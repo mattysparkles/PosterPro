@@ -19,7 +19,7 @@ def get_inventory(
     stale: bool = Query(default=False),
     search: str | None = Query(default=None),
     page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=50, ge=1, le=200),
+    page_size: int = Query(default=50, ge=1, le=5000),
     db: Session = Depends(get_db),
 ):
     stmt = service.build_inventory_query(label=label, multi_quantity_only=quantity_gt_one, stale=stale, search=search)

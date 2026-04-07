@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models.enums import EbayPublishStatus, MarketplaceName
 from app.models.models import Listing, MarketplaceAccount
+from app.services.rate_limiter import rate_limiter
 
 
 
@@ -59,6 +60,7 @@ class EbayAPIClient:
         backoff_seconds = 0.5
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             for attempt in range(1, retries + 1):
+                await rate_limiter.acquire_async("ebay")
                 response = await client.request(
                     method,
                     f"{self.base_url}{path}",

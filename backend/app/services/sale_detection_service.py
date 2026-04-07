@@ -11,6 +11,7 @@ from app.connectors.registry import get_connector
 from app.core.config import settings
 from app.models.enums import MarketplaceListingStatus, MarketplaceName
 from app.models.models import Listing, MarketplaceListing, Sale, User
+from app.services.rate_limiter import rate_limiter
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,7 @@ class SaleDetectionService:
                 continue
 
             connector = get_connector(market)
+            rate_limiter.acquire(market)
             if new_quantity <= 0:
                 action = "delist"
                 row.status = MarketplaceListingStatus.DELETED
@@ -140,6 +142,7 @@ class SaleDetectionService:
         for marketplace in enabled:
             connector = get_connector(marketplace)
             try:
+                rate_limiter.acquire(marketplace)
                 polled = asyncio.run(connector.poll_sales(user.id, since=since))
                 logger.info(
                     "Marketplace poll completed",
