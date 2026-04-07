@@ -25,5 +25,9 @@ celery_app.conf.update(
             "task": "process_overnight_storage_batches",
             "schedule": crontab(minute=30, hour=2),
         },
+        "poll-for-sales-every-15m": {
+            "task": "poll_for_sales",
+            "schedule": crontab(minute="*/15"),
+        },
     },
 )

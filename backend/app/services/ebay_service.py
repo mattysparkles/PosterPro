@@ -358,6 +358,22 @@ async def get_incoming_best_offers(
     return [offer for offer in offers if isinstance(offer, dict)]
 
 
+async def get_fulfillment_orders(
+    account: MarketplaceAccount,
+    *,
+    limit: int = 50,
+    filter_expression: str | None = None,
+) -> list[dict[str, Any]]:
+    """Pull paid/completed orders from eBay Fulfillment API."""
+    client = EbayAPIClient(account.access_token)
+    params: dict[str, Any] = {"limit": limit}
+    if filter_expression:
+        params["filter"] = filter_expression
+    response = await client.request("GET", "/sell/fulfillment/v1/order", params=params)
+    orders = response.get("orders") or []
+    return [order for order in orders if isinstance(order, dict)]
+
+
 async def accept_best_offer(account: MarketplaceAccount, offer_id: str) -> dict[str, Any]:
     client = EbayAPIClient(account.access_token)
     return await client.request("POST", f"/sell/negotiation/v1/offer/{offer_id}/accept")

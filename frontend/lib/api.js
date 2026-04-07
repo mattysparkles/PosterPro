@@ -155,3 +155,27 @@ export async function bulkEditInventory(payload) {
     body: JSON.stringify(payload),
   });
 }
+
+export async function fetchSalesDashboard(userId = 1, limit = 100) {
+  return jsonFetch(`${API_BASE}/sales/dashboard?user_id=${userId}&limit=${limit}`);
+}
+
+export async function updateSaleDetails(saleId, body) {
+  return jsonFetch(`${API_BASE}/sales/${saleId}/details`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function fetchSaleDetectionSettings(userId = 1) {
+  return jsonFetch(`${API_BASE}/sales/settings/${userId}`);
+}
+
+export async function updateSaleDetectionSettings(userId, marketplaces) {
+  return jsonFetch(`${API_BASE}/sales/settings/${userId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ marketplaces }),
+  });
+}

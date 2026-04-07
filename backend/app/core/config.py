@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     auto_relist_enabled: bool = True
     auto_relist_min_price: float = 20.0
     auto_relist_user_rules_json: str | None = None
+    sale_detection_enabled: bool = True
+    sale_detection_dry_run: bool = True
+    sale_detection_poll_minutes: int = 15
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

@@ -37,3 +37,7 @@ class BaseMarketplaceConnector(ABC):
     @abstractmethod
     def to_marketplace_payload(self, listing: Listing) -> dict[str, Any]:
         raise NotImplementedError
+
+    async def poll_sales(self, user_id: int, since: str | None = None) -> list[dict[str, Any]]:
+        """Fetch sold-order events from the marketplace."""
+        return []
