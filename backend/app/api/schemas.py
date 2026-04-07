@@ -132,7 +132,7 @@ class InventoryFilterRequest(BaseModel):
 
 
 class InventoryBulkRequest(BaseModel):
-    action: str = Field(description="edit|delist|relist|label|refresh|autobump")
+    action: str = Field(description="edit|delist|relist|label|mark_sold|refresh|autobump")
     listing_ids: list[int] = Field(default_factory=list)
     filters: InventoryFilterRequest | None = None
     payload: dict | None = None
