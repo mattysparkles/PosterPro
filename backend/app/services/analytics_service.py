@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from collections import Counter
-from datetime import date
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models.models import CategoryStat, DailyStat, Listing
+from app.models.models import CategoryStat, DailyStat, Listing, Sale
 
 
 class AnalyticsService:
@@ -116,4 +116,66 @@ class AnalyticsService:
             "listing_price": listing.listing_price or listing.suggested_price,
             "category": listing.category_suggestion,
             "keywords": listing.tags or [],
+        }
+
+    def dashboard(self, db: Session, user_id: int, days: int = 30) -> dict:
+        days = max(7, min(days, 365))
+        now = datetime.utcnow()
+        start = now - timedelta(days=days)
+        sales = db.execute(
+            select(Sale).where(Sale.user_id == user_id, Sale.sold_at.is_not(None), Sale.sold_at >= start)
+        ).scalars().all()
+        listings = db.execute(select(Listing).where(Listing.user_id == user_id)).scalars().all()
+
+        top_items = sorted(
+            [
+                {
+                    "listing_id": listing.id,
+                    "title": listing.title or f"Listing #{listing.id}",
+                    "units_sold": len([sale for sale in sales if sale.listing_id == listing.id]),
+                    "revenue": round(sum(float(sale.amount or 0) for sale in sales if sale.listing_id == listing.id), 2),
+                }
+                for listing in listings
+            ],
+            key=lambda row: (row["revenue"], row["units_sold"]),
+            reverse=True,
+        )[:8]
+
+        platform_rows = db.execute(
+            select(Sale.platform, func.count(Sale.id), func.sum(Sale.amount))
+            .where(Sale.user_id == user_id, Sale.sold_at.is_not(None), Sale.sold_at >= start)
+            .group_by(Sale.platform)
+        ).all()
+        revenue_by_marketplace = [
+            {"platform": platform.value, "sales_count": int(count or 0), "revenue": round(float(revenue or 0), 2)}
+            for platform, count, revenue in platform_rows
+        ]
+        revenue_by_marketplace.sort(key=lambda row: row["revenue"], reverse=True)
+
+        trend_map: dict[str, float] = {}
+        for idx in range(days):
+            current = (start + timedelta(days=idx)).date().isoformat()
+            trend_map[current] = 0.0
+        for sale in sales:
+            sold_day = sale.sold_at.date().isoformat() if sale.sold_at else None
+            if sold_day in trend_map:
+                trend_map[sold_day] += float(sale.amount or 0)
+        sales_trend = [{"date": key, "revenue": round(value, 2)} for key, value in trend_map.items()]
+
+        sold_listing_ids = {sale.listing_id for sale in sales if sale.listing_id is not None}
+        total_revenue = round(sum(float(sale.amount or 0) for sale in sales), 2)
+        units_sold = int(sum(int(sale.quantity or 1) for sale in sales))
+        return {
+            "period_days": days,
+            "kpis": {
+                "total_revenue": total_revenue,
+                "total_sales": len(sales),
+                "units_sold": units_sold,
+                "avg_order_value": round(total_revenue / len(sales), 2) if sales else 0.0,
+                "active_listings": len([listing for listing in listings if listing.status in {"ready", "posted"}]),
+                "sold_unique_items": len(sold_listing_ids),
+            },
+            "top_items": [row for row in top_items if row["units_sold"] > 0 or row["revenue"] > 0],
+            "revenue_by_marketplace": revenue_by_marketplace,
+            "sales_trend": sales_trend,
         }

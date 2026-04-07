@@ -684,3 +684,31 @@ def process_incoming_offers(self) -> dict:
         "rejected": rejected,
         "skipped": skipped,
     }
+
+
+@celery_app.task(
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_backoff_max=120,
+    retry_jitter=True,
+    max_retries=3,
+    name="send_personalized_offers",
+)
+def send_personalized_offers_task(self) -> dict:
+    checked_accounts = 0
+    sent = 0
+    skipped = 0
+    candidates = 0
+    with SessionLocal() as db:
+        accounts = db.execute(
+            select(MarketplaceAccount).where(MarketplaceAccount.marketplace == MarketplaceName.ebay)
+        ).scalars().all()
+        service = OfferService()
+        for account in accounts:
+            checked_accounts += 1
+            result = service.send_personalized_offers(db, account, force=False)
+            candidates += result["candidates"]
+            sent += result["sent"]
+            skipped += result["skipped"]
+    return {"accounts_checked": checked_accounts, "candidates": candidates, "sent": sent, "skipped": skipped}
