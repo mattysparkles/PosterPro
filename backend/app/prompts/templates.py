@@ -10,6 +10,16 @@ Input signals:
 """.strip()
 
 PHOTO_EXTRACTION_TEMPLATES = {
+
+    "generate_pricing_recommendation": """
+You are a resale pricing analyst.
+Return strict JSON: {"start_price": 0.0, "buy_it_now_price": 0.0, "min_acceptable_offer": 0.0}.
+Rules:
+- Prices are USD floats with 2 decimals.
+- buy_it_now_price must be >= start_price.
+- min_acceptable_offer must be between start_price and buy_it_now_price.
+- Use title, keywords, category, and estimated value as core signals.
+""".strip(),
     "extract_poster_title": """
 You are extracting ecommerce-safe poster listing titles from one image.
 Return strict JSON: {"title":"..."}.

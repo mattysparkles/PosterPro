@@ -12,6 +12,7 @@ from app.services.analytics_service import AnalyticsService
 from app.services.prediction_service import PredictionService
 from app.services.pricing_intelligence_service import PricingIntelligenceService
 from app.services.photo_enrichment import PhotoEnrichmentService
+from app.services.pricing_service import PricingService
 from app.workers.celery_app import celery_app
 from app.services.clustering import cluster_embeddings
 
@@ -137,6 +138,50 @@ def refresh_listing_predictions_task(user_id: int = 1) -> dict:
         return {"user_id": user_id, "count": len(predictions)}
 
 
+
+
+@celery_app.task(
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_backoff_max=120,
+    retry_jitter=True,
+    max_retries=5,
+    name="auto_price_listing",
+)
+def auto_price_listing(self, listing_id: int) -> dict:
+    with SessionLocal() as db:
+        logger.info("Auto pricing start", extra={"listing_id": listing_id})
+        result = PricingService().generate_pricing(db, listing_id)
+        return {"listing_id": listing_id, **result}
+
+
+@celery_app.task(
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_jitter=True,
+    max_retries=3,
+    name="adjust_active_listing_prices",
+)
+def adjust_active_listing_prices(self) -> dict:
+    adjusted = 0
+    with SessionLocal() as db:
+        active_listings = db.execute(
+            select(Listing).where(
+                Listing.status.in_(["PROCESSED", "ready"]),
+                Listing.sale_price.is_(None),
+            )
+        ).scalars().all()
+
+        service = PricingService()
+        for listing in active_listings:
+            service.adjust_price_based_on_comps(db, listing.id)
+            adjusted += 1
+
+    return {"adjusted": adjusted}
+
+
 @celery_app.task(
     bind=True,
     autoretry_for=(Exception,),
@@ -177,6 +222,7 @@ def process_photo_batch(self, listing_ids: list[int]) -> dict:
                 db.add(listing)
                 processed += 1
                 logger.info("Photo enrichment complete", extra={"listing_id": listing.id, "status": listing.status})
+                auto_price_listing.delay(listing.id)
             except Exception as exc:
                 listing.status = "FAILED"
                 db.add(listing)

@@ -36,6 +36,9 @@ class ListingResponse(BaseModel):
     item_specifics: dict | None = None
     tags: list[str] | None = None
     estimated_value: float | None = None
+    start_price: float | None = None
+    buy_it_now_price: float | None = None
+    min_acceptable_offer: float | None = None
     suggested_price: float | None
     listing_price: float | None = None
     purchase_cost: float | None = None

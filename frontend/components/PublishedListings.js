@@ -12,6 +12,9 @@ export default function PublishedListings({ listings }) {
             <strong>{listing.title || `Listing #${listing.id}`}</strong>
             <div>eBay Listing ID: {listing.ebay_listing_id}</div>
             <div>Status: {listing.ebay_publish_status || 'UNKNOWN'}</div>
+            <div>Start Price: {listing.start_price ? `$${listing.start_price.toFixed(2)}` : 'N/A'}</div>
+            <div>Buy It Now: {listing.buy_it_now_price ? `$${listing.buy_it_now_price.toFixed(2)}` : 'N/A'}</div>
+            <div>Min Offer: {listing.min_acceptable_offer ? `$${listing.min_acceptable_offer.toFixed(2)}` : 'N/A'}</div>
             {ebayUrl && (
               <a href={ebayUrl} target="_blank" rel="noreferrer">
                 Open on eBay
