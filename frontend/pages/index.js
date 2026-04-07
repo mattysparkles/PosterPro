@@ -8,6 +8,7 @@ import SyncPanel from '../components/SyncPanel';
 import { useMarketplacePublish } from '../hooks/useMarketplacePublish';
 import {
   connectMarketplace,
+  fetchAutonomousConfig,
   fetchAlerts,
   fetchAnalyticsOverview,
   fetchClusters,
@@ -17,6 +18,7 @@ import {
   fetchPricingRecommendation,
   generateListing,
   optimizeListing,
+  toggleAutonomousMode,
   updateListing,
 } from '../lib/api';
 
@@ -29,22 +31,25 @@ export default function Dashboard() {
   const [recommendation, setRecommendation] = useState(null);
   const [prediction, setPrediction] = useState(null);
   const [optimization, setOptimization] = useState(null);
+  const [autonomousConfig, setAutonomousConfig] = useState({ autonomous_mode: true, autonomous_dry_run: false });
   const [connectError, setConnectError] = useState('');
   const { publish, publishing, errors, statusByListing, refreshStatus } = useMarketplacePublish();
 
   const reload = async () => {
-    const [c, l, m, a, al] = await Promise.all([
+    const [c, l, m, a, al, autoConfig] = await Promise.all([
       fetchClusters(),
       fetchListings(),
       fetchMarketplaces(),
       fetchAnalyticsOverview(),
       fetchAlerts(),
+      fetchAutonomousConfig(),
     ]);
     setClusters(c);
     setListings(l);
     setMarketplaces(m.marketplaces || []);
     setAnalytics(a);
     setAlerts(al.alerts || []);
+    setAutonomousConfig(autoConfig);
     if (l?.length) {
       const listingId = l[0].id;
       const [rec, pred, opt] = await Promise.all([
@@ -69,6 +74,19 @@ export default function Dashboard() {
   }, [listings, refreshStatus]);
 
   const readyCount = useMemo(() => listings.filter((l) => l.status === 'ready').length, [listings]);
+  const recentAutoPublished = useMemo(
+    () =>
+      listings
+        .filter(
+          (listing) =>
+            listing.marketplace_data?.autonomous?.trigger === 'auto' &&
+            !listing.marketplace_data?.autonomous?.dry_run &&
+            (listing.ebay_publish_status === 'POSTED' || listing.ebay_listing_id)
+        )
+        .sort((a, b) => b.id - a.id)
+        .slice(0, 8),
+    [listings]
+  );
 
   const bulkApprove = async () => {
     await Promise.all(
@@ -95,6 +113,18 @@ export default function Dashboard() {
         <div className="actions">
           <button onClick={bulkApprove}>Bulk Approve Drafts</button>
           <span>{readyCount} ready listings</span>
+          <span className={`autonomous-badge ${autonomousConfig.autonomous_mode ? 'on' : 'off'}`}>
+            Autonomous Mode: {autonomousConfig.autonomous_mode ? 'ON' : 'OFF'}
+            {autonomousConfig.autonomous_dry_run ? ' (DRY RUN)' : ''}
+          </span>
+          <button
+            onClick={async () => {
+              await toggleAutonomousMode(!autonomousConfig.autonomous_mode);
+              await reload();
+            }}
+          >
+            Toggle Autonomous
+          </button>
         </div>
         <div className="actions">
           {marketplaces.map((m) => (
@@ -143,6 +173,12 @@ export default function Dashboard() {
         </div>
       </section>
       <PublishedListings listings={listings} />
+      <PublishedListings
+        listings={recentAutoPublished}
+        title="Recently Auto-Published"
+        emptyMessage="No autonomous publishes yet."
+        postedOnly={false}
+      />
     </main>
   );
 }

@@ -95,3 +95,15 @@ export async function fetchAlerts(userId = 1) {
 export async function fetchListingPricing(id) {
   return jsonFetch(`${API_BASE}/listings/${id}/pricing`);
 }
+
+export async function fetchAutonomousConfig() {
+  return jsonFetch(`${API_BASE}/config/autonomous`);
+}
+
+export async function toggleAutonomousMode(enabled) {
+  return jsonFetch(`${API_BASE}/config/toggle-autonomous`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(typeof enabled === 'boolean' ? { enabled } : {}),
+  });
+}

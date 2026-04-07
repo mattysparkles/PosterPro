@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     ebay_client_id: str | None = None
     ebay_client_secret: str | None = None
     ebay_redirect_uri: str | None = None
+    autonomous_mode: bool = True
+    autonomous_dry_run: bool = False
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

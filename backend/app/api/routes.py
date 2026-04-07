@@ -3,10 +3,12 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.schemas import GooglePhotosImportRequest, ListingGenerateRequest, ListingResponse, ListingUpdateRequest
+from app.core.config import settings
 from app.core.database import get_db
 from app.models.models import Cluster, Image, Listing
 from app.services.ebay import EbayService
@@ -21,6 +23,10 @@ from app.models.enums import ListingStatus
 from app.workers.tasks import cluster_images_task, process_photo_batch
 
 router = APIRouter()
+
+
+class AutonomousToggleRequest(BaseModel):
+    enabled: bool | None = None
 
 
 @router.post("/import/google-photos")
@@ -109,6 +115,26 @@ async def ingest_photos(
     db.commit()
     task = process_photo_batch.delay(listing_ids)
     return {"created_listings": listing_ids, "uploaded_paths": uploads, "task_id": task.id}
+
+
+@router.get("/config/autonomous")
+def get_autonomous_config():
+    return {
+        "autonomous_mode": settings.autonomous_mode,
+        "autonomous_dry_run": settings.autonomous_dry_run,
+    }
+
+
+@router.post("/config/toggle-autonomous")
+def toggle_autonomous_mode(payload: AutonomousToggleRequest | None = None):
+    if payload and payload.enabled is not None:
+        settings.autonomous_mode = payload.enabled
+    else:
+        settings.autonomous_mode = not settings.autonomous_mode
+    return {
+        "autonomous_mode": settings.autonomous_mode,
+        "autonomous_dry_run": settings.autonomous_dry_run,
+    }
 
 
 

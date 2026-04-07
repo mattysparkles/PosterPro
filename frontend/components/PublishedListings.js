@@ -1,10 +1,17 @@
-export default function PublishedListings({ listings }) {
-  const posted = listings.filter((listing) => listing.ebay_publish_status === 'POSTED' || listing.ebay_listing_id);
+export default function PublishedListings({
+  listings,
+  title = 'Published eBay Listings',
+  emptyMessage = 'No published listings yet.',
+  postedOnly = true,
+}) {
+  const posted = postedOnly
+    ? listings.filter((listing) => listing.ebay_publish_status === 'POSTED' || listing.ebay_listing_id)
+    : listings;
 
   return (
     <section className="card">
-      <h2>Published eBay Listings</h2>
-      {!posted.length && <p>No published listings yet.</p>}
+      <h2>{title}</h2>
+      {!posted.length && <p>{emptyMessage}</p>}
       {posted.map((listing) => {
         const ebayUrl = listing.marketplace_data?.ebay_url || (listing.ebay_listing_id ? `https://www.ebay.com/itm/${listing.ebay_listing_id}` : '');
         return (
