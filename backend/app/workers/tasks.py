@@ -1,18 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+from datetime import datetime, UTC
 
 from sqlalchemy import select
 
+from app.core.config import settings
 from app.connectors.registry import get_connector
 from app.core.database import SessionLocal
-from app.models.enums import MarketplaceListingStatus, MarketplaceName
+from app.models.enums import ListingStatus, MarketplaceListingStatus, MarketplaceName
 from app.models.models import Cluster, Image, Listing, MarketplaceListing
 from app.services.analytics_service import AnalyticsService
 from app.services.prediction_service import PredictionService
 from app.services.pricing_intelligence_service import PricingIntelligenceService
 from app.services.photo_enrichment import PhotoEnrichmentService
 from app.services.pricing_service import PricingService
+from app.services.ebay_service import publish_listing_to_ebay
 from app.workers.celery_app import celery_app
 from app.services.clustering import cluster_embeddings
 
@@ -160,6 +164,78 @@ def auto_price_listing(self, listing_id: int) -> dict:
     bind=True,
     autoretry_for=(Exception,),
     retry_backoff=True,
+    retry_backoff_max=120,
+    retry_jitter=True,
+    max_retries=5,
+    name="autonomous_publish",
+)
+def autonomous_publish(self, listing_id: int, dry_run: bool | None = None) -> dict:
+    with SessionLocal() as db:
+        listing = db.get(Listing, listing_id)
+        if not listing:
+            raise ValueError("Listing not found")
+        if listing.status != ListingStatus.PROCESSED:
+            raise ValueError(f"Listing must be PROCESSED before autonomous publish (got {listing.status})")
+
+        resolved_dry_run = settings.autonomous_dry_run if dry_run is None else dry_run
+        logger.info(
+            "Autonomous publish start",
+            extra={"listing_id": listing_id, "dry_run": resolved_dry_run, "status": listing.status.value},
+        )
+        pricing = PricingService().generate_pricing(db, listing_id)
+        logger.info("Autonomous publish pricing complete", extra={"listing_id": listing_id, "pricing": pricing})
+
+        if resolved_dry_run:
+            existing_data = listing.marketplace_data or {}
+            listing.marketplace_data = {
+                **existing_data,
+                "autonomous": {
+                    "trigger": "auto",
+                    "dry_run": True,
+                    "pricing": pricing,
+                    "executed_at": datetime.now(UTC).isoformat(),
+                },
+            }
+            db.add(listing)
+            db.commit()
+            logger.info("Autonomous publish dry-run complete", extra={"listing_id": listing_id})
+            return {"listing_id": listing_id, "status": "DRY_RUN", "pricing": pricing}
+
+        try:
+            ebay_result = asyncio.run(publish_listing_to_ebay(listing, db))
+            listing.status = ListingStatus.PUBLISHED
+            listing.marketplace_data = {
+                **(listing.marketplace_data or {}),
+                "autonomous": {
+                    "trigger": "auto",
+                    "dry_run": False,
+                    "pricing": pricing,
+                    "published_at": datetime.now(UTC).isoformat(),
+                },
+            }
+            db.add(listing)
+            db.commit()
+            logger.info(
+                "Autonomous publish complete",
+                extra={
+                    "listing_id": listing_id,
+                    "status": listing.status.value,
+                    "ebay_listing_id": listing.ebay_listing_id,
+                },
+            )
+            return {"listing_id": listing_id, "status": "PUBLISHED", "ebay": ebay_result, "pricing": pricing}
+        except Exception as exc:
+            listing.status = ListingStatus.FAILED
+            db.add(listing)
+            db.commit()
+            logger.exception("Autonomous publish failed", extra={"listing_id": listing_id, "error": str(exc)})
+            raise
+
+
+@celery_app.task(
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
     retry_jitter=True,
     max_retries=3,
     name="adjust_active_listing_prices",
@@ -222,7 +298,14 @@ def process_photo_batch(self, listing_ids: list[int]) -> dict:
                 db.add(listing)
                 processed += 1
                 logger.info("Photo enrichment complete", extra={"listing_id": listing.id, "status": listing.status})
-                auto_price_listing.delay(listing.id)
+                if settings.autonomous_mode:
+                    logger.info(
+                        "Queueing autonomous publish from photo pipeline",
+                        extra={"listing_id": listing.id, "dry_run": settings.autonomous_dry_run},
+                    )
+                    autonomous_publish.delay(listing.id, dry_run=settings.autonomous_dry_run)
+                else:
+                    auto_price_listing.delay(listing.id)
             except Exception as exc:
                 listing.status = "FAILED"
                 db.add(listing)
