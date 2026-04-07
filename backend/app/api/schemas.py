@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel, Field, HttpUrl
 
 
@@ -20,6 +22,10 @@ class ListingUpdateRequest(BaseModel):
     sale_price: float | None = None
     condition: str | None = None
     photo_quality_score: float | None = None
+    quantity: int | None = None
+    platform_quantities: dict | None = None
+    custom_labels: list[str] | None = None
+    last_refreshed: datetime | None = None
 
 
 class ListingResponse(BaseModel):
@@ -51,6 +57,10 @@ class ListingResponse(BaseModel):
     ebay_listing_id: str | None = None
     ebay_publish_status: str | None = None
     marketplace_data: dict | None = None
+    quantity: int = 1
+    platform_quantities: dict | None = None
+    custom_labels: list[str] | None = None
+    last_refreshed: datetime | None = None
 
     class Config:
         from_attributes = True
@@ -102,3 +112,13 @@ class StorageUnitBatchResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class InventoryBulkEditRequest(BaseModel):
+    listing_ids: list[int] = Field(default_factory=list)
+    quantity: int | None = None
+    platform_quantities: dict | None = None
+    add_labels: list[str] | None = None
+    remove_labels: list[str] | None = None
+    delist: bool = False
+    relist: bool = False

@@ -90,6 +90,10 @@ class Listing(Base, TimestampMixin):
         Enum(EbayPublishStatus), default=EbayPublishStatus.DRAFT, index=True
     )
     marketplace_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    quantity: Mapped[int] = mapped_column(Integer, default=1)
+    platform_quantities: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    custom_labels: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    last_refreshed: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
 
     user: Mapped["User"] = relationship(back_populates="listings")
     cluster: Mapped["Cluster | None"] = relationship(back_populates="listings")

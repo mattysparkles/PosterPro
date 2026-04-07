@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import { BarChart3, Boxes, Bot, LayoutDashboard, Moon, Search, Send, Sun, User } from 'lucide-react';
+import { BarChart3, Boxes, Bot, LayoutDashboard, Moon, Package, Search, Send, Sun, User } from 'lucide-react';
 
 import Badge from '../ui/badge';
 import Button from '../ui/button';
@@ -8,6 +8,7 @@ import Input from '../ui/input';
 const NAV_ITEMS = [
   { href: '/', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/listings', label: 'Listings', icon: Boxes },
+  { href: '/inventory', label: 'Inventory', icon: Package },
   { href: '/published', label: 'Published', icon: Send },
   { href: '/analytics', label: 'Analytics', icon: BarChart3, disabled: true },
 ];

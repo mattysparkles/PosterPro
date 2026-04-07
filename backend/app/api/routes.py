@@ -25,6 +25,7 @@ from app.services.ebay import EbayService
 from app.services.embedding import fake_clip_embedding
 from app.services.google_photos import GooglePhotosService
 from app.services.image_pipeline import ImagePipelineService
+from app.services.inventory_service import InventorySafetyError, InventoryService
 from app.services.listing_ai import ListingAIService
 from app.services.profit_service import ProfitService
 from app.services.storage import LocalStorage
@@ -38,6 +39,7 @@ from app.workers.tasks import (
 )
 
 router = APIRouter()
+inventory_service = InventoryService()
 
 
 def _create_storage_batch(
@@ -123,8 +125,17 @@ def update_listing(listing_id: int, payload: ListingUpdateRequest, db: Session =
     listing = db.get(Listing, listing_id)
     if not listing:
         raise HTTPException(status_code=404, detail="Listing not found")
-    for key, value in payload.model_dump(exclude_none=True).items():
+    for key, value in payload.model_dump(exclude_none=True, exclude={"quantity", "platform_quantities", "custom_labels"}).items():
         setattr(listing, key, value)
+    try:
+        inventory_service.update_listing_inventory(
+            listing,
+            quantity=payload.quantity,
+            platform_quantities=payload.platform_quantities,
+            labels_to_add=payload.custom_labels,
+        )
+    except InventorySafetyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if payload.sale_price is not None:
         listing.sold_at = datetime.utcnow()
         ProfitService().update_profit_on_sale_event(listing, "ebay")

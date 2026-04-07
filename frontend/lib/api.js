@@ -139,3 +139,19 @@ export async function runOvernightBatch(batchId) {
 export async function runAllOvernightBatches() {
   return jsonFetch(`${API_BASE}/batch/storage-unit/run-overnight`, { method: 'POST' });
 }
+
+export async function fetchInventory(filters = {}) {
+  const url = new URL(`${API_BASE}/inventory`);
+  if (filters.label) url.searchParams.set('label', filters.label);
+  if (filters.quantityGtOne) url.searchParams.set('quantity_gt_one', 'true');
+  if (filters.stale) url.searchParams.set('stale', 'true');
+  return jsonFetch(url.toString());
+}
+
+export async function bulkEditInventory(payload) {
+  return jsonFetch(`${API_BASE}/inventory/bulk-edit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
