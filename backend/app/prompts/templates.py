@@ -8,3 +8,34 @@ Constraints:
 Input signals:
 {signals}
 """.strip()
+
+PHOTO_EXTRACTION_TEMPLATES = {
+    "extract_poster_title": """
+You are extracting ecommerce-safe poster listing titles from one image.
+Return strict JSON: {"title":"..."}.
+Rules: max 80 chars, include likely subject/event/year if visible, no hype words.
+""".strip(),
+    "extract_description": """
+You are writing a concise factual description from one poster image.
+Return strict JSON: {"description":"..."}.
+Rules: mention visible condition clues only, avoid authenticity guarantees.
+""".strip(),
+    "detect_category": """
+Identify the best eBay taxonomy category for this poster.
+Return strict JSON: {"category_id":"...", "category_name":"..."}.
+Use a plausible eBay category id string even if estimated.
+""".strip(),
+    "extract_keywords": """
+Extract search keywords and specifics from the image.
+Return strict JSON: {"keywords":[...], "item_specifics": {...}, "estimated_value": 0.0}.
+estimated_value is a USD float estimate from visual cues only.
+""".strip(),
+}
+
+
+def get_prompt_template(name: str) -> str:
+    if name in PHOTO_EXTRACTION_TEMPLATES:
+        return PHOTO_EXTRACTION_TEMPLATES[name]
+    if name == "listing":
+        return LISTING_PROMPT_TEMPLATE
+    raise KeyError(f"Unknown prompt template: {name}")

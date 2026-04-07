@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from sqlalchemy import select
 
 from app.connectors.registry import get_connector
@@ -9,8 +11,11 @@ from app.models.models import Cluster, Image, Listing, MarketplaceListing
 from app.services.analytics_service import AnalyticsService
 from app.services.prediction_service import PredictionService
 from app.services.pricing_intelligence_service import PricingIntelligenceService
+from app.services.photo_enrichment import PhotoEnrichmentService
 from app.workers.celery_app import celery_app
 from app.services.clustering import cluster_embeddings
+
+logger = logging.getLogger(__name__)
 
 
 @celery_app.task(name="cluster_images")
@@ -130,3 +135,53 @@ def refresh_listing_predictions_task(user_id: int = 1) -> dict:
         listings = db.execute(select(Listing).where(Listing.user_id == user_id)).scalars().all()
         predictions = [PredictionService().predict_sell_through(db, l.id) for l in listings]
         return {"user_id": user_id, "count": len(predictions)}
+
+
+@celery_app.task(
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_jitter=True,
+    max_retries=3,
+    name="process_photo_batch",
+)
+def process_photo_batch(self, listing_ids: list[int]) -> dict:
+    service = PhotoEnrichmentService()
+    processed = 0
+    failed = 0
+
+    with SessionLocal() as db:
+        for listing_id in listing_ids:
+            listing = db.get(Listing, listing_id)
+            if not listing:
+                logger.warning("Photo batch listing not found", extra={"listing_id": listing_id})
+                failed += 1
+                continue
+            if not listing.raw_photo_path:
+                listing.status = "FAILED"
+                db.add(listing)
+                failed += 1
+                continue
+
+            try:
+                logger.info("Photo enrichment start", extra={"listing_id": listing.id, "photo_path": listing.raw_photo_path})
+                enriched = service.enrich_photo(listing.raw_photo_path)
+                listing.title = enriched.get("title") or listing.title
+                listing.description = enriched.get("description") or listing.description
+                listing.category_id = enriched.get("category_id")
+                listing.category_suggestion = enriched.get("category_suggestion")
+                listing.tags = enriched.get("tags")
+                listing.item_specifics = enriched.get("item_specifics")
+                listing.estimated_value = enriched.get("estimated_value")
+                listing.status = "PROCESSED"
+                db.add(listing)
+                processed += 1
+                logger.info("Photo enrichment complete", extra={"listing_id": listing.id, "status": listing.status})
+            except Exception as exc:
+                listing.status = "FAILED"
+                db.add(listing)
+                failed += 1
+                logger.exception("Photo enrichment failed", extra={"listing_id": listing.id, "error": str(exc)})
+        db.commit()
+
+    return {"processed": processed, "failed": failed, "total": len(listing_ids)}

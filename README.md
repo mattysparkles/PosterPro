@@ -84,6 +84,19 @@ npm run dev
 - `GET /ebay/callback?code=...&state=...`
 - `POST /listings/{id}/publish/ebay`
 - `GET /ebay/status/{id}`
+- `POST /ingest/photos` (multipart photo ingestion + autonomous AI enrichment)
+
+### Photo ingestion quick test
+
+```bash
+curl -X POST "http://localhost:8000/ingest/photos" \
+  -F "user_id=1" \
+  -F "storage_unit_name=Unit A3" \
+  -F "photos=@/absolute/path/poster1.jpg" \
+  -F "photos=@/absolute/path/poster2.jpg"
+```
+
+The endpoint stores uploads under `./storage/uploads`, creates `listings` in `INGESTED` status, and enqueues Celery task `process_photo_batch` to extract title/description/category/keywords and update each listing to `PROCESSED` (or `FAILED` on errors).
 
 ## Example API request/response logging
 

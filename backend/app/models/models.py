@@ -56,12 +56,18 @@ class Listing(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
-    cluster_id: Mapped[int] = mapped_column(ForeignKey("clusters.id"), index=True)
+    cluster_id: Mapped[int | None] = mapped_column(ForeignKey("clusters.id"), index=True, nullable=True)
     status: Mapped[ListingStatus] = mapped_column(Enum(ListingStatus), default=ListingStatus.draft)
+    image_urls: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    raw_photo_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    storage_unit_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    category_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     category_suggestion: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    item_specifics: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     tags: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    estimated_value: Mapped[float | None] = mapped_column(Float, nullable=True)
     suggested_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     listing_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     purchase_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -81,7 +87,7 @@ class Listing(Base, TimestampMixin):
     marketplace_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="listings")
-    cluster: Mapped["Cluster"] = relationship(back_populates="listings")
+    cluster: Mapped["Cluster | None"] = relationship(back_populates="listings")
     marketplace_listings: Mapped[list["MarketplaceListing"]] = relationship(back_populates="listing")
 
 

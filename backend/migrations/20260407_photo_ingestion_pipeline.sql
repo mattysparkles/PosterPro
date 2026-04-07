@@ -1,0 +1,10 @@
+ALTER TABLE listings
+    ALTER COLUMN cluster_id DROP NOT NULL;
+
+ALTER TABLE listings
+    ADD COLUMN IF NOT EXISTS image_urls JSON,
+    ADD COLUMN IF NOT EXISTS raw_photo_path TEXT,
+    ADD COLUMN IF NOT EXISTS storage_unit_name VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS category_id VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS item_specifics JSON,
+    ADD COLUMN IF NOT EXISTS estimated_value DOUBLE PRECISION;
