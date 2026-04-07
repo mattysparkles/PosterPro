@@ -8,7 +8,9 @@ from celery import chord, group, signature
 from sqlalchemy import Select, String, cast, func, or_, select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.models import BulkJob, Listing
+from app.services.rate_limiter import rate_limiter
 
 
 class InventorySafetyError(ValueError):
@@ -19,7 +21,7 @@ class InventoryService:
     """Inventory read/write orchestration with oversell safety checks."""
 
     STALE_AFTER_DAYS = 7
-    BULK_BATCH_SIZE = 150
+    DEFAULT_BULK_BATCH_SIZE = 150
 
     @staticmethod
     def _normalize_labels(labels: list[str] | None) -> list[str]:
@@ -213,9 +215,18 @@ class InventoryService:
             db.commit()
             return job
 
-        chunks = [listing_ids[i : i + self.BULK_BATCH_SIZE] for i in range(0, len(listing_ids), self.BULK_BATCH_SIZE)]
+        max_parallel_tasks = max(1, settings.max_concurrent_bulk_tasks)
+        configured_chunk_size = max(0, settings.bulk_chunk_size)
+        dynamic_chunk_size = configured_chunk_size or max(
+            self.DEFAULT_BULK_BATCH_SIZE,
+            rate_limiter.suggested_chunk_size("ebay", len(listing_ids), max_parallel_tasks),
+        )
+        chunks = [listing_ids[i : i + dynamic_chunk_size] for i in range(0, len(listing_ids), dynamic_chunk_size)]
         header = group(
-            signature("bulk_process_inventory_chunk", args=[job.id, action, payload or {}, chunk, batch_index])
+            signature(
+                "bulk_process_inventory_chunk",
+                args=[job.id, action, payload or {}, chunk, batch_index],
+            )
             for batch_index, chunk in enumerate(chunks)
         )
         callback = signature("bulk_finalize_job", args=[job.id])
@@ -226,4 +237,5 @@ class InventoryService:
     def estimate_minutes(total_items: int) -> int:
         if total_items <= 0:
             return 0
-        return max(1, math.ceil(total_items / 150))
+        chunk_size = max(1, settings.bulk_chunk_size or InventoryService.DEFAULT_BULK_BATCH_SIZE)
+        return max(1, math.ceil(total_items / chunk_size))

@@ -14,6 +14,9 @@ import { fetchBulkJob, fetchInventory, processListingPhoto, runInventoryBulkJob,
 
 const columnHelper = createColumnHelper();
 const TABS = ['All', 'Multi-Quantity', 'Stale'];
+const VIRTUALIZATION_THRESHOLD = 500;
+const VIRTUAL_ROW_HEIGHT = 76;
+const VIRTUAL_CONTAINER_HEIGHT = 560;
 
 function ConfirmBulkModal({ open, onClose, onConfirm, summary }) {
   if (!open) return null;
@@ -82,11 +85,13 @@ export default function InventoryPage({ theme, setTheme }) {
   const [selectAllMatching, setSelectAllMatching] = useState(false);
   const [view, setView] = useState('table');
   const [page, setPage] = useState(1);
-  const [pageSize] = useState(50);
+  const pageSize = view === 'table' ? 1000 : 120;
   const [confirmAction, setConfirmAction] = useState(null);
   const [bulkJob, setBulkJob] = useState(null);
   const [editingListing, setEditingListing] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [virtualOffset, setVirtualOffset] = useState(0);
+  const [isBackgroundSyncing, setIsBackgroundSyncing] = useState(false);
 
   const filters = useMemo(() => ({
     quantityGtOne: tab === 'Multi-Quantity',
@@ -116,7 +121,8 @@ export default function InventoryPage({ theme, setTheme }) {
     const timer = setInterval(async () => {
       const updated = await fetchBulkJob(bulkJob.job_id);
       setBulkJob(updated);
-      if (['completed', 'completed_with_errors'].includes(updated.status)) {
+      if (['completed', 'completed_with_errors', 'failed'].includes(updated.status)) {
+        setIsBackgroundSyncing(false);
         toast.success(`Bulk job finished: ${updated.processed_items}/${updated.total_items}`);
         await loadInventory();
       }
@@ -167,6 +173,11 @@ export default function InventoryPage({ theme, setTheme }) {
   ], [inventory, selection]);
 
   const table = useReactTable({ data: inventory, columns, getCoreRowModel: getCoreRowModel() });
+  const shouldVirtualize = view === 'table' && total > VIRTUALIZATION_THRESHOLD;
+  const visibleRowCount = Math.ceil(VIRTUAL_CONTAINER_HEIGHT / VIRTUAL_ROW_HEIGHT) + 8;
+  const startIndex = Math.max(0, Math.floor(virtualOffset / VIRTUAL_ROW_HEIGHT) - 4);
+  const endIndex = Math.min(table.getRowModel().rows.length, startIndex + visibleRowCount);
+  const visibleRows = shouldVirtualize ? table.getRowModel().rows.slice(startIndex, endIndex) : table.getRowModel().rows;
   const selectedIds = useMemo(() => Object.entries(selection).filter(([, checked]) => checked).map(([id]) => Number(id)), [selection]);
   const effectiveSelectionCount = selectAllMatching ? total : selectedIds.length;
 
@@ -209,10 +220,23 @@ export default function InventoryPage({ theme, setTheme }) {
       },
       listing_ids: selectAllMatching ? [] : selectedIds,
     };
+    if (!selectAllMatching && selectedIds.length) {
+      setInventory((prev) => prev.map((item) => {
+        if (!selectedIds.includes(item.id)) return item;
+        if (confirmAction.action === 'mark_sold') {
+          return { ...item, quantity: 0, last_refreshed: new Date().toISOString() };
+        }
+        if (confirmAction.action === 'refresh' || confirmAction.action === 'autobump') {
+          return { ...item, last_refreshed: new Date().toISOString(), stale_flag: false };
+        }
+        return item;
+      }));
+    }
     const job = await runInventoryBulkJob(body);
     setBulkJob(job);
+    setIsBackgroundSyncing(true);
     setConfirmAction(null);
-    toast.success(`Bulk job queued for ${job.total_items} item(s)`);
+    toast.success(`Unlimited bulk job queued for ${job.total_items} item(s). Processing safely in background.`);
   };
 
   return (
@@ -242,6 +266,16 @@ export default function InventoryPage({ theme, setTheme }) {
             <Button size="lg" variant="outline" onClick={loadInventory}><RefreshCcw size={18} /></Button>
           </div>
         </div>
+        {total > VIRTUALIZATION_THRESHOLD && (
+          <CardDescription title="Large inventories are virtualized automatically so browsing stays fast.">
+            Handling large inventory with virtualized rendering and safe background processing.
+          </CardDescription>
+        )}
+        {isBackgroundSyncing && (
+          <CardDescription title="Bulk changes are optimistic in the UI and then reconciled in background sync.">
+            Syncing bulk updates in background for unlimited operations…
+          </CardDescription>
+        )}
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <Keyboard size={14} />
           <Badge tone="default">⌘/Ctrl + F Search</Badge>
@@ -256,18 +290,18 @@ export default function InventoryPage({ theme, setTheme }) {
 
         <Card className="rounded-2xl border-dashed p-4">
           <div className="mb-3 flex flex-wrap items-center gap-2">
-            <Button size="lg" variant={selectAllMatching ? 'default' : 'outline'} title="Select all listings matching current filters across all pages." onClick={() => setSelectAllMatching(true)}><CheckSquare size={18} /> Select All Matching Filters</Button>
+            <Button size="lg" variant={selectAllMatching ? 'default' : 'outline'} title="Select every listing matching active filters across all pages. Unlimited scope, safely chunked in background." onClick={() => setSelectAllMatching(true)}><CheckSquare size={18} /> Select All Matching Filters</Button>
             <Button size="lg" variant="outline" onClick={() => { setSelection({}); setSelectAllMatching(false); }}><Eraser size={18} /> Clear Selection</Button>
             <Badge tone="info">This will affect {effectiveSelectionCount.toLocaleString()} items</Badge>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button size="lg" title="Bulk edit selected inventory quantities and platform quantities." onClick={() => queueAction('edit', { quantity: 1 })}><Pencil size={18} /> Bulk Edit</Button>
-            <Button size="lg" variant="secondary" title="Manual override to immediately mark selected listings as sold." onClick={() => queueAction('mark_sold')}><ClipboardList size={18} /> Mark as Sold</Button>
-            <Button size="lg" variant="outline" title="Delist selected listings from all marketplaces." onClick={() => queueAction('delist')}><Trash2 size={18} /> Bulk Delist</Button>
-            <Button size="lg" variant="outline" title="Relist selected or filtered listings to restore visibility." onClick={() => queueAction('relist')}><Undo2 size={18} /> Bulk Relist</Button>
-            <Button size="lg" variant="outline" title="Add/remove labels in bulk with no quantity limit." onClick={() => queueAction('label', { add_labels: ['priority'], remove_labels: [] })}><Tag size={18} /> Add/Remove Labels</Button>
-            <Button size="lg" variant="secondary" title="Relist all stale items to boost visibility — no limit on quantity." onClick={() => queueAction('refresh')}><Zap size={18} /> Refresh Stale</Button>
-            <Button size="lg" variant="secondary" title="Schedule marketplace auto-bump in chunked batches for Poshmark, Depop, Grailed, and more." onClick={() => queueAction('autobump', { marketplaces: ['poshmark', 'depop', 'grailed'] })}><RefreshCcw size={18} /> Marketplace Sharer</Button>
+            <Button size="lg" title="Bulk edit selected inventory quantities and platform quantities. Unlimited size; safely processed in background." onClick={() => queueAction('edit', { quantity: 1 })}><Pencil size={18} /> Bulk Edit</Button>
+            <Button size="lg" variant="secondary" title="Manual override to immediately mark selected listings as sold. Unlimited and safely synchronized." onClick={() => queueAction('mark_sold')}><ClipboardList size={18} /> Mark as Sold</Button>
+            <Button size="lg" variant="outline" title="Delist selected listings from all marketplaces with unlimited queue size and safe chunking." onClick={() => queueAction('delist')}><Trash2 size={18} /> Bulk Delist</Button>
+            <Button size="lg" variant="outline" title="Relist selected or filtered listings to restore visibility at unlimited scale." onClick={() => queueAction('relist')}><Undo2 size={18} /> Bulk Relist</Button>
+            <Button size="lg" variant="outline" title="Add/remove labels in bulk with no quantity limit and background-safe processing." onClick={() => queueAction('label', { add_labels: ['priority'], remove_labels: [] })}><Tag size={18} /> Add/Remove Labels</Button>
+            <Button size="lg" variant="secondary" title="Relist all stale items to boost visibility — unlimited volume, safety throttled." onClick={() => queueAction('refresh')}><Zap size={18} /> Refresh Stale</Button>
+            <Button size="lg" variant="secondary" title="Schedule marketplace auto-bump in dynamic chunks for unlimited listings." onClick={() => queueAction('autobump', { marketplaces: ['poshmark', 'depop', 'grailed'] })}><RefreshCcw size={18} /> Marketplace Sharer</Button>
           </div>
         </Card>
 
@@ -276,17 +310,30 @@ export default function InventoryPage({ theme, setTheme }) {
         ) : inventory.length === 0 ? (
           <Card className="flex flex-col items-center gap-3 rounded-2xl border-dashed py-10 text-center">
             <PackageOpen size={34} className="text-muted-foreground" />
-            <p className="text-lg font-semibold">No inventory matches these filters</p>
-            <p className="max-w-md text-sm text-muted-foreground">Try clearing filters, switching tabs, or uploading a fresh storage unit batch. We will auto-enrich and stage everything for selling.</p>
+            <p className="text-lg font-semibold">No inventory yet — you’re ready for unlimited bulk actions</p>
+            <p className="max-w-md text-sm text-muted-foreground">Try clearing filters, switching tabs, or uploading a fresh storage unit batch. We process huge inventories safely in the background with clear progress.</p>
             <Button variant="outline" onClick={() => { setSearch(''); setTab('All'); }}>
               <Sparkles size={16} /> Reset filters
             </Button>
           </Card>
         ) : view === 'table' ? (
-          <div className="overflow-x-auto rounded-2xl border border-border/70">
+          <div
+            className="overflow-x-auto rounded-2xl border border-border/70"
+            style={shouldVirtualize ? { maxHeight: `${VIRTUAL_CONTAINER_HEIGHT}px`, overflowY: 'auto' } : undefined}
+            onScroll={shouldVirtualize ? (event) => setVirtualOffset(event.currentTarget.scrollTop) : undefined}
+            title={shouldVirtualize ? 'Virtualized for speed on large inventories. Unlimited operations remain available.' : undefined}
+          >
             <table className="w-full text-left text-sm">
               <thead className="bg-muted/40">{table.getHeaderGroups().map((headerGroup) => <tr key={headerGroup.id}>{headerGroup.headers.map((header) => <th key={header.id} className="px-3 py-2 font-semibold text-muted-foreground">{flexRender(header.column.columnDef.header, header.getContext())}</th>)}</tr>)}</thead>
-              <tbody>{table.getRowModel().rows.map((row) => <tr key={row.id} className="border-t border-border/70">{row.getVisibleCells().map((cell) => <td key={cell.id} className="px-3 py-3 align-top">{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}</tr>)}</tbody>
+              <tbody>
+                {shouldVirtualize && startIndex > 0 && (
+                  <tr><td colSpan={columns.length} style={{ height: `${startIndex * VIRTUAL_ROW_HEIGHT}px` }} /></tr>
+                )}
+                {visibleRows.map((row) => <tr key={row.id} className="border-t border-border/70">{row.getVisibleCells().map((cell) => <td key={cell.id} className="px-3 py-3 align-top">{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}</tr>)}
+                {shouldVirtualize && endIndex < table.getRowModel().rows.length && (
+                  <tr><td colSpan={columns.length} style={{ height: `${(table.getRowModel().rows.length - endIndex) * VIRTUAL_ROW_HEIGHT}px` }} /></tr>
+                )}
+              </tbody>
             </table>
           </div>
         ) : (
@@ -319,7 +366,11 @@ export default function InventoryPage({ theme, setTheme }) {
         open={!!confirmAction}
         onClose={() => setConfirmAction(null)}
         onConfirm={startBulkJob}
-        summary={{ count: effectiveSelectionCount, estimate: Math.max(1, Math.ceil(effectiveSelectionCount / 150)), label: confirmAction?.label || '' }}
+        summary={{
+          count: effectiveSelectionCount,
+          estimate: Math.max(1, Math.ceil(effectiveSelectionCount / Math.max(250, Math.ceil(effectiveSelectionCount / 50 || 1)))),
+          label: confirmAction?.label || '',
+        }}
       />
       <ProgressModal job={bulkJob} onClose={() => setBulkJob(null)} />
       <PhotoEditorModal

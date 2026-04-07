@@ -97,6 +97,17 @@ npm run dev
 
 ## What’s New in the Final Unification Pass
 
+- **Unlimited Bulk Actions — Edit, delist, or relist thousands of items at once with smart background processing. No 240-item caps like other tools.**
+  - Bulk chunk size now auto-scales from inventory size + configured worker concurrency.
+  - Inventory actions use optimistic UI updates, then reconcile with background job status.
+  - Large inventory tables auto-virtualize for smooth performance once datasets exceed 500 items.
+- **Global marketplace rate-limit respect**
+  - A centralized rate limiter coordinates publish/poll/sync calls per marketplace profile.
+  - Daily quota and burst pacing are enforced while still maximizing throughput.
+  - Default eBay profile honors a 4,000-calls/day envelope.
+- **Safety configuration**
+  - New `.env` tuning: `MAX_CONCURRENT_BULK_TASKS=50` (high default, fully tunable).
+
 - **Phone-first UX polish**
   - Mobile bottom navigation for quick switching between key views.
   - Inventory controls stack cleanly on small screens.

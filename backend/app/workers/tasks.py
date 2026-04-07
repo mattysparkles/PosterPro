@@ -23,6 +23,7 @@ from app.services.offer_service import OfferService
 from app.services.sale_detection_service import SaleDetectionService
 from app.workers.celery_app import celery_app
 from app.services.clustering import cluster_embeddings
+from app.services.rate_limiter import rate_limiter
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,7 @@ def publish_listing_to_marketplace_task(self, listing_id: int, marketplace: str)
             raise ValueError("Listing not found")
 
         try:
+            rate_limiter.acquire(marketplace)
             result = multi_platform_publisher.publish(db, listing, marketplace)
             upsert_marketplace_listing(
                 db,

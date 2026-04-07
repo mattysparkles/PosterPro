@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     sale_detection_enabled: bool = True
     sale_detection_dry_run: bool = True
     sale_detection_poll_minutes: int = 15
+    max_concurrent_bulk_tasks: int = 50
+    bulk_chunk_size: int = 0
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
