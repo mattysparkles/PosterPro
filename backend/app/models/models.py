@@ -58,6 +58,7 @@ class Listing(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     cluster_id: Mapped[int | None] = mapped_column(ForeignKey("clusters.id"), index=True, nullable=True)
+    batch_id: Mapped[int | None] = mapped_column(ForeignKey("storage_unit_batches.id"), index=True, nullable=True)
     status: Mapped[ListingStatus] = mapped_column(Enum(ListingStatus), default=ListingStatus.draft)
     image_urls: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     raw_photo_path: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -92,7 +93,24 @@ class Listing(Base, TimestampMixin):
 
     user: Mapped["User"] = relationship(back_populates="listings")
     cluster: Mapped["Cluster | None"] = relationship(back_populates="listings")
+    batch: Mapped["StorageUnitBatch | None"] = relationship(back_populates="listings")
     marketplace_listings: Mapped[list["MarketplaceListing"]] = relationship(back_populates="listing")
+
+
+class StorageUnitBatch(Base, TimestampMixin):
+    __tablename__ = "storage_unit_batches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    storage_unit_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(String(64), default="INGESTED", index=True)
+    overnight_mode: Mapped[bool] = mapped_column(Boolean, default=False)
+    total_items: Mapped[int] = mapped_column(Integer, default=0)
+    processed_items: Mapped[int] = mapped_column(Integer, default=0)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pipeline_task_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    listings: Mapped[list["Listing"]] = relationship(back_populates="batch")
 
 
 class MarketplaceAccount(Base, TimestampMixin):

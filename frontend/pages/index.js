@@ -5,6 +5,7 @@ import IntelligencePanel from '../components/IntelligencePanel';
 import ListingEditor from '../components/ListingEditor';
 import PublishedListings from '../components/PublishedListings';
 import SyncPanel from '../components/SyncPanel';
+import { useBatchProgress } from '../hooks/useBatchProgress';
 import { useMarketplacePublish } from '../hooks/useMarketplacePublish';
 import {
   connectMarketplace,
@@ -18,8 +19,11 @@ import {
   fetchPlatformConfig,
   fetchPrediction,
   fetchPricingRecommendation,
+  fetchStorageUnitBatches,
   generateListing,
   optimizeListing,
+  runAllOvernightBatches,
+  runOvernightBatch,
   toggleAutonomousMode,
   updatePlatformConfig,
   updateListing,
@@ -38,10 +42,12 @@ export default function Dashboard() {
   const [offerDashboard, setOfferDashboard] = useState({ active_offers: [], decision_log: [] });
   const [connectError, setConnectError] = useState('');
   const [enabledPlatforms, setEnabledPlatforms] = useState(['ebay']);
+  const [storageBatches, setStorageBatches] = useState([]);
   const { publish, publishing, errors, statusByListing, refreshStatus } = useMarketplacePublish();
+  const { batchStatusById, trackBatch } = useBatchProgress();
 
   const reload = async () => {
-    const [c, l, m, a, al, autoConfig, offerData, platformConfig] = await Promise.all([
+    const [c, l, m, a, al, autoConfig, offerData, platformConfig, batches] = await Promise.all([
       fetchClusters(),
       fetchListings(),
       fetchMarketplaces(),
@@ -50,6 +56,7 @@ export default function Dashboard() {
       fetchAutonomousConfig(),
       fetchEbayOfferDashboard().catch(() => ({ active_offers: [], decision_log: [] })),
       fetchPlatformConfig(1).catch(() => ({ enabled_platforms: ['ebay'] })),
+      fetchStorageUnitBatches().catch(() => []),
     ]);
     setClusters(c);
     setListings(l);
@@ -59,6 +66,7 @@ export default function Dashboard() {
     setAutonomousConfig(autoConfig);
     setOfferDashboard(offerData);
     setEnabledPlatforms(platformConfig.enabled_platforms || ['ebay']);
+    setStorageBatches(batches || []);
     if (l?.length) {
       const listingId = l[0].id;
       const [rec, pred, opt] = await Promise.all([
@@ -209,6 +217,38 @@ export default function Dashboard() {
         emptyMessage="No autonomous publishes yet."
         postedOnly={false}
       />
+      <section className="card">
+        <h2>Storage Unit Batches</h2>
+        <button
+          onClick={async () => {
+            await runAllOvernightBatches();
+            await reload();
+          }}
+        >
+          Run Overnight Batch
+        </button>
+        {(storageBatches || []).map((batch) => {
+          const liveBatch = batchStatusById[batch.id] || batch;
+          return (
+            <p key={batch.id}>
+              #{batch.id} {liveBatch.storage_unit_name || 'Unnamed'} — {liveBatch.status} ({liveBatch.processed_items}/
+              {liveBatch.total_items}){' '}
+              {liveBatch.status === 'QUEUED' && (
+                <button
+                  onClick={async () => {
+                    await runOvernightBatch(batch.id);
+                    trackBatch(batch.id);
+                    await reload();
+                  }}
+                >
+                  Run Now
+                </button>
+              )}
+              {liveBatch.status === 'PROCESSING' && <button onClick={() => trackBatch(batch.id)}>Track</button>}
+            </p>
+          );
+        })}
+      </section>
       <section className="card">
         <h2>eBay Best Offers</h2>
         <p>Active incoming offers: {offerDashboard.active_offers?.length || 0}</p>

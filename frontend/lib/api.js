@@ -123,3 +123,19 @@ export async function updatePlatformConfig(userId, marketplaces) {
     body: JSON.stringify({ marketplaces }),
   });
 }
+
+export async function fetchStorageUnitBatches() {
+  return jsonFetch(`${API_BASE}/batch/storage-unit`);
+}
+
+export async function fetchStorageUnitBatch(batchId) {
+  return jsonFetch(`${API_BASE}/batch/storage-unit/${batchId}`);
+}
+
+export async function runOvernightBatch(batchId) {
+  return jsonFetch(`${API_BASE}/batch/storage-unit/${batchId}/run-overnight`, { method: 'POST' });
+}
+
+export async function runAllOvernightBatches() {
+  return jsonFetch(`${API_BASE}/batch/storage-unit/run-overnight`, { method: 'POST' });
+}
