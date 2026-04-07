@@ -5,13 +5,13 @@ import json
 import logging
 from datetime import datetime, UTC
 
-from celery import group
+from celery import chord, group
 from sqlalchemy import select
 
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.models.enums import ListingStatus, MarketplaceListingStatus, MarketplaceName
-from app.models.models import Cluster, Image, Listing, MarketplaceAccount, MarketplaceListing, User
+from app.models.models import Cluster, Image, Listing, MarketplaceAccount, MarketplaceListing, StorageUnitBatch, User
 from app.services.analytics_service import AnalyticsService
 from app.services.prediction_service import PredictionService
 from app.services.pricing_intelligence_service import PricingIntelligenceService
@@ -431,6 +431,98 @@ def process_photo_batch(self, listing_ids: list[int]) -> dict:
         db.commit()
 
     return {"processed": processed, "failed": failed, "total": len(listing_ids)}
+
+
+@celery_app.task(
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_jitter=True,
+    max_retries=3,
+    name="process_storage_unit_listing",
+)
+def process_storage_unit_listing(self, listing_id: int, batch_id: int) -> dict:
+    service = PhotoEnrichmentService()
+    with SessionLocal() as db:
+        listing = db.get(Listing, listing_id)
+        batch = db.get(StorageUnitBatch, batch_id)
+        if not listing or not batch:
+            raise ValueError("Listing or batch not found")
+        if not listing.raw_photo_path:
+            listing.status = ListingStatus.FAILED
+            batch.processed_items += 1
+            db.add_all([listing, batch])
+            db.commit()
+            return {"listing_id": listing_id, "status": "FAILED"}
+        try:
+            enriched = service.enrich_photo(listing.raw_photo_path)
+            listing.title = enriched.get("title") or listing.title
+            listing.description = enriched.get("description") or listing.description
+            listing.category_id = enriched.get("category_id")
+            listing.category_suggestion = enriched.get("category_suggestion")
+            listing.tags = enriched.get("tags")
+            listing.item_specifics = enriched.get("item_specifics")
+            listing.estimated_value = enriched.get("estimated_value")
+            listing.status = ListingStatus.PROCESSED
+            if settings.autonomous_mode:
+                autonomous_publish.delay(listing.id, dry_run=settings.autonomous_dry_run)
+            else:
+                auto_price_listing.delay(listing.id)
+            batch.processed_items += 1
+            db.add_all([listing, batch])
+            db.commit()
+            return {"listing_id": listing_id, "status": "PROCESSED"}
+        except Exception as exc:
+            listing.status = ListingStatus.FAILED
+            batch.processed_items += 1
+            db.add_all([listing, batch])
+            db.commit()
+            logger.exception("Storage unit listing processing failed", extra={"listing_id": listing_id, "error": str(exc)})
+            raise
+
+
+@celery_app.task(name="finalize_storage_unit_batch")
+def finalize_storage_unit_batch(results: list[dict], batch_id: int) -> dict:
+    with SessionLocal() as db:
+        batch = db.get(StorageUnitBatch, batch_id)
+        if not batch:
+            return {"batch_id": batch_id, "status": "MISSING"}
+        failed_count = sum(1 for result in results if result.get("status") == "FAILED")
+        batch.status = "FAILED" if failed_count else "COMPLETED"
+        db.add(batch)
+        db.commit()
+        return {"batch_id": batch_id, "status": batch.status, "processed": batch.processed_items, "total": batch.total_items}
+
+
+def enqueue_storage_unit_batch_pipeline(batch_id: int, listing_ids: list[int]):
+    workflow = chord(
+        group(process_storage_unit_listing.s(listing_id, batch_id) for listing_id in listing_ids),
+        finalize_storage_unit_batch.s(batch_id),
+    )
+    return workflow.apply_async()
+
+
+@celery_app.task(name="process_overnight_storage_batches")
+def process_overnight_storage_batches() -> dict:
+    started = 0
+    with SessionLocal() as db:
+        batches = db.execute(
+            select(StorageUnitBatch).where(
+                StorageUnitBatch.overnight_mode.is_(True),
+                StorageUnitBatch.status.in_(["INGESTED", "QUEUED"]),
+            )
+        ).scalars().all()
+        for batch in batches:
+            listing_ids = [listing.id for listing in batch.listings]
+            if not listing_ids:
+                continue
+            batch.status = "PROCESSING"
+            async_result = enqueue_storage_unit_batch_pipeline(batch.id, listing_ids)
+            batch.pipeline_task_id = async_result.id
+            db.add(batch)
+            started += 1
+        db.commit()
+    return {"started": started}
 
 
 @celery_app.task(

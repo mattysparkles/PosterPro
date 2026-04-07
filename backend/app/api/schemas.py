@@ -80,3 +80,25 @@ class MarketplaceStatusEntry(BaseModel):
 
 class SoldSyncRequest(BaseModel):
     listing_ids: list[int] | None = None
+
+
+class BatchStorageUnitUrlRequest(BaseModel):
+    image_urls: list[HttpUrl] = Field(default_factory=list)
+    user_id: int = 1
+    storage_unit_name: str | None = None
+    overnight_mode: bool = False
+
+
+class StorageUnitBatchResponse(BaseModel):
+    id: int
+    user_id: int
+    storage_unit_name: str | None = None
+    status: str
+    overnight_mode: bool
+    total_items: int
+    processed_items: int
+    error_message: str | None = None
+    pipeline_task_id: str | None = None
+
+    class Config:
+        from_attributes = True

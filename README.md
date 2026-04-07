@@ -85,6 +85,11 @@ npm run dev
 - `POST /listings/{id}/publish/ebay`
 - `GET /ebay/status/{id}`
 - `POST /ingest/photos` (multipart photo ingestion + autonomous AI enrichment)
+- `POST /batch/storage-unit` (zip upload OR image URL batch ingestion)
+- `POST /batch/storage-unit/from-urls` (JSON URL list for mobile clients)
+- `GET /batch/storage-unit` and `GET /batch/storage-unit/{batch_id}` (batch progress)
+- `POST /batch/storage-unit/{batch_id}/run-overnight` (manual run now)
+- `POST /batch/storage-unit/run-overnight` (queue all overnight batches now)
 
 ### Photo ingestion quick test
 
@@ -97,6 +102,25 @@ curl -X POST "http://localhost:8000/ingest/photos" \
 ```
 
 The endpoint stores uploads under `./storage/uploads`, creates `listings` in `INGESTED` status, and enqueues Celery task `process_photo_batch` to extract title/description/category/keywords and update each listing to `PROCESSED` (or `FAILED` on errors).
+
+## Autonomous Reseller Mode (Storage Unit Overnight Flow)
+
+### End-to-end: upload 200 photos and let it list while you sleep
+
+1. Upload one storage-unit batch (zip or URL list):
+   - `POST /batch/storage-unit` with `zip_file=@unit-photos.zip`, optional `storage_unit_name`, and optional `overnight_mode=true`.
+   - or `POST /batch/storage-unit/from-urls` with JSON `image_urls` for mobile upload workflows.
+2. API creates one `storage_unit_batches` row, creates all child listings in `INGESTED`, and tracks progress (`processed_items/total_items`).
+3. If `overnight_mode=false`, the autonomous Prompt 1–3 pipeline starts immediately through a Celery chord/group:
+   - per-photo enrichment
+   - auto-pricing / autonomous publish trigger
+   - final batch completion status
+4. If `overnight_mode=true`, batch is queued (`QUEUED`) and can be started by:
+   - Celery Beat nightly schedule (`process_overnight_storage_batches`), or
+   - dashboard **Run Overnight Batch** button / manual API call.
+5. Dashboard polls batch progress every few seconds to show live `processed/total` progress until `COMPLETED` or `FAILED`.
+
+That gives you a practical overnight pipeline: **Upload 200 photos from a storage unit and wake up to processed/published inventory.**
 
 ## Example API request/response logging
 

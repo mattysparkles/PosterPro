@@ -1,4 +1,7 @@
 from datetime import datetime
+import io
+import json
+import zipfile
 
 from pathlib import Path
 
@@ -7,10 +10,17 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.schemas import GooglePhotosImportRequest, ListingGenerateRequest, ListingResponse, ListingUpdateRequest
+from app.api.schemas import (
+    BatchStorageUnitUrlRequest,
+    GooglePhotosImportRequest,
+    ListingGenerateRequest,
+    ListingResponse,
+    ListingUpdateRequest,
+    StorageUnitBatchResponse,
+)
 from app.core.config import settings
 from app.core.database import get_db
-from app.models.models import Cluster, Image, Listing
+from app.models.models import Cluster, Image, Listing, StorageUnitBatch
 from app.services.ebay import EbayService
 from app.services.embedding import fake_clip_embedding
 from app.services.google_photos import GooglePhotosService
@@ -20,9 +30,56 @@ from app.services.profit_service import ProfitService
 from app.services.storage import LocalStorage
 from app.services.pricing_service import PricingService
 from app.models.enums import ListingStatus
-from app.workers.tasks import cluster_images_task, process_photo_batch
+from app.workers.tasks import (
+    cluster_images_task,
+    enqueue_storage_unit_batch_pipeline,
+    process_overnight_storage_batches,
+    process_photo_batch,
+)
 
 router = APIRouter()
+
+
+def _create_storage_batch(
+    db: Session,
+    user_id: int,
+    storage_unit_name: str | None,
+    overnight_mode: bool,
+    photo_paths: list[str],
+) -> StorageUnitBatch:
+    batch = StorageUnitBatch(
+        user_id=user_id,
+        storage_unit_name=storage_unit_name,
+        status="INGESTED",
+        overnight_mode=overnight_mode,
+        total_items=len(photo_paths),
+        processed_items=0,
+    )
+    db.add(batch)
+    db.flush()
+    for raw_path in photo_paths:
+        listing = Listing(
+            user_id=user_id,
+            batch_id=batch.id,
+            cluster_id=None,
+            status=ListingStatus.INGESTED,
+            image_urls=[raw_path],
+            raw_photo_path=raw_path,
+            storage_unit_name=storage_unit_name,
+        )
+        db.add(listing)
+    return batch
+
+
+def _start_batch_pipeline(db: Session, batch: StorageUnitBatch) -> str | None:
+    listing_ids = [listing.id for listing in batch.listings]
+    if not listing_ids:
+        return None
+    async_result = enqueue_storage_unit_batch_pipeline(batch.id, listing_ids)
+    batch.status = "PROCESSING"
+    batch.pipeline_task_id = async_result.id
+    db.add(batch)
+    return async_result.id
 
 
 class AutonomousToggleRequest(BaseModel):
@@ -115,6 +172,123 @@ async def ingest_photos(
     db.commit()
     task = process_photo_batch.delay(listing_ids)
     return {"created_listings": listing_ids, "uploaded_paths": uploads, "task_id": task.id}
+
+
+@router.post("/batch/storage-unit", response_model=StorageUnitBatchResponse)
+async def ingest_storage_unit_batch(
+    zip_file: UploadFile | None = File(default=None),
+    image_urls: str | None = Form(default=None),
+    user_id: int = Form(1),
+    storage_unit_name: str | None = Form(default=None),
+    overnight_mode: bool = Form(default=False),
+    db: Session = Depends(get_db),
+):
+    if not zip_file and not image_urls:
+        raise HTTPException(status_code=400, detail="Provide either zip_file or image_urls")
+    if zip_file and image_urls:
+        raise HTTPException(status_code=400, detail="Provide zip_file or image_urls, not both")
+
+    storage = LocalStorage()
+    photo_paths: list[str] = []
+
+    if zip_file:
+        payload = await zip_file.read()
+        if not payload:
+            raise HTTPException(status_code=400, detail="Uploaded zip file is empty")
+        try:
+            with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                for member in archive.infolist():
+                    if member.is_dir():
+                        continue
+                    suffix = Path(member.filename).suffix.lower()
+                    if suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
+                        continue
+                    file_bytes = archive.read(member.filename)
+                    if not file_bytes:
+                        continue
+                    photo_paths.append(storage.save_bytes(file_bytes, extension=suffix, prefix="batch_uploads"))
+        except zipfile.BadZipFile as exc:
+            raise HTTPException(status_code=400, detail="Invalid zip file") from exc
+    else:
+        try:
+            decoded = json.loads(image_urls or "[]")
+            if not isinstance(decoded, list):
+                raise ValueError("image_urls must be a list")
+            for url in decoded:
+                photo_paths.append(storage.save_from_url(str(url), prefix="batch_uploads"))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid image_urls payload: {exc}") from exc
+
+    if not photo_paths:
+        raise HTTPException(status_code=400, detail="No valid images found in payload")
+
+    batch = _create_storage_batch(db, user_id, storage_unit_name, overnight_mode, photo_paths)
+    db.commit()
+    db.refresh(batch)
+    if not overnight_mode:
+        task_id = _start_batch_pipeline(db, batch)
+        db.commit()
+        db.refresh(batch)
+        batch.pipeline_task_id = task_id
+    elif overnight_mode:
+        batch.status = "QUEUED"
+        db.add(batch)
+        db.commit()
+        db.refresh(batch)
+    return batch
+
+
+@router.post("/batch/storage-unit/from-urls", response_model=StorageUnitBatchResponse)
+def ingest_storage_unit_urls(payload: BatchStorageUnitUrlRequest, db: Session = Depends(get_db)):
+    storage = LocalStorage()
+    photo_paths = [storage.save_from_url(str(url), prefix="batch_uploads") for url in payload.image_urls]
+    if not photo_paths:
+        raise HTTPException(status_code=400, detail="No valid image URLs received")
+    batch = _create_storage_batch(db, payload.user_id, payload.storage_unit_name, payload.overnight_mode, photo_paths)
+    db.commit()
+    db.refresh(batch)
+    if payload.overnight_mode:
+        batch.status = "QUEUED"
+        db.add(batch)
+        db.commit()
+        db.refresh(batch)
+        return batch
+    _start_batch_pipeline(db, batch)
+    db.commit()
+    db.refresh(batch)
+    return batch
+
+
+@router.get("/batch/storage-unit", response_model=list[StorageUnitBatchResponse])
+def list_storage_unit_batches(db: Session = Depends(get_db)):
+    return db.execute(select(StorageUnitBatch).order_by(StorageUnitBatch.id.desc())).scalars().all()
+
+
+@router.get("/batch/storage-unit/{batch_id}", response_model=StorageUnitBatchResponse)
+def get_storage_unit_batch(batch_id: int, db: Session = Depends(get_db)):
+    batch = db.get(StorageUnitBatch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    return batch
+
+
+@router.post("/batch/storage-unit/{batch_id}/run-overnight", response_model=StorageUnitBatchResponse)
+def run_storage_unit_batch(batch_id: int, db: Session = Depends(get_db)):
+    batch = db.get(StorageUnitBatch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    if batch.status not in {"QUEUED", "INGESTED"}:
+        raise HTTPException(status_code=400, detail=f"Batch is not runnable from status {batch.status}")
+    _start_batch_pipeline(db, batch)
+    db.commit()
+    db.refresh(batch)
+    return batch
+
+
+@router.post("/batch/storage-unit/run-overnight")
+def run_all_overnight_batches():
+    task = process_overnight_storage_batches.delay()
+    return {"task_id": task.id, "status": "QUEUED"}
 
 
 @router.get("/config/autonomous")
