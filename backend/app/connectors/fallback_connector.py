@@ -39,6 +39,17 @@ class ProxyAutomationConnector(BaseMarketplaceConnector):
     async def fetch_status(self, listing: Listing) -> dict:
         return {"status": "PENDING_PROVIDER_SYNC", "listing_id": listing.id}
 
+    async def poll_sales(self, user_id: int, since: str | None = None) -> list[dict]:
+        return [
+            {
+                "marketplace": self.name,
+                "status": "stub",
+                "message": f"{self.name} sale polling stubbed pending official integration",
+                "user_id": user_id,
+                "since": since,
+            }
+        ]
+
     def to_marketplace_payload(self, listing: Listing) -> dict:
         return {
             "headline": listing.title,

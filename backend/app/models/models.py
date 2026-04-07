@@ -19,9 +19,11 @@ class User(Base, TimestampMixin):
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     enabled_platforms: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    sale_detection_platforms: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
 
     listings: Mapped[list["Listing"]] = relationship(back_populates="user")
     marketplace_accounts: Mapped[list["MarketplaceAccount"]] = relationship(back_populates="user")
+    sales: Mapped[list["Sale"]] = relationship(back_populates="user")
 
 
 class Cluster(Base, TimestampMixin):
@@ -99,6 +101,7 @@ class Listing(Base, TimestampMixin):
     cluster: Mapped["Cluster | None"] = relationship(back_populates="listings")
     batch: Mapped["StorageUnitBatch | None"] = relationship(back_populates="listings")
     marketplace_listings: Mapped[list["MarketplaceListing"]] = relationship(back_populates="listing")
+    sales: Mapped[list["Sale"]] = relationship(back_populates="listing")
 
 
 class StorageUnitBatch(Base, TimestampMixin):
@@ -144,6 +147,26 @@ class MarketplaceListing(Base, TimestampMixin):
     raw_response: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     listing: Mapped["Listing"] = relationship(back_populates="marketplace_listings")
+
+
+class Sale(Base, TimestampMixin):
+    __tablename__ = "sales"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    listing_id: Mapped[int | None] = mapped_column(ForeignKey("listings.id"), index=True, nullable=True)
+    platform: Mapped[MarketplaceName] = mapped_column(Enum(MarketplaceName), index=True)
+    marketplace_order_id: Mapped[str | None] = mapped_column(String(255), index=True, nullable=True)
+    marketplace_listing_id: Mapped[str | None] = mapped_column(String(255), index=True, nullable=True)
+    quantity: Mapped[int] = mapped_column(Integer, default=1)
+    amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    currency: Mapped[str] = mapped_column(String(8), default="USD")
+    sold_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="DETECTED")
+    details: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    user: Mapped["User"] = relationship(back_populates="sales")
+    listing: Mapped["Listing | None"] = relationship(back_populates="sales")
 
 
 class DailyStat(Base, TimestampMixin):

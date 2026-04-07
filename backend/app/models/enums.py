@@ -26,6 +26,8 @@ class MarketplaceName(str, enum.Enum):
     mercari = "mercari"
     poshmark = "poshmark"
     depop = "depop"
+    whatnot = "whatnot"
+    vinted = "vinted"
 
 
 class MarketplaceListingStatus(str, enum.Enum):

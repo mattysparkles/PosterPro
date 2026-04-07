@@ -15,6 +15,10 @@ def list_marketplaces() -> list[dict]:
         {"name": MarketplaceName.etsy.value, "supports_oauth": False},
         {"name": MarketplaceName.mercari.value, "supports_oauth": False},
         {"name": MarketplaceName.facebook.value, "supports_oauth": False},
+        {"name": MarketplaceName.poshmark.value, "supports_oauth": False},
+        {"name": MarketplaceName.depop.value, "supports_oauth": False},
+        {"name": MarketplaceName.whatnot.value, "supports_oauth": False},
+        {"name": MarketplaceName.vinted.value, "supports_oauth": False},
     ]
 
 

@@ -122,3 +122,13 @@ class InventoryBulkEditRequest(BaseModel):
     remove_labels: list[str] | None = None
     delist: bool = False
     relist: bool = False
+
+
+class SaleDetectionConfigRequest(BaseModel):
+    marketplaces: list[str] = Field(default_factory=list)
+
+
+class SaleDetailsUpdateRequest(BaseModel):
+    fees_actual: float | None = None
+    shipping_cost: float | None = None
+    notes: str | None = None

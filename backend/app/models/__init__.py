@@ -8,6 +8,7 @@ from app.models.models import (
     ListingPrediction,
     MarketplaceAccount,
     MarketplaceListing,
+    Sale,
     User,
 )
 
@@ -18,6 +19,7 @@ __all__ = [
     "Listing",
     "MarketplaceAccount",
     "MarketplaceListing",
+    "Sale",
     "DailyStat",
     "CategoryStat",
     "ListingPrediction",

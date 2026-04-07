@@ -19,10 +19,13 @@ from app.services.photo_enrichment import PhotoEnrichmentService
 from app.services.pricing_service import PricingService
 from app.services.marketplace_publisher import get_enabled_platforms, marketplace_publisher, upsert_marketplace_listing
 from app.services.offer_service import OfferService
+from app.services.sale_detection_service import SaleDetectionService
 from app.workers.celery_app import celery_app
 from app.services.clustering import cluster_embeddings
 
 logger = logging.getLogger(__name__)
+
+sale_detection_service = SaleDetectionService()
 
 
 def _extract_end_time_iso(marketplace_data: dict | None) -> str | None:
@@ -151,6 +154,31 @@ def sync_sold_everywhere_task(self, listing_ids: list[int]) -> dict:
         db.commit()
 
     return {"processed_listing_ids": processed, "count": len(processed)}
+
+
+@celery_app.task(
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_jitter=True,
+    max_retries=3,
+    name="poll_for_sales",
+)
+def poll_for_sales_task(self, dry_run: bool | None = None) -> dict:
+    if not settings.sale_detection_enabled:
+        logger.info("Sale detection polling disabled by config")
+        return {"disabled": True, "processed_users": 0}
+
+    resolved_dry_run = settings.sale_detection_dry_run if dry_run is None else dry_run
+    with SessionLocal() as db:
+        logger.info("Sale detection polling task started", extra={"dry_run": resolved_dry_run})
+        result = sale_detection_service.poll_all_users(
+            db,
+            dry_run=resolved_dry_run,
+            lookback_minutes=max(10, settings.sale_detection_poll_minutes + 5),
+        )
+        logger.info("Sale detection polling task completed", extra=result)
+        return result
 
 
 @celery_app.task(name="recompute_daily_analytics")
