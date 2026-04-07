@@ -335,7 +335,7 @@ async def get_required_item_specifics(access_token: str, category_id: str, marke
     )
 
 
-async def publish_listing_to_ebay(listing: Listing, db: Session) -> dict[str, Any]:
+async def publish_listing_to_ebay(listing: Listing, db: Session, *, relist: bool = False) -> dict[str, Any]:
     listing.ebay_publish_status = EbayPublishStatus.POSTING
     db.add(listing)
     db.commit()
@@ -347,14 +347,29 @@ async def publish_listing_to_ebay(listing: Listing, db: Session) -> dict[str, An
         offer_data = await create_offer_for_item(listing, account, item_data["sku"])
         publish_data = await publish_offer(listing, account, offer_data["offerId"])
 
+        previous_listing_id = listing.ebay_listing_id
         listing.ebay_listing_id = publish_data["listingId"]
         listing.ebay_publish_status = EbayPublishStatus.POSTED
+        previous_data = listing.marketplace_data or {}
+        history = list(previous_data.get("auto_relist_history") or [])
+        if relist:
+            history.append(
+                {
+                    "action": "AUTO_RELISTED",
+                    "previous_listing_id": previous_listing_id,
+                    "new_listing_id": publish_data["listingId"],
+                    "timestamp": datetime.now(UTC).isoformat(),
+                }
+            )
         listing.marketplace_data = {
+            **previous_data,
             "location": location_data,
             "item": item_data,
             "offer": offer_data,
             "publish": publish_data,
             "ebay_url": f"https://www.ebay.com/itm/{publish_data['listingId']}",
+            "last_publish_action": "relist" if relist else "publish",
+            "auto_relist_history": history,
         }
         db.add(listing)
         db.commit()

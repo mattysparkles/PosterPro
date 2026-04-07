@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import datetime, UTC
 
@@ -21,6 +22,47 @@ from app.workers.celery_app import celery_app
 from app.services.clustering import cluster_embeddings
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_end_time_iso(marketplace_data: dict | None) -> str | None:
+    if not marketplace_data:
+        return None
+    publish = marketplace_data.get("publish") or {}
+    return (
+        publish.get("endTime")
+        or publish.get("listingEndDate")
+        or publish.get("listingEndTime")
+        or marketplace_data.get("ebay_end_time")
+    )
+
+
+def _extract_quantity(marketplace_data: dict | None) -> int | None:
+    if not marketplace_data:
+        return None
+    item = marketplace_data.get("item") or {}
+    availability = item.get("availability") or {}
+    ship_to = availability.get("shipToLocationAvailability") or {}
+    quantity = ship_to.get("quantity", marketplace_data.get("quantity"))
+    if quantity is None:
+        return None
+    try:
+        return int(quantity)
+    except (TypeError, ValueError):
+        return None
+
+
+def _get_user_relist_min_price(user_id: int) -> float:
+    if not settings.auto_relist_user_rules_json:
+        return settings.auto_relist_min_price
+    try:
+        rule_map = json.loads(settings.auto_relist_user_rules_json)
+        if not isinstance(rule_map, dict):
+            return settings.auto_relist_min_price
+        user_value = rule_map.get(str(user_id)) or rule_map.get(user_id)
+        return float(user_value) if user_value is not None else settings.auto_relist_min_price
+    except Exception:
+        logger.warning("Invalid auto_relist_user_rules_json value; using default threshold.")
+        return settings.auto_relist_min_price
 
 
 @celery_app.task(name="cluster_images")
@@ -256,6 +298,70 @@ def adjust_active_listing_prices(self) -> dict:
             adjusted += 1
 
     return {"adjusted": adjusted}
+
+
+@celery_app.task(
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_jitter=True,
+    max_retries=3,
+    name="monitor_and_relist",
+)
+def monitor_and_relist(self) -> dict:
+    if not settings.auto_relist_enabled:
+        logger.info("Auto relist disabled by config.")
+        return {"checked": 0, "relisted": 0, "skipped": 0, "disabled": True}
+
+    checked = 0
+    relisted = 0
+    skipped = 0
+    now = datetime.now(UTC)
+
+    with SessionLocal() as db:
+        candidates = db.execute(select(Listing).where(Listing.status == ListingStatus.PUBLISHED)).scalars().all()
+        for listing in candidates:
+            checked += 1
+            data = listing.marketplace_data or {}
+            end_time_iso = _extract_end_time_iso(data)
+            quantity = _extract_quantity(data)
+            listing_price = float(listing.listing_price or listing.buy_it_now_price or listing.suggested_price or 0)
+            min_price = _get_user_relist_min_price(listing.user_id)
+
+            should_monitor = False
+            if end_time_iso:
+                try:
+                    end_time = datetime.fromisoformat(end_time_iso.replace("Z", "+00:00"))
+                    should_monitor = end_time <= now
+                except ValueError:
+                    logger.warning("Unable to parse listing end time.", extra={"listing_id": listing.id, "value": end_time_iso})
+            if quantity is not None and quantity <= 0:
+                should_monitor = True
+
+            if not should_monitor:
+                continue
+
+            if listing_price <= min_price:
+                skipped += 1
+                logger.info(
+                    "Auto-relist skipped due to relist rule threshold.",
+                    extra={"listing_id": listing.id, "listing_price": listing_price, "min_price": min_price},
+                )
+                continue
+
+            logger.info(
+                "Auto-relisting listing.",
+                extra={"listing_id": listing.id, "ebay_listing_id": listing.ebay_listing_id, "price": listing_price},
+            )
+            try:
+                result = asyncio.run(publish_listing_to_ebay(listing, db, relist=True))
+                relisted += 1
+                logger.info("Auto-relist successful.", extra={"listing_id": listing.id, "result": result})
+            except Exception as exc:
+                skipped += 1
+                logger.exception("Auto-relist failed.", extra={"listing_id": listing.id, "error": str(exc)})
+
+    return {"checked": checked, "relisted": relisted, "skipped": skipped}
 
 
 @celery_app.task(
