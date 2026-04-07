@@ -108,3 +108,9 @@ a { color: #1d4ed8; }
   padding: 6px;
   text-align: left;
 }
+
+.intelligence-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 14px;
+}

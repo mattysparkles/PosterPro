@@ -71,3 +71,23 @@ export async function fetchEbayAuthUrl(userId, redirectUri) {
 export async function fetchEbayStatus(id) {
   return jsonFetch(`${API_BASE}/ebay/status/${id}`);
 }
+
+export async function fetchAnalyticsOverview(userId = 1) {
+  return jsonFetch(`${API_BASE}/analytics/overview?user_id=${userId}`);
+}
+
+export async function fetchPricingRecommendation(id) {
+  return jsonFetch(`${API_BASE}/pricing/recommendations/${id}`);
+}
+
+export async function optimizeListing(id) {
+  return jsonFetch(`${API_BASE}/listings/${id}/optimize`, { method: 'POST' });
+}
+
+export async function fetchPrediction(id) {
+  return jsonFetch(`${API_BASE}/predictions/${id}`);
+}
+
+export async function fetchAlerts(userId = 1) {
+  return jsonFetch(`${API_BASE}/alerts?user_id=${userId}`);
+}

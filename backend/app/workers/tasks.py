@@ -6,6 +6,9 @@ from app.connectors.registry import get_connector
 from app.core.database import SessionLocal
 from app.models.enums import MarketplaceListingStatus, MarketplaceName
 from app.models.models import Cluster, Image, Listing, MarketplaceListing
+from app.services.analytics_service import AnalyticsService
+from app.services.prediction_service import PredictionService
+from app.services.pricing_intelligence_service import PricingIntelligenceService
 from app.workers.celery_app import celery_app
 from app.services.clustering import cluster_embeddings
 
@@ -104,3 +107,26 @@ def sync_sold_everywhere_task(self, listing_ids: list[int]) -> dict:
         db.commit()
 
     return {"processed_listing_ids": processed, "count": len(processed)}
+
+
+@celery_app.task(name="recompute_daily_analytics")
+def recompute_daily_analytics_task(user_id: int = 1) -> dict:
+    with SessionLocal() as db:
+        stat = AnalyticsService().store_daily_stats(db, user_id)
+        return {"user_id": user_id, "stat_date": str(stat.stat_date)}
+
+
+@celery_app.task(name="refresh_pricing_recommendations")
+def refresh_pricing_recommendations_task(user_id: int = 1) -> dict:
+    with SessionLocal() as db:
+        listings = db.execute(select(Listing).where(Listing.user_id == user_id)).scalars().all()
+        recommendations = [PricingIntelligenceService().recommend_price(db, l.id) for l in listings]
+        return {"user_id": user_id, "count": len(recommendations)}
+
+
+@celery_app.task(name="refresh_listing_predictions")
+def refresh_listing_predictions_task(user_id: int = 1) -> dict:
+    with SessionLocal() as db:
+        listings = db.execute(select(Listing).where(Listing.user_id == user_id)).scalars().all()
+        predictions = [PredictionService().predict_sell_through(db, l.id) for l in listings]
+        return {"user_id": user_id, "count": len(predictions)}

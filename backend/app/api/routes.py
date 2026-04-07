@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -10,6 +12,7 @@ from app.services.embedding import fake_clip_embedding
 from app.services.google_photos import GooglePhotosService
 from app.services.image_pipeline import ImagePipelineService
 from app.services.listing_ai import ListingAIService
+from app.services.profit_service import ProfitService
 from app.services.storage import LocalStorage
 from app.workers.tasks import cluster_images_task
 
@@ -55,6 +58,9 @@ def update_listing(listing_id: int, payload: ListingUpdateRequest, db: Session =
         raise HTTPException(status_code=404, detail="Listing not found")
     for key, value in payload.model_dump(exclude_none=True).items():
         setattr(listing, key, value)
+    if payload.sale_price is not None:
+        listing.sold_at = datetime.utcnow()
+        ProfitService().update_profit_on_sale_event(listing, "ebay")
     db.commit()
     db.refresh(listing)
     return listing
@@ -77,6 +83,7 @@ def generate_listing(listing_id: int, payload: ListingGenerateRequest, db: Sessi
     listing.category_suggestion = generated["category_suggestion"]
     listing.tags = generated["tags"]
     listing.suggested_price = price_data["suggested_price"]
+    listing.listing_price = price_data["suggested_price"]
     listing.status = "ready"
     db.commit()
     db.refresh(listing)
