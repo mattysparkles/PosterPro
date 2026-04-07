@@ -15,11 +15,13 @@ import {
   fetchEbayOfferDashboard,
   fetchListings,
   fetchMarketplaces,
+  fetchPlatformConfig,
   fetchPrediction,
   fetchPricingRecommendation,
   generateListing,
   optimizeListing,
   toggleAutonomousMode,
+  updatePlatformConfig,
   updateListing,
 } from '../lib/api';
 
@@ -35,10 +37,11 @@ export default function Dashboard() {
   const [autonomousConfig, setAutonomousConfig] = useState({ autonomous_mode: true, autonomous_dry_run: false });
   const [offerDashboard, setOfferDashboard] = useState({ active_offers: [], decision_log: [] });
   const [connectError, setConnectError] = useState('');
+  const [enabledPlatforms, setEnabledPlatforms] = useState(['ebay']);
   const { publish, publishing, errors, statusByListing, refreshStatus } = useMarketplacePublish();
 
   const reload = async () => {
-    const [c, l, m, a, al, autoConfig, offerData] = await Promise.all([
+    const [c, l, m, a, al, autoConfig, offerData, platformConfig] = await Promise.all([
       fetchClusters(),
       fetchListings(),
       fetchMarketplaces(),
@@ -46,6 +49,7 @@ export default function Dashboard() {
       fetchAlerts(),
       fetchAutonomousConfig(),
       fetchEbayOfferDashboard().catch(() => ({ active_offers: [], decision_log: [] })),
+      fetchPlatformConfig(1).catch(() => ({ enabled_platforms: ['ebay'] })),
     ]);
     setClusters(c);
     setListings(l);
@@ -54,6 +58,7 @@ export default function Dashboard() {
     setAlerts(al.alerts || []);
     setAutonomousConfig(autoConfig);
     setOfferDashboard(offerData);
+    setEnabledPlatforms(platformConfig.enabled_platforms || ['ebay']);
     if (l?.length) {
       const listingId = l[0].id;
       const [rec, pred, opt] = await Promise.all([
@@ -131,6 +136,26 @@ export default function Dashboard() {
           </button>
         </div>
         <div className="actions">
+          <span>Cross-post defaults:</span>
+          {['ebay', 'etsy', 'mercari', 'facebook'].map((platform) => (
+            <label key={platform}>
+              <input
+                type="checkbox"
+                checked={enabledPlatforms.includes(platform)}
+                onChange={async (event) => {
+                  const next = event.target.checked
+                    ? [...enabledPlatforms, platform]
+                    : enabledPlatforms.filter((name) => name !== platform);
+                  const ensured = next.length ? next : ['ebay'];
+                  await updatePlatformConfig(1, ensured);
+                  setEnabledPlatforms(ensured);
+                }}
+              />
+              {platform}
+            </label>
+          ))}
+        </div>
+        <div className="actions">
           {marketplaces.map((m) => (
             <button key={m.name} onClick={() => connect(m.name)}>
               Connect {m.name}
@@ -176,9 +201,10 @@ export default function Dashboard() {
           ))}
         </div>
       </section>
-      <PublishedListings listings={listings} />
+      <PublishedListings listings={listings} statusMap={statusByListing} />
       <PublishedListings
         listings={recentAutoPublished}
+        statusMap={statusByListing}
         title="Recently Auto-Published"
         emptyMessage="No autonomous publishes yet."
         postedOnly={false}

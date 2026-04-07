@@ -21,6 +21,7 @@ class EbayPublishStatus(str, enum.Enum):
 
 class MarketplaceName(str, enum.Enum):
     ebay = "ebay"
+    etsy = "etsy"
     facebook = "facebook"
     mercari = "mercari"
     poshmark = "poshmark"

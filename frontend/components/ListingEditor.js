@@ -3,7 +3,7 @@ import { useState } from 'react';
 import MarketplaceStatusPanel from './MarketplaceStatusPanel';
 import StatusPill from './StatusPill';
 
-const MARKETPLACES = ['ebay', 'facebook', 'mercari', 'poshmark', 'depop'];
+const MARKETPLACES = ['ebay', 'etsy', 'mercari', 'facebook'];
 
 export default function ListingEditor({ listing, onSave, onGenerate, onPublish, publishState, statuses }) {
   const [form, setForm] = useState({

@@ -111,3 +111,15 @@ export async function toggleAutonomousMode(enabled) {
 export async function fetchEbayOfferDashboard(userId = 1) {
   return jsonFetch(`${API_BASE}/ebay/offers/dashboard?user_id=${userId}`);
 }
+
+export async function fetchPlatformConfig(userId = 1) {
+  return jsonFetch(`${API_BASE}/users/${userId}/platform-config`);
+}
+
+export async function updatePlatformConfig(userId, marketplaces) {
+  return jsonFetch(`${API_BASE}/users/${userId}/platform-config`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ marketplaces }),
+  });
+}

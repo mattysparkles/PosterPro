@@ -1,5 +1,6 @@
 export default function PublishedListings({
   listings,
+  statusMap = {},
   title = 'Published eBay Listings',
   emptyMessage = 'No published listings yet.',
   postedOnly = true,
@@ -15,6 +16,7 @@ export default function PublishedListings({
       {posted.map((listing) => {
         const ebayUrl = listing.marketplace_data?.ebay_url || (listing.ebay_listing_id ? `https://www.ebay.com/itm/${listing.ebay_listing_id}` : '');
         const autoRelistHistory = listing.marketplace_data?.auto_relist_history || [];
+        const crosspostStatuses = (statusMap[listing.id] || []).filter((row) => row.marketplace !== 'ebay');
         return (
           <article key={listing.id} className="listing-item">
             <strong>{listing.title || `Listing #${listing.id}`}</strong>
@@ -27,6 +29,15 @@ export default function PublishedListings({
               <a href={ebayUrl} target="_blank" rel="noreferrer">
                 Open on eBay
               </a>
+            )}
+            {!!crosspostStatuses.length && (
+              <div className="crosspost-badges">
+                {crosspostStatuses.map((row) => (
+                  <span key={`${listing.id}-${row.marketplace}`} className={`status ${row.status.toLowerCase()}`}>
+                    {row.marketplace}: {row.status}
+                  </span>
+                ))}
+              </div>
             )}
             {autoRelistHistory.length > 0 && (
               <div>

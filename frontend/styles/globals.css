@@ -93,6 +93,9 @@ button {
 
 .status.posting { background: #e9d5ff; }
 .status.failed { background: #fecaca; }
+.status.published { background: #dcfce7; }
+.status.pending { background: #fef3c7; }
+.status.updated { background: #dbeafe; }
 .error-text { color: #b91c1c; margin-top: 8px; }
 a { color: #1d4ed8; }
 
@@ -132,4 +135,11 @@ a { color: #1d4ed8; }
 .autonomous-badge.off {
   background: #fee2e2;
   color: #991b1b;
+}
+
+.crosspost-badges {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 8px;
 }

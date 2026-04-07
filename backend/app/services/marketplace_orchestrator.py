@@ -3,16 +3,18 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.connectors.registry import MARKETPLACE_REGISTRY
 from app.models.enums import MarketplaceListingStatus, MarketplaceName
-from app.models.models import Listing, MarketplaceListing
+from app.models.models import Listing, MarketplaceListing, User
+from app.services.marketplace_publisher import get_enabled_platforms
 from app.workers.tasks import publish_listing_to_marketplace_task, sync_sold_everywhere_task
 
 
 def list_marketplaces() -> list[dict]:
     return [
-        {"name": name, "supports_oauth": connector.supports_oauth}
-        for name, connector in MARKETPLACE_REGISTRY.items()
+        {"name": MarketplaceName.ebay.value, "supports_oauth": True},
+        {"name": MarketplaceName.etsy.value, "supports_oauth": False},
+        {"name": MarketplaceName.mercari.value, "supports_oauth": False},
+        {"name": MarketplaceName.facebook.value, "supports_oauth": False},
     ]
 
 
@@ -21,12 +23,13 @@ def queue_publish(db: Session, listing_id: int, marketplaces: list[str] | None) 
     if not listing:
         raise ValueError("Listing not found")
 
-    targets = marketplaces or list(MARKETPLACE_REGISTRY.keys())
+    user = db.get(User, listing.user_id)
+    targets = marketplaces or get_enabled_platforms(user)
     results: list[dict] = []
 
     for market in targets:
         market_key = market.lower()
-        if market_key not in MARKETPLACE_REGISTRY:
+        if market_key not in MarketplaceName._value2member_map_:
             results.append({"marketplace": market_key, "status": "UNSUPPORTED", "task_id": None})
             continue
 
