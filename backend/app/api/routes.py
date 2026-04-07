@@ -1,0 +1,106 @@
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.api.schemas import GooglePhotosImportRequest, ListingGenerateRequest, ListingResponse, ListingUpdateRequest
+from app.core.database import get_db
+from app.models.models import Cluster, Image, Listing, MarketplaceListing
+from app.services.ebay import EbayService
+from app.services.embedding import fake_clip_embedding
+from app.services.google_photos import GooglePhotosService
+from app.services.image_pipeline import ImagePipelineService
+from app.services.listing_ai import ListingAIService
+from app.services.storage import LocalStorage
+from app.workers.tasks import cluster_images_task
+
+router = APIRouter()
+
+
+@router.post("/import/google-photos")
+def import_google_photos(payload: GooglePhotosImportRequest, db: Session = Depends(get_db)):
+    photo_service = GooglePhotosService()
+    storage = LocalStorage()
+    pipeline = ImagePipelineService()
+
+    urls = photo_service.extract_image_urls(str(payload.album_url))
+    created = []
+    for url in urls:
+        local = storage.save_from_url(url)
+        processed = pipeline.process(local)
+        embedding = fake_clip_embedding(processed)
+        image = Image(user_id=payload.user_id, source_url=url, local_path=processed, embedding=embedding)
+        db.add(image)
+        created.append(url)
+    db.commit()
+
+    task = cluster_images_task.delay(payload.user_id)
+    return {"imported": len(created), "task_id": task.id}
+
+
+@router.get("/clusters")
+def get_clusters(db: Session = Depends(get_db)):
+    clusters = db.execute(select(Cluster)).scalars().all()
+    return [{"id": c.id, "title_hint": c.title_hint, "image_count": len(c.images)} for c in clusters]
+
+
+@router.get("/listings", response_model=list[ListingResponse])
+def get_listings(db: Session = Depends(get_db)):
+    return db.execute(select(Listing)).scalars().all()
+
+
+@router.patch("/listings/{listing_id}", response_model=ListingResponse)
+def update_listing(listing_id: int, payload: ListingUpdateRequest, db: Session = Depends(get_db)):
+    listing = db.get(Listing, listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    for key, value in payload.model_dump(exclude_none=True).items():
+        setattr(listing, key, value)
+    db.commit()
+    db.refresh(listing)
+    return listing
+
+
+@router.post("/listings/{listing_id}/generate", response_model=ListingResponse)
+def generate_listing(listing_id: int, payload: ListingGenerateRequest, db: Session = Depends(get_db)):
+    listing = db.get(Listing, listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+
+    ai = ListingAIService()
+    ebay = EbayService()
+
+    generated = ai.generate({"title_hint": listing.cluster.title_hint if listing.cluster else None})
+    price_data = ebay.enrich_price(generated["title"], payload.barcode)
+
+    listing.title = generated["title"]
+    listing.description = generated["description"]
+    listing.category_suggestion = generated["category_suggestion"]
+    listing.tags = generated["tags"]
+    listing.suggested_price = price_data["suggested_price"]
+    listing.status = "ready"
+    db.commit()
+    db.refresh(listing)
+    return listing
+
+
+@router.post("/listings/{listing_id}/publish/ebay")
+def publish_listing_to_ebay(listing_id: int, db: Session = Depends(get_db)):
+    listing = db.get(Listing, listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    if not listing.title or not listing.description:
+        raise HTTPException(status_code=400, detail="Listing must be generated before publishing")
+
+    ebay = EbayService()
+    result = ebay.publish_listing({"id": listing.id, "title": listing.title, "description": listing.description})
+    mp_listing = MarketplaceListing(
+        listing_id=listing.id,
+        marketplace="ebay",
+        external_listing_id=result["listing_id"],
+        status=result["status"],
+        payload=result,
+    )
+    db.add(mp_listing)
+    listing.status = "posted"
+    db.commit()
+    return {"listing_id": result["listing_id"], "status": result["status"]}
