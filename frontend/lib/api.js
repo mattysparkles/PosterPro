@@ -145,6 +145,9 @@ export async function fetchInventory(filters = {}) {
   if (filters.label) url.searchParams.set('label', filters.label);
   if (filters.quantityGtOne) url.searchParams.set('quantity_gt_one', 'true');
   if (filters.stale) url.searchParams.set('stale', 'true');
+  if (filters.search) url.searchParams.set('search', filters.search);
+  if (filters.page) url.searchParams.set('page', String(filters.page));
+  if (filters.pageSize) url.searchParams.set('page_size', String(filters.pageSize));
   return jsonFetch(url.toString());
 }
 
@@ -154,6 +157,18 @@ export async function bulkEditInventory(payload) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
+}
+
+export async function runInventoryBulkJob(payload) {
+  return jsonFetch(`${API_BASE}/inventory/bulk`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchBulkJob(jobId) {
+  return jsonFetch(`${API_BASE}/bulk-jobs/${jobId}`);
 }
 
 export async function fetchSalesDashboard(userId = 1, limit = 100) {

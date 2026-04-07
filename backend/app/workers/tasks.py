@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, UTC
+from datetime import datetime, timedelta, UTC
 
 from celery import chord, group
 from sqlalchemy import select
@@ -11,7 +11,8 @@ from sqlalchemy import select
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.models.enums import ListingStatus, MarketplaceListingStatus, MarketplaceName
-from app.models.models import Cluster, Image, Listing, MarketplaceAccount, MarketplaceListing, StorageUnitBatch, User
+from app.models.models import BulkJob, Cluster, Image, Listing, MarketplaceAccount, MarketplaceListing, StorageUnitBatch, User
+from app.services.inventory_service import InventorySafetyError, InventoryService
 from app.services.analytics_service import AnalyticsService
 from app.services.prediction_service import PredictionService
 from app.services.pricing_intelligence_service import PricingIntelligenceService
@@ -26,6 +27,7 @@ from app.services.clustering import cluster_embeddings
 logger = logging.getLogger(__name__)
 
 sale_detection_service = SaleDetectionService()
+inventory_service = InventoryService()
 
 
 def _extract_end_time_iso(marketplace_data: dict | None) -> str | None:
@@ -202,6 +204,99 @@ def refresh_listing_predictions_task(user_id: int = 1) -> dict:
         listings = db.execute(select(Listing).where(Listing.user_id == user_id)).scalars().all()
         predictions = [PredictionService().predict_sell_through(db, l.id) for l in listings]
         return {"user_id": user_id, "count": len(predictions)}
+
+
+@celery_app.task(name="flag_stale_listings")
+def flag_stale_listings_task() -> dict:
+    stale_count = 0
+    with SessionLocal() as db:
+        listings = db.execute(select(Listing)).scalars().all()
+        stale_cutoff = datetime.utcnow() - timedelta(days=inventory_service.STALE_AFTER_DAYS)
+        for listing in listings:
+            is_stale = listing.last_refreshed is None or listing.last_refreshed < stale_cutoff
+            listing.stale_flag = is_stale
+            stale_count += 1 if is_stale else 0
+            db.add(listing)
+        db.commit()
+    return {"processed": len(listings), "stale": stale_count}
+
+
+@celery_app.task(name="bulk_process_inventory_chunk")
+def bulk_process_inventory_chunk(job_id: str, action: str, payload: dict, listing_ids: list[int], batch_index: int = 0) -> dict:
+    processed = 0
+    errors: list[dict] = []
+    with SessionLocal() as db:
+        job = db.get(BulkJob, job_id)
+        if not job:
+            return {"processed": 0, "errors": [{"message": "Bulk job not found"}]}
+        job.status = "running"
+        db.add(job)
+        listings = db.execute(select(Listing).where(Listing.id.in_(listing_ids))).scalars().all()
+        for listing in listings:
+            try:
+                if action == "edit":
+                    inventory_service.update_listing_inventory(
+                        listing,
+                        quantity=payload.get("quantity"),
+                        platform_quantities=payload.get("platform_quantities"),
+                    )
+                elif action == "delist":
+                    inventory_service.update_listing_inventory(listing, delist=True)
+                elif action == "relist":
+                    inventory_service.update_listing_inventory(listing, relist=True)
+                elif action == "label":
+                    inventory_service.update_listing_inventory(
+                        listing,
+                        labels_to_add=payload.get("add_labels"),
+                        labels_to_remove=payload.get("remove_labels"),
+                    )
+                elif action in {"refresh", "autobump"}:
+                    listing.last_refreshed = datetime.utcnow()
+                    listing.stale_flag = False
+                else:
+                    raise ValueError(f"Unsupported action: {action}")
+                if payload.get("marketplaces"):
+                    data = listing.marketplace_data or {}
+                    data["scheduled_refresh"] = {
+                        "marketplaces": payload.get("marketplaces"),
+                        "requested_at": datetime.utcnow().isoformat(),
+                    }
+                    listing.marketplace_data = data
+                db.add(listing)
+                processed += 1
+            except (InventorySafetyError, ValueError) as exc:
+                errors.append({"listing_id": listing.id, "error": str(exc)})
+
+        db.commit()
+        job.processed_items = min(job.total_items, (job.processed_items or 0) + processed + len(errors))
+        existing_errors = job.errors or []
+        job.errors = [*existing_errors, *errors]
+        job.error_count = len(job.errors or [])
+        db.add(job)
+        db.commit()
+
+    return {"processed": processed, "errors": errors, "batch_index": batch_index}
+
+
+@celery_app.task(name="bulk_finalize_job")
+def bulk_finalize_job(results: list[dict], job_id: str) -> dict:
+    with SessionLocal() as db:
+        job = db.get(BulkJob, job_id)
+        if not job:
+            return {"job_id": job_id, "status": "missing"}
+        total_errors = sum(len(result.get("errors") or []) for result in (results or []))
+        job.status = "completed_with_errors" if total_errors else "completed"
+        job.error_count = total_errors
+        job.processed_items = job.total_items
+        db.add(job)
+        db.commit()
+        return {
+            "job_id": job_id,
+            "status": job.status,
+            "processed_items": job.processed_items,
+            "total_items": job.total_items,
+            "errors": total_errors,
+        }
 
 
 

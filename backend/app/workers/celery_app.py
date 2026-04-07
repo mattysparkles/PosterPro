@@ -29,5 +29,9 @@ celery_app.conf.update(
             "task": "poll_for_sales",
             "schedule": crontab(minute="*/15"),
         },
+        "flag-stale-listings-daily": {
+            "task": "flag_stale_listings",
+            "schedule": crontab(minute=5, hour=0),
+        },
     },
 )
