@@ -18,6 +18,7 @@ class User(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    enabled_platforms: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
 
     listings: Mapped[list["Listing"]] = relationship(back_populates="user")
     marketplace_accounts: Mapped[list["MarketplaceAccount"]] = relationship(back_populates="user")

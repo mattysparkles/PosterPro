@@ -5,19 +5,19 @@ import json
 import logging
 from datetime import datetime, UTC
 
+from celery import group
 from sqlalchemy import select
 
 from app.core.config import settings
-from app.connectors.registry import get_connector
 from app.core.database import SessionLocal
 from app.models.enums import ListingStatus, MarketplaceListingStatus, MarketplaceName
-from app.models.models import Cluster, Image, Listing, MarketplaceAccount, MarketplaceListing
+from app.models.models import Cluster, Image, Listing, MarketplaceAccount, MarketplaceListing, User
 from app.services.analytics_service import AnalyticsService
 from app.services.prediction_service import PredictionService
 from app.services.pricing_intelligence_service import PricingIntelligenceService
 from app.services.photo_enrichment import PhotoEnrichmentService
 from app.services.pricing_service import PricingService
-from app.services.ebay_service import publish_listing_to_ebay
+from app.services.marketplace_publisher import get_enabled_platforms, marketplace_publisher, upsert_marketplace_listing
 from app.services.offer_service import OfferService
 from app.workers.celery_app import celery_app
 from app.services.clustering import cluster_embeddings
@@ -101,34 +101,25 @@ def publish_listing_to_marketplace_task(self, listing_id: int, marketplace: str)
         if not listing:
             raise ValueError("Listing not found")
 
-        record = db.execute(
-            select(MarketplaceListing).where(
-                MarketplaceListing.listing_id == listing_id,
-                MarketplaceListing.marketplace == MarketplaceName(marketplace),
-            )
-        ).scalar_one_or_none()
-        if not record:
-            record = MarketplaceListing(
-                listing_id=listing_id,
-                marketplace=MarketplaceName(marketplace),
-                status=MarketplaceListingStatus.DRAFT,
-            )
-            db.add(record)
-
-        connector = get_connector(marketplace)
-
         try:
-            response = __import__("asyncio").run(connector.publish(listing))
-            record.marketplace_listing_id = response.get("listing_id") or response.get("external_listing_id")
-            record.raw_response = response
-            record.status = MarketplaceListingStatus.PUBLISHED
-            db.add(record)
+            result = marketplace_publisher.publish(db, listing, marketplace)
+            upsert_marketplace_listing(
+                db,
+                listing_id=listing_id,
+                marketplace=marketplace,
+                status=result.status,
+                response=result.response,
+            )
             db.commit()
-            return {"marketplace": marketplace, "status": "PUBLISHED", "response": response}
+            return {"marketplace": marketplace, "status": result.status.value, "response": result.response}
         except Exception as exc:
-            record.status = MarketplaceListingStatus.FAILED
-            record.raw_response = {"error": str(exc)}
-            db.add(record)
+            upsert_marketplace_listing(
+                db,
+                listing_id=listing_id,
+                marketplace=marketplace,
+                status=MarketplaceListingStatus.FAILED,
+                response={"error": str(exc)},
+            )
             db.commit()
             raise
 
@@ -245,8 +236,16 @@ def autonomous_publish(self, listing_id: int, dry_run: bool | None = None) -> di
             return {"listing_id": listing_id, "status": "DRY_RUN", "pricing": pricing}
 
         try:
-            ebay_result = asyncio.run(publish_listing_to_ebay(listing, db))
+            ebay_result = marketplace_publisher.publish(db, listing, MarketplaceName.ebay.value).response
             listing.status = ListingStatus.PUBLISHED
+            user = db.get(User, listing.user_id)
+            enabled_platforms = get_enabled_platforms(user)
+            crosspost_targets = [market for market in enabled_platforms if market != MarketplaceName.ebay.value]
+            crosspost_group = None
+            if crosspost_targets:
+                crosspost_group = group(
+                    publish_listing_to_marketplace_task.s(listing.id, market) for market in crosspost_targets
+                ).apply_async()
             listing.marketplace_data = {
                 **(listing.marketplace_data or {}),
                 "autonomous": {
@@ -254,6 +253,8 @@ def autonomous_publish(self, listing_id: int, dry_run: bool | None = None) -> di
                     "dry_run": False,
                     "pricing": pricing,
                     "published_at": datetime.now(UTC).isoformat(),
+                    "crosspost_targets": crosspost_targets,
+                    "crosspost_group_id": crosspost_group.id if crosspost_group else None,
                 },
             }
             db.add(listing)
@@ -266,7 +267,16 @@ def autonomous_publish(self, listing_id: int, dry_run: bool | None = None) -> di
                     "ebay_listing_id": listing.ebay_listing_id,
                 },
             )
-            return {"listing_id": listing_id, "status": "PUBLISHED", "ebay": ebay_result, "pricing": pricing}
+            return {
+                "listing_id": listing_id,
+                "status": "PUBLISHED",
+                "ebay": ebay_result,
+                "pricing": pricing,
+                "crossposts": {
+                    "targets": crosspost_targets,
+                    "group_id": crosspost_group.id if crosspost_group else None,
+                },
+            }
         except Exception as exc:
             listing.status = ListingStatus.FAILED
             db.add(listing)
