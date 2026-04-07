@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.models.enums import MarketplaceListingStatus, MarketplaceName
 from app.models.models import Listing, MarketplaceListing, User
-from app.services.marketplace_publisher import get_enabled_platforms
+from app.services.multi_platform_publisher import get_enabled_platforms
 from app.workers.tasks import publish_listing_to_marketplace_task, sync_sold_everywhere_task
 
 

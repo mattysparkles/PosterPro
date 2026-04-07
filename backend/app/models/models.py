@@ -150,6 +150,19 @@ class MarketplaceListing(Base, TimestampMixin):
     listing: Mapped["Listing"] = relationship(back_populates="marketplace_listings")
 
 
+class ListingTemplate(Base, TimestampMixin):
+    __tablename__ = "listing_templates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    name: Mapped[str] = mapped_column(String(255), index=True)
+    category_id: Mapped[str | None] = mapped_column(String(255), index=True, nullable=True)
+    is_category_default: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    fields: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+
+
 class Sale(Base, TimestampMixin):
     __tablename__ = "sales"
 

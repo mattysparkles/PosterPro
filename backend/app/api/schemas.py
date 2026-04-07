@@ -171,3 +171,27 @@ class PhotoEditRequest(BaseModel):
 class PhotoEditResponse(BaseModel):
     image_url: str
     image_urls: list[str]
+
+
+class ListingTemplateCreateRequest(BaseModel):
+    user_id: int = 1
+    name: str
+    category_id: str | None = None
+    is_category_default: bool = False
+    fields: dict = Field(default_factory=dict)
+
+
+class ListingTemplateApplyRequest(BaseModel):
+    template_id: int
+
+
+class ListingTemplateResponse(BaseModel):
+    id: int
+    user_id: int
+    name: str
+    category_id: str | None = None
+    is_category_default: bool
+    fields: dict = Field(default_factory=dict)
+
+    class Config:
+        from_attributes = True
