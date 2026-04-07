@@ -6,6 +6,10 @@ class ListingStatus(str, enum.Enum):
     ready = "ready"
     posted = "posted"
     rejected = "rejected"
+    INGESTED = "INGESTED"
+    PROCESSED = "PROCESSED"
+    PUBLISHED = "PUBLISHED"
+    FAILED = "FAILED"
 
 
 class EbayPublishStatus(str, enum.Enum):

@@ -24,3 +24,17 @@ PYTHONPATH=. DATABASE_URL=sqlite:///./test.db pytest tests -q
    - create offer
    - publish offer
 4. Listing table updated with `ebay_listing_id`, `ebay_publish_status`, `marketplace_data`.
+
+## Photo ingestion flow
+1. `POST /ingest/photos` with multipart files (`photos`) and optional `user_id`, `storage_unit_name`.
+2. API stores files in `storage/uploads` and creates listings in `INGESTED`.
+3. Worker task `process_photo_batch` runs OpenAI vision prompts (`extract_poster_title`, `extract_description`, `detect_category`, `extract_keywords`) and updates each listing to `PROCESSED` or `FAILED`.
+
+### Example curl
+```bash
+curl -X POST "http://localhost:8000/ingest/photos" \
+  -F "user_id=1" \
+  -F "storage_unit_name=Shelf B2" \
+  -F "photos=@/tmp/poster-1.jpg" \
+  -F "photos=@/tmp/poster-2.jpg"
+```

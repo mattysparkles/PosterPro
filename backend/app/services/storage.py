@@ -22,3 +22,11 @@ class LocalStorage:
             response.raise_for_status()
             target.write_bytes(response.content)
         return str(target)
+
+    def save_bytes(self, data: bytes, *, extension: str = ".jpg", prefix: str = "uploads") -> str:
+        destination_dir = self.root / prefix
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        file_name = f"{uuid4()}{extension if extension.startswith('.') else f'.{extension}'}"
+        target = destination_dir / file_name
+        target.write_bytes(data)
+        return str(target)

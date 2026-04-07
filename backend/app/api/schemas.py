@@ -24,10 +24,18 @@ class ListingUpdateRequest(BaseModel):
 
 class ListingResponse(BaseModel):
     id: int
-    cluster_id: int
+    cluster_id: int | None
     status: str
+    image_urls: list[str] | None = None
+    raw_photo_path: str | None = None
+    storage_unit_name: str | None = None
     title: str | None
     description: str | None
+    category_id: str | None = None
+    category_suggestion: str | None = None
+    item_specifics: dict | None = None
+    tags: list[str] | None = None
+    estimated_value: float | None = None
     suggested_price: float | None
     listing_price: float | None = None
     purchase_cost: float | None = None

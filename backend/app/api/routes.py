@@ -1,6 +1,8 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -14,7 +16,8 @@ from app.services.image_pipeline import ImagePipelineService
 from app.services.listing_ai import ListingAIService
 from app.services.profit_service import ProfitService
 from app.services.storage import LocalStorage
-from app.workers.tasks import cluster_images_task
+from app.models.enums import ListingStatus
+from app.workers.tasks import cluster_images_task, process_photo_batch
 
 router = APIRouter()
 
@@ -64,6 +67,47 @@ def update_listing(listing_id: int, payload: ListingUpdateRequest, db: Session =
     db.commit()
     db.refresh(listing)
     return listing
+
+
+@router.post("/ingest/photos")
+async def ingest_photos(
+    photos: list[UploadFile] = File(...),
+    user_id: int = Form(1),
+    storage_unit_name: str | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    if not photos:
+        raise HTTPException(status_code=400, detail="No photos uploaded")
+
+    storage = LocalStorage()
+    listing_ids: list[int] = []
+    uploads: list[str] = []
+
+    for photo in photos:
+        content = await photo.read()
+        if not content:
+            continue
+        suffix = Path(photo.filename or "").suffix or ".jpg"
+        raw_path = storage.save_bytes(content, extension=suffix, prefix="uploads")
+        listing = Listing(
+            user_id=user_id,
+            cluster_id=None,
+            status=ListingStatus.INGESTED,
+            image_urls=[raw_path],
+            raw_photo_path=raw_path,
+            storage_unit_name=storage_unit_name,
+        )
+        db.add(listing)
+        db.flush()
+        listing_ids.append(listing.id)
+        uploads.append(raw_path)
+
+    if not listing_ids:
+        raise HTTPException(status_code=400, detail="No valid photo payloads received")
+
+    db.commit()
+    task = process_photo_batch.delay(listing_ids)
+    return {"created_listings": listing_ids, "uploaded_paths": uploads, "task_id": task.id}
 
 
 @router.post("/listings/{listing_id}/generate", response_model=ListingResponse)
