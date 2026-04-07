@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useReactTable, getCoreRowModel, flexRender, createColumnHelper } from '@tanstack/react-table';
-import { CheckSquare, Eraser, Filter, Grid3X3, List, Pencil, RefreshCcw, Tag, Trash2, Undo2, Zap } from 'lucide-react';
+import { CheckSquare, Eraser, Filter, Grid3X3, Image, List, Pencil, RefreshCcw, Tag, Trash2, Undo2, Zap } from 'lucide-react';
 import toast from 'react-hot-toast';
 
 import AppShell from '../components/layout/AppShell';
@@ -8,8 +8,9 @@ import Badge from '../components/ui/badge';
 import Button from '../components/ui/button';
 import { Card, CardDescription, CardTitle } from '../components/ui/card';
 import Input from '../components/ui/input';
+import PhotoEditorModal from '../components/PhotoEditorModal';
 import useDashboardData from '../hooks/useDashboardData';
-import { fetchBulkJob, fetchInventory, runInventoryBulkJob, toggleAutonomousMode } from '../lib/api';
+import { fetchBulkJob, fetchInventory, processListingPhoto, runInventoryBulkJob, toPublicImageUrl, toggleAutonomousMode } from '../lib/api';
 
 const columnHelper = createColumnHelper();
 const TABS = ['All', 'Multi-Quantity', 'Stale'];
@@ -73,6 +74,7 @@ export default function InventoryPage({ theme, setTheme }) {
   const [pageSize] = useState(50);
   const [confirmAction, setConfirmAction] = useState(null);
   const [bulkJob, setBulkJob] = useState(null);
+  const [editingListing, setEditingListing] = useState(null);
 
   const filters = useMemo(() => ({
     quantityGtOne: tab === 'Multi-Quantity',
@@ -119,6 +121,16 @@ export default function InventoryPage({ theme, setTheme }) {
       cell: ({ row }) => <input type="checkbox" checked={!!selection[row.original.id]} onChange={(e) => setSelection((prev) => ({ ...prev, [row.original.id]: e.target.checked }))} />,
     }),
     columnHelper.accessor('title', { header: 'Listing', cell: (info) => info.getValue() || `Listing #${info.row.original.id}` }),
+
+    columnHelper.display({
+      id: 'photo',
+      header: 'Photo',
+      cell: ({ row }) => (
+        <Button size="sm" variant="outline" onClick={() => setEditingListing(row.original)} title="Quick edit listing photos.">
+          <Image size={14} /> Quick edit
+        </Button>
+      ),
+    }),
     columnHelper.accessor('quantity', { header: 'Qty' }),
     columnHelper.accessor('custom_labels', { header: 'Labels', cell: (info) => <div className="flex flex-wrap gap-1">{(info.getValue() || []).map((label) => <Badge key={label} tone="info">{label}</Badge>)}</div> }),
     columnHelper.accessor('last_refreshed', { header: 'Status', cell: (info) => {
@@ -214,7 +226,16 @@ export default function InventoryPage({ theme, setTheme }) {
             </table>
           </div>
         ) : (
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{inventory.map((item) => <Card key={item.id} className="space-y-2 rounded-2xl"><p className="text-sm font-semibold">{item.title || `Listing #${item.id}`}</p><Badge tone={item.quantity > 1 ? 'info' : 'default'}>Qty: {item.quantity}</Badge></Card>)}</div>
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{inventory.map((item) => (
+            <Card key={item.id} className="space-y-2 rounded-2xl">
+              {!!item.image_urls?.[0] && <img src={toPublicImageUrl(item.image_urls[0])} alt={item.title || `Listing ${item.id}`} className="h-36 w-full rounded-xl object-cover" />}
+              <p className="text-sm font-semibold">{item.title || `Listing #${item.id}`}</p>
+              <div className="flex items-center justify-between">
+                <Badge tone={item.quantity > 1 ? 'info' : 'default'}>Qty: {item.quantity}</Badge>
+                <Button size="sm" variant="outline" onClick={() => setEditingListing(item)} title="Quick edit listing photos."><Image size={14} /> Quick edit</Button>
+              </div>
+            </Card>
+          ))}</div>
         )}
 
         <div className="flex items-center justify-between">
@@ -234,6 +255,15 @@ export default function InventoryPage({ theme, setTheme }) {
         summary={{ count: effectiveSelectionCount, estimate: Math.max(1, Math.ceil(effectiveSelectionCount / 150)), label: confirmAction?.label || '' }}
       />
       <ProgressModal job={bulkJob} onClose={() => setBulkJob(null)} />
+      <PhotoEditorModal
+        open={!!editingListing}
+        listing={editingListing}
+        onClose={() => setEditingListing(null)}
+        onApply={async ({ listingId, sourceImage, file, removeBackground, edits }) => {
+          const result = await processListingPhoto({ listingId, sourceImage, file, removeBackground, edits });
+          setInventory((prev) => prev.map((item) => (item.id === listingId ? { ...item, image_urls: result.image_urls } : item)));
+        }}
+      />
     </AppShell>
   );
 }

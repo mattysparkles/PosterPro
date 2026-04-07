@@ -3,7 +3,7 @@ import ListingEditor from '../components/ListingEditor';
 import { Card, CardDescription, CardTitle } from '../components/ui/card';
 import { useMarketplacePublish } from '../hooks/useMarketplacePublish';
 import useDashboardData from '../hooks/useDashboardData';
-import { generateListing, toggleAutonomousMode, updateListing } from '../lib/api';
+import { generateListing, processListingPhoto, toggleAutonomousMode, updateListing } from '../lib/api';
 
 export default function ListingsPage({ theme, setTheme }) {
   const { publish, publishing, errors, statusByListing } = useMarketplacePublish();
@@ -45,6 +45,11 @@ export default function ListingsPage({ theme, setTheme }) {
               }}
               onPublish={async (id, targets) => {
                 await publish(id, targets);
+                await reload();
+              }}
+
+              onPhotoUpdated={async ({ listingId, sourceImage, file, removeBackground, edits }) => {
+                await processListingPhoto({ listingId, sourceImage, file, removeBackground, edits });
                 await reload();
               }}
             />

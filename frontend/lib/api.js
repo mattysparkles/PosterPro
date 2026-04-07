@@ -194,3 +194,30 @@ export async function updateSaleDetectionSettings(userId, marketplaces) {
     body: JSON.stringify({ marketplaces }),
   });
 }
+
+
+export function toPublicImageUrl(path) {
+  if (!path) return '';
+  if (path.startsWith('http://') || path.startsWith('https://') || path.startsWith('blob:') || path.startsWith('/media/')) return path;
+  const marker = '/storage/';
+  const idx = path.indexOf(marker);
+  if (idx >= 0) {
+    return `${API_BASE}/media/${path.slice(idx + marker.length)}`;
+  }
+  if (path.startsWith('./storage/')) {
+    return `${API_BASE}/media/${path.replace('./storage/', '')}`;
+  }
+  return path;
+}
+
+export async function processListingPhoto({ listingId, sourceImage, edits, removeBackground = false, file }) {
+  const form = new FormData();
+  form.append('edits', JSON.stringify(edits || {}));
+  form.append('remove_background', String(removeBackground));
+  if (sourceImage) form.append('source_image', sourceImage);
+  if (file) form.append('photo', file);
+  return jsonFetch(`${API_BASE}/listings/${listingId}/photo-tools`, {
+    method: 'POST',
+    body: form,
+  });
+}

@@ -157,3 +157,17 @@ class SaleDetailsUpdateRequest(BaseModel):
     fees_actual: float | None = None
     shipping_cost: float | None = None
     notes: str | None = None
+
+class PhotoEditRequest(BaseModel):
+    brightness: float = 1.0
+    contrast: float = 1.0
+    filter_name: str = "none"
+    crop_x: int | None = None
+    crop_y: int | None = None
+    crop_width: int | None = None
+    crop_height: int | None = None
+
+
+class PhotoEditResponse(BaseModel):
+    image_url: str
+    image_urls: list[str]

@@ -1,14 +1,18 @@
-import { Sparkles, WandSparkles } from 'lucide-react';
+import { useState } from 'react';
+import { Camera, Sparkles, WandSparkles } from 'lucide-react';
 
 import MarketplaceStatusPanel from './MarketplaceStatusPanel';
 import StatusPill from './StatusPill';
 import Button from './ui/button';
 import { Card, CardDescription, CardTitle } from './ui/card';
+import PhotoEditorModal from './PhotoEditorModal';
 import Input from './ui/input';
 
 const MARKETPLACES = ['ebay', 'etsy', 'mercari', 'facebook'];
 
-export default function ListingEditor({ listing, onSave, onGenerate, onPublish, publishState, statuses }) {
+export default function ListingEditor({ listing, onSave, onGenerate, onPublish, onPhotoUpdated, publishState, statuses }) {
+  const [openEditor, setOpenEditor] = useState(false);
+
   return (
     <Card className="h-full" data-tour="view-inventory">
       <div className="mb-3 flex items-center justify-between gap-2">
@@ -41,6 +45,9 @@ export default function ListingEditor({ listing, onSave, onGenerate, onPublish, 
       </div>
 
       <div className="mt-4 flex flex-wrap gap-2">
+        <Button variant="outline" onClick={() => setOpenEditor(true)} title="Open premium photo editor.">
+          <Camera size={16} /> Edit photos
+        </Button>
         <Button variant="secondary" onClick={() => onGenerate(listing.id)} title="Use AI to improve title and description.">
           <WandSparkles size={16} /> Generate copy
         </Button>
@@ -59,6 +66,13 @@ export default function ListingEditor({ listing, onSave, onGenerate, onPublish, 
 
       {publishState.error && <p className="mt-3 text-sm text-rose-500">{publishState.error}</p>}
       <MarketplaceStatusPanel statuses={statuses} />
+
+      <PhotoEditorModal
+        open={openEditor}
+        listing={listing}
+        onClose={() => setOpenEditor(false)}
+        onApply={onPhotoUpdated}
+      />
     </Card>
   );
 }
