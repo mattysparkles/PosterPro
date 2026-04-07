@@ -4,7 +4,7 @@ from sqlalchemy import JSON, DateTime, Enum, Float, ForeignKey, Integer, String,
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
-from app.models.enums import ListingStatus, MarketplaceName
+from app.models.enums import EbayPublishStatus, ListingStatus, MarketplaceName
 
 
 class TimestampMixin:
@@ -46,7 +46,7 @@ class Image(Base, TimestampMixin):
     width: Mapped[int | None] = mapped_column(Integer, nullable=True)
     height: Mapped[int | None] = mapped_column(Integer, nullable=True)
     embedding: Mapped[list[float] | None] = mapped_column(JSON, nullable=True)
-    metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    image_metadata: Mapped[dict | None] = mapped_column("metadata", JSON, nullable=True)
 
     cluster: Mapped["Cluster | None"] = relationship(back_populates="images")
 
@@ -63,6 +63,11 @@ class Listing(Base, TimestampMixin):
     category_suggestion: Mapped[str | None] = mapped_column(String(255), nullable=True)
     tags: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     suggested_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ebay_listing_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    ebay_publish_status: Mapped[EbayPublishStatus] = mapped_column(
+        Enum(EbayPublishStatus), default=EbayPublishStatus.DRAFT, index=True
+    )
+    marketplace_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="listings")
     cluster: Mapped["Cluster"] = relationship(back_populates="listings")

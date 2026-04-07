@@ -23,6 +23,9 @@ class ListingResponse(BaseModel):
     title: str | None
     description: str | None
     suggested_price: float | None
+    ebay_listing_id: str | None = None
+    ebay_publish_status: str | None = None
+    marketplace_data: dict | None = None
 
     class Config:
         from_attributes = True

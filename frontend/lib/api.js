@@ -1,34 +1,49 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8000';
 
+async function jsonFetch(url, options = {}) {
+  const response = await fetch(url, options);
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.detail || data.message || 'Request failed');
+  }
+  return data;
+}
+
 export async function fetchListings() {
-  const response = await fetch(`${API_BASE}/listings`);
-  return response.json();
+  return jsonFetch(`${API_BASE}/listings`);
 }
 
 export async function fetchClusters() {
-  const response = await fetch(`${API_BASE}/clusters`);
-  return response.json();
+  return jsonFetch(`${API_BASE}/clusters`);
 }
 
 export async function updateListing(id, body) {
-  const response = await fetch(`${API_BASE}/listings/${id}`, {
+  return jsonFetch(`${API_BASE}/listings/${id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  return response.json();
 }
 
 export async function generateListing(id) {
-  const response = await fetch(`${API_BASE}/listings/${id}/generate`, {
+  return jsonFetch(`${API_BASE}/listings/${id}/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({}),
   });
-  return response.json();
 }
 
 export async function publishListing(id) {
-  const response = await fetch(`${API_BASE}/listings/${id}/publish/ebay`, { method: 'POST' });
-  return response.json();
+  return jsonFetch(`${API_BASE}/listings/${id}/publish/ebay`, { method: 'POST' });
+}
+
+export async function fetchEbayAuthUrl(userId, redirectUri) {
+  const url = new URL(`${API_BASE}/ebay/auth/url`);
+  url.searchParams.set('user_id', userId);
+  if (redirectUri) url.searchParams.set('redirect_uri', redirectUri);
+  return jsonFetch(url.toString());
+}
+
+export async function fetchEbayStatus(id) {
+  return jsonFetch(`${API_BASE}/ebay/status/${id}`);
 }
