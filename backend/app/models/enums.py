@@ -8,6 +8,13 @@ class ListingStatus(str, enum.Enum):
     rejected = "rejected"
 
 
+class EbayPublishStatus(str, enum.Enum):
+    DRAFT = "DRAFT"
+    POSTING = "POSTING"
+    POSTED = "POSTED"
+    FAILED = "FAILED"
+
+
 class MarketplaceName(str, enum.Enum):
     ebay = "ebay"
     facebook = "facebook"

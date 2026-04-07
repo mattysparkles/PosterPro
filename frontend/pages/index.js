@@ -2,11 +2,16 @@ import { useEffect, useMemo, useState } from 'react';
 
 import ClusterPreview from '../components/ClusterPreview';
 import ListingEditor from '../components/ListingEditor';
-import { fetchClusters, fetchListings, generateListing, publishListing, updateListing } from '../lib/api';
+import PublishedListings from '../components/PublishedListings';
+import { useEbayAuth } from '../hooks/useEbayAuth';
+import { useEbayPublish } from '../hooks/useEbayPublish';
+import { fetchClusters, fetchListings, generateListing, updateListing } from '../lib/api';
 
 export default function Dashboard() {
   const [clusters, setClusters] = useState([]);
   const [listings, setListings] = useState([]);
+  const { connect, loading: ebayAuthLoading, error: ebayAuthError } = useEbayAuth(1);
+  const { publish, publishing, errors, success } = useEbayPublish();
 
   const reload = async () => {
     const [c, l] = await Promise.all([fetchClusters(), fetchListings()]);
@@ -35,9 +40,13 @@ export default function Dashboard() {
         <h1>Reseller Cross-Posting Dashboard</h1>
         <div className="actions">
           <button onClick={bulkApprove}>Bulk Approve Drafts</button>
+          <button disabled={ebayAuthLoading} onClick={connect}>
+            {ebayAuthLoading ? 'Connecting…' : 'Connect eBay'}
+          </button>
           <span>{readyCount} ready listings</span>
         </div>
       </header>
+      {ebayAuthError && <p className="error-text">{ebayAuthError}</p>}
       <ClusterPreview clusters={clusters} />
       <section className="card">
         <h2>Listing Editor</h2>
@@ -46,6 +55,11 @@ export default function Dashboard() {
             <ListingEditor
               key={listing.id}
               listing={listing}
+              publishState={{
+                loading: !!publishing[listing.id],
+                error: errors[listing.id] || '',
+                url: success[listing.id] || listing.marketplace_data?.ebay_url || '',
+              }}
               onSave={async (id, form) => {
                 await updateListing(id, form);
                 await reload();
@@ -55,13 +69,14 @@ export default function Dashboard() {
                 await reload();
               }}
               onPublish={async (id) => {
-                await publishListing(id);
+                await publish(id);
                 await reload();
               }}
             />
           ))}
         </div>
       </section>
+      <PublishedListings listings={listings} />
     </main>
   );
 }

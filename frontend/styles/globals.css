@@ -90,3 +90,8 @@ button {
     font-size: 20px;
   }
 }
+
+.status.posting { background: #e9d5ff; }
+.status.failed { background: #fecaca; }
+.error-text { color: #b91c1c; margin-top: 8px; }
+a { color: #1d4ed8; }

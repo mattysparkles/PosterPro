@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.api.schemas import GooglePhotosImportRequest, ListingGenerateRequest, ListingResponse, ListingUpdateRequest
 from app.core.database import get_db
-from app.models.models import Cluster, Image, Listing, MarketplaceListing
+from app.models.models import Cluster, Image, Listing
 from app.services.ebay import EbayService
 from app.services.embedding import fake_clip_embedding
 from app.services.google_photos import GooglePhotosService
@@ -81,26 +81,3 @@ def generate_listing(listing_id: int, payload: ListingGenerateRequest, db: Sessi
     db.commit()
     db.refresh(listing)
     return listing
-
-
-@router.post("/listings/{listing_id}/publish/ebay")
-def publish_listing_to_ebay(listing_id: int, db: Session = Depends(get_db)):
-    listing = db.get(Listing, listing_id)
-    if not listing:
-        raise HTTPException(status_code=404, detail="Listing not found")
-    if not listing.title or not listing.description:
-        raise HTTPException(status_code=400, detail="Listing must be generated before publishing")
-
-    ebay = EbayService()
-    result = ebay.publish_listing({"id": listing.id, "title": listing.title, "description": listing.description})
-    mp_listing = MarketplaceListing(
-        listing_id=listing.id,
-        marketplace="ebay",
-        external_listing_id=result["listing_id"],
-        status=result["status"],
-        payload=result,
-    )
-    db.add(mp_listing)
-    listing.status = "posted"
-    db.commit()
-    return {"listing_id": result["listing_id"], "status": result["status"]}
