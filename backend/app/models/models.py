@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, Enum, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Date, DateTime, Enum, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -63,6 +63,17 @@ class Listing(Base, TimestampMixin):
     category_suggestion: Mapped[str | None] = mapped_column(String(255), nullable=True)
     tags: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     suggested_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    listing_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    purchase_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fees_estimated: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fees_actual: Mapped[float | None] = mapped_column(Float, nullable=True)
+    shipping_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sale_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    profit: Mapped[float | None] = mapped_column(Float, nullable=True)
+    roi_percentage: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sold_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    photo_quality_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    condition: Mapped[str | None] = mapped_column(String(64), nullable=True)
     ebay_listing_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     ebay_publish_status: Mapped[EbayPublishStatus] = mapped_column(
         Enum(EbayPublishStatus), default=EbayPublishStatus.DRAFT, index=True
@@ -101,3 +112,55 @@ class MarketplaceListing(Base, TimestampMixin):
     raw_response: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     listing: Mapped["Listing"] = relationship(back_populates="marketplace_listings")
+
+
+class DailyStat(Base, TimestampMixin):
+    __tablename__ = "daily_stats"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    stat_date: Mapped[datetime.date] = mapped_column(Date, index=True)
+    total_revenue: Mapped[float] = mapped_column(Float, default=0.0)
+    total_profit: Mapped[float] = mapped_column(Float, default=0.0)
+    roi_percentage: Mapped[float] = mapped_column(Float, default=0.0)
+    sell_through_rate: Mapped[float] = mapped_column(Float, default=0.0)
+    avg_days_to_sell: Mapped[float] = mapped_column(Float, default=0.0)
+
+
+class CategoryStat(Base, TimestampMixin):
+    __tablename__ = "category_stats"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    category: Mapped[str] = mapped_column(String(255), index=True)
+    total_listed: Mapped[int] = mapped_column(Integer, default=0)
+    total_sold: Mapped[int] = mapped_column(Integer, default=0)
+    avg_days_to_sell: Mapped[float] = mapped_column(Float, default=0.0)
+    avg_sale_price: Mapped[float] = mapped_column(Float, default=0.0)
+    sell_through_rate: Mapped[float] = mapped_column(Float, default=0.0)
+
+
+class ListingPrediction(Base, TimestampMixin):
+    __tablename__ = "listing_predictions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    listing_id: Mapped[int] = mapped_column(ForeignKey("listings.id"), index=True, unique=True)
+    probability_sale_7d: Mapped[float] = mapped_column(Float, default=0.0)
+    probability_sale_30d: Mapped[float] = mapped_column(Float, default=0.0)
+    model_version: Mapped[str] = mapped_column(String(64), default="heuristic-v1")
+    features: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class ListingABTestVariant(Base, TimestampMixin):
+    __tablename__ = "listing_ab_test_variants"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    listing_id: Mapped[int] = mapped_column(ForeignKey("listings.id"), index=True)
+    variant_label: Mapped[str] = mapped_column(String(32))
+    title: Mapped[str] = mapped_column(String(255))
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False)
+    impressions: Mapped[int] = mapped_column(Integer, default=0)
+    clicks: Mapped[int] = mapped_column(Integer, default=0)
+    watch_count: Mapped[int] = mapped_column(Integer, default=0)
+    conversions: Mapped[int] = mapped_column(Integer, default=0)

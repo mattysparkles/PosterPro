@@ -14,6 +14,12 @@ class ListingUpdateRequest(BaseModel):
     title: str | None = None
     description: str | None = None
     suggested_price: float | None = None
+    listing_price: float | None = None
+    purchase_cost: float | None = None
+    shipping_cost: float | None = None
+    sale_price: float | None = None
+    condition: str | None = None
+    photo_quality_score: float | None = None
 
 
 class ListingResponse(BaseModel):
@@ -23,6 +29,14 @@ class ListingResponse(BaseModel):
     title: str | None
     description: str | None
     suggested_price: float | None
+    listing_price: float | None = None
+    purchase_cost: float | None = None
+    fees_estimated: float | None = None
+    fees_actual: float | None = None
+    shipping_cost: float | None = None
+    sale_price: float | None = None
+    profit: float | None = None
+    roi_percentage: float | None = None
     ebay_listing_id: str | None = None
     ebay_publish_status: str | None = None
     marketplace_data: dict | None = None

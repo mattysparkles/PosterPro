@@ -1,16 +1,22 @@
 import { useEffect, useMemo, useState } from 'react';
 
 import ClusterPreview from '../components/ClusterPreview';
+import IntelligencePanel from '../components/IntelligencePanel';
 import ListingEditor from '../components/ListingEditor';
 import PublishedListings from '../components/PublishedListings';
 import SyncPanel from '../components/SyncPanel';
 import { useMarketplacePublish } from '../hooks/useMarketplacePublish';
 import {
   connectMarketplace,
+  fetchAlerts,
+  fetchAnalyticsOverview,
   fetchClusters,
   fetchListings,
   fetchMarketplaces,
+  fetchPrediction,
+  fetchPricingRecommendation,
   generateListing,
+  optimizeListing,
   updateListing,
 } from '../lib/api';
 
@@ -18,14 +24,38 @@ export default function Dashboard() {
   const [clusters, setClusters] = useState([]);
   const [listings, setListings] = useState([]);
   const [marketplaces, setMarketplaces] = useState([]);
+  const [analytics, setAnalytics] = useState(null);
+  const [alerts, setAlerts] = useState([]);
+  const [recommendation, setRecommendation] = useState(null);
+  const [prediction, setPrediction] = useState(null);
+  const [optimization, setOptimization] = useState(null);
   const [connectError, setConnectError] = useState('');
   const { publish, publishing, errors, statusByListing, refreshStatus } = useMarketplacePublish();
 
   const reload = async () => {
-    const [c, l, m] = await Promise.all([fetchClusters(), fetchListings(), fetchMarketplaces()]);
+    const [c, l, m, a, al] = await Promise.all([
+      fetchClusters(),
+      fetchListings(),
+      fetchMarketplaces(),
+      fetchAnalyticsOverview(),
+      fetchAlerts(),
+    ]);
     setClusters(c);
     setListings(l);
     setMarketplaces(m.marketplaces || []);
+    setAnalytics(a);
+    setAlerts(al.alerts || []);
+    if (l?.length) {
+      const listingId = l[0].id;
+      const [rec, pred, opt] = await Promise.all([
+        fetchPricingRecommendation(listingId),
+        fetchPrediction(listingId),
+        optimizeListing(listingId),
+      ]);
+      setRecommendation(rec);
+      setPrediction(pred);
+      setOptimization(opt);
+    }
   };
 
   useEffect(() => {
@@ -76,6 +106,13 @@ export default function Dashboard() {
       </header>
       {connectError && <p className="error-text">{connectError}</p>}
       <ClusterPreview clusters={clusters} />
+      <IntelligencePanel
+        analytics={analytics}
+        alerts={alerts}
+        recommendation={recommendation}
+        prediction={prediction}
+        optimization={optimization}
+      />
       <SyncPanel />
       <section className="card">
         <h2>Listing Editor</h2>
