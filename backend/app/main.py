@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 
 from app.api.ebay import router as ebay_router
+from app.api.inventory import router as inventory_router
 from app.api.intelligence import router as intelligence_router
 from app.api.marketplaces import router as marketplaces_router
 from app.api.routes import router
@@ -13,6 +14,7 @@ app.include_router(router)
 app.include_router(ebay_router)
 app.include_router(marketplaces_router)
 app.include_router(intelligence_router)
+app.include_router(inventory_router)
 
 
 @app.get("/health")
