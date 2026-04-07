@@ -11,13 +11,14 @@ from app.core.config import settings
 from app.connectors.registry import get_connector
 from app.core.database import SessionLocal
 from app.models.enums import ListingStatus, MarketplaceListingStatus, MarketplaceName
-from app.models.models import Cluster, Image, Listing, MarketplaceListing
+from app.models.models import Cluster, Image, Listing, MarketplaceAccount, MarketplaceListing
 from app.services.analytics_service import AnalyticsService
 from app.services.prediction_service import PredictionService
 from app.services.pricing_intelligence_service import PricingIntelligenceService
 from app.services.photo_enrichment import PhotoEnrichmentService
 from app.services.pricing_service import PricingService
 from app.services.ebay_service import publish_listing_to_ebay
+from app.services.offer_service import OfferService
 from app.workers.celery_app import celery_app
 from app.services.clustering import cluster_embeddings
 
@@ -420,3 +421,41 @@ def process_photo_batch(self, listing_ids: list[int]) -> dict:
         db.commit()
 
     return {"processed": processed, "failed": failed, "total": len(listing_ids)}
+
+
+@celery_app.task(
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_backoff_max=120,
+    retry_jitter=True,
+    max_retries=5,
+    name="process_incoming_offers",
+)
+def process_incoming_offers(self) -> dict:
+    checked_accounts = 0
+    offers_checked = 0
+    accepted = 0
+    rejected = 0
+    skipped = 0
+
+    with SessionLocal() as db:
+        accounts = db.execute(
+            select(MarketplaceAccount).where(MarketplaceAccount.marketplace == MarketplaceName.ebay)
+        ).scalars().all()
+        service = OfferService()
+        for account in accounts:
+            checked_accounts += 1
+            result = service.process_incoming_offers(db, account)
+            offers_checked += result["checked"]
+            accepted += result["accepted"]
+            rejected += result["rejected"]
+            skipped += result["skipped"]
+
+    return {
+        "accounts_checked": checked_accounts,
+        "offers_checked": offers_checked,
+        "accepted": accepted,
+        "rejected": rejected,
+        "skipped": skipped,
+    }
