@@ -21,6 +21,10 @@ celery_app.conf.update(
             "task": "process_incoming_offers",
             "schedule": crontab(minute="*/15"),
         },
+        "send-personalized-offers-every-20m": {
+            "task": "send_personalized_offers",
+            "schedule": crontab(minute="*/20"),
+        },
         "run-overnight-storage-batches": {
             "task": "process_overnight_storage_batches",
             "schedule": crontab(minute=30, hour=2),

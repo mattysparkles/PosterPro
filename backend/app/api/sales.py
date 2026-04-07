@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import csv
+import io
+
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.schemas import SaleDetailsUpdateRequest, SaleDetectionConfigRequest
 from app.core.database import get_db
 from app.models.enums import MarketplaceName
-from app.models.models import Listing, Sale, User
+from app.models.models import AutomatedOfferLog, Listing, MarketplaceAccount, OfferAutomationRule, Sale, User
+from app.services.offer_service import OfferService
 
 router = APIRouter(prefix="/sales", tags=["sales"])
+offer_service = OfferService()
 
 
 @router.get("/dashboard")
@@ -92,3 +98,111 @@ def update_sale_detection_settings(user_id: int, payload: SaleDetectionConfigReq
     db.add(user)
     db.commit()
     return {"user_id": user_id, "marketplaces": user.sale_detection_platforms}
+
+
+@router.get("/reports/sales.csv")
+def export_sales_csv(user_id: int = Query(1), db: Session = Depends(get_db)):
+    sales = db.execute(select(Sale).where(Sale.user_id == user_id).order_by(Sale.sold_at.desc().nullslast())).scalars().all()
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["sale_id", "listing_id", "platform", "amount", "currency", "quantity", "sold_at", "status"])
+    for sale in sales:
+        writer.writerow(
+            [
+                sale.id,
+                sale.listing_id or "",
+                sale.platform.value,
+                sale.amount or 0,
+                sale.currency,
+                sale.quantity,
+                sale.sold_at.isoformat() if sale.sold_at else "",
+                sale.status,
+            ]
+        )
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="posterpro-sales-report.csv"'},
+    )
+
+
+@router.get("/reports/inventory.csv")
+def export_inventory_csv(user_id: int = Query(1), db: Session = Depends(get_db)):
+    listings = db.execute(select(Listing).where(Listing.user_id == user_id).order_by(Listing.updated_at.desc())).scalars().all()
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["listing_id", "title", "status", "marketplace", "listing_price", "sale_price", "quantity", "updated_at"])
+    for listing in listings:
+        marketplace = "ebay" if listing.ebay_listing_id else "multi"
+        writer.writerow(
+            [
+                listing.id,
+                listing.title or "",
+                getattr(listing.status, "value", listing.status),
+                marketplace,
+                listing.listing_price or listing.suggested_price or 0,
+                listing.sale_price or "",
+                listing.quantity,
+                listing.updated_at.isoformat() if listing.updated_at else "",
+            ]
+        )
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="posterpro-inventory-report.csv"'},
+    )
+
+
+@router.get("/offers/rules/{user_id}")
+def get_offer_rules(user_id: int, db: Session = Depends(get_db)):
+    rule = offer_service.get_or_create_rule(db, user_id)
+    return {"user_id": user_id, "is_enabled": rule.is_enabled, "rules": rule.rules or OfferService.DEFAULT_RULES}
+
+
+@router.put("/offers/rules/{user_id}")
+def update_offer_rules(user_id: int, payload: dict, db: Session = Depends(get_db)):
+    rule = offer_service.update_rules(
+        db,
+        user_id=user_id,
+        is_enabled=bool(payload.get("is_enabled")),
+        rules=payload.get("rules") or {},
+    )
+    return {"user_id": user_id, "is_enabled": rule.is_enabled, "rules": rule.rules or OfferService.DEFAULT_RULES}
+
+
+@router.post("/offers/send/{user_id}")
+def send_offers_now(user_id: int, db: Session = Depends(get_db)):
+    account = db.execute(
+        select(MarketplaceAccount).where(MarketplaceAccount.user_id == user_id, MarketplaceAccount.marketplace == MarketplaceName.ebay)
+    ).scalar_one_or_none()
+    if not account:
+        raise HTTPException(status_code=404, detail="No connected eBay account found")
+    result = offer_service.send_personalized_offers(db, account, force=True)
+    return {"user_id": user_id, **result}
+
+
+@router.get("/offers/history")
+def offer_history(user_id: int = Query(1), limit: int = Query(100, ge=1, le=500), db: Session = Depends(get_db)):
+    rows = db.execute(
+        select(AutomatedOfferLog)
+        .where(AutomatedOfferLog.user_id == user_id)
+        .order_by(AutomatedOfferLog.sent_at.desc().nullslast(), AutomatedOfferLog.id.desc())
+        .limit(limit)
+    ).scalars().all()
+    return {
+        "user_id": user_id,
+        "offers": [
+            {
+                "id": row.id,
+                "listing_id": row.listing_id,
+                "platform": row.platform,
+                "watcher_count": row.watcher_count,
+                "offer_percent": row.offer_percent,
+                "offer_price": row.offer_price,
+                "status": row.status,
+                "details": row.details or {},
+                "sent_at": row.sent_at.isoformat() if row.sent_at else None,
+            }
+            for row in rows
+        ],
+    }

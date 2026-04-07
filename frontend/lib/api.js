@@ -102,6 +102,10 @@ export async function fetchAnalyticsOverview(userId = 1) {
   return jsonFetch(`${API_BASE}/analytics/overview?user_id=${userId}`);
 }
 
+export async function fetchAnalyticsDashboard(userId = 1, days = 30) {
+  return jsonFetch(`${API_BASE}/analytics/dashboard?user_id=${userId}&days=${days}`);
+}
+
 export async function fetchPricingRecommendation(id) {
   return jsonFetch(`${API_BASE}/pricing/recommendations/${id}`);
 }
@@ -208,6 +212,14 @@ export async function fetchSalesDashboard(userId = 1, limit = 100) {
   );
 }
 
+export function downloadSalesReportCsv(userId = 1) {
+  window.open(`${API_BASE}/sales/reports/sales.csv?user_id=${userId}`, '_blank', 'noopener,noreferrer');
+}
+
+export function downloadInventoryReportCsv(userId = 1) {
+  window.open(`${API_BASE}/sales/reports/inventory.csv?user_id=${userId}`, '_blank', 'noopener,noreferrer');
+}
+
 export async function updateSaleDetails(saleId, body) {
   return jsonFetch(`${API_BASE}/sales/${saleId}/details`, {
     method: "PATCH",
@@ -226,6 +238,26 @@ export async function updateSaleDetectionSettings(userId, marketplaces) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ marketplaces }),
   });
+}
+
+export async function fetchOfferRules(userId = 1) {
+  return jsonFetch(`${API_BASE}/sales/offers/rules/${userId}`);
+}
+
+export async function updateOfferRules(userId, body) {
+  return jsonFetch(`${API_BASE}/sales/offers/rules/${userId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function sendOffersNow(userId = 1) {
+  return jsonFetch(`${API_BASE}/sales/offers/send/${userId}`, { method: "POST" });
+}
+
+export async function fetchOfferHistory(userId = 1) {
+  return jsonFetch(`${API_BASE}/sales/offers/history?user_id=${userId}`);
 }
 
 export function toPublicImageUrl(path) {

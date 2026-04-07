@@ -16,6 +16,11 @@ def analytics_overview(user_id: int = Query(1), db: Session = Depends(get_db)):
     return AnalyticsService().compute_overview(db, user_id)
 
 
+@router.get("/analytics/dashboard")
+def analytics_dashboard(user_id: int = Query(1), days: int = Query(30, ge=7, le=365), db: Session = Depends(get_db)):
+    return AnalyticsService().dashboard(db, user_id, days=days)
+
+
 @router.get("/analytics/listings/{listing_id}")
 def analytics_listing(listing_id: int, db: Session = Depends(get_db)):
     try:

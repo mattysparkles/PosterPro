@@ -266,3 +266,27 @@ class BulkJob(Base, TimestampMixin):
     errors: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
     filters: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class OfferAutomationRule(Base, TimestampMixin):
+    __tablename__ = "offer_automation_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), unique=True, index=True)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    rules: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class AutomatedOfferLog(Base, TimestampMixin):
+    __tablename__ = "automated_offer_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    listing_id: Mapped[int | None] = mapped_column(ForeignKey("listings.id"), nullable=True, index=True)
+    platform: Mapped[str] = mapped_column(String(32), default="ebay", index=True)
+    watcher_count: Mapped[int] = mapped_column(Integer, default=0)
+    offer_percent: Mapped[float] = mapped_column(Float, default=0.0)
+    offer_price: Mapped[float] = mapped_column(Float, default=0.0)
+    status: Mapped[str] = mapped_column(String(32), default="SENT")
+    details: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

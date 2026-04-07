@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import { BarChart3, Boxes, Bot, LayoutDashboard, Moon, Package, Search, Send, Sun, User, Wallet } from 'lucide-react';
+import { BarChart3, Boxes, Bot, Gift, LayoutDashboard, Moon, Package, Search, Send, Sun, User, Wallet } from 'lucide-react';
 
 import Badge from '../ui/badge';
 import Button from '../ui/button';
@@ -11,7 +11,8 @@ const NAV_ITEMS = [
   { href: '/inventory', label: 'Inventory', icon: Package },
   { href: '/published', label: 'Published', icon: Send },
   { href: '/sales', label: 'Sales', icon: Wallet },
-  { href: '/analytics', label: 'Analytics', icon: BarChart3, disabled: true },
+  { href: '/analytics', label: 'Analytics', icon: BarChart3 },
+  { href: '/offers', label: 'Send Offers', icon: Gift },
 ];
 
 export default function AppShell({
