@@ -95,3 +95,16 @@ button {
 .status.failed { background: #fecaca; }
 .error-text { color: #b91c1c; margin-top: 8px; }
 a { color: #1d4ed8; }
+
+.status-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 10px;
+  font-size: 12px;
+}
+.status-table th,
+.status-table td {
+  border: 1px solid #e5e7eb;
+  padding: 6px;
+  text-align: left;
+}
