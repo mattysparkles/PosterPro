@@ -1,7 +1,12 @@
+import { ExternalLink } from 'lucide-react';
+
+import StatusPill from './StatusPill';
+import { Card, CardDescription, CardTitle } from './ui/card';
+
 export default function PublishedListings({
   listings,
   statusMap = {},
-  title = 'Published eBay Listings',
+  title = 'Published Listings',
   emptyMessage = 'No published listings yet.',
   postedOnly = true,
 }) {
@@ -10,50 +15,37 @@ export default function PublishedListings({
     : listings;
 
   return (
-    <section className="card">
-      <h2>{title}</h2>
-      {!posted.length && <p>{emptyMessage}</p>}
-      {posted.map((listing) => {
-        const ebayUrl = listing.marketplace_data?.ebay_url || (listing.ebay_listing_id ? `https://www.ebay.com/itm/${listing.ebay_listing_id}` : '');
-        const autoRelistHistory = listing.marketplace_data?.auto_relist_history || [];
-        const crosspostStatuses = (statusMap[listing.id] || []).filter((row) => row.marketplace !== 'ebay');
-        return (
-          <article key={listing.id} className="listing-item">
-            <strong>{listing.title || `Listing #${listing.id}`}</strong>
-            <div>eBay Listing ID: {listing.ebay_listing_id}</div>
-            <div>Status: {listing.ebay_publish_status || 'UNKNOWN'}</div>
-            <div>Start Price: {listing.start_price ? `$${listing.start_price.toFixed(2)}` : 'N/A'}</div>
-            <div>Buy It Now: {listing.buy_it_now_price ? `$${listing.buy_it_now_price.toFixed(2)}` : 'N/A'}</div>
-            <div>Min Offer: {listing.min_acceptable_offer ? `$${listing.min_acceptable_offer.toFixed(2)}` : 'N/A'}</div>
-            {ebayUrl && (
-              <a href={ebayUrl} target="_blank" rel="noreferrer">
-                Open on eBay
-              </a>
-            )}
-            {!!crosspostStatuses.length && (
-              <div className="crosspost-badges">
-                {crosspostStatuses.map((row) => (
-                  <span key={`${listing.id}-${row.marketplace}`} className={`status ${row.status.toLowerCase()}`}>
-                    {row.marketplace}: {row.status}
-                  </span>
-                ))}
+    <Card>
+      <CardTitle>{title}</CardTitle>
+      <CardDescription className="mb-4">Listings that are live or recently published across channels.</CardDescription>
+      {!posted.length && <p className="text-sm text-muted-foreground">{emptyMessage}</p>}
+      <div className="grid gap-3 lg:grid-cols-2">
+        {posted.map((listing) => {
+          const ebayUrl = listing.marketplace_data?.ebay_url || (listing.ebay_listing_id ? `https://www.ebay.com/itm/${listing.ebay_listing_id}` : '');
+          const crosspostStatuses = (statusMap[listing.id] || []).filter((row) => row.marketplace !== 'ebay');
+          return (
+            <article key={listing.id} className="rounded-2xl border border-border/70 bg-background p-4">
+              <div className="mb-2 flex items-start justify-between gap-3">
+                <strong>{listing.title || `Listing #${listing.id}`}</strong>
+                <StatusPill status={listing.ebay_publish_status || 'UNKNOWN'} />
               </div>
-            )}
-            {autoRelistHistory.length > 0 && (
-              <div>
-                <strong>Auto-Relisted</strong>
-                <ul>
-                  {autoRelistHistory.map((event, index) => (
-                    <li key={`${listing.id}-${event.timestamp || index}`}>
-                      {event.timestamp || 'Unknown time'} → {event.new_listing_id || 'N/A'}
-                    </li>
+              <p className="text-sm text-muted-foreground">eBay ID: {listing.ebay_listing_id || 'Pending'}</p>
+              {ebayUrl && (
+                <a href={ebayUrl} target="_blank" rel="noreferrer" className="mt-2 inline-flex items-center gap-1 text-sm text-primary underline" title="Open this listing on eBay in a new tab.">
+                  Open on eBay <ExternalLink size={14} />
+                </a>
+              )}
+              {!!crosspostStatuses.length && (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {crosspostStatuses.map((row) => (
+                    <StatusPill key={`${listing.id}-${row.marketplace}`} status={`${row.marketplace}: ${row.status}`} />
                   ))}
-                </ul>
-              </div>
-            )}
-          </article>
-        );
-      })}
-    </section>
+                </div>
+              )}
+            </article>
+          );
+        })}
+      </div>
+    </Card>
   );
 }
