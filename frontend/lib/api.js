@@ -33,8 +33,32 @@ export async function generateListing(id) {
   });
 }
 
-export async function publishListing(id) {
-  return jsonFetch(`${API_BASE}/listings/${id}/publish/ebay`, { method: 'POST' });
+export async function publishListing(id, marketplaces) {
+  return jsonFetch(`${API_BASE}/listings/${id}/publish`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ marketplaces }),
+  });
+}
+
+export async function fetchMarketplaceStatus(id) {
+  return jsonFetch(`${API_BASE}/listings/${id}/marketplace_status`);
+}
+
+export async function syncSoldEverywhere(listingIds = []) {
+  return jsonFetch(`${API_BASE}/listings/sync_sold`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ listing_ids: listingIds }),
+  });
+}
+
+export async function fetchMarketplaces() {
+  return jsonFetch(`${API_BASE}/marketplaces`);
+}
+
+export async function connectMarketplace(name, userId = 1) {
+  return jsonFetch(`${API_BASE}/marketplaces/${name}/connect?user_id=${userId}`, { method: 'POST' });
 }
 
 export async function fetchEbayAuthUrl(userId, redirectUri) {

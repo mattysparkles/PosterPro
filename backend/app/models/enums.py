@@ -20,3 +20,13 @@ class MarketplaceName(str, enum.Enum):
     facebook = "facebook"
     mercari = "mercari"
     poshmark = "poshmark"
+    depop = "depop"
+
+
+class MarketplaceListingStatus(str, enum.Enum):
+    DRAFT = "DRAFT"
+    PUBLISHED = "PUBLISHED"
+    UPDATED = "UPDATED"
+    FAILED = "FAILED"
+    DELETED = "DELETED"
+    PENDING = "PENDING"

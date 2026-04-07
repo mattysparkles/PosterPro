@@ -1,8 +1,11 @@
 import { useState } from 'react';
 
+import MarketplaceStatusPanel from './MarketplaceStatusPanel';
 import StatusPill from './StatusPill';
 
-export default function ListingEditor({ listing, onSave, onGenerate, onPublish, publishState }) {
+const MARKETPLACES = ['ebay', 'facebook', 'mercari', 'poshmark', 'depop'];
+
+export default function ListingEditor({ listing, onSave, onGenerate, onPublish, publishState, statuses }) {
   const [form, setForm] = useState({
     title: listing.title || '',
     description: listing.description || '',
@@ -30,16 +33,21 @@ export default function ListingEditor({ listing, onSave, onGenerate, onPublish, 
       <div className="actions">
         <button onClick={() => onSave(listing.id, form)}>Save</button>
         <button onClick={() => onGenerate(listing.id)}>Generate</button>
-        <button disabled={publishState.loading} onClick={() => onPublish(listing.id)}>
-          {publishState.loading ? 'Publishing...' : 'Publish to eBay'}
+        <button disabled={publishState.loading} onClick={() => onPublish(listing.id, MARKETPLACES)}>
+          {publishState.loading ? 'Publishing...' : 'Bulk Publish'}
         </button>
       </div>
+
+      <div className="actions">
+        {MARKETPLACES.map((market) => (
+          <button key={market} disabled={publishState.loading} onClick={() => onPublish(listing.id, [market])}>
+            Publish to {market}
+          </button>
+        ))}
+      </div>
+
       {publishState.error && <p className="error-text">{publishState.error}</p>}
-      {publishState.url && (
-        <a href={publishState.url} target="_blank" rel="noreferrer">
-          View posted listing
-        </a>
-      )}
+      <MarketplaceStatusPanel statuses={statuses} />
     </article>
   );
 }

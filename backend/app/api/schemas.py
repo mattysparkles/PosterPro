@@ -29,3 +29,29 @@ class ListingResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class MarketplacePublishRequest(BaseModel):
+    marketplaces: list[str] | None = None
+
+
+class MarketplacePublishResult(BaseModel):
+    marketplace: str
+    task_id: str | None = None
+    status: str
+
+
+class ConnectMarketplaceResponse(BaseModel):
+    marketplace: str
+    auth: dict
+
+
+class MarketplaceStatusEntry(BaseModel):
+    marketplace: str
+    status: str
+    marketplace_listing_id: str | None = None
+    raw_response: dict | None = None
+
+
+class SoldSyncRequest(BaseModel):
+    listing_ids: list[int] | None = None

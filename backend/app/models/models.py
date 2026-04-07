@@ -4,7 +4,7 @@ from sqlalchemy import JSON, DateTime, Enum, Float, ForeignKey, Integer, String,
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
-from app.models.enums import EbayPublishStatus, ListingStatus, MarketplaceName
+from app.models.enums import EbayPublishStatus, ListingStatus, MarketplaceListingStatus, MarketplaceName
 
 
 class TimestampMixin:
@@ -94,8 +94,10 @@ class MarketplaceListing(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     listing_id: Mapped[int] = mapped_column(ForeignKey("listings.id"), index=True)
     marketplace: Mapped[MarketplaceName] = mapped_column(Enum(MarketplaceName), index=True)
-    external_listing_id: Mapped[str] = mapped_column(String(255), index=True)
-    status: Mapped[str] = mapped_column(String(100), default="posted")
-    payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    marketplace_listing_id: Mapped[str | None] = mapped_column(String(255), index=True, nullable=True)
+    status: Mapped[MarketplaceListingStatus] = mapped_column(
+        Enum(MarketplaceListingStatus), default=MarketplaceListingStatus.DRAFT, index=True
+    )
+    raw_response: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     listing: Mapped["Listing"] = relationship(back_populates="marketplace_listings")
