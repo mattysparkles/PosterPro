@@ -18,7 +18,7 @@ from app.services.prediction_service import PredictionService
 from app.services.pricing_intelligence_service import PricingIntelligenceService
 from app.services.photo_enrichment import PhotoEnrichmentService
 from app.services.pricing_service import PricingService
-from app.services.marketplace_publisher import get_enabled_platforms, marketplace_publisher, upsert_marketplace_listing
+from app.services.multi_platform_publisher import get_enabled_platforms, multi_platform_publisher, upsert_marketplace_listing
 from app.services.offer_service import OfferService
 from app.services.sale_detection_service import SaleDetectionService
 from app.workers.celery_app import celery_app
@@ -107,7 +107,7 @@ def publish_listing_to_marketplace_task(self, listing_id: int, marketplace: str)
             raise ValueError("Listing not found")
 
         try:
-            result = marketplace_publisher.publish(db, listing, marketplace)
+            result = multi_platform_publisher.publish(db, listing, marketplace)
             upsert_marketplace_listing(
                 db,
                 listing_id=listing_id,
@@ -359,11 +359,11 @@ def autonomous_publish(self, listing_id: int, dry_run: bool | None = None) -> di
             return {"listing_id": listing_id, "status": "DRY_RUN", "pricing": pricing}
 
         try:
-            ebay_result = marketplace_publisher.publish(db, listing, MarketplaceName.ebay.value).response
+            ebay_result = multi_platform_publisher.publish(db, listing, MarketplaceName.ebay.value).response
             listing.status = ListingStatus.PUBLISHED
             user = db.get(User, listing.user_id)
             enabled_platforms = get_enabled_platforms(user)
-            crosspost_targets = [market for market in enabled_platforms if market != MarketplaceName.ebay.value]
+            crosspost_targets = [market for market in enabled_platforms if market != MarketplaceName.ebay.value] if settings.autonomous_crosspost_enabled else []
             crosspost_group = None
             if crosspost_targets:
                 crosspost_group = group(

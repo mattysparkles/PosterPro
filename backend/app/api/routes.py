@@ -17,6 +17,9 @@ from app.api.schemas import (
     GooglePhotosImportRequest,
     ListingGenerateRequest,
     ListingResponse,
+    ListingTemplateApplyRequest,
+    ListingTemplateCreateRequest,
+    ListingTemplateResponse,
     ListingUpdateRequest,
     PhotoEditRequest,
     PhotoEditResponse,
@@ -24,7 +27,7 @@ from app.api.schemas import (
 )
 from app.core.config import settings
 from app.core.database import get_db
-from app.models.models import Cluster, Image, Listing, StorageUnitBatch
+from app.models.models import Cluster, Image, Listing, ListingTemplate, StorageUnitBatch
 from app.services.ebay import EbayService
 from app.services.embedding import fake_clip_embedding
 from app.services.google_photos import GooglePhotosService
@@ -35,6 +38,7 @@ from app.services.profit_service import ProfitService
 from app.services.storage import LocalStorage
 from app.services.pricing_service import PricingService
 from app.services.photo_editor import PhotoEditorService
+from app.services.listing_templates_service import listing_template_service
 from app.models.enums import ListingStatus
 from app.workers.tasks import (
     cluster_images_task,
@@ -103,6 +107,37 @@ def _start_batch_pipeline(db: Session, batch: StorageUnitBatch) -> str | None:
 
 class AutonomousToggleRequest(BaseModel):
     enabled: bool | None = None
+    crosspost_enabled: bool | None = None
+
+
+@router.get("/listing-templates", response_model=list[ListingTemplateResponse])
+def get_listing_templates(user_id: int = 1, category_id: str | None = None, db: Session = Depends(get_db)):
+    return listing_template_service.list_templates(db, user_id=user_id, category_id=category_id)
+
+
+@router.post("/listing-templates", response_model=ListingTemplateResponse)
+def create_listing_template(payload: ListingTemplateCreateRequest, db: Session = Depends(get_db)):
+    return listing_template_service.create_template(
+        db,
+        user_id=payload.user_id,
+        name=payload.name,
+        category_id=payload.category_id,
+        is_category_default=payload.is_category_default,
+        fields=payload.fields,
+    )
+
+
+@router.post("/listings/{listing_id}/apply-template", response_model=ListingResponse)
+def apply_template_to_listing(listing_id: int, payload: ListingTemplateApplyRequest, db: Session = Depends(get_db)):
+    listing = db.get(Listing, listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    template = db.get(ListingTemplate, payload.template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+    if template.user_id != listing.user_id:
+        raise HTTPException(status_code=403, detail="Template does not belong to listing owner")
+    return listing_template_service.apply_template(db, listing, template)
 
 
 @router.post("/import/google-photos")
@@ -377,6 +412,7 @@ def get_autonomous_config():
     return {
         "autonomous_mode": settings.autonomous_mode,
         "autonomous_dry_run": settings.autonomous_dry_run,
+        "autonomous_crosspost_enabled": settings.autonomous_crosspost_enabled,
     }
 
 
@@ -386,9 +422,14 @@ def toggle_autonomous_mode(payload: AutonomousToggleRequest | None = None):
         settings.autonomous_mode = payload.enabled
     else:
         settings.autonomous_mode = not settings.autonomous_mode
+
+    if payload and payload.crosspost_enabled is not None:
+        settings.autonomous_crosspost_enabled = payload.crosspost_enabled
+
     return {
         "autonomous_mode": settings.autonomous_mode,
         "autonomous_dry_run": settings.autonomous_dry_run,
+        "autonomous_crosspost_enabled": settings.autonomous_crosspost_enabled,
     }
 
 
