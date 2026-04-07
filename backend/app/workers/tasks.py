@@ -250,6 +250,12 @@ def bulk_process_inventory_chunk(job_id: str, action: str, payload: dict, listin
                         labels_to_add=payload.get("add_labels"),
                         labels_to_remove=payload.get("remove_labels"),
                     )
+                elif action == "mark_sold":
+                    inventory_service.update_listing_inventory(
+                        listing,
+                        mark_sold=True,
+                        sale_price=payload.get("sale_price"),
+                    )
                 elif action in {"refresh", "autobump"}:
                     listing.last_refreshed = datetime.utcnow()
                     listing.stale_flag = False
@@ -535,6 +541,13 @@ def process_photo_batch(self, listing_ids: list[int]) -> dict:
                 listing.item_specifics = enriched.get("item_specifics")
                 listing.estimated_value = enriched.get("estimated_value")
                 listing.status = "PROCESSED"
+                listing.last_refreshed = datetime.utcnow()
+                listing.platform_quantities = listing.platform_quantities or {"inventory": max(1, int(listing.quantity or 1))}
+                listing.marketplace_data = {
+                    **(listing.marketplace_data or {}),
+                    "ingestion_source": "autonomous_photo_batch",
+                    "sale_detection_ready": True,
+                }
                 db.add(listing)
                 processed += 1
                 logger.info("Photo enrichment complete", extra={"listing_id": listing.id, "status": listing.status})
@@ -587,6 +600,13 @@ def process_storage_unit_listing(self, listing_id: int, batch_id: int) -> dict:
             listing.item_specifics = enriched.get("item_specifics")
             listing.estimated_value = enriched.get("estimated_value")
             listing.status = ListingStatus.PROCESSED
+            listing.last_refreshed = datetime.utcnow()
+            listing.platform_quantities = listing.platform_quantities or {"inventory": max(1, int(listing.quantity or 1))}
+            listing.marketplace_data = {
+                **(listing.marketplace_data or {}),
+                "ingestion_source": "autonomous_storage_batch",
+                "sale_detection_ready": True,
+            }
             if settings.autonomous_mode:
                 autonomous_publish.delay(listing.id, dry_run=settings.autonomous_dry_run)
             else:

@@ -25,7 +25,7 @@ export default function AppShell({
 }) {
   return (
     <div className="min-h-screen bg-background text-foreground">
-      <div className="mx-auto flex w-full max-w-[1400px] gap-5 px-3 py-4 md:px-5">
+      <div className="mx-auto flex w-full max-w-[1400px] gap-5 px-3 pb-24 pt-4 md:px-5 md:pb-5">
         <aside className="hidden w-72 shrink-0 rounded-3xl border border-border/70 bg-card p-5 shadow-soft lg:block">
           <div className="mb-8">
             <p className="text-xs font-bold uppercase tracking-[0.2em] text-primary">PosterPro</p>
@@ -89,6 +89,26 @@ export default function AppShell({
           {children}
         </div>
       </div>
+      <nav className="fixed bottom-0 left-0 right-0 z-40 border-t border-border/70 bg-card/95 p-2 backdrop-blur lg:hidden">
+        <div className="mx-auto grid max-w-3xl grid-cols-4 gap-1">
+          {NAV_ITEMS.slice(0, 4).map((item) => {
+            const Icon = item.icon;
+            const selected = item.href === active;
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                className={`flex flex-col items-center justify-center gap-1 rounded-xl px-2 py-2 text-[11px] font-semibold ${
+                  selected ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'
+                }`}
+              >
+                <Icon size={16} />
+                <span>{item.label}</span>
+              </Link>
+            );
+          })}
+        </div>
+      </nav>
     </div>
   );
 }

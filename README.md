@@ -1,10 +1,13 @@
 # PosterPro MVP - Reseller Marketplace Cross-Posting Tool
 
+PosterPro is now tuned for fast, phone-first listing workflows: snap photos, auto-ingest, review inventory, bulk-edit quantities, and keep cross-posted inventory in sync when items sell.
+
 Production-minded MVP scaffolding with:
 - FastAPI + PostgreSQL + SQLAlchemy
 - Redis + Celery workers for async ingestion/clustering
 - Next.js dashboard for cluster preview + listing management
 - eBay Inventory API publish pipeline with OAuth account linking
+- Mobile-responsive inventory command center with quick actions
 
 ## Project Structure
 
@@ -90,52 +93,58 @@ npm run dev
 - `GET /batch/storage-unit` and `GET /batch/storage-unit/{batch_id}` (batch progress)
 - `POST /batch/storage-unit/{batch_id}/run-overnight` (manual run now)
 - `POST /batch/storage-unit/run-overnight` (queue all overnight batches now)
+- `POST /inventory/bulk` supports `edit|delist|relist|label|mark_sold|refresh|autobump`
 
-### Photo ingestion quick test
+## What’s New in the Final Unification Pass
 
-```bash
-curl -X POST "http://localhost:8000/ingest/photos" \
-  -F "user_id=1" \
-  -F "storage_unit_name=Unit A3" \
-  -F "photos=@/absolute/path/poster1.jpg" \
-  -F "photos=@/absolute/path/poster2.jpg"
-```
+- **Phone-first UX polish**
+  - Mobile bottom navigation for quick switching between key views.
+  - Inventory controls stack cleanly on small screens.
+  - Keyboard shortcut hints for desktop power users.
+  - Loading skeletons and friendlier empty states.
+- **Manual "Mark as Sold" override**
+  - Available as a bulk action and as a one-tap quick action.
+  - Sets quantity to `0`, zeroes channel quantities, and stamps `sold_at` (plus optional `sale_price`).
+- **Integrated ingestion → inventory flow**
+  - Autonomous photo/storage-unit ingestion now stamps freshness metadata and sale-detection readiness.
+  - Processed items initialize quantity-aware platform inventory state.
+- **Inventory safety + multi-quantity support**
+  - Anti-oversell validation remains in place while chunked bulk jobs provide transparent progress.
 
-The endpoint stores uploads under `./storage/uploads`, creates `listings` in `INGESTED` status, and enqueues Celery task `process_photo_batch` to extract title/description/category/keywords and update each listing to `PROCESSED` (or `FAILED` on errors).
+## Screenshots (Descriptions)
+
+When you run the app locally (`npm run dev`), capture these views:
+
+1. **Inventory Command Center (Mobile):**
+   - Bottom nav visible.
+   - Bulk action tray wraps naturally.
+   - "Mark as Sold" action shown with bulk controls.
+2. **Inventory Loading / Empty States:**
+   - Skeleton cards/rows while inventory loads.
+   - Empty state card with guidance to reset filters or ingest a new unit.
+3. **Inventory Grid Quick Actions:**
+   - Card-level photo edit and one-tap Sold actions.
+
+## How a Non-Technical User Can List a Storage Unit in Minutes
+
+1. Open PosterPro on your phone or laptop.
+2. Upload photos using ZIP (`/batch/storage-unit`) or URL list (`/batch/storage-unit/from-urls`).
+3. Let PosterPro auto-process titles, descriptions, categories, tags, and pricing signals.
+4. Open Inventory Command Center to review, filter, and bulk-edit quantities/labels.
+5. Use **Mark as Sold** for any manual/offline sale so inventory stays accurate.
+6. Publish and monitor while sale detection handles quantity sync and delist logic.
 
 ## Autonomous Reseller Mode (Storage Unit Overnight Flow)
 
 ### End-to-end: upload 200 photos and let it list while you sleep
 
-1. Upload one storage-unit batch (zip or URL list):
-   - `POST /batch/storage-unit` with `zip_file=@unit-photos.zip`, optional `storage_unit_name`, and optional `overnight_mode=true`.
-   - or `POST /batch/storage-unit/from-urls` with JSON `image_urls` for mobile upload workflows.
-2. API creates one `storage_unit_batches` row, creates all child listings in `INGESTED`, and tracks progress (`processed_items/total_items`).
-3. If `overnight_mode=false`, the autonomous Prompt 1–3 pipeline starts immediately through a Celery chord/group:
-   - per-photo enrichment
-   - auto-pricing / autonomous publish trigger
-   - final batch completion status
-4. If `overnight_mode=true`, batch is queued (`QUEUED`) and can be started by:
-   - Celery Beat nightly schedule (`process_overnight_storage_batches`), or
-   - dashboard **Run Overnight Batch** button / manual API call.
-5. Dashboard polls batch progress every few seconds to show live `processed/total` progress until `COMPLETED` or `FAILED`.
+1. Upload one storage-unit batch (zip or URL list).
+2. API creates one `storage_unit_batches` row and child listings in `INGESTED`.
+3. If `overnight_mode=false`, autonomous processing starts immediately.
+4. If `overnight_mode=true`, batch is queued and can run via scheduler or manual trigger.
+5. Dashboard polls progress until `COMPLETED` or `FAILED`.
 
 That gives you a practical overnight pipeline: **Upload 200 photos from a storage unit and wake up to processed/published inventory.**
-
-## Example API request/response logging
-
-```text
-INFO publish start listing_id=42 user_id=1 status=POSTING
-INFO createOrReplaceInventoryItem sku=posterpro-1-42 status=204
-INFO createOffer offerId=6241573010
-INFO publishOffer listingId=387612300245
-INFO publish success listing_id=42 ebay_listing_id=387612300245 status=POSTED
-```
-
-Failure example:
-```text
-ERROR publish failed listing_id=42 status=FAILED reason="eBay API request failed (429) ..."
-```
 
 ## Notes
 - `app/services/ebay_service.py` uses retry/backoff for `429/5xx` responses.

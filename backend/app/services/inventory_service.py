@@ -116,6 +116,8 @@ class InventoryService:
         labels_to_remove: list[str] | None = None,
         delist: bool = False,
         relist: bool = False,
+        mark_sold: bool = False,
+        sale_price: float | None = None,
     ) -> Listing:
         if quantity is not None:
             listing.quantity = int(quantity)
@@ -137,6 +139,12 @@ class InventoryService:
         elif relist:
             channels = listing.platform_quantities or {}
             listing.platform_quantities = {k: listing.quantity for k in channels.keys()} or listing.platform_quantities
+        elif mark_sold:
+            listing.quantity = 0
+            listing.platform_quantities = {k: 0 for k in (listing.platform_quantities or {}).keys()}
+            if sale_price is not None:
+                listing.sale_price = float(sale_price)
+            listing.sold_at = datetime.utcnow()
 
         listing.last_refreshed = datetime.utcnow()
         return listing

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useReactTable, getCoreRowModel, flexRender, createColumnHelper } from '@tanstack/react-table';
-import { CheckSquare, Eraser, Filter, Grid3X3, Image, List, Pencil, RefreshCcw, Tag, Trash2, Undo2, Zap } from 'lucide-react';
+import { CheckSquare, ClipboardList, Eraser, Filter, Grid3X3, Image, Keyboard, List, PackageOpen, Pencil, RefreshCcw, Sparkles, Tag, Trash2, Undo2, Zap } from 'lucide-react';
 import toast from 'react-hot-toast';
 
 import AppShell from '../components/layout/AppShell';
@@ -61,6 +61,17 @@ function ProgressModal({ job, onClose }) {
   );
 }
 
+function InventorySkeleton({ view = 'table' }) {
+  if (view === 'grid') {
+    return (
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        {[...Array(6)].map((_, idx) => <div key={idx} className="h-44 animate-pulse rounded-2xl bg-muted/60" />)}
+      </div>
+    );
+  }
+  return <div className="h-56 animate-pulse rounded-2xl bg-muted/60" />;
+}
+
 export default function InventoryPage({ theme, setTheme }) {
   const { autonomousConfig, reload } = useDashboardData();
   const [tab, setTab] = useState('All');
@@ -75,6 +86,7 @@ export default function InventoryPage({ theme, setTheme }) {
   const [confirmAction, setConfirmAction] = useState(null);
   const [bulkJob, setBulkJob] = useState(null);
   const [editingListing, setEditingListing] = useState(null);
+  const [isLoading, setIsLoading] = useState(false);
 
   const filters = useMemo(() => ({
     quantityGtOne: tab === 'Multi-Quantity',
@@ -85,9 +97,14 @@ export default function InventoryPage({ theme, setTheme }) {
   }), [page, pageSize, search, tab]);
 
   const loadInventory = useCallback(async () => {
-    const response = await fetchInventory(filters);
-    setInventory(response.items || []);
-    setTotal(response.total || 0);
+    setIsLoading(true);
+    try {
+      const response = await fetchInventory(filters);
+      setInventory(response.items || []);
+      setTotal(response.total || 0);
+    } finally {
+      setIsLoading(false);
+    }
   }, [filters]);
 
   useEffect(() => {
@@ -137,6 +154,16 @@ export default function InventoryPage({ theme, setTheme }) {
       const stale = !info.getValue() || Date.now() - new Date(info.getValue()).getTime() > 1000 * 60 * 60 * 24 * 7;
       return <Badge tone={stale ? 'danger' : 'success'}>{stale ? 'Stale' : 'Synced'}</Badge>;
     } }),
+    columnHelper.display({
+      id: 'actions',
+      header: 'Quick actions',
+      cell: ({ row }) => (
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" variant="outline" onClick={() => setEditingListing(row.original)}><Image size={14} /> Edit</Button>
+          <Button size="sm" variant="secondary" onClick={() => { setSelection({ [row.original.id]: true }); setSelectAllMatching(false); setTimeout(() => queueAction('mark_sold'), 0); }}><ClipboardList size={14} /> Sold</Button>
+        </div>
+      ),
+    }),
   ], [inventory, selection]);
 
   const table = useReactTable({ data: inventory, columns, getCoreRowModel: getCoreRowModel() });
@@ -150,6 +177,25 @@ export default function InventoryPage({ theme, setTheme }) {
     }
     setConfirmAction({ action, payload, label: action.toUpperCase() });
   };
+
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
+        event.preventDefault();
+        document.getElementById('inventory-search')?.focus();
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'r') {
+        event.preventDefault();
+        loadInventory();
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'g') {
+        event.preventDefault();
+        setView((prev) => (prev === 'table' ? 'grid' : 'table'));
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [loadInventory]);
 
   const startBulkJob = async () => {
     if (!confirmAction) return;
@@ -186,7 +232,7 @@ export default function InventoryPage({ theme, setTheme }) {
       }}
     >
       <Card className="space-y-5">
-        <div className="flex items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <CardTitle>Inventory Command Center</CardTitle>
             <CardDescription>Limitless bulk operations with explicit progress, chunking, and no silent limits.</CardDescription>
@@ -196,10 +242,16 @@ export default function InventoryPage({ theme, setTheme }) {
             <Button size="lg" variant="outline" onClick={loadInventory}><RefreshCcw size={18} /></Button>
           </div>
         </div>
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          <Keyboard size={14} />
+          <Badge tone="default">⌘/Ctrl + F Search</Badge>
+          <Badge tone="default">⌘/Ctrl + R Refresh</Badge>
+          <Badge tone="default">⌘/Ctrl + G Toggle view</Badge>
+        </div>
 
         <div className="flex flex-wrap items-center gap-2">
           {TABS.map((tabName) => <Button key={tabName} size="lg" variant={tab === tabName ? 'default' : 'secondary'} onClick={() => { setPage(1); setTab(tabName); }}><Filter size={16} /> {tabName}</Button>)}
-          <Input placeholder="Search title / ID" value={search} onChange={(e) => { setPage(1); setSearch(e.target.value); }} className="max-w-md" />
+          <Input id="inventory-search" placeholder="Search title / ID" value={search} onChange={(e) => { setPage(1); setSearch(e.target.value); }} className="w-full sm:max-w-md" />
         </div>
 
         <Card className="rounded-2xl border-dashed p-4">
@@ -210,6 +262,7 @@ export default function InventoryPage({ theme, setTheme }) {
           </div>
           <div className="flex flex-wrap gap-2">
             <Button size="lg" title="Bulk edit selected inventory quantities and platform quantities." onClick={() => queueAction('edit', { quantity: 1 })}><Pencil size={18} /> Bulk Edit</Button>
+            <Button size="lg" variant="secondary" title="Manual override to immediately mark selected listings as sold." onClick={() => queueAction('mark_sold')}><ClipboardList size={18} /> Mark as Sold</Button>
             <Button size="lg" variant="outline" title="Delist selected listings from all marketplaces." onClick={() => queueAction('delist')}><Trash2 size={18} /> Bulk Delist</Button>
             <Button size="lg" variant="outline" title="Relist selected or filtered listings to restore visibility." onClick={() => queueAction('relist')}><Undo2 size={18} /> Bulk Relist</Button>
             <Button size="lg" variant="outline" title="Add/remove labels in bulk with no quantity limit." onClick={() => queueAction('label', { add_labels: ['priority'], remove_labels: [] })}><Tag size={18} /> Add/Remove Labels</Button>
@@ -218,7 +271,18 @@ export default function InventoryPage({ theme, setTheme }) {
           </div>
         </Card>
 
-        {view === 'table' ? (
+        {isLoading ? (
+          <InventorySkeleton view={view} />
+        ) : inventory.length === 0 ? (
+          <Card className="flex flex-col items-center gap-3 rounded-2xl border-dashed py-10 text-center">
+            <PackageOpen size={34} className="text-muted-foreground" />
+            <p className="text-lg font-semibold">No inventory matches these filters</p>
+            <p className="max-w-md text-sm text-muted-foreground">Try clearing filters, switching tabs, or uploading a fresh storage unit batch. We will auto-enrich and stage everything for selling.</p>
+            <Button variant="outline" onClick={() => { setSearch(''); setTab('All'); }}>
+              <Sparkles size={16} /> Reset filters
+            </Button>
+          </Card>
+        ) : view === 'table' ? (
           <div className="overflow-x-auto rounded-2xl border border-border/70">
             <table className="w-full text-left text-sm">
               <thead className="bg-muted/40">{table.getHeaderGroups().map((headerGroup) => <tr key={headerGroup.id}>{headerGroup.headers.map((header) => <th key={header.id} className="px-3 py-2 font-semibold text-muted-foreground">{flexRender(header.column.columnDef.header, header.getContext())}</th>)}</tr>)}</thead>
@@ -226,13 +290,16 @@ export default function InventoryPage({ theme, setTheme }) {
             </table>
           </div>
         ) : (
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{inventory.map((item) => (
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{inventory.map((item) => (
             <Card key={item.id} className="space-y-2 rounded-2xl">
               {!!item.image_urls?.[0] && <img src={toPublicImageUrl(item.image_urls[0])} alt={item.title || `Listing ${item.id}`} className="h-36 w-full rounded-xl object-cover" />}
               <p className="text-sm font-semibold">{item.title || `Listing #${item.id}`}</p>
               <div className="flex items-center justify-between">
                 <Badge tone={item.quantity > 1 ? 'info' : 'default'}>Qty: {item.quantity}</Badge>
-                <Button size="sm" variant="outline" onClick={() => setEditingListing(item)} title="Quick edit listing photos."><Image size={14} /> Quick edit</Button>
+                <div className="flex gap-2">
+                  <Button size="sm" variant="outline" onClick={() => setEditingListing(item)} title="Quick edit listing photos."><Image size={14} /> Quick edit</Button>
+                  <Button size="sm" variant="secondary" onClick={() => { setSelection({ [item.id]: true }); setSelectAllMatching(false); setTimeout(() => queueAction('mark_sold'), 0); }}><ClipboardList size={14} /> Sold</Button>
+                </div>
               </div>
             </Card>
           ))}</div>
