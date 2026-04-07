@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import math
+import uuid
 from datetime import datetime, timedelta
 
-from sqlalchemy import Select, select
+from celery import chord, group, signature
+from sqlalchemy import Select, String, cast, func, or_, select
 from sqlalchemy.orm import Session
 
-from app.models.models import Listing
+from app.models.models import BulkJob, Listing
 
 
 class InventorySafetyError(ValueError):
@@ -16,6 +19,7 @@ class InventoryService:
     """Inventory read/write orchestration with oversell safety checks."""
 
     STALE_AFTER_DAYS = 7
+    BULK_BATCH_SIZE = 150
 
     @staticmethod
     def _normalize_labels(labels: list[str] | None) -> list[str]:
@@ -52,6 +56,7 @@ class InventoryService:
         label: str | None = None,
         multi_quantity_only: bool = False,
         stale: bool = False,
+        search: str | None = None,
     ) -> Select:
         stmt = select(Listing)
         if multi_quantity_only:
@@ -59,7 +64,11 @@ class InventoryService:
 
         if stale:
             stale_cutoff = datetime.utcnow() - timedelta(days=self.STALE_AFTER_DAYS)
-            stmt = stmt.where((Listing.last_refreshed.is_(None)) | (Listing.last_refreshed < stale_cutoff))
+            stmt = stmt.where(
+                (Listing.stale_flag.is_(True))
+                | (Listing.last_refreshed.is_(None))
+                | (Listing.last_refreshed < stale_cutoff)
+            )
 
         # JSON operators vary by db backend; do in-python for portability.
         if label:
@@ -67,6 +76,10 @@ class InventoryService:
             if target:
                 listings = stmt
                 return listings
+
+        if search and search.strip():
+            term = f"%{search.strip()}%"
+            stmt = stmt.where(or_(Listing.title.ilike(term), cast(Listing.id, String).ilike(term)))
 
         return stmt.order_by(Listing.updated_at.desc())
 
@@ -146,3 +159,63 @@ class InventoryService:
         for listing in updated:
             db.refresh(listing)
         return updated
+
+    def resolve_listing_ids(self, db: Session, listing_ids: list[int] | None = None, filters: dict | None = None) -> list[int]:
+        if listing_ids:
+            return [int(listing_id) for listing_id in listing_ids]
+
+        filters = filters or {}
+        stmt = self.build_inventory_query(
+            label=filters.get("label"),
+            multi_quantity_only=bool(filters.get("quantity_gt_one")),
+            stale=bool(filters.get("stale")),
+            search=filters.get("search"),
+        )
+        listings = db.execute(stmt).scalars().all()
+        filtered = self.apply_label_filter(listings, filters.get("label"))
+        return [listing.id for listing in filtered]
+
+    def queue_bulk_job(
+        self,
+        db: Session,
+        user_id: int,
+        action: str,
+        listing_ids: list[int],
+        payload: dict | None = None,
+        filters: dict | None = None,
+    ) -> BulkJob:
+        job = BulkJob(
+            id=str(uuid.uuid4()),
+            user_id=user_id,
+            action=action,
+            status="queued",
+            total_items=len(listing_ids),
+            processed_items=0,
+            errors=[],
+            error_count=0,
+            payload=payload or {},
+            filters=filters or {},
+        )
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+        if not listing_ids:
+            job.status = "completed"
+            db.add(job)
+            db.commit()
+            return job
+
+        chunks = [listing_ids[i : i + self.BULK_BATCH_SIZE] for i in range(0, len(listing_ids), self.BULK_BATCH_SIZE)]
+        header = group(
+            signature("bulk_process_inventory_chunk", args=[job.id, action, payload or {}, chunk, batch_index])
+            for batch_index, chunk in enumerate(chunks)
+        )
+        callback = signature("bulk_finalize_job", args=[job.id])
+        chord(header)(callback)
+        return job
+
+    @staticmethod
+    def estimate_minutes(total_items: int) -> int:
+        if total_items <= 0:
+            return 0
+        return max(1, math.ceil(total_items / 150))

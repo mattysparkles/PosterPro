@@ -124,6 +124,31 @@ class InventoryBulkEditRequest(BaseModel):
     relist: bool = False
 
 
+class InventoryFilterRequest(BaseModel):
+    label: str | None = None
+    stale: bool = False
+    quantity_gt_one: bool = False
+    search: str | None = None
+
+
+class InventoryBulkRequest(BaseModel):
+    action: str = Field(description="edit|delist|relist|label|refresh|autobump")
+    listing_ids: list[int] = Field(default_factory=list)
+    filters: InventoryFilterRequest | None = None
+    payload: dict | None = None
+    user_id: int = 1
+
+
+class BulkJobResponse(BaseModel):
+    job_id: str
+    action: str
+    status: str
+    total_items: int
+    processed_items: int
+    error_count: int = 0
+    errors: list[dict] = Field(default_factory=list)
+
+
 class SaleDetectionConfigRequest(BaseModel):
     marketplaces: list[str] = Field(default_factory=list)
 

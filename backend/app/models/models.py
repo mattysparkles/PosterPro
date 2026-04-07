@@ -96,6 +96,7 @@ class Listing(Base, TimestampMixin):
     platform_quantities: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     custom_labels: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     last_refreshed: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    stale_flag: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
 
     user: Mapped["User"] = relationship(back_populates="listings")
     cluster: Mapped["Cluster | None"] = relationship(back_populates="listings")
@@ -237,3 +238,18 @@ class ListingABTestVariant(Base, TimestampMixin):
     clicks: Mapped[int] = mapped_column(Integer, default=0)
     watch_count: Mapped[int] = mapped_column(Integer, default=0)
     conversions: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class BulkJob(Base, TimestampMixin):
+    __tablename__ = "bulk_jobs"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    action: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    total_items: Mapped[int] = mapped_column(Integer, default=0)
+    processed_items: Mapped[int] = mapped_column(Integer, default=0)
+    error_count: Mapped[int] = mapped_column(Integer, default=0)
+    errors: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
+    filters: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)

@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 
 from app.api.ebay import router as ebay_router
+from app.api.inventory import bulk_router as bulk_jobs_router
 from app.api.inventory import router as inventory_router
 from app.api.intelligence import router as intelligence_router
 from app.api.marketplaces import router as marketplaces_router
@@ -16,6 +17,7 @@ app.include_router(ebay_router)
 app.include_router(marketplaces_router)
 app.include_router(intelligence_router)
 app.include_router(inventory_router)
+app.include_router(bulk_jobs_router)
 app.include_router(sales_router)
 
 
