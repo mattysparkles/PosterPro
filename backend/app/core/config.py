@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     ebay_redirect_uri: str | None = None
     autonomous_mode: bool = True
     autonomous_dry_run: bool = False
+    auto_relist_enabled: bool = True
+    auto_relist_min_price: float = 20.0
+    auto_relist_user_rules_json: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

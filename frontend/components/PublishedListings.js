@@ -14,6 +14,7 @@ export default function PublishedListings({
       {!posted.length && <p>{emptyMessage}</p>}
       {posted.map((listing) => {
         const ebayUrl = listing.marketplace_data?.ebay_url || (listing.ebay_listing_id ? `https://www.ebay.com/itm/${listing.ebay_listing_id}` : '');
+        const autoRelistHistory = listing.marketplace_data?.auto_relist_history || [];
         return (
           <article key={listing.id} className="listing-item">
             <strong>{listing.title || `Listing #${listing.id}`}</strong>
@@ -26,6 +27,18 @@ export default function PublishedListings({
               <a href={ebayUrl} target="_blank" rel="noreferrer">
                 Open on eBay
               </a>
+            )}
+            {autoRelistHistory.length > 0 && (
+              <div>
+                <strong>Auto-Relisted</strong>
+                <ul>
+                  {autoRelistHistory.map((event, index) => (
+                    <li key={`${listing.id}-${event.timestamp || index}`}>
+                      {event.timestamp || 'Unknown time'} → {event.new_listing_id || 'N/A'}
+                    </li>
+                  ))}
+                </ul>
+              </div>
             )}
           </article>
         );

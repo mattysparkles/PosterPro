@@ -12,6 +12,10 @@ celery_app.conf.update(
         "adjust-active-listing-prices-every-24h": {
             "task": "adjust_active_listing_prices",
             "schedule": crontab(minute=0, hour=0),
-        }
+        },
+        "monitor-and-relist-nightly": {
+            "task": "monitor_and_relist",
+            "schedule": crontab(minute=15, hour=1),
+        },
     },
 )
