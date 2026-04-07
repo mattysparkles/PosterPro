@@ -16,6 +16,7 @@ from app.services.image_pipeline import ImagePipelineService
 from app.services.listing_ai import ListingAIService
 from app.services.profit_service import ProfitService
 from app.services.storage import LocalStorage
+from app.services.pricing_service import PricingService
 from app.models.enums import ListingStatus
 from app.workers.tasks import cluster_images_task, process_photo_batch
 
@@ -108,6 +109,16 @@ async def ingest_photos(
     db.commit()
     task = process_photo_batch.delay(listing_ids)
     return {"created_listings": listing_ids, "uploaded_paths": uploads, "task_id": task.id}
+
+
+
+
+@router.get("/listings/{listing_id}/pricing")
+def get_listing_pricing(listing_id: int, db: Session = Depends(get_db)):
+    listing = db.get(Listing, listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    return PricingService().get_pricing(db, listing_id)
 
 
 @router.post("/listings/{listing_id}/generate", response_model=ListingResponse)

@@ -91,3 +91,7 @@ export async function fetchPrediction(id) {
 export async function fetchAlerts(userId = 1) {
   return jsonFetch(`${API_BASE}/alerts?user_id=${userId}`);
 }
+
+export async function fetchListingPricing(id) {
+  return jsonFetch(`${API_BASE}/listings/${id}/pricing`);
+}
