@@ -1,259 +1,156 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
+import { Joyride } from 'react-joyride';
+import { toast } from 'sonner';
 
 import ClusterPreview from '../components/ClusterPreview';
 import IntelligencePanel from '../components/IntelligencePanel';
 import ListingEditor from '../components/ListingEditor';
 import PublishedListings from '../components/PublishedListings';
 import SyncPanel from '../components/SyncPanel';
+import AppShell from '../components/layout/AppShell';
+import Button from '../components/ui/button';
+import { Card, CardDescription, CardTitle } from '../components/ui/card';
 import { useBatchProgress } from '../hooks/useBatchProgress';
+import useDashboardData from '../hooks/useDashboardData';
 import { useMarketplacePublish } from '../hooks/useMarketplacePublish';
-import {
-  connectMarketplace,
-  fetchAutonomousConfig,
-  fetchAlerts,
-  fetchAnalyticsOverview,
-  fetchClusters,
-  fetchEbayOfferDashboard,
-  fetchListings,
-  fetchMarketplaces,
-  fetchPlatformConfig,
-  fetchPrediction,
-  fetchPricingRecommendation,
-  fetchStorageUnitBatches,
-  generateListing,
-  optimizeListing,
-  runAllOvernightBatches,
-  runOvernightBatch,
-  toggleAutonomousMode,
-  updatePlatformConfig,
-  updateListing,
-} from '../lib/api';
+import { generateListing, runAllOvernightBatches, runOvernightBatch, toggleAutonomousMode, updateListing } from '../lib/api';
 
-export default function Dashboard() {
-  const [clusters, setClusters] = useState([]);
-  const [listings, setListings] = useState([]);
-  const [marketplaces, setMarketplaces] = useState([]);
-  const [analytics, setAnalytics] = useState(null);
-  const [alerts, setAlerts] = useState([]);
-  const [recommendation, setRecommendation] = useState(null);
-  const [prediction, setPrediction] = useState(null);
-  const [optimization, setOptimization] = useState(null);
-  const [autonomousConfig, setAutonomousConfig] = useState({ autonomous_mode: true, autonomous_dry_run: false });
-  const [offerDashboard, setOfferDashboard] = useState({ active_offers: [], decision_log: [] });
-  const [connectError, setConnectError] = useState('');
-  const [enabledPlatforms, setEnabledPlatforms] = useState(['ebay']);
-  const [storageBatches, setStorageBatches] = useState([]);
+const TOUR_STEPS = [
+  { target: 'body', content: 'Welcome! This is your command center to manage listings effortlessly.' },
+  { target: '[data-tour="upload-photos"]', content: 'Start here: your uploaded photos are grouped and ready for listing.' },
+  { target: '[data-tour="view-inventory"]', content: 'Review inventory cards, update details, and keep data clean.' },
+  { target: '[data-tour="publish"]', content: 'Publish to all marketplaces or choose one in a single tap.' },
+  { target: '[data-tour="analytics"]', content: 'Track performance and use insights to make better pricing decisions.' },
+];
+
+export default function Dashboard({ theme, setTheme }) {
+  const [runTour, setRunTour] = useState(false);
   const { publish, publishing, errors, statusByListing, refreshStatus } = useMarketplacePublish();
   const { batchStatusById, trackBatch } = useBatchProgress();
-
-  const reload = async () => {
-    const [c, l, m, a, al, autoConfig, offerData, platformConfig, batches] = await Promise.all([
-      fetchClusters(),
-      fetchListings(),
-      fetchMarketplaces(),
-      fetchAnalyticsOverview(),
-      fetchAlerts(),
-      fetchAutonomousConfig(),
-      fetchEbayOfferDashboard().catch(() => ({ active_offers: [], decision_log: [] })),
-      fetchPlatformConfig(1).catch(() => ({ enabled_platforms: ['ebay'] })),
-      fetchStorageUnitBatches().catch(() => []),
-    ]);
-    setClusters(c);
-    setListings(l);
-    setMarketplaces(m.marketplaces || []);
-    setAnalytics(a);
-    setAlerts(al.alerts || []);
-    setAutonomousConfig(autoConfig);
-    setOfferDashboard(offerData);
-    setEnabledPlatforms(platformConfig.enabled_platforms || ['ebay']);
-    setStorageBatches(batches || []);
-    if (l?.length) {
-      const listingId = l[0].id;
-      const [rec, pred, opt] = await Promise.all([
-        fetchPricingRecommendation(listingId),
-        fetchPrediction(listingId),
-        optimizeListing(listingId),
-      ]);
-      setRecommendation(rec);
-      setPrediction(pred);
-      setOptimization(opt);
-    }
-  };
+  const {
+    clusters,
+    listings,
+    analytics,
+    alerts,
+    recommendation,
+    prediction,
+    optimization,
+    autonomousConfig,
+    storageBatches,
+    readyCount,
+    recentAutoPublished,
+    reload,
+  } = useDashboardData();
 
   useEffect(() => {
-    reload();
+    if (!localStorage.getItem('posterpro-tour-done')) setRunTour(true);
   }, []);
 
   useEffect(() => {
-    listings.forEach((listing) => {
-      refreshStatus(listing.id).catch(() => undefined);
-    });
+    listings.forEach((listing) => refreshStatus(listing.id).catch(() => undefined));
   }, [listings, refreshStatus]);
 
-  const readyCount = useMemo(() => listings.filter((l) => l.status === 'ready').length, [listings]);
-  const recentAutoPublished = useMemo(
-    () =>
-      listings
-        .filter(
-          (listing) =>
-            listing.marketplace_data?.autonomous?.trigger === 'auto' &&
-            !listing.marketplace_data?.autonomous?.dry_run &&
-            (listing.ebay_publish_status === 'POSTED' || listing.ebay_listing_id)
-        )
-        .sort((a, b) => b.id - a.id)
-        .slice(0, 8),
-    [listings]
-  );
-
-  const bulkApprove = async () => {
-    await Promise.all(
-      listings
-        .filter((l) => l.status === 'draft')
-        .map((l) => generateListing(l.id))
-    );
-    await reload();
-  };
-
-  const connect = async (name) => {
-    setConnectError('');
-    try {
-      await connectMarketplace(name, 1);
-    } catch (err) {
-      setConnectError(err.message);
-    }
-  };
-
   return (
-    <main className="container">
-      <header className="topbar">
-        <h1>Reseller Cross-Posting Dashboard</h1>
-        <div className="actions">
-          <button onClick={bulkApprove}>Bulk Approve Drafts</button>
-          <span>{readyCount} ready listings</span>
-          <span className={`autonomous-badge ${autonomousConfig.autonomous_mode ? 'on' : 'off'}`}>
-            Autonomous Mode: {autonomousConfig.autonomous_mode ? 'ON' : 'OFF'}
-            {autonomousConfig.autonomous_dry_run ? ' (DRY RUN)' : ''}
-          </span>
-          <button
-            onClick={async () => {
-              await toggleAutonomousMode(!autonomousConfig.autonomous_mode);
-              await reload();
-            }}
-          >
-            Toggle Autonomous
-          </button>
-        </div>
-        <div className="actions">
-          <span>Cross-post defaults:</span>
-          {['ebay', 'etsy', 'mercari', 'facebook'].map((platform) => (
-            <label key={platform}>
-              <input
-                type="checkbox"
-                checked={enabledPlatforms.includes(platform)}
-                onChange={async (event) => {
-                  const next = event.target.checked
-                    ? [...enabledPlatforms, platform]
-                    : enabledPlatforms.filter((name) => name !== platform);
-                  const ensured = next.length ? next : ['ebay'];
-                  await updatePlatformConfig(1, ensured);
-                  setEnabledPlatforms(ensured);
+    <>
+      <Joyride
+        steps={TOUR_STEPS}
+        run={runTour}
+        continuous
+        showSkipButton
+        styles={{ options: { primaryColor: '#2563eb', zIndex: 10000 } }}
+        callback={(data) => {
+          if (data.status === 'finished' || data.status === 'skipped') {
+            localStorage.setItem('posterpro-tour-done', '1');
+            setRunTour(false);
+          }
+        }}
+      />
+      <AppShell
+        active="/"
+        autonomousConfig={autonomousConfig}
+        onToggleAutonomous={async () => {
+          await toggleAutonomousMode(!autonomousConfig.autonomous_mode);
+          toast.success('Autonomous mode updated.');
+          await reload();
+        }}
+        theme={theme}
+        onToggleTheme={() => {
+          const next = theme === 'dark' ? 'light' : 'dark';
+          setTheme(next);
+          localStorage.setItem('posterpro-theme', next);
+          document.documentElement.classList.toggle('dark', next === 'dark');
+        }}
+      >
+        <section className="mb-4 grid gap-4 md:grid-cols-3">
+          <Card className="bg-grid">
+            <CardTitle>Ready to publish</CardTitle>
+            <CardDescription>{readyCount} listings are ready now.</CardDescription>
+          </Card>
+          <Card>
+            <CardTitle>Storage batches</CardTitle>
+            <CardDescription>{storageBatches.length} batches detected and waiting for actions.</CardDescription>
+          </Card>
+          <Card>
+            <CardTitle>Recent automation wins</CardTitle>
+            <CardDescription>{recentAutoPublished.length} items were auto-published recently.</CardDescription>
+          </Card>
+        </section>
+
+        <ClusterPreview clusters={clusters} />
+        <div className="mt-4"><IntelligencePanel analytics={analytics} alerts={alerts} recommendation={recommendation} prediction={prediction} optimization={optimization} /></div>
+        <div className="mt-4"><SyncPanel /></div>
+
+        <Card className="mt-4">
+          <CardTitle>Listing inventory</CardTitle>
+          <CardDescription className="mb-4">Every card is touch-friendly and written in plain language.</CardDescription>
+          <div className="grid gap-4 lg:grid-cols-2">
+            {listings.map((listing) => (
+              <ListingEditor
+                key={listing.id}
+                listing={listing}
+                statuses={statusByListing[listing.id] || []}
+                publishState={{ loading: !!publishing[listing.id], error: errors[listing.id] || '' }}
+                onSave={async (id, form) => {
+                  await updateListing(id, form);
+                  await reload();
+                }}
+                onGenerate={async (id) => {
+                  await generateListing(id);
+                  toast.success(`Listing #${id} improved with AI.`);
+                  await reload();
+                }}
+                onPublish={async (id, targets) => {
+                  await publish(id, targets);
+                  await reload();
                 }}
               />
-              {platform}
-            </label>
-          ))}
-        </div>
-        <div className="actions">
-          {marketplaces.map((m) => (
-            <button key={m.name} onClick={() => connect(m.name)}>
-              Connect {m.name}
-            </button>
-          ))}
-        </div>
-      </header>
-      {connectError && <p className="error-text">{connectError}</p>}
-      <ClusterPreview clusters={clusters} />
-      <IntelligencePanel
-        analytics={analytics}
-        alerts={alerts}
-        recommendation={recommendation}
-        prediction={prediction}
-        optimization={optimization}
-      />
-      <SyncPanel />
-      <section className="card">
-        <h2>Listing Editor</h2>
-        <div className="listing-grid">
-          {listings.map((listing) => (
-            <ListingEditor
-              key={listing.id}
-              listing={listing}
-              statuses={statusByListing[listing.id] || []}
-              publishState={{
-                loading: !!publishing[listing.id],
-                error: errors[listing.id] || '',
-              }}
-              onSave={async (id, form) => {
-                await updateListing(id, form);
-                await reload();
-              }}
-              onGenerate={async (id) => {
-                await generateListing(id);
-                await reload();
-              }}
-              onPublish={async (id, targets) => {
-                await publish(id, targets);
-                await reload();
-              }}
-            />
-          ))}
-        </div>
-      </section>
-      <PublishedListings listings={listings} statusMap={statusByListing} />
-      <PublishedListings
-        listings={recentAutoPublished}
-        statusMap={statusByListing}
-        title="Recently Auto-Published"
-        emptyMessage="No autonomous publishes yet."
-        postedOnly={false}
-      />
-      <section className="card">
-        <h2>Storage Unit Batches</h2>
-        <button
-          onClick={async () => {
-            await runAllOvernightBatches();
-            await reload();
-          }}
-        >
-          Run Overnight Batch
-        </button>
-        {(storageBatches || []).map((batch) => {
-          const liveBatch = batchStatusById[batch.id] || batch;
-          return (
-            <p key={batch.id}>
-              #{batch.id} {liveBatch.storage_unit_name || 'Unnamed'} — {liveBatch.status} ({liveBatch.processed_items}/
-              {liveBatch.total_items}){' '}
-              {liveBatch.status === 'QUEUED' && (
-                <button
-                  onClick={async () => {
-                    await runOvernightBatch(batch.id);
-                    trackBatch(batch.id);
-                    await reload();
-                  }}
-                >
-                  Run Now
-                </button>
-              )}
-              {liveBatch.status === 'PROCESSING' && <button onClick={() => trackBatch(batch.id)}>Track</button>}
-            </p>
-          );
-        })}
-      </section>
-      <section className="card">
-        <h2>eBay Best Offers</h2>
-        <p>Active incoming offers: {offerDashboard.active_offers?.length || 0}</p>
-        <p>Auto-decision log entries: {offerDashboard.decision_log?.length || 0}</p>
-      </section>
-    </main>
+            ))}
+          </div>
+        </Card>
+
+        <div className="mt-4"><PublishedListings listings={listings} statusMap={statusByListing} /></div>
+        <div className="mt-4"><PublishedListings listings={recentAutoPublished} statusMap={statusByListing} title="Recently Auto-Published" emptyMessage="No autonomous publishes yet." postedOnly={false} /></div>
+
+        <Card className="mt-4">
+          <CardTitle>Overnight storage runs</CardTitle>
+          <CardDescription className="mb-4">Run all batches at once or trigger one manually.</CardDescription>
+          <Button onClick={async () => { await runAllOvernightBatches(); await reload(); }} title="Run overnight processing for all storage batches.">Run Overnight Batch</Button>
+          <div className="mt-4 space-y-2 text-sm">
+            {(storageBatches || []).map((batch) => {
+              const liveBatch = batchStatusById[batch.id] || batch;
+              return (
+                <div key={batch.id} className="rounded-2xl border border-border/70 p-3">
+                  #{batch.id} {liveBatch.storage_unit_name || 'Unnamed'} — {liveBatch.status} ({liveBatch.processed_items}/{liveBatch.total_items})
+                  {liveBatch.status === 'QUEUED' && (
+                    <Button size="sm" className="ml-3" onClick={async () => { await runOvernightBatch(batch.id); trackBatch(batch.id); await reload(); }}>Run now</Button>
+                  )}
+                  {liveBatch.status === 'PROCESSING' && <Button variant="outline" size="sm" className="ml-3" onClick={() => trackBatch(batch.id)}>Track</Button>}
+                </div>
+              );
+            })}
+          </div>
+        </Card>
+      </AppShell>
+    </>
   );
 }
