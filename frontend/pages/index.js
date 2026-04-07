@@ -12,6 +12,7 @@ import {
   fetchAlerts,
   fetchAnalyticsOverview,
   fetchClusters,
+  fetchEbayOfferDashboard,
   fetchListings,
   fetchMarketplaces,
   fetchPrediction,
@@ -32,17 +33,19 @@ export default function Dashboard() {
   const [prediction, setPrediction] = useState(null);
   const [optimization, setOptimization] = useState(null);
   const [autonomousConfig, setAutonomousConfig] = useState({ autonomous_mode: true, autonomous_dry_run: false });
+  const [offerDashboard, setOfferDashboard] = useState({ active_offers: [], decision_log: [] });
   const [connectError, setConnectError] = useState('');
   const { publish, publishing, errors, statusByListing, refreshStatus } = useMarketplacePublish();
 
   const reload = async () => {
-    const [c, l, m, a, al, autoConfig] = await Promise.all([
+    const [c, l, m, a, al, autoConfig, offerData] = await Promise.all([
       fetchClusters(),
       fetchListings(),
       fetchMarketplaces(),
       fetchAnalyticsOverview(),
       fetchAlerts(),
       fetchAutonomousConfig(),
+      fetchEbayOfferDashboard().catch(() => ({ active_offers: [], decision_log: [] })),
     ]);
     setClusters(c);
     setListings(l);
@@ -50,6 +53,7 @@ export default function Dashboard() {
     setAnalytics(a);
     setAlerts(al.alerts || []);
     setAutonomousConfig(autoConfig);
+    setOfferDashboard(offerData);
     if (l?.length) {
       const listingId = l[0].id;
       const [rec, pred, opt] = await Promise.all([
@@ -179,6 +183,11 @@ export default function Dashboard() {
         emptyMessage="No autonomous publishes yet."
         postedOnly={false}
       />
+      <section className="card">
+        <h2>eBay Best Offers</h2>
+        <p>Active incoming offers: {offerDashboard.active_offers?.length || 0}</p>
+        <p>Auto-decision log entries: {offerDashboard.decision_log?.length || 0}</p>
+      </section>
     </main>
   );
 }

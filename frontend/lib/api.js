@@ -107,3 +107,7 @@ export async function toggleAutonomousMode(enabled) {
     body: JSON.stringify(typeof enabled === 'boolean' ? { enabled } : {}),
   });
 }
+
+export async function fetchEbayOfferDashboard(userId = 1) {
+  return jsonFetch(`${API_BASE}/ebay/offers/dashboard?user_id=${userId}`);
+}

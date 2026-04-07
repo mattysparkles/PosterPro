@@ -17,5 +17,9 @@ celery_app.conf.update(
             "task": "monitor_and_relist",
             "schedule": crontab(minute=15, hour=1),
         },
+        "process-ebay-incoming-offers-every-15m": {
+            "task": "process_incoming_offers",
+            "schedule": crontab(minute="*/15"),
+        },
     },
 )

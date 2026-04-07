@@ -335,6 +335,40 @@ async def get_required_item_specifics(access_token: str, category_id: str, marke
     )
 
 
+async def get_incoming_best_offers(
+    account: MarketplaceAccount,
+    *,
+    limit: int = 100,
+    marketplace_id: str = "EBAY_US",
+) -> list[dict[str, Any]]:
+    """
+    Pull incoming buyer offers from eBay's negotiation API.
+    """
+    client = EbayAPIClient(account.access_token)
+    response = await client.request(
+        "GET",
+        "/sell/negotiation/v1/find_offers",
+        params={
+            "limit": limit,
+            "marketplace_id": marketplace_id,
+            "offer_type": "COUNTER_OFFER",
+        },
+    )
+    offers = response.get("offers") or response.get("bestOffers") or []
+    return [offer for offer in offers if isinstance(offer, dict)]
+
+
+async def accept_best_offer(account: MarketplaceAccount, offer_id: str) -> dict[str, Any]:
+    client = EbayAPIClient(account.access_token)
+    return await client.request("POST", f"/sell/negotiation/v1/offer/{offer_id}/accept")
+
+
+async def reject_best_offer(account: MarketplaceAccount, offer_id: str, reason: str | None = None) -> dict[str, Any]:
+    client = EbayAPIClient(account.access_token)
+    payload = {"declineReason": reason} if reason else None
+    return await client.request("POST", f"/sell/negotiation/v1/offer/{offer_id}/decline", payload=payload)
+
+
 async def publish_listing_to_ebay(listing: Listing, db: Session, *, relist: bool = False) -> dict[str, Any]:
     listing.ebay_publish_status = EbayPublishStatus.POSTING
     db.add(listing)

@@ -136,6 +136,24 @@ class DailyStat(Base, TimestampMixin):
     avg_days_to_sell: Mapped[float] = mapped_column(Float, default=0.0)
 
 
+class EbayOfferHistory(Base, TimestampMixin):
+    __tablename__ = "ebay_offer_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    listing_id: Mapped[int | None] = mapped_column(ForeignKey("listings.id"), index=True, nullable=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    ebay_offer_id: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    ebay_listing_id: Mapped[str | None] = mapped_column(String(255), index=True, nullable=True)
+    buyer_username: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    offered_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    currency: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    offer_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    decision: Mapped[str] = mapped_column(String(32), index=True)
+    decision_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class CategoryStat(Base, TimestampMixin):
     __tablename__ = "category_stats"
 

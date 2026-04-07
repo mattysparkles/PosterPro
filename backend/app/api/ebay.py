@@ -9,11 +9,13 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.database import get_db
 from app.models.enums import MarketplaceName
-from app.models.models import Listing, MarketplaceAccount
+from app.models.models import EbayOfferHistory, Listing, MarketplaceAccount
 from app.services.ebay_service import (
     EbayIntegrationError,
+    get_incoming_best_offers,
     authenticate_user_ebay,
     exchange_code_for_tokens,
+    get_or_refresh_account,
     parse_oauth_state,
     publish_listing_to_ebay,
 )
@@ -100,4 +102,35 @@ async def ebay_listing_status(listing_id: int, db: Session = Depends(get_db)):
         "ebay_listing_id": listing.ebay_listing_id,
         "status": listing.ebay_publish_status,
         "marketplace_data": listing.marketplace_data,
+    }
+
+
+@router.get("/ebay/offers/dashboard")
+async def ebay_offer_dashboard(user_id: int = Query(1), db: Session = Depends(get_db)):
+    account = await get_or_refresh_account(user_id, db)
+    active_offers = await get_incoming_best_offers(account, limit=50)
+    decisions = db.execute(
+        select(EbayOfferHistory)
+        .where(EbayOfferHistory.user_id == user_id)
+        .order_by(EbayOfferHistory.created_at.desc())
+        .limit(100)
+    ).scalars().all()
+    return {
+        "active_offers": active_offers,
+        "decision_log": [
+            {
+                "id": row.id,
+                "listing_id": row.listing_id,
+                "ebay_offer_id": row.ebay_offer_id,
+                "ebay_listing_id": row.ebay_listing_id,
+                "offered_amount": row.offered_amount,
+                "currency": row.currency,
+                "offer_status": row.offer_status,
+                "decision": row.decision,
+                "decision_reason": row.decision_reason,
+                "decided_at": row.decided_at.isoformat() if row.decided_at else None,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+            }
+            for row in decisions
+        ],
     }
