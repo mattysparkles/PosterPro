@@ -3,6 +3,8 @@ import io
 import json
 import zipfile
 
+import httpx
+
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -16,6 +18,8 @@ from app.api.schemas import (
     ListingGenerateRequest,
     ListingResponse,
     ListingUpdateRequest,
+    PhotoEditRequest,
+    PhotoEditResponse,
     StorageUnitBatchResponse,
 )
 from app.core.config import settings
@@ -30,6 +34,7 @@ from app.services.listing_ai import ListingAIService
 from app.services.profit_service import ProfitService
 from app.services.storage import LocalStorage
 from app.services.pricing_service import PricingService
+from app.services.photo_editor import PhotoEditorService
 from app.models.enums import ListingStatus
 from app.workers.tasks import (
     cluster_images_task,
@@ -40,6 +45,18 @@ from app.workers.tasks import (
 
 router = APIRouter()
 inventory_service = InventoryService()
+photo_editor_service = PhotoEditorService()
+
+
+
+def _to_public_image_url(path: str) -> str:
+    storage_root = Path(settings.storage_root).resolve()
+    resolved = Path(path).resolve()
+    try:
+        relative = resolved.relative_to(storage_root)
+        return f"/media/{relative.as_posix()}"
+    except ValueError:
+        return path
 
 
 def _create_storage_batch(
@@ -142,6 +159,59 @@ def update_listing(listing_id: int, payload: ListingUpdateRequest, db: Session =
     db.commit()
     db.refresh(listing)
     return listing
+
+
+@router.post("/listings/{listing_id}/photo-tools", response_model=PhotoEditResponse)
+async def process_listing_photo(
+    listing_id: int,
+    edits: str = Form(default="{}"),
+    remove_background: bool = Form(default=False),
+    source_image: str | None = Form(default=None),
+    photo: UploadFile | None = File(default=None),
+    db: Session = Depends(get_db),
+):
+    listing = db.get(Listing, listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+
+    candidates = [source_image, *((listing.image_urls or [])), listing.raw_photo_path]
+    preferred_source = next((item for item in candidates if item), None)
+    upload_bytes = await photo.read() if photo else None
+
+    try:
+        parsed = PhotoEditRequest.model_validate_json(edits)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid edits payload: {exc}") from exc
+
+    try:
+        image = photo_editor_service.load_image(source_image=preferred_source, upload_bytes=upload_bytes)
+        if remove_background:
+            image = photo_editor_service.remove_background(image)
+        image = photo_editor_service.apply_edits(
+            image,
+            brightness=parsed.brightness,
+            contrast=parsed.contrast,
+            filter_name=parsed.filter_name,
+            crop_x=parsed.crop_x,
+            crop_y=parsed.crop_y,
+            crop_width=parsed.crop_width,
+            crop_height=parsed.crop_height,
+        )
+        saved_path = photo_editor_service.save_image(image, transparent=remove_background)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Background removal failed: {exc}") from exc
+
+    listing.image_urls = [*(listing.image_urls or []), saved_path]
+    db.add(listing)
+    db.commit()
+    db.refresh(listing)
+
+    return PhotoEditResponse(
+        image_url=_to_public_image_url(saved_path),
+        image_urls=[_to_public_image_url(path) for path in (listing.image_urls or [])],
+    )
 
 
 @router.post("/ingest/photos")

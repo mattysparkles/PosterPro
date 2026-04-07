@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     ebay_client_id: str | None = None
     ebay_client_secret: str | None = None
     ebay_redirect_uri: str | None = None
+    photoroom_api_key: str | None = None
+    photoroom_api_url: str = "https://sdk.photoroom.com/v1/segment"
     autonomous_mode: bool = True
     autonomous_dry_run: bool = False
     auto_relist_enabled: bool = True

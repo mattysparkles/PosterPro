@@ -13,7 +13,7 @@ import { Card, CardDescription, CardTitle } from '../components/ui/card';
 import { useBatchProgress } from '../hooks/useBatchProgress';
 import useDashboardData from '../hooks/useDashboardData';
 import { useMarketplacePublish } from '../hooks/useMarketplacePublish';
-import { generateListing, runAllOvernightBatches, runOvernightBatch, toggleAutonomousMode, updateListing } from '../lib/api';
+import { generateListing, processListingPhoto, runAllOvernightBatches, runOvernightBatch, toggleAutonomousMode, updateListing } from '../lib/api';
 
 const TOUR_STEPS = [
   { target: 'body', content: 'Welcome! This is your command center to manage listings effortlessly.' },
@@ -121,6 +121,10 @@ export default function Dashboard({ theme, setTheme }) {
                 }}
                 onPublish={async (id, targets) => {
                   await publish(id, targets);
+                  await reload();
+                }}
+                onPhotoUpdated={async ({ listingId, sourceImage, file, removeBackground, edits }) => {
+                  await processListingPhoto({ listingId, sourceImage, file, removeBackground, edits });
                   await reload();
                 }}
               />
