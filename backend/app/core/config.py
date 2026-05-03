@@ -4,8 +4,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     app_name: str = "PosterPro"
     environment: str = "development"
-    database_url: str = "postgresql+psycopg2://postgres:postgres@localhost:5432/posterpro"
-    redis_url: str = "redis://localhost:6379/0"
+    # Keep local defaults credential-free; production should supply explicit env vars.
+    database_url: str = "sqlite:///./posterpro.db"
+    redis_url: str = "redis://localhost:6379/1"
     storage_root: str = "./storage"
     session_secret: str | None = None
     openai_api_key: str | None = None

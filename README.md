@@ -293,8 +293,8 @@ PosterPro reads backend settings from `backend/.env`.
 ### Core
 - `APP_NAME` (default: PosterPro)
 - `ENVIRONMENT` (default: development)
-- `DATABASE_URL` (default local postgres URI)
-- `REDIS_URL` (default local redis URI)
+- `DATABASE_URL` (default `sqlite:///./posterpro.db`; production should set an explicit database URI)
+- `REDIS_URL` (default `redis://localhost:6379/1`)
 - `STORAGE_ROOT` (default `./storage`)
 
 ### AI / Enrichment
