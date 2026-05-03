@@ -8,6 +8,11 @@ celery_app.conf.update(
     task_track_started=True,
     task_serializer="json",
     accept_content=["json"],
+    task_default_queue="posterpro",
+    task_default_exchange="posterpro",
+    task_default_routing_key="posterpro",
+    task_routes={"*": {"queue": "posterpro", "routing_key": "posterpro"}},
+    imports=("app.workers.tasks",),
     beat_schedule={
         "adjust-active-listing-prices-every-24h": {
             "task": "adjust_active_listing_prices",

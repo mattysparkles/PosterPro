@@ -16,7 +16,7 @@ import {
   optimizeListing,
 } from "../lib/api";
 
-export default function useDashboardData() {
+export default function useDashboardData(userId) {
   const [clusters, setClusters] = useState([]);
   const [listings, setListings] = useState([]);
   const [marketplaces, setMarketplaces] = useState([]);
@@ -38,6 +38,7 @@ export default function useDashboardData() {
   const [listingTemplates, setListingTemplates] = useState([]);
 
   const reload = useCallback(async () => {
+    if (!userId) return;
     const [
       c,
       l,
@@ -53,16 +54,16 @@ export default function useDashboardData() {
       fetchClusters(),
       fetchListings(),
       fetchMarketplaces(),
-      fetchAnalyticsOverview(),
-      fetchAlerts(),
+      fetchAnalyticsOverview(userId),
+      fetchAlerts(userId),
       fetchAutonomousConfig(),
-      fetchEbayOfferDashboard().catch(() => ({
+      fetchEbayOfferDashboard(userId).catch(() => ({
         active_offers: [],
         decision_log: [],
       })),
-      fetchPlatformConfig(1).catch(() => ({ enabled_platforms: ["ebay"] })),
+      fetchPlatformConfig(userId).catch(() => ({ enabled_platforms: ["ebay"] })),
       fetchStorageUnitBatches().catch(() => []),
-      fetchListingTemplates(1).catch(() => []),
+      fetchListingTemplates(userId).catch(() => []),
     ]);
     setClusters(c);
     setListings(l);
@@ -86,7 +87,7 @@ export default function useDashboardData() {
       setPrediction(pred);
       setOptimization(opt);
     }
-  }, []);
+  }, [userId]);
 
   useEffect(() => {
     reload();

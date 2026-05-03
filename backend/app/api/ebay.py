@@ -6,10 +6,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.auth import ensure_user_owns_resource, get_current_user, resolve_user_scope
 from app.core.config import settings
 from app.core.database import get_db
 from app.models.enums import MarketplaceName
-from app.models.models import EbayOfferHistory, Listing, MarketplaceAccount
+from app.models.models import EbayOfferHistory, Listing, MarketplaceAccount, User
 from app.services.ebay_service import (
     EbayIntegrationError,
     get_incoming_best_offers,
@@ -24,12 +25,16 @@ router = APIRouter()
 
 
 @router.get("/ebay/auth/url")
-async def ebay_auth_url(user_id: int = Query(...), redirect_uri: str | None = Query(None)):
+async def ebay_auth_url(
+    user_id: int | None = Query(None),
+    redirect_uri: str | None = Query(None),
+    current_user: User = Depends(get_current_user),
+):
     callback = redirect_uri or settings.ebay_redirect_uri
     if not callback:
         raise HTTPException(status_code=400, detail="redirect_uri is required")
     try:
-        url = await authenticate_user_ebay(user_id=user_id, redirect_uri=callback)
+        url = await authenticate_user_ebay(user_id=resolve_user_scope(current_user, user_id), redirect_uri=callback)
     except EbayIntegrationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"auth_url": url}
@@ -78,10 +83,15 @@ async def ebay_callback(
 
 
 @router.post("/listings/{listing_id}/publish/ebay")
-async def publish_listing_ebay(listing_id: int, db: Session = Depends(get_db)):
+async def publish_listing_ebay(
+    listing_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     listing = db.get(Listing, listing_id)
     if not listing:
         raise HTTPException(status_code=404, detail="Listing not found")
+    ensure_user_owns_resource(current_user, listing.user_id)
     if not listing.title or not listing.description:
         raise HTTPException(status_code=400, detail="Listing must be generated before publishing")
 
@@ -92,10 +102,15 @@ async def publish_listing_ebay(listing_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/ebay/status/{listing_id}")
-async def ebay_listing_status(listing_id: int, db: Session = Depends(get_db)):
+async def ebay_listing_status(
+    listing_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     listing = db.get(Listing, listing_id)
     if not listing:
         raise HTTPException(status_code=404, detail="Listing not found")
+    ensure_user_owns_resource(current_user, listing.user_id)
 
     return {
         "id": listing.id,
@@ -106,12 +121,17 @@ async def ebay_listing_status(listing_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/ebay/offers/dashboard")
-async def ebay_offer_dashboard(user_id: int = Query(1), db: Session = Depends(get_db)):
-    account = await get_or_refresh_account(user_id, db)
+async def ebay_offer_dashboard(
+    user_id: int | None = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    scoped_user_id = resolve_user_scope(current_user, user_id)
+    account = await get_or_refresh_account(scoped_user_id, db)
     active_offers = await get_incoming_best_offers(account, limit=50)
     decisions = db.execute(
         select(EbayOfferHistory)
-        .where(EbayOfferHistory.user_id == user_id)
+        .where(EbayOfferHistory.user_id == scoped_user_id)
         .order_by(EbayOfferHistory.created_at.desc())
         .limit(100)
     ).scalars().all()

@@ -1,12 +1,52 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
 
 async function jsonFetch(url, options = {}) {
-  const response = await fetch(url, options);
-  const data = await response.json();
+  const response = await fetch(url, {
+    credentials: "include",
+    ...options,
+  });
+  const contentType = response.headers.get("content-type") || "";
+  const data = contentType.includes("application/json")
+    ? await response.json()
+    : null;
   if (!response.ok) {
-    throw new Error(data.detail || data.message || "Request failed");
+    throw new Error(data?.detail || data?.message || "Request failed");
   }
   return data;
+}
+
+export async function fetchCurrentUser() {
+  return jsonFetch(`${API_BASE}/auth/me`);
+}
+
+export async function updateCurrentUser(body) {
+  return jsonFetch(`${API_BASE}/auth/me`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function registerUser(body) {
+  return jsonFetch(`${API_BASE}/auth/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function loginUser(body) {
+  return jsonFetch(`${API_BASE}/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function logoutUser() {
+  return jsonFetch(`${API_BASE}/auth/logout`, {
+    method: "POST",
+  });
 }
 
 export async function fetchListings() {
@@ -25,9 +65,9 @@ export async function updateListing(id, body) {
   });
 }
 
-export async function fetchListingTemplates(userId = 1, categoryId) {
+export async function fetchListingTemplates(userId, categoryId) {
   const url = new URL(`${API_BASE}/listing-templates`);
-  url.searchParams.set("user_id", String(userId));
+  if (userId) url.searchParams.set("user_id", String(userId));
   if (categoryId) url.searchParams.set("category_id", categoryId);
   return jsonFetch(url.toString());
 }
@@ -80,11 +120,10 @@ export async function fetchMarketplaces() {
   return jsonFetch(`${API_BASE}/marketplaces`);
 }
 
-export async function connectMarketplace(name, userId = 1) {
-  return jsonFetch(
-    `${API_BASE}/marketplaces/${name}/connect?user_id=${userId}`,
-    { method: "POST" },
-  );
+export async function connectMarketplace(name, userId) {
+  const url = new URL(`${API_BASE}/marketplaces/${name}/connect`);
+  if (userId) url.searchParams.set("user_id", String(userId));
+  return jsonFetch(url.toString(), { method: "POST" });
 }
 
 export async function fetchEbayAuthUrl(userId, redirectUri) {
@@ -98,12 +137,17 @@ export async function fetchEbayStatus(id) {
   return jsonFetch(`${API_BASE}/ebay/status/${id}`);
 }
 
-export async function fetchAnalyticsOverview(userId = 1) {
-  return jsonFetch(`${API_BASE}/analytics/overview?user_id=${userId}`);
+export async function fetchAnalyticsOverview(userId) {
+  const url = new URL(`${API_BASE}/analytics/overview`);
+  if (userId) url.searchParams.set("user_id", String(userId));
+  return jsonFetch(url.toString());
 }
 
-export async function fetchAnalyticsDashboard(userId = 1, days = 30) {
-  return jsonFetch(`${API_BASE}/analytics/dashboard?user_id=${userId}&days=${days}`);
+export async function fetchAnalyticsDashboard(userId, days = 30) {
+  const url = new URL(`${API_BASE}/analytics/dashboard`);
+  if (userId) url.searchParams.set("user_id", String(userId));
+  url.searchParams.set("days", String(days));
+  return jsonFetch(url.toString());
 }
 
 export async function fetchPricingRecommendation(id) {
@@ -118,8 +162,10 @@ export async function fetchPrediction(id) {
   return jsonFetch(`${API_BASE}/predictions/${id}`);
 }
 
-export async function fetchAlerts(userId = 1) {
-  return jsonFetch(`${API_BASE}/alerts?user_id=${userId}`);
+export async function fetchAlerts(userId) {
+  const url = new URL(`${API_BASE}/alerts`);
+  if (userId) url.searchParams.set("user_id", String(userId));
+  return jsonFetch(url.toString());
 }
 
 export async function fetchListingPricing(id) {
@@ -138,12 +184,18 @@ export async function toggleAutonomousMode(enabled) {
   });
 }
 
-export async function fetchEbayOfferDashboard(userId = 1) {
-  return jsonFetch(`${API_BASE}/ebay/offers/dashboard?user_id=${userId}`);
+export async function fetchEbayOfferDashboard(userId) {
+  const url = new URL(`${API_BASE}/ebay/offers/dashboard`);
+  if (userId) url.searchParams.set("user_id", String(userId));
+  return jsonFetch(url.toString());
 }
 
-export async function fetchPlatformConfig(userId = 1) {
+export async function fetchPlatformConfig(userId) {
   return jsonFetch(`${API_BASE}/users/${userId}/platform-config`);
+}
+
+export async function fetchAccountSetupSummary(userId) {
+  return jsonFetch(`${API_BASE}/users/${userId}/setup`);
 }
 
 export async function updatePlatformConfig(userId, marketplaces) {
@@ -206,17 +258,18 @@ export async function fetchBulkJob(jobId) {
   return jsonFetch(`${API_BASE}/bulk-jobs/${jobId}`);
 }
 
-export async function fetchSalesDashboard(userId = 1, limit = 100) {
-  return jsonFetch(
-    `${API_BASE}/sales/dashboard?user_id=${userId}&limit=${limit}`,
-  );
+export async function fetchSalesDashboard(userId, limit = 100) {
+  const url = new URL(`${API_BASE}/sales/dashboard`);
+  if (userId) url.searchParams.set("user_id", String(userId));
+  url.searchParams.set("limit", String(limit));
+  return jsonFetch(url.toString());
 }
 
-export function downloadSalesReportCsv(userId = 1) {
+export function downloadSalesReportCsv(userId) {
   window.open(`${API_BASE}/sales/reports/sales.csv?user_id=${userId}`, '_blank', 'noopener,noreferrer');
 }
 
-export function downloadInventoryReportCsv(userId = 1) {
+export function downloadInventoryReportCsv(userId) {
   window.open(`${API_BASE}/sales/reports/inventory.csv?user_id=${userId}`, '_blank', 'noopener,noreferrer');
 }
 
@@ -228,7 +281,7 @@ export async function updateSaleDetails(saleId, body) {
   });
 }
 
-export async function fetchSaleDetectionSettings(userId = 1) {
+export async function fetchSaleDetectionSettings(userId) {
   return jsonFetch(`${API_BASE}/sales/settings/${userId}`);
 }
 
@@ -240,7 +293,7 @@ export async function updateSaleDetectionSettings(userId, marketplaces) {
   });
 }
 
-export async function fetchOfferRules(userId = 1) {
+export async function fetchOfferRules(userId) {
   return jsonFetch(`${API_BASE}/sales/offers/rules/${userId}`);
 }
 
@@ -252,12 +305,14 @@ export async function updateOfferRules(userId, body) {
   });
 }
 
-export async function sendOffersNow(userId = 1) {
+export async function sendOffersNow(userId) {
   return jsonFetch(`${API_BASE}/sales/offers/send/${userId}`, { method: "POST" });
 }
 
-export async function fetchOfferHistory(userId = 1) {
-  return jsonFetch(`${API_BASE}/sales/offers/history?user_id=${userId}`);
+export async function fetchOfferHistory(userId) {
+  const url = new URL(`${API_BASE}/sales/offers/history`);
+  if (userId) url.searchParams.set("user_id", String(userId));
+  return jsonFetch(url.toString());
 }
 
 export function toPublicImageUrl(path) {

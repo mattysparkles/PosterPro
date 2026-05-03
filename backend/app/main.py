@@ -3,6 +3,9 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from sqlalchemy import text
+
+from app.api.auth import router as auth_router
 from app.api.ebay import router as ebay_router
 from app.api.inventory import bulk_router as bulk_jobs_router
 from app.api.inventory import router as inventory_router
@@ -15,7 +18,12 @@ from app.core.database import Base, engine
 
 Base.metadata.create_all(bind=engine)
 
+with engine.begin() as connection:
+    connection.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT"))
+    connection.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE"))
+
 app = FastAPI(title="PosterPro API")
+app.include_router(auth_router)
 app.include_router(router)
 app.include_router(ebay_router)
 app.include_router(marketplaces_router)

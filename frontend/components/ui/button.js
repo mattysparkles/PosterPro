@@ -3,20 +3,20 @@ import { cva } from 'class-variance-authority';
 import { cn } from '../../lib/utils';
 
 const buttonVariants = cva(
-  'inline-flex items-center justify-center gap-2 rounded-2xl text-sm font-semibold transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 disabled:pointer-events-none disabled:opacity-50 active:scale-[0.98]',
+  'inline-flex items-center justify-center gap-2 rounded-full border text-sm font-semibold transition-all focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-[#2563eb]/15 disabled:pointer-events-none disabled:opacity-50 active:scale-[0.99]',
   {
     variants: {
       variant: {
-        default: 'bg-primary text-primary-foreground hover:brightness-110 shadow-soft',
-        secondary: 'bg-muted text-foreground hover:bg-muted/80',
-        ghost: 'text-muted-foreground hover:bg-muted/70 hover:text-foreground',
-        outline: 'border border-border bg-background hover:bg-muted/60',
+        default: 'pp-button-primary',
+        secondary: 'border-[#e5e7eb] bg-[#f8fafc] text-[#111827] hover:bg-white',
+        ghost: 'border-transparent bg-transparent text-[#667085] hover:bg-white hover:text-[#111827]',
+        outline: 'pp-button-secondary hover:bg-[#f8fafc]',
       },
       size: {
-        default: 'h-11 px-5',
-        sm: 'h-9 px-3 text-xs',
+        default: 'h-12 px-5',
+        sm: 'h-10 px-3.5 text-xs',
         lg: 'h-12 px-6 text-base',
-        icon: 'h-11 w-11',
+        icon: 'h-12 w-12',
       },
     },
     defaultVariants: {

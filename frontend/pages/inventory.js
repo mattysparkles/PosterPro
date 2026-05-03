@@ -1,243 +1,123 @@
+import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useReactTable, getCoreRowModel, flexRender, createColumnHelper } from '@tanstack/react-table';
-import { CheckSquare, ClipboardList, Eraser, Filter, Grid3X3, Image, Keyboard, List, PackageOpen, Pencil, RefreshCcw, Sparkles, Tag, Trash2, Undo2, Zap } from 'lucide-react';
+import { ChevronDown, PencilLine, RefreshCcw, Tag, Trash2 } from 'lucide-react';
 import toast from 'react-hot-toast';
 
 import AppShell from '../components/layout/AppShell';
+import PhotoEditorModal from '../components/PhotoEditorModal';
 import Badge from '../components/ui/badge';
 import Button from '../components/ui/button';
-import { Card, CardDescription, CardTitle } from '../components/ui/card';
 import Input from '../components/ui/input';
-import PhotoEditorModal from '../components/PhotoEditorModal';
+import { Tabs } from '../components/ui/tabs';
+import { useAuth } from '../contexts/AuthContext';
 import useDashboardData from '../hooks/useDashboardData';
-import { fetchBulkJob, fetchInventory, processListingPhoto, runInventoryBulkJob, toPublicImageUrl, toggleAutonomousMode } from '../lib/api';
+import { fetchInventory, processListingPhoto, runInventoryBulkJob, toggleAutonomousMode, toPublicImageUrl } from '../lib/api';
 
-const columnHelper = createColumnHelper();
-const TABS = ['All', 'Multi-Quantity', 'Stale'];
-const VIRTUALIZATION_THRESHOLD = 500;
-const VIRTUAL_ROW_HEIGHT = 76;
-const VIRTUAL_CONTAINER_HEIGHT = 560;
+const INVENTORY_TABS = [
+  { value: 'intake', label: 'Intake' },
+  { value: 'active', label: 'Active' },
+  { value: 'sold', label: 'Sold' },
+  { value: 'batches', label: 'Batches' },
+];
 
-function ConfirmBulkModal({ open, onClose, onConfirm, summary }) {
-  if (!open) return null;
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-      <Card className="w-full max-w-xl space-y-4 p-2">
-        <CardTitle className="text-2xl">Confirm Large Bulk Action</CardTitle>
-        <CardDescription>
-          This will affect <span className="font-bold text-foreground">{summary.count.toLocaleString()} items</span> and is estimated to take about{' '}
-          <span className="font-bold text-foreground">{summary.estimate} minute(s)</span>.
-        </CardDescription>
-        <p className="rounded-xl bg-muted/60 p-3 text-sm">Action: {summary.label}</p>
-        <div className="flex justify-end gap-2">
-          <Button variant="outline" size="lg" onClick={onClose}>Cancel</Button>
-          <Button size="lg" onClick={onConfirm}>Start bulk job</Button>
-        </div>
-      </Card>
-    </div>
-  );
+const FILTER_OPTIONS = [
+  { value: 'all', label: 'All items' },
+  { value: 'multi', label: 'Qty > 1' },
+  { value: 'stale', label: 'Stale inventory' },
+];
+
+function getInventoryStatus(item) {
+  if (item.quantity <= 0) return { label: 'Sold', tone: 'danger' };
+  if (item.status === 'archived') return { label: 'Archived', tone: 'default' };
+  if (item.status === 'ingested' || item.status === 'INGESTED') return { label: 'Intake', tone: 'info' };
+  return { label: 'Active', tone: 'success' };
 }
 
-function ProgressModal({ job, onClose }) {
-  if (!job) return null;
-  const pct = job.total_items ? Math.min(100, Math.round((job.processed_items / job.total_items) * 100)) : 0;
-  const done = ['completed', 'completed_with_errors', 'failed'].includes(job.status);
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-      <Card className="w-full max-w-xl space-y-4 p-2">
-        <CardTitle className="text-xl">Bulk Processing</CardTitle>
-        <CardDescription>{job.processed_items} of {job.total_items} completed • status: {job.status}</CardDescription>
-        <div className="h-3 w-full rounded-full bg-muted">
-          <div className="h-3 rounded-full bg-primary transition-all" style={{ width: `${pct}%` }} />
-        </div>
-        {!!job.errors?.length && (
-          <div className="max-h-40 overflow-auto rounded-xl border border-border p-2 text-xs">
-            {job.errors.map((error, idx) => <p key={`${error.listing_id}-${idx}`}>#{error.listing_id}: {error.error}</p>)}
-          </div>
-        )}
-        <div className="flex justify-end gap-2">
-          {!done && <Button variant="outline" size="lg" title="Cancellation can be implemented by revoking Celery tasks." disabled>Cancel</Button>}
-          <Button size="lg" onClick={onClose}>{done ? 'Close' : 'Hide'}</Button>
-        </div>
-      </Card>
-    </div>
-  );
-}
-
-function InventorySkeleton({ view = 'table' }) {
-  if (view === 'grid') {
-    return (
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-        {[...Array(6)].map((_, idx) => <div key={idx} className="h-44 animate-pulse rounded-2xl bg-muted/60" />)}
-      </div>
-    );
-  }
-  return <div className="h-56 animate-pulse rounded-2xl bg-muted/60" />;
+function getBatchLabel(item, storageBatches) {
+  const batch = storageBatches.find((row) => row.id === item.batch_id);
+  return batch?.name || (item.batch_id ? `Batch ${item.batch_id}` : 'Unassigned');
 }
 
 export default function InventoryPage({ theme, setTheme }) {
-  const { autonomousConfig, reload } = useDashboardData();
-  const [tab, setTab] = useState('All');
+  const { user } = useAuth();
+  const { autonomousConfig, reload, storageBatches, clusters } = useDashboardData(user?.id);
+  const [activeTab, setActiveTab] = useState('active');
   const [search, setSearch] = useState('');
   const [inventory, setInventory] = useState([]);
-  const [total, setTotal] = useState(0);
-  const [selection, setSelection] = useState({});
-  const [selectAllMatching, setSelectAllMatching] = useState(false);
-  const [view, setView] = useState('table');
-  const [page, setPage] = useState(1);
-  const pageSize = view === 'table' ? 1000 : 120;
-  const [confirmAction, setConfirmAction] = useState(null);
-  const [bulkJob, setBulkJob] = useState(null);
-  const [editingListing, setEditingListing] = useState(null);
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [filter, setFilter] = useState('all');
   const [isLoading, setIsLoading] = useState(false);
-  const [virtualOffset, setVirtualOffset] = useState(0);
-  const [isBackgroundSyncing, setIsBackgroundSyncing] = useState(false);
-
-  const filters = useMemo(() => ({
-    quantityGtOne: tab === 'Multi-Quantity',
-    stale: tab === 'Stale',
-    search,
-    page,
-    pageSize,
-  }), [page, pageSize, search, tab]);
+  const [editingListing, setEditingListing] = useState(null);
 
   const loadInventory = useCallback(async () => {
     setIsLoading(true);
     try {
-      const response = await fetchInventory(filters);
+      const response = await fetchInventory({
+        search,
+        page: 1,
+        pageSize: 200,
+        quantityGtOne: filter === 'multi',
+        stale: filter === 'stale',
+      });
       setInventory(response.items || []);
-      setTotal(response.total || 0);
     } finally {
       setIsLoading(false);
     }
-  }, [filters]);
+  }, [filter, search]);
 
   useEffect(() => {
     loadInventory();
   }, [loadInventory]);
 
-  useEffect(() => {
-    if (!bulkJob || ['completed', 'completed_with_errors', 'failed'].includes(bulkJob.status)) return;
-    const timer = setInterval(async () => {
-      const updated = await fetchBulkJob(bulkJob.job_id);
-      setBulkJob(updated);
-      if (['completed', 'completed_with_errors', 'failed'].includes(updated.status)) {
-        setIsBackgroundSyncing(false);
-        toast.success(`Bulk job finished: ${updated.processed_items}/${updated.total_items}`);
-        await loadInventory();
-      }
-    }, 1500);
-    return () => clearInterval(timer);
-  }, [bulkJob, loadInventory]);
+  const filteredInventory = useMemo(() => {
+    if (activeTab === 'sold') return inventory.filter((item) => item.quantity <= 0);
+    if (activeTab === 'intake') return inventory.filter((item) => item.status === 'ingested' || item.status === 'INGESTED');
+    if (activeTab === 'active') {
+      return inventory.filter((item) => item.quantity > 0 && item.status !== 'archived' && item.status !== 'ingested' && item.status !== 'INGESTED');
+    }
+    return [];
+  }, [activeTab, inventory]);
 
-  const columns = useMemo(() => [
-    columnHelper.display({
-      id: 'select',
-      header: () => <input type="checkbox" checked={inventory.length > 0 && inventory.every((item) => selection[item.id])} onChange={(e) => {
-        const checked = e.target.checked;
-        setSelection((prev) => {
-          const next = { ...prev };
-          inventory.forEach((item) => { next[item.id] = checked; });
-          return next;
-        });
-      }} />,
-      cell: ({ row }) => <input type="checkbox" checked={!!selection[row.original.id]} onChange={(e) => setSelection((prev) => ({ ...prev, [row.original.id]: e.target.checked }))} />,
+  const tabCounts = useMemo(
+    () => ({
+      intake: inventory.filter((item) => item.status === 'ingested' || item.status === 'INGESTED').length,
+      active: inventory.filter((item) => item.quantity > 0 && item.status !== 'archived' && item.status !== 'ingested' && item.status !== 'INGESTED').length,
+      sold: inventory.filter((item) => item.quantity <= 0).length,
+      batches: storageBatches.length || clusters.length,
     }),
-    columnHelper.accessor('title', { header: 'Listing', cell: (info) => info.getValue() || `Listing #${info.row.original.id}` }),
+    [clusters.length, inventory, storageBatches.length],
+  );
 
-    columnHelper.display({
-      id: 'photo',
-      header: 'Photo',
-      cell: ({ row }) => (
-        <Button size="sm" variant="outline" onClick={() => setEditingListing(row.original)} title="Quick edit listing photos.">
-          <Image size={14} /> Quick edit
-        </Button>
-      ),
-    }),
-    columnHelper.accessor('quantity', { header: 'Qty' }),
-    columnHelper.accessor('custom_labels', { header: 'Labels', cell: (info) => <div className="flex flex-wrap gap-1">{(info.getValue() || []).map((label) => <Badge key={label} tone="info">{label}</Badge>)}</div> }),
-    columnHelper.accessor('last_refreshed', { header: 'Status', cell: (info) => {
-      const stale = !info.getValue() || Date.now() - new Date(info.getValue()).getTime() > 1000 * 60 * 60 * 24 * 7;
-      return <Badge tone={stale ? 'danger' : 'success'}>{stale ? 'Stale' : 'Synced'}</Badge>;
-    } }),
-    columnHelper.display({
-      id: 'actions',
-      header: 'Quick actions',
-      cell: ({ row }) => (
-        <div className="flex flex-wrap gap-2">
-          <Button size="sm" variant="outline" onClick={() => setEditingListing(row.original)}><Image size={14} /> Edit</Button>
-          <Button size="sm" variant="secondary" onClick={() => { setSelection({ [row.original.id]: true }); setSelectAllMatching(false); setTimeout(() => queueAction('mark_sold'), 0); }}><ClipboardList size={14} /> Sold</Button>
-        </div>
-      ),
-    }),
-  ], [inventory, selection]);
+  const toggleRow = (id) => {
+    setSelectedIds((current) => (current.includes(id) ? current.filter((item) => item !== id) : [...current, id]));
+  };
 
-  const table = useReactTable({ data: inventory, columns, getCoreRowModel: getCoreRowModel() });
-  const shouldVirtualize = view === 'table' && total > VIRTUALIZATION_THRESHOLD;
-  const visibleRowCount = Math.ceil(VIRTUAL_CONTAINER_HEIGHT / VIRTUAL_ROW_HEIGHT) + 8;
-  const startIndex = Math.max(0, Math.floor(virtualOffset / VIRTUAL_ROW_HEIGHT) - 4);
-  const endIndex = Math.min(table.getRowModel().rows.length, startIndex + visibleRowCount);
-  const visibleRows = shouldVirtualize ? table.getRowModel().rows.slice(startIndex, endIndex) : table.getRowModel().rows;
-  const selectedIds = useMemo(() => Object.entries(selection).filter(([, checked]) => checked).map(([id]) => Number(id)), [selection]);
-  const effectiveSelectionCount = selectAllMatching ? total : selectedIds.length;
-
-  const queueAction = (action, payload = {}) => {
-    if (!selectAllMatching && selectedIds.length === 0) {
-      toast.error('Select items or use Select All Matching Filters first.');
+  const runBulkAction = async (action) => {
+    if (!selectedIds.length) {
+      toast.error('Select inventory items first.');
       return;
     }
-    setConfirmAction({ action, payload, label: action.toUpperCase() });
+    await runInventoryBulkJob({ action, listing_ids: selectedIds, filters: {}, payload: {} });
+    toast.success(`Queued ${action} for ${selectedIds.length} items.`);
+    setSelectedIds([]);
+    await loadInventory();
   };
 
-  useEffect(() => {
-    const onKeyDown = (event) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
-        event.preventDefault();
-        document.getElementById('inventory-search')?.focus();
-      }
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'r') {
-        event.preventDefault();
-        loadInventory();
-      }
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'g') {
-        event.preventDefault();
-        setView((prev) => (prev === 'table' ? 'grid' : 'table'));
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [loadInventory]);
-
-  const startBulkJob = async () => {
-    if (!confirmAction) return;
-    const body = {
-      action: confirmAction.action,
-      payload: confirmAction.payload,
-      filters: {
-        stale: tab === 'Stale',
-        quantity_gt_one: tab === 'Multi-Quantity',
-        search: search || null,
-      },
-      listing_ids: selectAllMatching ? [] : selectedIds,
-    };
-    if (!selectAllMatching && selectedIds.length) {
-      setInventory((prev) => prev.map((item) => {
-        if (!selectedIds.includes(item.id)) return item;
-        if (confirmAction.action === 'mark_sold') {
-          return { ...item, quantity: 0, last_refreshed: new Date().toISOString() };
-        }
-        if (confirmAction.action === 'refresh' || confirmAction.action === 'autobump') {
-          return { ...item, last_refreshed: new Date().toISOString(), stale_flag: false };
-        }
-        return item;
+  const batches = storageBatches.length
+    ? storageBatches.map((batch) => ({
+        id: batch.id,
+        name: batch.name || `Batch ${batch.id}`,
+        item_count: batch.item_count || 0,
+        photo_count: batch.photo_count || batch.image_count || 0,
+        status: batch.status || 'Queued',
+      }))
+    : clusters.map((cluster) => ({
+        id: cluster.id,
+        name: `Batch ${cluster.id}`,
+        item_count: cluster.listing_count || 0,
+        photo_count: cluster.image_count || 0,
+        status: 'Grouped',
       }));
-    }
-    const job = await runInventoryBulkJob(body);
-    setBulkJob(job);
-    setIsBackgroundSyncing(true);
-    setConfirmAction(null);
-    toast.success(`Unlimited bulk job queued for ${job.total_items} item(s). Processing safely in background.`);
-  };
 
   return (
     <AppShell
@@ -255,133 +135,209 @@ export default function InventoryPage({ theme, setTheme }) {
         document.documentElement.classList.toggle('dark', next === 'dark');
       }}
     >
-      <Card className="space-y-5">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <CardTitle>Inventory Command Center</CardTitle>
-            <CardDescription>Limitless bulk operations with explicit progress, chunking, and no silent limits.</CardDescription>
-          </div>
-          <div className="flex gap-2">
-            <Button size="lg" variant="outline" onClick={() => setView((prev) => (prev === 'table' ? 'grid' : 'table'))}>{view === 'table' ? <Grid3X3 size={18} /> : <List size={18} />}</Button>
-            <Button size="lg" variant="outline" onClick={loadInventory}><RefreshCcw size={18} /></Button>
-          </div>
+      <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+        <div>
+          <p className="text-sm font-semibold text-[#667085]">Inventory</p>
+          <h1 className="mt-1 text-[2rem] font-semibold tracking-[-0.04em] text-[#111827]">Inventory</h1>
         </div>
-        {total > VIRTUALIZATION_THRESHOLD && (
-          <CardDescription title="Large inventories are virtualized automatically so browsing stays fast.">
-            Handling large inventory with virtualized rendering and safe background processing.
-          </CardDescription>
-        )}
-        {isBackgroundSyncing && (
-          <CardDescription title="Bulk changes are optimistic in the UI and then reconciled in background sync.">
-            Syncing bulk updates in background for unlimited operations…
-          </CardDescription>
-        )}
-        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-          <Keyboard size={14} />
-          <Badge tone="default">⌘/Ctrl + F Search</Badge>
-          <Badge tone="default">⌘/Ctrl + R Refresh</Badge>
-          <Badge tone="default">⌘/Ctrl + G Toggle view</Badge>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" onClick={loadInventory}>
+            <RefreshCcw size={16} />
+            Refresh
+          </Button>
+          <Link href="/listings">
+            <Button variant="outline">Open listings</Button>
+          </Link>
         </div>
+      </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          {TABS.map((tabName) => <Button key={tabName} size="lg" variant={tab === tabName ? 'default' : 'secondary'} onClick={() => { setPage(1); setTab(tabName); }}><Filter size={16} /> {tabName}</Button>)}
-          <Input id="inventory-search" placeholder="Search title / ID" value={search} onChange={(e) => { setPage(1); setSearch(e.target.value); }} className="w-full sm:max-w-md" />
-        </div>
-
-        <Card className="rounded-2xl border-dashed p-4">
-          <div className="mb-3 flex flex-wrap items-center gap-2">
-            <Button size="lg" variant={selectAllMatching ? 'default' : 'outline'} title="Select every listing matching active filters across all pages. Unlimited scope, safely chunked in background." onClick={() => setSelectAllMatching(true)}><CheckSquare size={18} /> Select All Matching Filters</Button>
-            <Button size="lg" variant="outline" onClick={() => { setSelection({}); setSelectAllMatching(false); }}><Eraser size={18} /> Clear Selection</Button>
-            <Badge tone="info">This will affect {effectiveSelectionCount.toLocaleString()} items</Badge>
+      <div className="rounded-[18px] border border-[#e5e7eb] bg-white p-4">
+        <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+          <div className="flex flex-1 flex-col gap-3 sm:flex-row">
+            <Input
+              placeholder="Search inventory"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              className="w-full sm:max-w-[320px]"
+            />
+            <div className="relative w-full sm:w-[220px]">
+              <select
+                value={filter}
+                onChange={(event) => setFilter(event.target.value)}
+                className="pp-input h-12 w-full appearance-none pr-10 text-sm text-[#111827]"
+              >
+                {FILTER_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown size={16} className="pointer-events-none absolute right-4 top-4 text-[#98a2b3]" />
+            </div>
           </div>
+          <div className="text-sm text-[#667085]">
+            {isLoading ? 'Loading…' : activeTab === 'batches' ? `${batches.length} visible` : `${filteredInventory.length} visible`}
+          </div>
+        </div>
+      </div>
+
+      <Tabs
+        items={INVENTORY_TABS.map((tab) => ({ ...tab, count: tabCounts[tab.value] || 0 }))}
+        value={activeTab}
+        onChange={(value) => {
+          setActiveTab(value);
+          setSelectedIds([]);
+        }}
+      />
+
+      {selectedIds.length && activeTab !== 'batches' ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-[18px] border border-[#e5e7eb] bg-white px-4 py-3">
+          <p className="text-sm font-semibold text-[#111827]">{selectedIds.length} selected</p>
           <div className="flex flex-wrap gap-2">
-            <Button size="lg" title="Bulk edit selected inventory quantities and platform quantities. Unlimited size; safely processed in background." onClick={() => queueAction('edit', { quantity: 1 })}><Pencil size={18} /> Bulk Edit</Button>
-            <Button size="lg" variant="secondary" title="Manual override to immediately mark selected listings as sold. Unlimited and safely synchronized." onClick={() => queueAction('mark_sold')}><ClipboardList size={18} /> Mark as Sold</Button>
-            <Button size="lg" variant="outline" title="Delist selected listings from all marketplaces with unlimited queue size and safe chunking." onClick={() => queueAction('delist')}><Trash2 size={18} /> Bulk Delist</Button>
-            <Button size="lg" variant="outline" title="Relist selected or filtered listings to restore visibility at unlimited scale." onClick={() => queueAction('relist')}><Undo2 size={18} /> Bulk Relist</Button>
-            <Button size="lg" variant="outline" title="Add/remove labels in bulk with no quantity limit and background-safe processing." onClick={() => queueAction('label', { add_labels: ['priority'], remove_labels: [] })}><Tag size={18} /> Add/Remove Labels</Button>
-            <Button size="lg" variant="secondary" title="Relist all stale items to boost visibility — unlimited volume, safety throttled." onClick={() => queueAction('refresh')}><Zap size={18} /> Refresh Stale</Button>
-            <Button size="lg" variant="secondary" title="Schedule marketplace auto-bump in dynamic chunks for unlimited listings." onClick={() => queueAction('autobump', { marketplaces: ['poshmark', 'depop', 'grailed'] })}><RefreshCcw size={18} /> Marketplace Sharer</Button>
-          </div>
-        </Card>
-
-        {isLoading ? (
-          <InventorySkeleton view={view} />
-        ) : inventory.length === 0 ? (
-          <Card className="flex flex-col items-center gap-3 rounded-2xl border-dashed py-10 text-center">
-            <PackageOpen size={34} className="text-muted-foreground" />
-            <p className="text-lg font-semibold">No inventory yet — you’re ready for unlimited bulk actions</p>
-            <p className="max-w-md text-sm text-muted-foreground">Try clearing filters, switching tabs, or uploading a fresh storage unit batch. We process huge inventories safely in the background with clear progress.</p>
-            <Button variant="outline" onClick={() => { setSearch(''); setTab('All'); }}>
-              <Sparkles size={16} /> Reset filters
+            <Button variant="outline" size="sm" onClick={() => setSelectedIds([])}>
+              Clear
             </Button>
-          </Card>
-        ) : view === 'table' ? (
-          <div
-            className="overflow-x-auto rounded-2xl border border-border/70"
-            style={shouldVirtualize ? { maxHeight: `${VIRTUAL_CONTAINER_HEIGHT}px`, overflowY: 'auto' } : undefined}
-            onScroll={shouldVirtualize ? (event) => setVirtualOffset(event.currentTarget.scrollTop) : undefined}
-            title={shouldVirtualize ? 'Virtualized for speed on large inventories. Unlimited operations remain available.' : undefined}
-          >
-            <table className="w-full text-left text-sm">
-              <thead className="bg-muted/40">{table.getHeaderGroups().map((headerGroup) => <tr key={headerGroup.id}>{headerGroup.headers.map((header) => <th key={header.id} className="px-3 py-2 font-semibold text-muted-foreground">{flexRender(header.column.columnDef.header, header.getContext())}</th>)}</tr>)}</thead>
+            <Button variant="outline" size="sm" onClick={() => runBulkAction('label')}>
+              <Tag size={14} />
+              Label
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => runBulkAction('delist')}>
+              <Trash2 size={14} />
+              Delist
+            </Button>
+            <Button size="sm" onClick={() => runBulkAction('mark_sold')}>
+              Mark sold
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      {activeTab === 'batches' ? (
+        <div className="overflow-hidden rounded-[18px] border border-[#e5e7eb] bg-white">
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-left text-sm">
+              <thead className="bg-[#f8fafc]">
+                <tr>
+                  <th className="px-4 py-3 font-semibold text-[#667085]">Batch</th>
+                  <th className="px-4 py-3 font-semibold text-[#667085]">Items</th>
+                  <th className="px-4 py-3 font-semibold text-[#667085]">Photos</th>
+                  <th className="px-4 py-3 font-semibold text-[#667085]">Status</th>
+                </tr>
+              </thead>
               <tbody>
-                {shouldVirtualize && startIndex > 0 && (
-                  <tr><td colSpan={columns.length} style={{ height: `${startIndex * VIRTUAL_ROW_HEIGHT}px` }} /></tr>
-                )}
-                {visibleRows.map((row) => <tr key={row.id} className="border-t border-border/70">{row.getVisibleCells().map((cell) => <td key={cell.id} className="px-3 py-3 align-top">{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}</tr>)}
-                {shouldVirtualize && endIndex < table.getRowModel().rows.length && (
-                  <tr><td colSpan={columns.length} style={{ height: `${(table.getRowModel().rows.length - endIndex) * VIRTUAL_ROW_HEIGHT}px` }} /></tr>
+                {batches.length ? (
+                  batches.map((batch) => (
+                    <tr key={batch.id} className="border-t border-[#e5e7eb] hover:bg-[#fbfdff]">
+                      <td className="px-4 py-3 font-medium text-[#111827]">{batch.name}</td>
+                      <td className="px-4 py-3 text-[#111827]">{batch.item_count}</td>
+                      <td className="px-4 py-3 text-[#111827]">{batch.photo_count}</td>
+                      <td className="px-4 py-3">
+                        <Badge tone="info">{String(batch.status).toLowerCase()}</Badge>
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={4} className="px-4 py-10 text-center text-sm text-[#667085]">
+                      No batches available yet.
+                    </td>
+                  </tr>
                 )}
               </tbody>
             </table>
           </div>
-        ) : (
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{inventory.map((item) => (
-            <Card key={item.id} className="space-y-2 rounded-2xl">
-              {!!item.image_urls?.[0] && <img src={toPublicImageUrl(item.image_urls[0])} alt={item.title || `Listing ${item.id}`} className="h-36 w-full rounded-xl object-cover" />}
-              <p className="text-sm font-semibold">{item.title || `Listing #${item.id}`}</p>
-              <div className="flex items-center justify-between">
-                <Badge tone={item.quantity > 1 ? 'info' : 'default'}>Qty: {item.quantity}</Badge>
-                <div className="flex gap-2">
-                  <Button size="sm" variant="outline" onClick={() => setEditingListing(item)} title="Quick edit listing photos."><Image size={14} /> Quick edit</Button>
-                  <Button size="sm" variant="secondary" onClick={() => { setSelection({ [item.id]: true }); setSelectAllMatching(false); setTimeout(() => queueAction('mark_sold'), 0); }}><ClipboardList size={14} /> Sold</Button>
-                </div>
-              </div>
-            </Card>
-          ))}</div>
-        )}
-
-        <div className="flex items-center justify-between">
-          <p className="text-sm text-muted-foreground">{total.toLocaleString()} total listings</p>
-          <div className="flex gap-2">
-            <Button variant="outline" onClick={() => setPage((prev) => Math.max(1, prev - 1))} disabled={page === 1}>Prev</Button>
-            <Badge>{page}</Badge>
-            <Button variant="outline" onClick={() => setPage((prev) => prev + 1)} disabled={page * pageSize >= total}>Next</Button>
+        </div>
+      ) : (
+        <div className="overflow-hidden rounded-[18px] border border-[#e5e7eb] bg-white">
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-left text-sm">
+              <thead className="bg-[#f8fafc]">
+                <tr>
+                  <th className="w-12 px-4 py-3">
+                    <input
+                      type="checkbox"
+                      checked={filteredInventory.length > 0 && selectedIds.length === filteredInventory.length}
+                      onChange={() =>
+                        setSelectedIds(selectedIds.length === filteredInventory.length ? [] : filteredInventory.map((item) => item.id))
+                      }
+                      className="h-4 w-4 rounded border-[#cbd5e1] text-[#2563eb] focus:ring-[#2563eb]"
+                    />
+                  </th>
+                  <th className="px-4 py-3 font-semibold text-[#667085]">Item</th>
+                  <th className="px-4 py-3 font-semibold text-[#667085]">Photo count</th>
+                  <th className="px-4 py-3 font-semibold text-[#667085]">Status</th>
+                  <th className="px-4 py-3 font-semibold text-[#667085]">Batch</th>
+                  <th className="px-4 py-3 font-semibold text-[#667085]">Value</th>
+                  <th className="px-4 py-3 font-semibold text-[#667085]">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredInventory.length ? (
+                  filteredInventory.map((item) => {
+                    const status = getInventoryStatus(item);
+                    return (
+                      <tr key={item.id} className="border-t border-[#e5e7eb] hover:bg-[#fbfdff]">
+                        <td className="px-4 py-3">
+                          <input
+                            type="checkbox"
+                            checked={selectedIds.includes(item.id)}
+                            onChange={() => toggleRow(item.id)}
+                            className="h-4 w-4 rounded border-[#cbd5e1] text-[#2563eb] focus:ring-[#2563eb]"
+                          />
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-3">
+                            <div className="h-11 w-11 overflow-hidden rounded-[12px] bg-[#f2f4f7]">
+                              {item.image_urls?.[0] ? (
+                                <img src={toPublicImageUrl(item.image_urls[0])} alt={item.title || `Item ${item.id}`} className="h-full w-full object-cover" />
+                              ) : null}
+                            </div>
+                            <div className="min-w-[220px]">
+                              <p className="truncate font-semibold text-[#111827]">{item.title || `Listing #${item.id}`}</p>
+                              <p className="mt-1 text-xs text-[#667085]">#{item.id}</p>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 text-[#111827]">{item.image_urls?.length || 0}</td>
+                        <td className="px-4 py-3">
+                          <Badge tone={status.tone}>{status.label}</Badge>
+                        </td>
+                        <td className="px-4 py-3 text-[#667085]">{getBatchLabel(item, storageBatches)}</td>
+                        <td className="px-4 py-3 font-medium text-[#111827]">${Number(item.price || item.suggested_price || 0).toFixed(0)}</td>
+                        <td className="px-4 py-3">
+                          <Button variant="outline" size="sm" onClick={() => setEditingListing(item)}>
+                            <PencilLine size={14} />
+                            Edit photo
+                          </Button>
+                        </td>
+                      </tr>
+                    );
+                  })
+                ) : (
+                  <tr>
+                    <td colSpan={7} className="px-4 py-10 text-center text-sm text-[#667085]">
+                      No inventory records in this view.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </div>
         </div>
-      </Card>
+      )}
 
-      <ConfirmBulkModal
-        open={!!confirmAction}
-        onClose={() => setConfirmAction(null)}
-        onConfirm={startBulkJob}
-        summary={{
-          count: effectiveSelectionCount,
-          estimate: Math.max(1, Math.ceil(effectiveSelectionCount / Math.max(250, Math.ceil(effectiveSelectionCount / 50 || 1)))),
-          label: confirmAction?.label || '',
-        }}
-      />
-      <ProgressModal job={bulkJob} onClose={() => setBulkJob(null)} />
       <PhotoEditorModal
         open={!!editingListing}
         listing={editingListing}
         onClose={() => setEditingListing(null)}
         onApply={async ({ listingId, sourceImage, file, removeBackground, edits }) => {
-          const result = await processListingPhoto({ listingId, sourceImage, file, removeBackground, edits });
-          setInventory((prev) => prev.map((item) => (item.id === listingId ? { ...item, image_urls: result.image_urls } : item)));
+          await processListingPhoto({ listingId, sourceImage, file, removeBackground, edits });
+          await loadInventory();
+          await reload();
         }}
       />
     </AppShell>
   );
 }
+
+InventoryPage.requireAuth = true;

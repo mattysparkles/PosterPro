@@ -18,6 +18,8 @@ class User(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     enabled_platforms: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     sale_detection_platforms: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
 

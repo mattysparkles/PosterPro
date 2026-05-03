@@ -30,6 +30,7 @@ class ListingUpdateRequest(BaseModel):
 
 class ListingResponse(BaseModel):
     id: int
+    user_id: int
     cluster_id: int | None
     status: str
     image_urls: list[str] | None = None
@@ -195,3 +196,64 @@ class ListingTemplateResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class AuthRegisterRequest(BaseModel):
+    email: str
+    password: str = Field(min_length=8, max_length=128)
+    full_name: str | None = None
+
+
+class AuthLoginRequest(BaseModel):
+    email: str
+    password: str = Field(min_length=8, max_length=128)
+
+
+class UserResponse(BaseModel):
+    id: int
+    email: str
+    full_name: str | None = None
+    is_admin: bool = False
+
+    class Config:
+        from_attributes = True
+
+
+class AuthSessionResponse(BaseModel):
+    user: UserResponse
+    is_bootstrap_admin: bool = False
+
+
+class UserUpdateRequest(BaseModel):
+    full_name: str | None = None
+
+
+class MarketplaceConnectionStatusResponse(BaseModel):
+    marketplace: str
+    supports_oauth: bool = False
+    connection_mode: str = "server_config"
+    connected: bool = False
+    available: bool = False
+    enabled_for_publishing: bool = False
+    enabled_for_sale_detection: bool = False
+    external_account_id: str | None = None
+    token_expires_at: datetime | None = None
+    status_note: str | None = None
+
+
+class ServerReadinessResponse(BaseModel):
+    openai_configured: bool = False
+    photoroom_configured: bool = False
+    ebay_oauth_configured: bool = False
+    storage_root_configured: bool = False
+
+
+class AccountSetupSummaryResponse(BaseModel):
+    user: UserResponse
+    ready_to_publish_count: int = 0
+    total_listings: int = 0
+    connected_marketplaces: int = 0
+    has_templates: bool = False
+    account_profile_complete: bool = False
+    marketplace_connections: list[MarketplaceConnectionStatusResponse] = Field(default_factory=list)
+    server_readiness: ServerReadinessResponse

@@ -25,9 +25,10 @@ from app.api.schemas import (
     PhotoEditResponse,
     StorageUnitBatchResponse,
 )
+from app.core.auth import ensure_user_owns_resource, get_current_user, resolve_user_scope
 from app.core.config import settings
 from app.core.database import get_db
-from app.models.models import Cluster, Image, Listing, ListingTemplate, StorageUnitBatch
+from app.models.models import Cluster, Image, Listing, ListingTemplate, StorageUnitBatch, User
 from app.services.ebay import EbayService
 from app.services.embedding import fake_clip_embedding
 from app.services.google_photos import GooglePhotosService
@@ -111,15 +112,25 @@ class AutonomousToggleRequest(BaseModel):
 
 
 @router.get("/listing-templates", response_model=list[ListingTemplateResponse])
-def get_listing_templates(user_id: int = 1, category_id: str | None = None, db: Session = Depends(get_db)):
-    return listing_template_service.list_templates(db, user_id=user_id, category_id=category_id)
+def get_listing_templates(
+    user_id: int | None = None,
+    category_id: str | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    scoped_user_id = resolve_user_scope(current_user, user_id)
+    return listing_template_service.list_templates(db, user_id=scoped_user_id, category_id=category_id)
 
 
 @router.post("/listing-templates", response_model=ListingTemplateResponse)
-def create_listing_template(payload: ListingTemplateCreateRequest, db: Session = Depends(get_db)):
+def create_listing_template(
+    payload: ListingTemplateCreateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     return listing_template_service.create_template(
         db,
-        user_id=payload.user_id,
+        user_id=resolve_user_scope(current_user, payload.user_id),
         name=payload.name,
         category_id=payload.category_id,
         is_category_default=payload.is_category_default,
@@ -141,42 +152,59 @@ def apply_template_to_listing(listing_id: int, payload: ListingTemplateApplyRequ
 
 
 @router.post("/import/google-photos")
-def import_google_photos(payload: GooglePhotosImportRequest, db: Session = Depends(get_db)):
+def import_google_photos(
+    payload: GooglePhotosImportRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     photo_service = GooglePhotosService()
     storage = LocalStorage()
     pipeline = ImagePipelineService()
 
     urls = photo_service.extract_image_urls(str(payload.album_url))
     created = []
+    scoped_user_id = resolve_user_scope(current_user, payload.user_id)
     for url in urls:
         local = storage.save_from_url(url)
         processed = pipeline.process(local)
         embedding = fake_clip_embedding(processed)
-        image = Image(user_id=payload.user_id, source_url=url, local_path=processed, embedding=embedding)
+        image = Image(user_id=scoped_user_id, source_url=url, local_path=processed, embedding=embedding)
         db.add(image)
         created.append(url)
     db.commit()
 
-    task = cluster_images_task.delay(payload.user_id)
+    task = cluster_images_task.delay(scoped_user_id)
     return {"imported": len(created), "task_id": task.id}
 
 
 @router.get("/clusters")
-def get_clusters(db: Session = Depends(get_db)):
-    clusters = db.execute(select(Cluster)).scalars().all()
+def get_clusters(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    clusters = db.execute(select(Cluster).where(Cluster.user_id == current_user.id)).scalars().all()
     return [{"id": c.id, "title_hint": c.title_hint, "image_count": len(c.images)} for c in clusters]
 
 
 @router.get("/listings", response_model=list[ListingResponse])
-def get_listings(db: Session = Depends(get_db)):
-    return db.execute(select(Listing)).scalars().all()
+def get_listings(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return db.execute(select(Listing).where(Listing.user_id == current_user.id).order_by(Listing.updated_at.desc())).scalars().all()
 
 
 @router.patch("/listings/{listing_id}", response_model=ListingResponse)
-def update_listing(listing_id: int, payload: ListingUpdateRequest, db: Session = Depends(get_db)):
+def update_listing(
+    listing_id: int,
+    payload: ListingUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     listing = db.get(Listing, listing_id)
     if not listing:
         raise HTTPException(status_code=404, detail="Listing not found")
+    ensure_user_owns_resource(current_user, listing.user_id)
     for key, value in payload.model_dump(exclude_none=True, exclude={"quantity", "platform_quantities", "custom_labels"}).items():
         setattr(listing, key, value)
     try:
@@ -204,10 +232,12 @@ async def process_listing_photo(
     source_image: str | None = Form(default=None),
     photo: UploadFile | None = File(default=None),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     listing = db.get(Listing, listing_id)
     if not listing:
         raise HTTPException(status_code=404, detail="Listing not found")
+    ensure_user_owns_resource(current_user, listing.user_id)
 
     candidates = [source_image, *((listing.image_urls or [])), listing.raw_photo_path]
     preferred_source = next((item for item in candidates if item), None)
@@ -252,9 +282,10 @@ async def process_listing_photo(
 @router.post("/ingest/photos")
 async def ingest_photos(
     photos: list[UploadFile] = File(...),
-    user_id: int = Form(1),
+    user_id: int | None = Form(None),
     storage_unit_name: str | None = Form(None),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     if not photos:
         raise HTTPException(status_code=400, detail="No photos uploaded")
@@ -263,6 +294,7 @@ async def ingest_photos(
     listing_ids: list[int] = []
     uploads: list[str] = []
 
+    scoped_user_id = resolve_user_scope(current_user, user_id)
     for photo in photos:
         content = await photo.read()
         if not content:
@@ -270,7 +302,7 @@ async def ingest_photos(
         suffix = Path(photo.filename or "").suffix or ".jpg"
         raw_path = storage.save_bytes(content, extension=suffix, prefix="uploads")
         listing = Listing(
-            user_id=user_id,
+            user_id=scoped_user_id,
             cluster_id=None,
             status=ListingStatus.INGESTED,
             image_urls=[raw_path],
@@ -294,10 +326,11 @@ async def ingest_photos(
 async def ingest_storage_unit_batch(
     zip_file: UploadFile | None = File(default=None),
     image_urls: str | None = Form(default=None),
-    user_id: int = Form(1),
+    user_id: int | None = Form(None),
     storage_unit_name: str | None = Form(default=None),
     overnight_mode: bool = Form(default=False),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     if not zip_file and not image_urls:
         raise HTTPException(status_code=400, detail="Provide either zip_file or image_urls")
@@ -338,7 +371,13 @@ async def ingest_storage_unit_batch(
     if not photo_paths:
         raise HTTPException(status_code=400, detail="No valid images found in payload")
 
-    batch = _create_storage_batch(db, user_id, storage_unit_name, overnight_mode, photo_paths)
+    batch = _create_storage_batch(
+        db,
+        resolve_user_scope(current_user, user_id),
+        storage_unit_name,
+        overnight_mode,
+        photo_paths,
+    )
     db.commit()
     db.refresh(batch)
     if not overnight_mode:
@@ -355,12 +394,22 @@ async def ingest_storage_unit_batch(
 
 
 @router.post("/batch/storage-unit/from-urls", response_model=StorageUnitBatchResponse)
-def ingest_storage_unit_urls(payload: BatchStorageUnitUrlRequest, db: Session = Depends(get_db)):
+def ingest_storage_unit_urls(
+    payload: BatchStorageUnitUrlRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     storage = LocalStorage()
     photo_paths = [storage.save_from_url(str(url), prefix="batch_uploads") for url in payload.image_urls]
     if not photo_paths:
         raise HTTPException(status_code=400, detail="No valid image URLs received")
-    batch = _create_storage_batch(db, payload.user_id, payload.storage_unit_name, payload.overnight_mode, photo_paths)
+    batch = _create_storage_batch(
+        db,
+        resolve_user_scope(current_user, payload.user_id),
+        payload.storage_unit_name,
+        payload.overnight_mode,
+        photo_paths,
+    )
     db.commit()
     db.refresh(batch)
     if payload.overnight_mode:
@@ -376,23 +425,40 @@ def ingest_storage_unit_urls(payload: BatchStorageUnitUrlRequest, db: Session = 
 
 
 @router.get("/batch/storage-unit", response_model=list[StorageUnitBatchResponse])
-def list_storage_unit_batches(db: Session = Depends(get_db)):
-    return db.execute(select(StorageUnitBatch).order_by(StorageUnitBatch.id.desc())).scalars().all()
+def list_storage_unit_batches(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return db.execute(
+        select(StorageUnitBatch)
+        .where(StorageUnitBatch.user_id == current_user.id)
+        .order_by(StorageUnitBatch.id.desc())
+    ).scalars().all()
 
 
 @router.get("/batch/storage-unit/{batch_id}", response_model=StorageUnitBatchResponse)
-def get_storage_unit_batch(batch_id: int, db: Session = Depends(get_db)):
+def get_storage_unit_batch(
+    batch_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     batch = db.get(StorageUnitBatch, batch_id)
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
+    ensure_user_owns_resource(current_user, batch.user_id)
     return batch
 
 
 @router.post("/batch/storage-unit/{batch_id}/run-overnight", response_model=StorageUnitBatchResponse)
-def run_storage_unit_batch(batch_id: int, db: Session = Depends(get_db)):
+def run_storage_unit_batch(
+    batch_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     batch = db.get(StorageUnitBatch, batch_id)
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
+    ensure_user_owns_resource(current_user, batch.user_id)
     if batch.status not in {"QUEUED", "INGESTED"}:
         raise HTTPException(status_code=400, detail=f"Batch is not runnable from status {batch.status}")
     _start_batch_pipeline(db, batch)
@@ -436,18 +502,29 @@ def toggle_autonomous_mode(payload: AutonomousToggleRequest | None = None):
 
 
 @router.get("/listings/{listing_id}/pricing")
-def get_listing_pricing(listing_id: int, db: Session = Depends(get_db)):
+def get_listing_pricing(
+    listing_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     listing = db.get(Listing, listing_id)
     if not listing:
         raise HTTPException(status_code=404, detail="Listing not found")
+    ensure_user_owns_resource(current_user, listing.user_id)
     return PricingService().get_pricing(db, listing_id)
 
 
 @router.post("/listings/{listing_id}/generate", response_model=ListingResponse)
-def generate_listing(listing_id: int, payload: ListingGenerateRequest, db: Session = Depends(get_db)):
+def generate_listing(
+    listing_id: int,
+    payload: ListingGenerateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     listing = db.get(Listing, listing_id)
     if not listing:
         raise HTTPException(status_code=404, detail="Listing not found")
+    ensure_user_owns_resource(current_user, listing.user_id)
 
     ai = ListingAIService()
     ebay = EbayService()

@@ -5,6 +5,7 @@ import AppShell from '../components/layout/AppShell';
 import Button from '../components/ui/button';
 import Input from '../components/ui/input';
 import { Card, CardDescription, CardTitle } from '../components/ui/card';
+import { useAuth } from '../contexts/AuthContext';
 import {
   fetchAutonomousConfig,
   fetchOfferHistory,
@@ -15,15 +16,17 @@ import {
 } from '../lib/api';
 
 export default function OffersPage({ theme, setTheme }) {
+  const { user } = useAuth();
   const [autonomousConfig, setAutonomousConfig] = useState({ autonomous_mode: true, autonomous_dry_run: true });
   const [offerRule, setOfferRule] = useState({ is_enabled: false, rules: {} });
   const [history, setHistory] = useState([]);
 
   const reload = async () => {
+    if (!user?.id) return;
     const [autoData, ruleData, historyData] = await Promise.all([
       fetchAutonomousConfig(),
-      fetchOfferRules(1),
-      fetchOfferHistory(1),
+      fetchOfferRules(user.id),
+      fetchOfferHistory(user.id),
     ]);
     setAutonomousConfig(autoData);
     setOfferRule(ruleData);
@@ -32,7 +35,7 @@ export default function OffersPage({ theme, setTheme }) {
 
   useEffect(() => {
     reload();
-  }, []);
+  }, [user?.id]);
 
   const rules = offerRule.rules || {};
 
@@ -58,7 +61,7 @@ export default function OffersPage({ theme, setTheme }) {
             <CardTitle>Send Offers</CardTitle>
             <CardDescription>Build rules to automatically send personalized offers to new watchers/likers.</CardDescription>
           </div>
-          <Button onClick={async () => { await sendOffersNow(1); await reload(); }}><Send size={16} /> Send Offers Now</Button>
+          <Button onClick={async () => { await sendOffersNow(user.id); await reload(); }}><Send size={16} /> Send Offers Now</Button>
         </div>
 
         <form
@@ -66,7 +69,7 @@ export default function OffersPage({ theme, setTheme }) {
           onSubmit={async (event) => {
             event.preventDefault();
             const form = new FormData(event.currentTarget);
-            await updateOfferRules(1, {
+            await updateOfferRules(user.id, {
               is_enabled: form.get('is_enabled') === 'on',
               rules: {
                 auto_send_to_new_watchers: form.get('auto_send_to_new_watchers') === 'on',
@@ -140,3 +143,5 @@ export default function OffersPage({ theme, setTheme }) {
     </AppShell>
   );
 }
+
+OffersPage.requireAuth = true;

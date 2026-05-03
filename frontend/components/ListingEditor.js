@@ -56,12 +56,12 @@ export default function ListingEditor({
         <StatusPill status={listing.ebay_publish_status || listing.status} />
       </div>
       <CardDescription className="mb-4">
-        Update details here, then publish everywhere in one click.
+        Tighten the draft, set pricing, and publish when it is ready.
       </CardDescription>
 
-      <div className="mb-4 flex flex-wrap items-center gap-2 rounded-2xl border border-border/70 bg-muted/30 p-3">
+      <div className="mb-4 flex flex-wrap items-center gap-2 rounded-[20px] border border-[#e5e7eb] bg-[#f8fafc] p-3">
         <select
-          className="rounded-xl border border-border bg-background px-3 py-2 text-sm"
+          className="h-12 rounded-xl border border-[#e5e7eb] bg-white px-3 text-sm text-[#111827] outline-none transition focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
           value={selectedTemplateId}
           onChange={(e) => setSelectedTemplateId(e.target.value)}
         >
@@ -87,7 +87,7 @@ export default function ListingEditor({
           variant="secondary"
           onClick={() =>
             onSaveTemplate({
-              user_id: listing.user_id || 1,
+              user_id: listing.user_id,
               name: `${listing.category_suggestion || listing.category_id || "General"} Defaults`,
               category_id: listing.category_id || null,
               is_category_default: true,
@@ -114,7 +114,7 @@ export default function ListingEditor({
         <textarea
           defaultValue={listing.description || ""}
           placeholder="Describe condition, size, defects, accessories, and what is included."
-          className="min-h-28 w-full rounded-2xl border border-border bg-background p-3 text-sm outline-none focus:border-primary/70 focus:ring-2 focus:ring-primary/20"
+          className="min-h-28 w-full rounded-[16px] border border-[#e5e7eb] bg-white p-4 text-[15px] text-[#111827] outline-none transition placeholder:text-[#98a2b3] focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
           onBlur={(e) => onSave(listing.id, { description: e.target.value })}
           title="Explain the item in plain words so anyone can understand quickly."
         />
@@ -156,7 +156,7 @@ export default function ListingEditor({
       </div>
 
       <div className="mt-4">
-        <p className="mb-2 text-sm font-medium">Choose platforms</p>
+        <p className="mb-2 text-sm font-semibold text-[#111827]">Choose marketplaces</p>
         <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
           {PLATFORM_OPTIONS.map((market) => {
             const enabled = selectedPlatforms.includes(market);
@@ -165,18 +165,18 @@ export default function ListingEditor({
               <button
                 key={market}
                 type="button"
-                className={`rounded-2xl border p-3 text-left transition ${enabled ? "border-primary bg-primary/5" : "border-border/70 bg-background"}`}
+                className={`rounded-[18px] border p-3 text-left transition ${
+                  enabled ? 'border-[#2563eb] bg-[#eff6ff] shadow-[0_10px_24px_rgba(37,99,235,0.08)]' : 'border-[#e5e7eb] bg-white'
+                }`}
                 onClick={() => togglePlatform(market)}
               >
                 <div className="flex items-center justify-between">
-                  <span className="text-sm font-semibold capitalize">
-                    {market}
-                  </span>
+                  <span className="text-sm font-semibold capitalize text-[#111827]">{market}</span>
                   <span
-                    className={`h-5 w-9 rounded-full ${enabled ? "bg-emerald-500" : "bg-slate-300"}`}
+                    className={`h-5 w-9 rounded-full ${enabled ? 'bg-[#2563eb]' : 'bg-[#cbd5e1]'}`}
                   />
                 </div>
-                <span className="mt-2 inline-block rounded-full bg-muted px-2 py-0.5 text-xs">
+                <span className="mt-2 inline-block rounded-full border border-[#e5e7eb] bg-[#f8fafc] px-2 py-0.5 text-xs font-semibold text-[#667085]">
                   {status}
                 </span>
               </button>
