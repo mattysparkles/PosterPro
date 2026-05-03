@@ -1,0 +1,15 @@
+[Unit]
+Description=PosterPro Next.js Frontend
+After=network.target posterpro-backend.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/apps/posterpro/repo/frontend
+Environment=NEXT_PUBLIC_API_BASE=https://posterpro.sparkleserver.site/api
+ExecStartPre=/usr/bin/npm run build
+ExecStart=/usr/bin/npm start -- --hostname 127.0.0.1 --port 3030
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

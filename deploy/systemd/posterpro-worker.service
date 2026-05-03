@@ -1,0 +1,14 @@
+[Unit]
+Description=PosterPro Celery Worker
+After=network.target postgresql.service redis-server.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/apps/posterpro/repo/backend
+EnvironmentFile=/opt/apps/posterpro/repo/backend/.env
+ExecStart=/opt/apps/posterpro/repo/backend/.venv/bin/celery -A app.workers.celery_app.celery_app worker -Q posterpro --loglevel=info
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

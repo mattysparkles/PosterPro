@@ -1,0 +1,390 @@
+PosterPro Reality Check
+Date: 2026-04-07
+Workspace: /opt/apps/posterpro
+Repo inspected: /opt/apps/posterpro/repo
+
+Purpose
+This file captures the deployment and product reality of PosterPro based on:
+- the actual cloned GitHub repo
+- the current live server layout
+- the current Caddy config
+- the current open ports on this machine
+
+This is intended to prevent us from making false assumptions during deployment.
+
+==================================================
+1. Current Server Reality
+==================================================
+
+1.1 PosterPro was not already deployed locally
+- `/opt/apps/posterpro` started effectively empty.
+- The repo has now been cloned into `/opt/apps/posterpro/repo`.
+- There was no existing git checkout in the root of `/opt/apps/posterpro`.
+
+1.2 The main SparkleServer hub is already live elsewhere
+- `sparkleserver.site` is currently served through Caddy.
+- Its source appears to live under `/opt/apps/shellgames`.
+- The project grid that should eventually get a PosterPro card is in:
+  - `/opt/apps/shellgames/sparkles.html`
+  - `/opt/apps/shellgames/index.html`
+
+1.3 The live Caddy config is real and active
+- The main Caddyfile is at `/etc/caddy/Caddyfile`.
+- Existing apps are already routed there.
+- This means PosterPro must be added carefully without disturbing other sites.
+
+==================================================
+2. Port Conflict Reality
+==================================================
+
+2.1 Backend port 8010 is NOT safe
+- The original deployment brief proposed backend port `8010`.
+- That conflicts with a currently running live service.
+- Live port inspection showed:
+  - `127.0.0.1:8010` is already in use
+  - `*:8000` is also already in use
+  - `5432` is in use by PostgreSQL
+  - `6379` is in use by Redis
+
+2.2 Required correction
+- PosterPro must be assigned a different backend port.
+- The frontend port also needs to be chosen with the same collision check.
+- Port selection should happen only after `ss -ltnp` preflight.
+
+Recommended directive to append:
+- Before assigning ports or editing Caddy, run `ss -ltnp`.
+- Record the final chosen PosterPro ports in `AGENTS.md`.
+
+==================================================
+3. Caddy Proxy Reality
+==================================================
+
+3.1 The draft Caddy block is not correct as written
+- The proposed rule was:
+
+  posterpro.sparkleserver.site {
+    reverse_proxy /api/* localhost:8010
+    reverse_proxy /* localhost:3010
+  }
+
+- That assumes the FastAPI app is mounted under `/api`.
+- It is not.
+
+3.2 What the backend actually exposes
+- The FastAPI app includes routes like:
+  - `/health`
+  - `/listings`
+  - `/ebay/auth/url`
+  - `/sales/dashboard`
+  - `/inventory`
+- These are mounted directly at root in the backend app.
+- Source:
+  - `/opt/apps/posterpro/repo/backend/app/main.py`
+
+3.3 Why this matters
+- If Caddy proxies `/api/*` directly to the backend without stripping `/api`,
+  then requests like:
+  - `https://posterpro.sparkleserver.site/api/listings`
+  will arrive upstream as:
+  - `/api/listings`
+- The backend expects:
+  - `/listings`
+- So those requests would fail unless `/api` is stripped first.
+
+3.4 Media routing is also required
+- PosterPro mounts `/media` from its storage directory.
+- If uploaded images are meant to render on the live site, `/media/*` must also be proxied.
+
+3.5 Correct Caddy pattern
+- Use `handle /api/*` and strip the prefix.
+- Proxy `/media/*` to the backend.
+- Proxy the frontend separately.
+
+Example pattern:
+
+posterpro.sparkleserver.site {
+    encode zstd gzip
+
+    handle /api/* {
+        uri strip_prefix /api
+        reverse_proxy 127.0.0.1:<BACKEND_PORT>
+    }
+
+    handle /media/* {
+        reverse_proxy 127.0.0.1:<BACKEND_PORT>
+    }
+
+    handle {
+        reverse_proxy 127.0.0.1:<FRONTEND_PORT>
+    }
+}
+
+3.6 Safer reload procedure
+- Do not immediately reload after editing.
+- First validate:
+  - `caddy validate --config /etc/caddy/Caddyfile`
+- Then reload:
+  - `systemctl reload caddy`
+
+==================================================
+4. Frontend Production Reality
+==================================================
+
+4.1 The frontend is a Next.js app
+- The repo frontend is standard Next.js.
+- It is not currently configured as a static-export-only site.
+- Source:
+  - `/opt/apps/posterpro/repo/frontend/package.json`
+  - `/opt/apps/posterpro/repo/frontend/next.config.js`
+
+4.2 The original directive about static serving is too optimistic
+- The deployment note said to:
+  - run `npm run build`
+  - serve `out/` or `.next/` statically through Caddy
+  - avoid a Node process in production
+
+- That is not currently supported by the repo as-is.
+- `next build` creates a production build, but not a static-export site by default.
+- There is no export config in `next.config.js`.
+- There is no evidence that `out/` will exist.
+
+4.3 Practical deployment reality
+- Until the frontend is explicitly adapted for static export, production should use:
+  - `npm run build`
+  - `next start` on a dedicated localhost port
+  - Caddy reverse proxy to that Next server
+
+4.4 Frontend API base must be configured
+- The frontend uses:
+  - `NEXT_PUBLIC_API_BASE`
+- Default fallback is:
+  - `http://localhost:8000`
+- That is wrong for production if the public site is behind Caddy.
+- Production should set:
+  - `NEXT_PUBLIC_API_BASE=https://posterpro.sparkleserver.site/api`
+
+Source:
+- `/opt/apps/posterpro/repo/frontend/lib/api.js`
+
+==================================================
+5. Product Feature Reality: Lander, Login, Admin
+==================================================
+
+5.1 The current root page is not a marketing lander
+- The current frontend root page is the internal dashboard.
+- It is not a public onboarding site.
+- It does not currently serve as a polished marketing homepage.
+- Source:
+  - `/opt/apps/posterpro/repo/frontend/pages/index.js`
+
+5.2 `/features`, `/pricing`, and `/how-it-works` do not currently exist
+- These were requested in the deployment brief.
+- They are not present in the current frontend pages inspected.
+
+5.3 There is no real login flow yet
+- No meaningful login/auth/session system is currently implemented.
+- No real sign-in, sign-up, session, or protected routing layer was found.
+- No backend auth API or frontend auth pages were found in the current repo.
+
+5.4 There is no real admin backend yet
+- No `/admin` route or dedicated admin GUI was found.
+- No existing admin auth gate was found.
+- No current implementation was found for:
+  - user analytics overview restricted to admin
+  - user management panel
+  - admin-only logs view
+  - Matthew-only protected dashboard
+
+5.5 Bottom line
+- Login, admin, and marketing pages are not deployment-only work.
+- They are additional feature work that still needs to be built.
+
+==================================================
+6. User Model / Bootstrap Reality
+==================================================
+
+6.1 The app currently assumes `user_id=1` in many places
+- The frontend and backend repeatedly default to user 1.
+- This is visible in:
+  - analytics endpoints
+  - sales endpoints
+  - marketplace connection endpoints
+  - frontend dashboard hooks and API helpers
+
+6.2 Why this matters
+- A clean production database may not have any user row at all.
+- If no user exists with `id=1`, parts of the app may fail or return empty results.
+
+6.3 Required deployment/bootstrap step
+- Create a seed/bootstrap user before declaring the app functional.
+- If admin auth is added, that bootstrap path should also define the first admin account.
+
+==================================================
+7. Environment / Secret Reality
+==================================================
+
+7.1 Confirmed required environment values from code
+- `DATABASE_URL`
+- `REDIS_URL`
+- `STORAGE_ROOT`
+- `OPENAI_API_KEY`
+- `EBAY_CLIENT_ID`
+- `EBAY_CLIENT_SECRET`
+- `EBAY_REDIRECT_URI`
+- `AUTONOMOUS_MODE`
+- `AUTONOMOUS_DRY_RUN`
+- `MAX_CONCURRENT_BULK_TASKS`
+- `BULK_CHUNK_SIZE`
+
+7.2 Additional config values found in code
+- `ENVIRONMENT`
+- `PHOTOROOM_API_KEY`
+- `PHOTOROOM_API_URL`
+- `AUTONOMOUS_CROSSPOST_ENABLED`
+- `AUTO_RELIST_ENABLED`
+- `AUTO_RELIST_MIN_PRICE`
+- `AUTO_RELIST_USER_RULES_JSON`
+- `SALE_DETECTION_ENABLED`
+- `SALE_DETECTION_DRY_RUN`
+- `SALE_DETECTION_POLL_MINUTES`
+
+Sources:
+- `/opt/apps/posterpro/repo/backend/.env.example`
+- `/opt/apps/posterpro/repo/backend/app/core/config.py`
+
+7.3 Important functional meaning
+- `OPENAI_API_KEY`
+  Required for photo enrichment and pricing fallbacks.
+
+- `EBAY_CLIENT_ID`, `EBAY_CLIENT_SECRET`, `EBAY_REDIRECT_URI`
+  Required for the real eBay OAuth and publishing flow.
+
+- `PHOTOROOM_API_KEY`
+  Required for background removal in the photo editor.
+
+- `STORAGE_ROOT`
+  Required because the backend mounts `/media` from local storage and uses it for uploaded/processed assets.
+
+==================================================
+8. Automation Safety Reality
+==================================================
+
+8.1 Autonomous mode exists
+- PosterPro does contain autonomous-mode logic.
+- It also includes Celery worker tasks and Celery Beat schedules for recurring operations.
+
+8.2 Live-first risk
+- Turning everything fully live immediately can trigger real automation behavior before the stack is verified.
+- That is risky for a first production boot.
+
+8.3 Safer first deployment posture
+- First boot should use:
+  - `AUTONOMOUS_DRY_RUN=true`
+  - `SALE_DETECTION_DRY_RUN=true`
+- After smoke testing and verification, those can be changed if desired.
+
+==================================================
+9. Database / Migration Reality
+==================================================
+
+9.1 The repo includes multiple raw SQL migrations
+- The backend contains migration SQL files under:
+  - `/opt/apps/posterpro/repo/backend/migrations`
+
+9.2 Alembic is installed but not visibly wired up in repo root
+- `alembic` is in requirements.
+- No clear active Alembic project structure was found from the initial inspection summary.
+- The SQL migrations are definitely present and should be treated as required.
+
+9.3 Deployment implication
+- The DB creation and migration process needs to be explicit.
+- It should not assume tables are fully handled only by `Base.metadata.create_all()`.
+
+==================================================
+10. Smoke Test Reality
+==================================================
+
+10.1 Some requested smoke tests are not yet possible without new work
+- “Login works” cannot pass until login exists.
+- “Admin backend works” cannot pass until admin exists.
+- “Landing page loads beautifully” requires replacing or refactoring the current dashboard-root homepage.
+
+10.2 What is possible now after deployment
+- API health check
+- frontend availability
+- DB connectivity
+- Redis connectivity
+- Celery worker availability
+- basic dashboard rendering
+- basic ingestion pipeline test
+- eBay OAuth callback path verification once keys are present
+
+==================================================
+11. Best Append Directives To Add To The Main Deployment Brief
+==================================================
+
+Add these as explicit directives:
+
+11.1 Preflight / collision check
+- Before selecting ports or changing Caddy, run `ss -ltnp`.
+- Do not reuse `8010`; it is already occupied on this server.
+
+11.2 Correct Caddy API handling
+- Strip `/api` before proxying to the backend.
+- Proxy `/media/*` to the backend.
+- Validate Caddy before reload.
+
+11.3 Frontend production correction
+- Do not assume static export.
+- Unless the frontend is specifically converted to export mode, run a dedicated Next production server behind Caddy.
+
+11.4 Treat auth/admin as implementation work
+- `/login`, `/admin`, protected user backend, and admin analytics are not already present.
+- They must be built.
+
+11.5 Bootstrap a default user
+- Seed the initial user/admin record before relying on `user_id=1`.
+
+11.6 Safer first automation rollout
+- Start with `AUTONOMOUS_DRY_RUN=true` and `SALE_DETECTION_DRY_RUN=true`.
+
+11.7 Record all choices in AGENTS.md
+- Final port assignments
+- env vars still missing
+- Caddy block used
+- service names
+- start/stop/restart commands
+- rollback notes
+
+==================================================
+12. Bottom Line
+==================================================
+
+The deployment goal is still achievable, but the original brief contains a few assumptions that are not true in the current repo/server state:
+
+- backend port `8010` is already taken
+- the backend is not mounted under `/api`
+- the frontend is not yet set up as a static-only production export
+- the homepage is currently the internal dashboard, not a marketing lander
+- login/auth is not implemented yet
+- admin backend is not implemented yet
+- the app assumes `user_id=1`, so bootstrap data is needed
+
+So the correct framing is:
+
+Phase 1:
+- deploy the existing repo safely on non-conflicting ports
+- wire Caddy correctly
+- configure secrets
+- migrate DB
+- start API, worker, beat, and frontend
+- confirm health and smoke-test core functionality
+
+Phase 2:
+- build the public lander
+- add login/auth
+- add admin backend
+- add the SparkleServer project card
+- polish production UX
+
+That is the actual reality as of this inspection.
