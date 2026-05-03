@@ -55,12 +55,15 @@ class InventoryService:
 
     def build_inventory_query(
         self,
+        user_id: int | None = None,
         label: str | None = None,
         multi_quantity_only: bool = False,
         stale: bool = False,
         search: str | None = None,
     ) -> Select:
         stmt = select(Listing)
+        if user_id is not None:
+            stmt = stmt.where(Listing.user_id == user_id)
         if multi_quantity_only:
             stmt = stmt.where(Listing.quantity > 1)
 
@@ -170,12 +173,19 @@ class InventoryService:
             db.refresh(listing)
         return updated
 
-    def resolve_listing_ids(self, db: Session, listing_ids: list[int] | None = None, filters: dict | None = None) -> list[int]:
+    def resolve_listing_ids(
+        self,
+        db: Session,
+        user_id: int,
+        listing_ids: list[int] | None = None,
+        filters: dict | None = None,
+    ) -> list[int]:
         if listing_ids:
             return [int(listing_id) for listing_id in listing_ids]
 
         filters = filters or {}
         stmt = self.build_inventory_query(
+            user_id=user_id,
             label=filters.get("label"),
             multi_quantity_only=bool(filters.get("quantity_gt_one")),
             stale=bool(filters.get("stale")),

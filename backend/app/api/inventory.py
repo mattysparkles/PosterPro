@@ -3,8 +3,9 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.schemas import BulkJobResponse, InventoryBulkEditRequest, InventoryBulkRequest, ListingResponse
+from app.core.auth import ensure_user_owns_resource, get_current_user
 from app.core.database import get_db
-from app.models.models import BulkJob, Listing
+from app.models.models import BulkJob, Listing, User
 from app.services.inventory_service import InventorySafetyError, InventoryService
 
 router = APIRouter(prefix="/inventory", tags=["inventory"])
@@ -21,8 +22,15 @@ def get_inventory(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=5000),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    stmt = service.build_inventory_query(label=label, multi_quantity_only=quantity_gt_one, stale=stale, search=search)
+    stmt = service.build_inventory_query(
+        user_id=current_user.id,
+        label=label,
+        multi_quantity_only=quantity_gt_one,
+        stale=stale,
+        search=search,
+    )
     total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar_one()
     paginated = stmt.offset((page - 1) * page_size).limit(page_size)
     listings = db.execute(paginated).scalars().all()
@@ -35,13 +43,19 @@ def get_inventory(
 
 
 @router.post("/bulk-edit", response_model=list[ListingResponse])
-def bulk_edit_inventory(payload: InventoryBulkEditRequest, db: Session = Depends(get_db)):
+def bulk_edit_inventory(
+    payload: InventoryBulkEditRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     if not payload.listing_ids:
         raise HTTPException(status_code=400, detail="listing_ids is required")
 
     listings = db.query(Listing).filter(Listing.id.in_(payload.listing_ids)).all()
     if not listings:
         raise HTTPException(status_code=404, detail="No listings found for given ids")
+    for listing in listings:
+        ensure_user_owns_resource(current_user, listing.user_id)
 
     try:
         return service.bulk_update(db, listings, payload.model_dump())
@@ -50,15 +64,20 @@ def bulk_edit_inventory(payload: InventoryBulkEditRequest, db: Session = Depends
 
 
 @router.post("/bulk", response_model=BulkJobResponse)
-def bulk_inventory(payload: InventoryBulkRequest, db: Session = Depends(get_db)):
+def bulk_inventory(
+    payload: InventoryBulkRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     listing_ids = service.resolve_listing_ids(
         db,
+        user_id=current_user.id,
         listing_ids=payload.listing_ids,
         filters=payload.filters.model_dump() if payload.filters else None,
     )
     job = service.queue_bulk_job(
         db,
-        user_id=payload.user_id,
+        user_id=current_user.id,
         action=payload.action,
         listing_ids=listing_ids,
         payload=payload.payload or {},
@@ -76,10 +95,15 @@ def bulk_inventory(payload: InventoryBulkRequest, db: Session = Depends(get_db))
 
 
 @bulk_router.get("/bulk-jobs/{job_id}", response_model=BulkJobResponse)
-def get_bulk_job(job_id: str, db: Session = Depends(get_db)):
+def get_bulk_job(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     job = db.get(BulkJob, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Bulk job not found")
+    ensure_user_owns_resource(current_user, job.user_id)
     return BulkJobResponse(
         job_id=job.id,
         action=job.action,

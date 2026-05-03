@@ -1,10 +1,12 @@
 import AppShell from '../components/layout/AppShell';
+import { useAuth } from '../contexts/AuthContext';
 import PublishedListings from '../components/PublishedListings';
 import useDashboardData from '../hooks/useDashboardData';
 import { toggleAutonomousMode } from '../lib/api';
 
 export default function PublishedPage({ theme, setTheme }) {
-  const { listings, recentAutoPublished, autonomousConfig, reload } = useDashboardData();
+  const { user } = useAuth();
+  const { listings, recentAutoPublished, autonomousConfig, reload } = useDashboardData(user?.id);
 
   return (
     <AppShell
@@ -34,3 +36,5 @@ export default function PublishedPage({ theme, setTheme }) {
     </AppShell>
   );
 }
+
+PublishedPage.requireAuth = true;

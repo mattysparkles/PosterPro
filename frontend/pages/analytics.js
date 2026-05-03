@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { BarChart3, Download, LineChart as LineChartIcon, PieChart as PieChartIcon, TrendingUp } from 'lucide-react';
+import { Download } from 'lucide-react';
 import {
   Area,
   AreaChart,
@@ -7,7 +7,6 @@ import {
   BarChart,
   CartesianGrid,
   Cell,
-  Legend,
   Pie,
   PieChart,
   ResponsiveContainer,
@@ -18,7 +17,11 @@ import {
 
 import AppShell from '../components/layout/AppShell';
 import Button from '../components/ui/button';
-import { Card, CardDescription, CardTitle } from '../components/ui/card';
+import MetricCard from '../components/ui/metric-card';
+import PageHeader from '../components/ui/page-header';
+import SectionCard from '../components/ui/section-card';
+import { Tabs } from '../components/ui/tabs';
+import { useAuth } from '../contexts/AuthContext';
 import {
   downloadInventoryReportCsv,
   downloadSalesReportCsv,
@@ -27,16 +30,26 @@ import {
   toggleAutonomousMode,
 } from '../lib/api';
 
-const CHART_COLORS = ['#3b82f6', '#14b8a6', '#a855f7', '#f59e0b', '#ef4444', '#22c55e'];
+const CHART_COLORS = ['#2563eb', '#14b8a6', '#f59e0b', '#ef4444'];
+const ANALYTICS_TABS = [
+  { value: 'revenue', label: 'Revenue' },
+  { value: 'profit', label: 'Profit' },
+  { value: 'categories', label: 'Categories' },
+  { value: 'pricing', label: 'Pricing' },
+  { value: 'performance', label: 'Performance' },
+];
 
 export default function AnalyticsPage({ theme, setTheme }) {
+  const { user } = useAuth();
   const [dashboard, setDashboard] = useState({ kpis: {}, top_items: [], revenue_by_marketplace: [], sales_trend: [] });
   const [periodDays, setPeriodDays] = useState(30);
+  const [activeTab, setActiveTab] = useState('revenue');
   const [autonomousConfig, setAutonomousConfig] = useState({ autonomous_mode: true, autonomous_dry_run: true });
 
   const reload = async (days = periodDays) => {
+    if (!user?.id) return;
     const [analyticsData, autonomousData] = await Promise.all([
-      fetchAnalyticsDashboard(1, days),
+      fetchAnalyticsDashboard(user.id, days),
       fetchAutonomousConfig(),
     ]);
     setDashboard(analyticsData);
@@ -45,15 +58,15 @@ export default function AnalyticsPage({ theme, setTheme }) {
 
   useEffect(() => {
     reload(periodDays);
-  }, [periodDays]);
+  }, [periodDays, user?.id]);
 
   const kpis = useMemo(() => {
     const data = dashboard.kpis || {};
     return [
-      { label: 'Revenue', value: `$${Number(data.total_revenue || 0).toFixed(2)}`, icon: TrendingUp },
-      { label: 'Orders', value: data.total_sales || 0, icon: BarChart3 },
-      { label: 'Avg Order Value', value: `$${Number(data.avg_order_value || 0).toFixed(2)}`, icon: LineChartIcon },
-      { label: 'Active Listings', value: data.active_listings || 0, icon: PieChartIcon },
+      { label: 'Revenue', value: `$${Number(data.total_revenue || 0).toFixed(2)}`, detail: 'Gross revenue for the selected period.' },
+      { label: 'Profit', value: `$${Number(data.total_profit || 0).toFixed(2)}`, detail: 'Profit after recorded costs.' },
+      { label: 'Orders', value: data.total_sales || 0, detail: 'Completed sales count.' },
+      { label: 'Active listings', value: data.active_listings || 0, detail: 'Currently active marketplace listings.' },
     ];
   }, [dashboard]);
 
@@ -73,111 +86,133 @@ export default function AnalyticsPage({ theme, setTheme }) {
         document.documentElement.classList.toggle('dark', next === 'dark');
       }}
     >
-      <Card className="mb-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <CardTitle>Premium Analytics</CardTitle>
-            <CardDescription>Actionable trends, top sellers, and marketplace performance in one clear view.</CardDescription>
-          </div>
-          <div className="flex flex-wrap gap-2">
+      <PageHeader
+        eyebrow="Analytics"
+        title="Analytics"
+        description="Revenue, profit, pricing, and marketplace performance."
+        actions={
+          <>
             {[14, 30, 60, 90].map((days) => (
               <Button key={days} variant={periodDays === days ? 'default' : 'outline'} onClick={() => setPeriodDays(days)}>
                 {days}d
               </Button>
             ))}
-            <Button variant="outline" onClick={() => downloadSalesReportCsv(1)}><Download size={14} /> Sales CSV</Button>
-            <Button variant="outline" onClick={() => downloadInventoryReportCsv(1)}><Download size={14} /> Inventory CSV</Button>
-          </div>
-        </div>
-      </Card>
+            <Button variant="outline" onClick={() => downloadSalesReportCsv(user.id)}>
+              <Download size={14} />
+              Sales CSV
+            </Button>
+            <Button variant="outline" onClick={() => downloadInventoryReportCsv(user.id)}>
+              <Download size={14} />
+              Inventory CSV
+            </Button>
+          </>
+        }
+      />
 
-      <section className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         {kpis.map((item) => (
-          <Card key={item.label} className="bg-gradient-to-br from-card to-accent/30">
-            <div className="flex items-center justify-between">
-              <CardDescription>{item.label}</CardDescription>
-              <item.icon size={16} className="text-primary" />
-            </div>
-            <CardTitle className="mt-3 text-3xl">{item.value}</CardTitle>
-          </Card>
+          <MetricCard key={item.label} label={item.label} value={item.value} detail={item.detail} />
         ))}
       </section>
 
-      <section className="mt-4 grid gap-4 lg:grid-cols-3">
-        <Card className="lg:col-span-2">
-          <CardTitle>Revenue Trend</CardTitle>
-          <CardDescription className="mb-4">Daily revenue movement for the selected period.</CardDescription>
-          <div className="h-72">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={dashboard.sales_trend || []}>
-                <defs>
-                  <linearGradient id="revenueGradient" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.5} />
-                    <stop offset="95%" stopColor="#3b82f6" stopOpacity={0.05} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.25} />
-                <XAxis dataKey="date" hide />
-                <YAxis />
-                <Tooltip formatter={(value) => [`$${Number(value).toFixed(2)}`, 'Revenue']} />
-                <Area type="monotone" dataKey="revenue" stroke="#3b82f6" fill="url(#revenueGradient)" strokeWidth={3} />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-        </Card>
+      <Tabs items={ANALYTICS_TABS} value={activeTab} onChange={setActiveTab} />
 
-        <Card>
-          <CardTitle>Revenue by Marketplace</CardTitle>
-          <CardDescription className="mb-4">Which platforms are driving revenue.</CardDescription>
-          <div className="h-72">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie data={dashboard.revenue_by_marketplace || []} dataKey="revenue" nameKey="platform" innerRadius={55} outerRadius={90}>
-                  {(dashboard.revenue_by_marketplace || []).map((entry, idx) => (
-                    <Cell key={entry.platform} fill={CHART_COLORS[idx % CHART_COLORS.length]} />
-                  ))}
-                </Pie>
-                <Tooltip formatter={(value) => `$${Number(value).toFixed(2)}`} />
-                <Legend />
-              </PieChart>
-            </ResponsiveContainer>
-          </div>
-        </Card>
-      </section>
+      {activeTab === 'revenue' ? (
+        <div className="grid gap-5 xl:grid-cols-[1.2fr_0.8fr]">
+          <SectionCard title="Revenue trend" description="Daily revenue movement for the selected period.">
+            <div className="h-80">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={dashboard.sales_trend || []}>
+                  <defs>
+                    <linearGradient id="revenueGradient" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#2563eb" stopOpacity={0.32} />
+                      <stop offset="95%" stopColor="#2563eb" stopOpacity={0.04} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.18} />
+                  <XAxis dataKey="date" hide />
+                  <YAxis />
+                  <Tooltip formatter={(value) => [`$${Number(value).toFixed(2)}`, 'Revenue']} />
+                  <Area type="monotone" dataKey="revenue" stroke="#2563eb" fill="url(#revenueGradient)" strokeWidth={3} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          </SectionCard>
+          <SectionCard title="Revenue by marketplace" description="Which marketplaces are driving current revenue.">
+            <div className="h-80">
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie data={dashboard.revenue_by_marketplace || []} dataKey="revenue" nameKey="platform" innerRadius={55} outerRadius={90}>
+                    {(dashboard.revenue_by_marketplace || []).map((entry, idx) => (
+                      <Cell key={entry.platform} fill={CHART_COLORS[idx % CHART_COLORS.length]} />
+                    ))}
+                  </Pie>
+                  <Tooltip formatter={(value) => `$${Number(value).toFixed(2)}`} />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+          </SectionCard>
+        </div>
+      ) : null}
 
-      <section className="mt-4 grid gap-4 lg:grid-cols-2">
-        <Card>
-          <CardTitle>Top Sellers</CardTitle>
-          <CardDescription className="mb-4">Highest-performing items by revenue.</CardDescription>
-          <div className="h-80">
+      {activeTab === 'profit' ? (
+        <SectionCard title="Top sellers by profit" description="Highest-performing items for the selected period.">
+          <div className="h-96">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={dashboard.top_items || []} layout="vertical" margin={{ left: 20 }}>
-                <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.2} />
+                <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.18} />
                 <XAxis type="number" />
-                <YAxis type="category" dataKey="title" width={150} tick={{ fontSize: 12 }} />
+                <YAxis type="category" dataKey="title" width={170} tick={{ fontSize: 12 }} />
                 <Tooltip formatter={(value) => `$${Number(value).toFixed(2)}`} />
                 <Bar dataKey="revenue" fill="#14b8a6" radius={[0, 8, 8, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>
-        </Card>
+        </SectionCard>
+      ) : null}
 
-        <Card>
-          <CardTitle>Marketplace Sales Count</CardTitle>
-          <CardDescription className="mb-4">Order volume by marketplace.</CardDescription>
-          <div className="h-80">
+      {activeTab === 'categories' ? (
+        <SectionCard title="Marketplace mix" description="A quick category-style read on where sales are landing.">
+          <div className="space-y-3">
+            {(dashboard.revenue_by_marketplace || []).map((row) => (
+              <div key={row.platform} className="flex items-center justify-between rounded-[16px] border border-[#e5e7eb] bg-[#f8fafc] px-4 py-3">
+                <div>
+                  <p className="text-sm font-semibold text-[#111827]">{row.platform}</p>
+                  <p className="text-sm text-[#667085]">{row.sales_count} sales</p>
+                </div>
+                <p className="text-sm font-semibold text-[#111827]">${Number(row.revenue || 0).toFixed(2)}</p>
+              </div>
+            ))}
+          </div>
+        </SectionCard>
+      ) : null}
+
+      {activeTab === 'pricing' ? (
+        <SectionCard title="Pricing overview" description="Current order value and sell-through signals.">
+          <div className="grid gap-4 md:grid-cols-2">
+            <MetricCard label="Average order value" value={`$${Number(dashboard.kpis?.avg_order_value || 0).toFixed(2)}`} detail="Average sale value for this period." />
+            <MetricCard label="Sell-through rate" value={`${Number(dashboard.kpis?.sell_through_rate || 0).toFixed(1)}%`} detail="How often listed inventory converts." />
+          </div>
+        </SectionCard>
+      ) : null}
+
+      {activeTab === 'performance' ? (
+        <SectionCard title="Marketplace sales count" description="Order volume by marketplace.">
+          <div className="h-96">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={dashboard.revenue_by_marketplace || []}>
-                <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.2} />
+                <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.18} />
                 <XAxis dataKey="platform" />
                 <YAxis />
                 <Tooltip />
-                <Bar dataKey="sales_count" fill="#a855f7" radius={[8, 8, 0, 0]} />
+                <Bar dataKey="sales_count" fill="#2563eb" radius={[8, 8, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>
-        </Card>
-      </section>
+        </SectionCard>
+      ) : null}
     </AppShell>
   );
 }
+
+AnalyticsPage.requireAuth = true;

@@ -17,8 +17,22 @@ ALTER TABLE marketplace_listings
     DROP COLUMN IF EXISTS external_listing_id,
     DROP COLUMN IF EXISTS payload;
 
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_name = 'marketplace_listings'
+          AND column_name = 'status'
+          AND udt_name <> 'marketplacelistingstatus'
+    ) THEN
+        ALTER TABLE marketplace_listings
+            ALTER COLUMN status TYPE marketplacelistingstatus USING UPPER(status::text)::marketplacelistingstatus;
+    END IF;
+END
+$$;
+
 ALTER TABLE marketplace_listings
-    ALTER COLUMN status TYPE marketplacelistingstatus USING UPPER(status)::marketplacelistingstatus,
     ALTER COLUMN status SET DEFAULT 'DRAFT';
 
 CREATE INDEX IF NOT EXISTS ix_marketplace_listings_marketplace_listing_id ON marketplace_listings (marketplace_listing_id);

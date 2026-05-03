@@ -4,6 +4,7 @@ import { Download, Info } from 'lucide-react';
 import AppShell from '../components/layout/AppShell';
 import Button from '../components/ui/button';
 import { Card, CardDescription, CardTitle } from '../components/ui/card';
+import { useAuth } from '../contexts/AuthContext';
 import {
   fetchAutonomousConfig,
   fetchSaleDetectionSettings,
@@ -16,16 +17,18 @@ import {
 const MARKETPLACES = ['ebay', 'poshmark', 'mercari', 'depop', 'whatnot', 'vinted'];
 
 export default function SalesPage({ theme, setTheme }) {
+  const { user } = useAuth();
   const [dashboard, setDashboard] = useState({ summary: { by_platform: {} }, sales: [] });
   const [autonomousConfig, setAutonomousConfig] = useState({ autonomous_mode: true, autonomous_dry_run: true });
   const [platformSettings, setPlatformSettings] = useState([]);
   const [activeSale, setActiveSale] = useState(null);
 
   const reload = async () => {
+    if (!user?.id) return;
     const [salesData, autoData, settings] = await Promise.all([
-      fetchSalesDashboard(1, 200),
+      fetchSalesDashboard(user.id, 200),
       fetchAutonomousConfig(),
-      fetchSaleDetectionSettings(1),
+      fetchSaleDetectionSettings(user.id),
     ]);
     setDashboard(salesData);
     setAutonomousConfig(autoData);
@@ -36,7 +39,7 @@ export default function SalesPage({ theme, setTheme }) {
     reload();
     const interval = setInterval(reload, 20000);
     return () => clearInterval(interval);
-  }, []);
+  }, [user?.id]);
 
   const summaryCards = useMemo(() => {
     const summary = dashboard.summary || {};
@@ -117,7 +120,7 @@ export default function SalesPage({ theme, setTheme }) {
                     ? platformSettings.filter((name) => name !== marketplace)
                     : [...platformSettings, marketplace];
                   setPlatformSettings(next);
-                  await updateSaleDetectionSettings(1, next);
+                  await updateSaleDetectionSettings(user.id, next);
                 }}
               >
                 {marketplace}
@@ -188,3 +191,5 @@ export default function SalesPage({ theme, setTheme }) {
     </AppShell>
   );
 }
+
+SalesPage.requireAuth = true;

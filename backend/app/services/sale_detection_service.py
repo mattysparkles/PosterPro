@@ -159,7 +159,10 @@ class SaleDetectionService:
         adjusted = 0
         for event in events:
             if event.get("status") == "stub":
-                logger.info("Stubbed marketplace sale poll", extra=event)
+                logger.info(
+                    "Stubbed marketplace sale poll",
+                    extra={"user_id": user.id, "event_payload": event},
+                )
                 continue
             platform = str(event.get("marketplace") or "").lower()
             if platform not in MarketplaceName._value2member_map_:
