@@ -27,6 +27,18 @@ export async function updateCurrentUser(body) {
   });
 }
 
+export async function fetchSettingsPanels() {
+  return jsonFetch(`${API_BASE}/auth/settings/panels`);
+}
+
+export async function updateServerSettings(body) {
+  return jsonFetch(`${API_BASE}/auth/settings/server`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 export async function registerUser(body) {
   return jsonFetch(`${API_BASE}/auth/register`, {
     method: "POST",
@@ -46,6 +58,38 @@ export async function loginUser(body) {
 export async function logoutUser() {
   return jsonFetch(`${API_BASE}/auth/logout`, {
     method: "POST",
+  });
+}
+
+export async function forgotPassword(body) {
+  return jsonFetch(`${API_BASE}/auth/password/forgot`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function resetPassword(body) {
+  return jsonFetch(`${API_BASE}/auth/password/reset`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function changePassword(body) {
+  return jsonFetch(`${API_BASE}/auth/password/change`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function updateSessionViewMode(viewAsRegular) {
+  return jsonFetch(`${API_BASE}/auth/session/view-mode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ view_as_regular: viewAsRegular }),
   });
 }
 
@@ -172,6 +216,10 @@ export async function fetchListingPricing(id) {
   return jsonFetch(`${API_BASE}/listings/${id}/pricing`);
 }
 
+export async function fetchListingIntelligence(id) {
+  return jsonFetch(`${API_BASE}/listings/${id}/intelligence`);
+}
+
 export async function fetchAutonomousConfig() {
   return jsonFetch(`${API_BASE}/config/autonomous`);
 }
@@ -206,8 +254,43 @@ export async function updatePlatformConfig(userId, marketplaces) {
   });
 }
 
+export async function updateMarketplaceConnection(userId, marketplace, body) {
+  return jsonFetch(`${API_BASE}/users/${userId}/marketplace-connections/${marketplace}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 export async function fetchStorageUnitBatches() {
   return jsonFetch(`${API_BASE}/batch/storage-unit`);
+}
+
+export async function ingestPhotos({ files, storageUnitName }) {
+  const form = new FormData();
+  (files || []).forEach((file) => form.append("photos", file));
+  if (storageUnitName) form.append("storage_unit_name", storageUnitName);
+  return jsonFetch(`${API_BASE}/ingest/photos`, {
+    method: "POST",
+    body: form,
+  });
+}
+
+export async function createStorageUnitBatch({
+  zipFile,
+  imageUrls,
+  storageUnitName,
+  overnightMode = false,
+}) {
+  const form = new FormData();
+  if (zipFile) form.append("zip_file", zipFile);
+  if (imageUrls?.length) form.append("image_urls", JSON.stringify(imageUrls));
+  if (storageUnitName) form.append("storage_unit_name", storageUnitName);
+  form.append("overnight_mode", String(overnightMode));
+  return jsonFetch(`${API_BASE}/batch/storage-unit`, {
+    method: "POST",
+    body: form,
+  });
 }
 
 export async function fetchStorageUnitBatch(batchId) {
@@ -236,6 +319,55 @@ export async function fetchInventory(filters = {}) {
   if (filters.pageSize)
     url.searchParams.set("page_size", String(filters.pageSize));
   return jsonFetch(url.toString());
+}
+
+export async function uploadVineReport(file) {
+  const form = new FormData();
+  form.append("file", file);
+  return jsonFetch(`${API_BASE}/imports/vine/upload`, {
+    method: "POST",
+    body: form,
+  });
+}
+
+export async function fetchVineBatches() {
+  return jsonFetch(`${API_BASE}/imports/vine/batches`);
+}
+
+export async function fetchVineBatch(batchId) {
+  return jsonFetch(`${API_BASE}/imports/vine/batches/${batchId}`);
+}
+
+export async function fetchVineMedia(batchId, itemIds) {
+  return jsonFetch(`${API_BASE}/imports/vine/batches/${batchId}/fetch-media`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ item_ids: itemIds }),
+  });
+}
+
+export async function createVineInventory(batchId, itemIds, includeLocked = true) {
+  return jsonFetch(`${API_BASE}/imports/vine/batches/${batchId}/create-inventory`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ item_ids: itemIds, include_locked: includeLocked }),
+  });
+}
+
+export async function createVineDrafts(batchId, itemIds) {
+  return jsonFetch(`${API_BASE}/imports/vine/batches/${batchId}/create-drafts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ item_ids: itemIds }),
+  });
+}
+
+export async function updateVineItem(itemId, body) {
+  return jsonFetch(`${API_BASE}/imports/vine/items/${itemId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }
 
 export async function bulkEditInventory(payload) {

@@ -1,231 +1,265 @@
-# PosterPro — Full Project Guide (Admin + Operator Manual)
+# PosterPro — Complete Operator & User Manual
 
-PosterPro is a self-hosted resale operations platform for people who list lots of items and need help turning photos into clean listings, publishing to marketplaces, tracking inventory, and reducing mistakes.
+PosterPro is a self-hosted **reseller operations platform** designed for high-volume, photo-first listing workflows.
 
-In plain terms: **PosterPro is your listing back office**. You upload item photos, PosterPro helps draft listing details, and your team manages publishing, inventory, sales, and automation from one dashboard.
+It helps you:
+- ingest large photo batches (single uploads, ZIPs, URL lists, storage-unit style lots),
+- auto-enrich listings with AI-generated copy and metadata,
+- price and publish to eBay (and queue multi-marketplace publishing),
+- manage inventory at scale with unlimited bulk actions,
+- detect sales and keep cross-posted inventory synchronized,
+- automate offers, relisting, analytics, and operational reporting.
+
+This README is intentionally written as a full instruction manual for two audiences:
+1. **Self-hosters/admins** running PosterPro infrastructure.
+2. **End users/operators** (future you, staff, assistants, VA teams) using your hosted instance day to day.
 
 ---
 
 ## Table of Contents
 
-1. [What PosterPro Does](#what-posterpro-does)
-2. [Who Should Use It](#who-should-use-it)
-3. [How the System Works (Simple Explanation)](#how-the-system-works-simple-explanation)
-4. [Current Features (Based on This Codebase)](#current-features-based-on-this-codebase)
-5. [Tech Stack](#tech-stack)
-6. [Repository Structure and What Each Part Does](#repository-structure-and-what-each-part-does)
-7. [Backend Deep Dive (What Each Layer Does)](#backend-deep-dive-what-each-layer-does)
-8. [Frontend Deep Dive (What Each Part Does)](#frontend-deep-dive-what-each-part-does)
-9. [Step-by-Step Local Setup](#step-by-step-local-setup)
-10. [Configuration Reference (`.env`)](#configuration-reference-env)
-11. [Database and Migrations](#database-and-migrations)
-12. [Background Jobs and Worker Tasks](#background-jobs-and-worker-tasks)
-13. [How to Use PosterPro (Operator Walkthrough)](#how-to-use-posterpro-operator-walkthrough)
-14. [Main API Areas](#main-api-areas)
-15. [Testing](#testing)
-16. [Troubleshooting](#troubleshooting)
-17. [Security and Operational Notes](#security-and-operational-notes)
-18. [Development Notes and Next Improvements](#development-notes-and-next-improvements)
+1. [What PosterPro Is](#what-posterpro-is)
+2. [Who This Is For](#who-this-is-for)
+3. [Core Concepts](#core-concepts)
+4. [Feature Map (What Exists Today)](#feature-map-what-exists-today)
+5. [System Architecture](#system-architecture)
+6. [Project Structure](#project-structure)
+7. [Prerequisites](#prerequisites)
+8. [Quick Start (Local Development)](#quick-start-local-development)
+9. [Configuration Reference (.env)](#configuration-reference-env)
+10. [Database & Migrations](#database--migrations)
+11. [Task Worker & Background Jobs](#task-worker--background-jobs)
+12. [Operational Runbook (Admin)](#operational-runbook-admin)
+13. [User Onboarding Guide (Non-Technical)](#user-onboarding-guide-non-technical)
+14. [UI Walkthrough by Page](#ui-walkthrough-by-page)
+15. [Feature Deep Dives](#feature-deep-dives)
+16. [API Reference (Practical)](#api-reference-practical)
+17. [Recommended Team SOPs](#recommended-team-sops)
+18. [Troubleshooting](#troubleshooting)
+19. [Security, Privacy, and Safety Notes](#security-privacy-and-safety-notes)
+20. [Testing](#testing)
+21. [Roadmap-Ready Extension Points](#roadmap-ready-extension-points)
+22. [Glossary](#glossary)
 
 ---
 
-## What PosterPro Does
+## What PosterPro Is
 
-PosterPro combines several jobs that sellers usually do in separate tools:
+PosterPro is a **Reseller Command Center** that unifies ingestion, listing operations, marketplace publishing, inventory safety controls, sales tracking, analytics, and offer automation.
 
-- **Photo ingestion** (single files, ZIPs, URL imports, batch flows)
-- **AI listing enrichment** (title/description/category/keywords support)
-- **Listing management** (edit, template apply, pricing adjustments)
-- **Publishing workflows** (strongest eBay integration today)
-- **Inventory safety workflows** (bulk actions, stale/multi-quantity views, labeling)
-- **Sales/offer automation and tracking**
-- **Operational dashboards and intelligence panels**
+It uses:
+- **FastAPI** backend for API + orchestration,
+- **PostgreSQL** for durable business data,
+- **Redis + Celery** for background processing,
+- **Next.js** frontend for operator workflows,
+- marketplace integration services (currently strongest for **eBay**).
 
-If you run a reselling business and need to process many listings quickly, this system is built for that style of work.
-
----
-
-## Who Should Use It
-
-### 1) Admin / Owner / Technical Lead
-Use this guide for:
-- install/setup
-- environment config
-- queue worker operations
-- data migrations
-- service health and troubleshooting
-
-### 2) Daily Operator / Assistant / VA Team
-Use this guide for:
-- where to click and what each screen means
-- how to upload/process inventory
-- how to publish safely
-- how to use bulk actions without causing oversells
+PosterPro is optimized for real reseller workflows where you need to process many items quickly, delegate operations to assistants, and reduce overselling mistakes.
 
 ---
 
-## How the System Works (Simple Explanation)
+## Who This Is For
 
-Think of PosterPro as 4 connected pieces:
+### A) Self-Hoster / Owner / Technical Admin
+You care about:
+- installation,
+- configuration,
+- API secrets,
+- workers and queues,
+- migration application,
+- uptime and monitoring.
 
-1. **Frontend dashboard (Next.js):** the screens your team uses.
-2. **Backend API (FastAPI):** receives requests and applies business rules.
-3. **Database (PostgreSQL or SQLite local default):** stores listings, inventory, jobs, sales metadata, etc.
-4. **Worker queue (Redis + Celery):** runs heavy/background work such as photo processing, bulk operations, sync checks, and automation.
+### B) Daily Operator / Assistant / Employee
+You care about:
+- where to click,
+- what each toggle means,
+- how to process new inventory,
+- how to publish safely,
+- how to mark sold and avoid double-selling,
+- how to export reports and complete bookkeeping.
 
-Basic flow:
-1. You upload photos or import image sources.
-2. PosterPro creates listing records.
-3. Background tasks enrich/process items.
-4. Team reviews and edits listings.
-5. Listings are published (especially to eBay).
-6. Inventory, sales, offers, and analytics keep updating over time.
+This manual covers both.
 
 ---
 
-## Current Features (Based on This Codebase)
+## Core Concepts
 
-### Listing and photo pipeline
-- Upload photos and create listing records.
-- Storage unit style batch pipeline with status tracking.
+Understanding these will make the app intuitive.
+
+### 1) Listing lifecycle statuses
+Listings can move through states such as:
+- `INGESTED` → photo received
+- `PROCESSED` → AI enrichment complete
+- `PUBLISHED` / `posted` → live on marketplace
+- `FAILED` → processing/publishing failed
+- `draft` / `ready` states are also used in parts of the flow
+
+### 2) Storage Unit Batch
+A storage unit batch is a group of many photos processed together. It tracks:
+- total item count,
+- processed count,
+- status (`INGESTED`, `QUEUED`, `PROCESSING`, `COMPLETED`, `FAILED`),
+- optional overnight scheduling.
+
+### 3) Inventory safety model
+PosterPro has explicit controls to prevent oversells:
+- central quantity,
+- per-platform quantities,
+- stale listing signals,
+- sale sync + mark sold pathways,
+- guarded bulk operations.
+
+### 4) Autonomous mode
+When enabled, newly processed listings can trigger autonomous publishing logic (dry-run or live depending on config).
+
+### 5) Bulk jobs
+Large operations (mark sold, relist, refresh, label, etc.) are queued and processed in chunks asynchronously so you can handle large inventories.
+
+---
+
+## Feature Map (What Exists Today)
+
+### Ingestion & Listing Creation
+- Upload photos directly.
+- Upload ZIPs for storage units.
+- Submit image URL arrays for mobile-friendly ingestion.
+- Import Amazon Vine-style source data through the imports workflow.
 - Optional Google Photos import path.
-- Photo editing tools (brightness/contrast/filter/crop + optional background removal via PhotoRoom API key).
+- AI enrichment for title/description/category/tags/item specifics/estimated value.
 
-### Listing intelligence and optimization
-- AI-driven listing text assistance.
-- Pricing and optimization service layer.
-- Prediction/intelligence modules for operational insights.
+### Listing Editing
+- Manual edits to title, description, pricing, condition, quantity, labels.
+- Listing template create/apply support.
+- Review-aware listing workflow with `needs_review`, approval messaging, and marketplace-style preview.
+- Photo tools: brightness, contrast, filters, crop, optional background removal.
 
-### Inventory operations
-- Inventory endpoint with filtering, searching, stale views, pagination.
-- Unlimited-style bulk actions via queued jobs.
-- Bulk edit and safety checks through inventory service logic.
+### Marketplace Workflows
+- eBay OAuth connect flow.
+- eBay publish endpoint and status polling.
+- Multi-marketplace publish queue abstraction (ebay/etsy/facebook/mercari/poshmark/depop/whatnot/vinted modeled).
+- Marketplace status history per listing.
+- Publishing console with approval queue, policy summary, and queued/live status views.
 
-### Marketplace operations
-- eBay auth/publish/status flows.
-- Marketplace abstraction + connector registry for multiple platforms (eBay, Mercari, Poshmark, Depop, Whatnot, Vinted, Facebook Marketplace, fallback connector).
-- Marketplace status workflows from unified services.
+### Inventory Command Center
+- Search/filter/pagination.
+- Tabs for multi-quantity and stale views.
+- Grid + table modes.
+- Virtualized table behavior for large inventories.
+- Unlimited bulk actions with tracked job progress.
 
-### Sales and offers
-- Sales API area and services.
-- Offer rules/history/automation paths.
-- Profit/sale detection components.
+### Sales & Offer Ops
+- Sales dashboard + timeline.
+- Sale detection marketplace settings.
+- Sale detail patching for bookkeeping (fees/shipping/notes).
+- CSV exports (sales + inventory).
+- Offer automation rules and offer history.
+- Manual “send offers now” trigger.
 
-### Dashboard and UX
-- Main app shell and multi-page operator dashboard.
-- Panels for setup, sync, intelligence, marketplace status, and published listings.
-- Auth gate and role-aware flows.
+### Intelligence & Analytics
+- Overview/dashboard analytics.
+- Listing-level analytics detail.
+- Pricing recommendations.
+- Listing optimization.
+- Sell-through prediction.
+- Alerts.
+- Listing intelligence payload with draft quality, missing-information checklist, photo review notes, item specifics, comparable-title context, and sold-comps prompts.
+
+### Automation
+- Photo batch processing pipeline.
+- Storage batch pipeline (including overnight queue mode).
+- Auto-pricing tasks.
+- Autonomous publish task.
+- Sale polling task.
+- Offer processing/sending tasks.
+- Relist monitoring task.
+
+### Authentication & Settings
+- Email/password login, registration, forgot-password, and reset-password flows.
+- Password change flow for signed-in users.
+- Admin preview mode to simulate non-admin experience safely.
+- In-app admin settings for API credentials, SMTP delivery, workflow controls, and app base URL.
+- Encrypted-at-rest secret handling for supported provider credentials.
 
 ---
 
-## Tech Stack
+## System Architecture
 
-- **Backend:** FastAPI, SQLAlchemy, Pydantic Settings, Celery, Redis, HTTPX
-- **Frontend:** Next.js 14, React 18, TailwindCSS, componentized UI toolkit
-- **Data:** PostgreSQL in Docker compose for local infra; SQLite defaults for quick local boot if env vars are absent
-- **Image/ML Helpers:** Pillow, NumPy, scikit-learn
+```text
+[Next.js Frontend]
+        |
+        v
+ [FastAPI API Layer] -----> [PostgreSQL]
+        |
+        +------> [Redis broker]
+                    |
+                    v
+               [Celery workers]
+                    |
+                    v
+       [AI enrichment / publishing / bulk jobs / polling]
+```
+
+### High-level flow
+1. Operator uploads photos.
+2. API writes listing records and storage files.
+3. Celery tasks enrich listings and optionally trigger autonomous publishing.
+4. Operator reviews/edits in UI.
+5. Publish actions hit marketplace services.
+6. Sales and offer automations run in background.
+7. Analytics and reports update continuously.
 
 ---
 
-## Repository Structure and What Each Part Does
+## Project Structure
 
 ```text
 /backend
   /app
-    /api          -> HTTP routes grouped by domain (auth, listings, inventory, marketplaces, sales, intelligence, ebay)
-    /connectors   -> platform-specific marketplace connector implementations
-    /core         -> runtime config, auth helpers, DB setup
-    /models       -> ORM models and enums
-    /prompts      -> AI prompt templates used by listing/intelligence services
-    /services     -> core business logic (pricing, publishing, inventory safety, analytics, offers, etc.)
-    /workers      -> Celery app + async task definitions
-  /migrations     -> SQL migrations
-  /tests          -> backend test suite
+    /api           # REST endpoints (listings, inventory, marketplaces, sales, intelligence, ebay)
+    /connectors    # marketplace connector implementations
+    /core          # config + DB bootstrap
+    /models        # SQLAlchemy models + enums
+    /prompts       # AI prompt templates
+    /services      # business logic layer
+    /workers       # Celery app + tasks
+  /migrations      # SQL migration files
+  /tests           # backend tests
 /frontend
-  /components     -> reusable UI components and feature panels
-  /contexts       -> global state like auth context
-  /hooks          -> custom hooks for dashboard data and workflow APIs
-  /lib            -> frontend API utilities
-  /pages          -> Next.js routes/screens
-  /styles         -> global and module styles
-/docker-compose.yml -> local Postgres + Redis services
-/README.md          -> this file
+  /components      # UI building blocks
+  /hooks           # data hooks + workflow hooks
+  /lib             # API client + utilities
+  /pages           # app routes/pages
+/docker-compose.yml
+/README.md
 ```
 
 ---
 
-## Backend Deep Dive (What Each Layer Does)
+## Prerequisites
 
-### `backend/app/main.py`
-- Boots FastAPI.
-- Registers all API routers (auth, core routes, eBay, marketplaces, intelligence, inventory, bulk-jobs, sales).
-- Mounts media files from storage root.
-- Exposes `/health` endpoint.
-- Ensures minimal user-table columns exist at startup.
+- Python 3.10+
+- Node.js 18+
+- PostgreSQL 16 (or compatible)
+- Redis 7
+- pip + virtualenv
+- npm
 
-### `backend/app/api/*`
-- **`routes.py`**: central listing/ingestion/template/photo-tools and core listing actions.
-- **`inventory.py`**: inventory list, bulk edit, bulk queued job APIs.
-- **`marketplaces.py`**: multi-marketplace flows.
-- **`ebay.py`**: eBay-specific auth/publishing/status APIs.
-- **`sales.py`**: sales management APIs.
-- **`intelligence.py`**: analytics/intelligence-facing APIs.
-- **`auth.py`**: login/registration/session-scoping behavior.
-
-### `backend/app/services/*`
-This is where the main business rules live:
-- listing AI/enrichment
-- inventory safety and quantity rules
-- marketplace orchestration and publishing
-- pricing and intelligence logic
-- photo processing/edit helpers
-- sale detection and offer automation
-
-### `backend/app/connectors/*`
-Each connector represents marketplace-specific behavior behind a shared interface so the system can publish/sync in a unified way.
-
-### `backend/app/workers/*`
-Celery app and async tasks for background jobs such as large batch processing, bulk operations, and automation tasks.
+Optional/feature-specific:
+- OpenAI API key (AI enrichment features)
+- eBay developer app credentials
+- Photoroom API key (background removal in photo tools)
 
 ---
 
-## Frontend Deep Dive (What Each Part Does)
+## Quick Start (Local Development)
 
-### Routing/pages (`frontend/pages`)
-You have dedicated screens for:
-- dashboard (`/app`)
-- listings
-- inventory
-- published listings
-- sales
-- analytics
-- offers
-- settings
-- auth (login/register)
-
-### Components (`frontend/components`)
-- High-level feature panels (sync, intelligence, setup checklist, status panels)
-- Listing editor and photo modal flows
-- Reusable UI primitives (`button`, `card`, `tabs`, `data-table`, etc.)
-- App shell layout and navigation framing
-
-### Hooks (`frontend/hooks`)
-Custom hooks centralize API interactions and state management for dashboard data, auth, publish flows, and batch progress.
-
-### Context (`frontend/contexts/AuthContext.js`)
-Global authentication state + helper methods consumed by protected screens.
-
----
-
-## Step-by-Step Local Setup
-
-## 1) Start infrastructure
+### 1) Start infrastructure services
 
 ```bash
 docker compose up -d db redis
 ```
 
-## 2) Start backend
+### 2) Start backend API
 
 ```bash
 cd backend
@@ -235,7 +269,9 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-## 3) Start worker (new terminal)
+### 3) Start Celery worker
+
+In a second terminal:
 
 ```bash
 cd backend
@@ -243,7 +279,9 @@ source .venv/bin/activate
 celery -A app.workers.celery_app.celery_app worker --loglevel=info
 ```
 
-## 4) Start frontend (new terminal)
+### 4) Start frontend
+
+In a third terminal:
 
 ```bash
 cd frontend
@@ -251,112 +289,571 @@ npm install
 npm run dev
 ```
 
-App URLs (default):
+### 5) Open app
+
 - Frontend: `http://localhost:3000`
-- Backend API docs: `http://localhost:8000/docs`
+- Backend API docs (if enabled by default FastAPI config): `http://localhost:8000/docs`
 - Health check: `http://localhost:8000/health`
 
 ---
 
-## Configuration Reference (`.env`)
+## Configuration Reference (.env)
 
-Backend settings are read by `pydantic-settings` from `.env`.
+PosterPro reads backend settings from `backend/.env`.
 
-Important keys:
+### Core
+- `APP_NAME` (default: PosterPro)
+- `ENVIRONMENT` (default: development)
+- `DATABASE_URL` (default `sqlite:///./posterpro.db`; production should set an explicit database URI)
+- `REDIS_URL` (default `redis://localhost:6379/1`)
+- `STORAGE_ROOT` (default `./storage`)
 
-- `DATABASE_URL` (default local fallback uses SQLite file)
-- `REDIS_URL`
-- `STORAGE_ROOT`
-- `SESSION_SECRET`
+### AI / Enrichment
 - `OPENAI_API_KEY`
+
+### eBay Integration
 - `EBAY_CLIENT_ID`
 - `EBAY_CLIENT_SECRET`
 - `EBAY_REDIRECT_URI`
+
+### Email / Auth Delivery
+- `APP_BASE_URL`
+- `SMTP_HOST`
+- `SMTP_PORT`
+- `SMTP_USERNAME`
+- `SMTP_PASSWORD`
+- `SMTP_PASSWORD_ENC`
+- `SMTP_FROM_EMAIL`
+- `SMTP_FROM_NAME`
+- `SMTP_USE_TLS`
+
+### Session / Secret Management
+- `SESSION_SECRET`
+
+### Photo Tools
+- `PHOTOROOM_API_KEY`
+- `PHOTOROOM_API_URL` (default provided)
+
+### Automation / Behavior
+- `AUTONOMOUS_MODE` (default true)
+- `AUTONOMOUS_DRY_RUN` (default false)
+- `AUTONOMOUS_CROSSPOST_ENABLED` (default true)
+- `AUTO_RELIST_ENABLED` (default true)
+- `AUTO_RELIST_MIN_PRICE` (default 20.0)
+- `AUTO_RELIST_USER_RULES_JSON` (optional per-user override map)
+- `SALE_DETECTION_ENABLED` (default true)
+- `SALE_DETECTION_DRY_RUN` (default true)
+- `SALE_DETECTION_POLL_MINUTES` (default 15)
+- `MAX_CONCURRENT_BULK_TASKS` (default 50)
+- `BULK_CHUNK_SIZE` (0 = auto)
+
+### Frontend
+- `NEXT_PUBLIC_API_BASE` in frontend environment if backend is not `http://localhost:8000`.
+
+---
+
+## Database & Migrations
+
+Migration SQL files exist under `backend/migrations/`.
+
+Typical process:
+1. Ensure Postgres is up.
+2. Apply each migration in chronological order.
+3. Start API.
+
+Example:
+
+```bash
+psql "$DATABASE_URL" -f backend/migrations/20260407_inventory_listing_fields.sql
+```
+
+Repeat for each migration file in the folder.
+
+> Note: `Base.metadata.create_all()` is called at app startup, but for production-like consistency you should still apply migration scripts deliberately.
+
+---
+
+## Task Worker & Background Jobs
+
+Celery tasks cover:
+- photo enrichment,
+- storage-unit batch orchestration,
+- autonomous publishing,
+- auto pricing,
+- stale listing flagging,
+- bulk job chunk processing + finalization,
+- sales polling,
+- offer processing/sending,
+- relist monitoring.
+
+If workers are not running, ingestion and automation-heavy features appear “stuck.”
+
+---
+
+## Operational Runbook (Admin)
+
+### Startup order
+1. Postgres
+2. Redis
+3. Backend API
+4. Celery worker
+5. Frontend
+
+### Daily checks
+- `/health` returns `{ "ok": true }`
+- worker logs show no repeated retries/failures
+- storage directory has available disk space
+- bulk job completion ratios are normal
+
+### Suggested production hardening (when you move beyond MVP)
+- run API and worker under process supervision (systemd, Docker, Kubernetes)
+- add reverse proxy + TLS
+- centralize logs
+- use managed Postgres backups
+- rotate API secrets
+
+---
+
+## User Onboarding Guide (Non-Technical)
+
+This section is for assistants and operators.
+
+### First day checklist
+1. Sign in to your hosted PosterPro URL.
+2. Confirm **Autonomous Mode** state in the top bar (ON/OFF and dry-run note).
+3. Open **Dashboard** and verify counts load.
+4. Open **Inventory** and confirm you can filter/search.
+5. Open **Listings** to verify cards and editing controls.
+6. If you will publish to eBay, ensure account is connected.
+
+### Daily workflow (recommended)
+1. Ingest new photos (batch preferred for large lots).
+2. Wait for processing (PROCESSED items).
+3. Review/edit listings (title, description, condition, price, qty).
+4. Apply templates for consistency.
+5. Publish to enabled marketplaces.
+6. Use inventory bulk actions for operational updates.
+7. Check Sales page and complete fee/shipping details.
+8. Review analytics and offer opportunities.
+
+---
+
+## UI Walkthrough by Page
+
+### 1) Dashboard (`/`)
+Use this as your daily command center.
+
+Contains:
+- primary workflow region with top metrics, workflow stages, and workspace pulse,
+- support panels for setup checklist, blockers, readiness, and attention items,
+- operator control-center links,
+- system-readiness and dependency visibility,
+- overnight batch controls and guided onboarding.
+
+Why it matters:
+- gives a one-screen operational pulse.
+
+### 2) Listings (`/listings`)
+Primary listing editing workspace.
+
+What you do here:
+- edit listing text and pricing,
+- generate AI improvements,
+- apply/save templates,
+- run photo tools,
+- review listing intelligence,
+- approve review-gated drafts,
+- publish per listing.
+
+Why it matters:
+- highest quality control point before going live.
+
+### 3) Intake (`/intake`)
+Structured intake workflow for new source material.
+
+What you can do:
+- review intake metrics,
+- follow folder-import workflow guidance,
+- understand current clustering/segmentation limitations before processing.
+
+Why it matters:
+- gives operators a clearer operational front door for high-volume photo ingestion.
+
+### 4) Inventory (`/inventory`)
+High-scale operations page.
+
+What you can do:
+- table or grid mode,
+- filter by stale / multi-quantity,
+- search quickly,
+- select all matching and launch bulk jobs,
+- mark sold, relist, label, refresh, etc.,
+- monitor progress with background-safe chunking.
+
+Why it matters:
+- lets a small team manage massive SKU counts efficiently.
+
+### 5) Publishing (`/publishing`)
+Publishing operations console.
+
+What it shows:
+- approvals queue,
+- queued-to-publish and live listing metrics,
+- publish-policy summary tied to workflow preferences,
+- operator shortcuts into review and workflow settings.
+
+Why it matters:
+- keeps approval-aware publishing disciplined instead of burying it inside listing detail only.
+
+### 6) Published (`/published`)
+Publishing result visibility.
+
+What it shows:
+- published listings,
+- recently auto-published items.
+
+Why it matters:
+- fast validation that automation and manual publish are working.
+
+### 7) Published Offers / Sales (`/sales`)
+Sales tracking + bookkeeping controls.
+
+What you can do:
+- monitor sales timeline,
+- configure sale-detection platforms,
+- export CSV,
+- patch sale details (fees/shipping/notes).
+
+Why it matters:
+- prevents accounting drift and preserves margin visibility.
+
+### 8) Analytics (`/analytics`)
+Business performance dashboard.
+
+Includes:
+- KPI cards,
+- revenue trend chart,
+- revenue split by marketplace,
+- top seller chart,
+- marketplace sales volume,
+- report download shortcuts.
+
+Why it matters:
+- informs repricing, sourcing, and staffing decisions.
+
+### 9) Send Offers (`/offers`)
+Offer automation workstation.
+
+What you can do:
+- enable/disable automated offer rule set,
+- define discount %, minimum price, exclusions, and message template,
+- run send-offers-now manually,
+- review recent automated offer history.
+
+Why it matters:
+- drives conversions without constant manual outreach.
+
+### 10) Settings (`/settings`)
+Operator and admin control center.
+
+What you can do:
+- manage profile details and password,
+- toggle workflow behavior such as review-before-publish,
+- enter provider credentials and SMTP configuration,
+- review channel onboarding instructions,
+- use admin preview mode.
+
+Why it matters:
+- centralizes both per-user workflow control and deployment-level service readiness.
+
+---
+
+## Feature Deep Dives
+
+### A) Storage-unit ingestion (ZIP/URL/overnight)
+
+Where to find it:
+- API endpoints under `/batch/storage-unit*`
+- dashboard overnight controls
+
+How it works:
+1. Create batch from ZIP or URL list.
+2. Batch creates listing rows in `INGESTED`.
+3. Immediate mode starts pipeline now; overnight mode queues.
+4. Worker processes each listing → enriches metadata.
+5. Batch finalizer marks `COMPLETED` or `FAILED`.
+
+Why you want it:
+- best path for high-volume intake from auctions, pallet buys, or storage units.
+
+### B) Photo enrichment + autonomous publish
+
+Where:
+- worker tasks for `process_photo_batch`, `process_storage_unit_listing`, `autonomous_publish`
+
+How it works:
+- enrichment service extracts listing-ready metadata,
+- listing status becomes `PROCESSED`,
+- optional autonomous path either dry-runs or publishes,
+- crosspost targets can be queued based on enabled platforms.
+
+Why you want it:
+- compresses listing turnaround time.
+
+### C) Inventory bulk processing
+
+Actions supported:
+- `edit`, `delist`, `relist`, `label`, `mark_sold`, `refresh`, `autobump`
+
+How it works:
+- create one bulk job,
+- worker runs chunk tasks with safety checks,
+- progress tracked by processed/total/errors,
+- finalizer marks completed state.
+
+Why you want it:
+- lets operators manage thousands of listings with confidence.
+
+### D) eBay account connection & publish
+
+Connection:
+1. request auth URL
+2. authenticate on eBay
+3. callback stores tokens in marketplace account table
+
+Publishing:
+- publish endpoint validates listing data,
+- pushes listing to eBay integration service,
+- status endpoint reports publish state and data.
+
+Why you want it:
+- direct path to live market with inventory-aware lifecycle tracking.
+
+### E) Sales detection + sync posture
+
+Where:
+- `/sales` endpoints + polling task
+
+Capabilities:
+- poll and summarize sales,
+- configure included marketplaces,
+- patch bookkeeping fields,
+- export data for accounting,
+- support sync workflows to avoid double-selling.
+
+### F) Offer automation
+
+Where:
+- `/sales/offers/*`
+
+Capabilities:
+- store rule set per user,
+- process incoming offers,
+- send personalized offers,
+- log results in history.
+
+Why you want it:
+- increases conversion while maintaining margin guardrails.
+
+---
+
+## API Reference (Practical)
+
+> This is a practical grouping, not an exhaustive OpenAPI dump.
+
+### Health
+- `GET /health`
+
+### Listings & templates
+- `GET /listings`
+- `PATCH /listings/{listing_id}`
+- `POST /listings/{listing_id}/generate`
+- `GET /listings/{listing_id}/intelligence`
+- `POST /listings/{listing_id}/photo-tools`
+- `GET /listing-templates`
+- `POST /listing-templates`
+- `POST /listings/{listing_id}/apply-template`
+
+### Ingestion & batches
+- `POST /ingest/photos`
+- `POST /batch/storage-unit`
+- `POST /batch/storage-unit/from-urls`
+- `GET /batch/storage-unit`
+- `GET /batch/storage-unit/{batch_id}`
+- `POST /batch/storage-unit/{batch_id}/run-overnight`
+- `POST /batch/storage-unit/run-overnight`
+
+### Inventory
+- `GET /inventory`
+- `POST /inventory/bulk-edit`
+- `POST /inventory/bulk`
+- `GET /bulk-jobs/{job_id}`
+
+### Marketplace & publish
+- `GET /marketplaces`
+- `POST /marketplaces/{name}/connect`
+- `GET /marketplaces/{name}/callback`
+- `POST /listings/{listing_id}/publish`
+- `GET /listings/{listing_id}/marketplace_status`
+- `POST /listings/sync_sold`
+- `GET /users/{user_id}/platform-config`
+- `PUT /users/{user_id}/platform-config`
+
+### eBay-specific
+- `GET /ebay/auth/url`
+- `GET /ebay/callback`
+- `POST /listings/{listing_id}/publish/ebay`
+- `GET /ebay/status/{listing_id}`
+- `GET /ebay/offers/dashboard`
+
+### Intelligence & analytics
+- `GET /analytics/overview`
+- `GET /analytics/dashboard`
+- `GET /analytics/listings/{listing_id}`
+- `GET /pricing/recommendations/{listing_id}`
+- `POST /listings/{listing_id}/optimize`
+- `GET /predictions/{listing_id}`
+- `GET /alerts`
+
+### Sales, reporting, offers
+- `GET /sales/dashboard`
+- `PATCH /sales/{sale_id}/details`
+- `GET /sales/settings/{user_id}`
+- `PUT /sales/settings/{user_id}`
+- `GET /sales/reports/sales.csv`
+- `GET /sales/reports/inventory.csv`
+- `GET /sales/offers/rules/{user_id}`
+- `PUT /sales/offers/rules/{user_id}`
+- `POST /sales/offers/send/{user_id}`
+- `GET /sales/offers/history`
+
+### Config
+- `GET /config/autonomous`
+- `POST /config/toggle-autonomous`
+
+### Auth & session
+- `POST /auth/login`
+- `POST /auth/register`
+- `POST /auth/password/change`
+- `POST /auth/password/forgot`
+- `POST /auth/password/reset`
+- `POST /auth/session/view-mode`
+
+---
+
+## Recommended Team SOPs
+
+### SOP: New batch intake
+- Name storage unit consistently (e.g., `Unit-A-2026-04-07`).
+- Upload in one batch.
+- Verify batch item count immediately.
+- Track until processing complete.
+
+### SOP: Listing QA
+- Require title quality pass before publish.
+- Ensure condition + price + quantity filled.
+- Use templates for category consistency.
+
+### SOP: Oversell prevention
+- Use mark-sold action as soon as offline sale occurs.
+- Keep sale detection platforms configured correctly.
+- Review stale tab daily.
+
+### SOP: Reporting cadence
+- End-of-day export sales CSV.
+- Weekly review analytics trends.
+- Monthly tune offer discount rules.
+
+---
+
+## Troubleshooting
+
+### “Uploads succeed but nothing processes”
+Likely cause:
+- Celery worker not running.
+
+Check:
+- worker terminal logs
+- redis connectivity
+
+### “Publish fails with authentication errors”
+Likely cause:
+- expired/missing eBay tokens or incorrect redirect URI.
+
+Check:
+- eBay app credentials
+- callback URI match
+- reconnect marketplace account
+
+### “Bulk action seems frozen”
+Likely cause:
+- job is queued/running in background.
+
+Check:
+- `/bulk-jobs/{job_id}` progress
+- worker throughput and retries
+
+### “Images not loading in UI”
+Likely cause:
+- storage path or media mount mismatch.
+
+Check:
+- `STORAGE_ROOT`
+- API `/media` mount
+- `toPublicImageUrl` output path
+
+### “Background removal fails”
+Likely cause:
+- missing/invalid Photoroom API key or network issue.
+
+Check:
 - `PHOTOROOM_API_KEY`
 - `PHOTOROOM_API_URL`
-- `AUTONOMOUS_MODE`
-- `AUTONOMOUS_DRY_RUN`
-- `AUTONOMOUS_CROSSPOST_ENABLED`
-- `AUTO_RELIST_ENABLED`
-- `AUTO_RELIST_MIN_PRICE`
-- `SALE_DETECTION_ENABLED`
-- `SALE_DETECTION_DRY_RUN`
-- `SALE_DETECTION_POLL_MINUTES`
-- `MAX_CONCURRENT_BULK_TASKS`
-- `BULK_CHUNK_SIZE`
 
-Tip: create a `.env` inside `backend/` during local development and set production-safe secrets for hosted deployments.
+### “Forgot-password flow does not send email”
+Likely cause:
+- SMTP settings are incomplete or invalid.
 
----
+Check:
+- `APP_BASE_URL`
+- `SMTP_HOST`
+- `SMTP_PORT`
+- `SMTP_USERNAME`
+- `SMTP_PASSWORD` or `SMTP_PASSWORD_ENC`
+- `SMTP_FROM_EMAIL`
 
-## Database and Migrations
+### “Listings API fails on an older production database”
+Likely cause:
+- schema drift from an older deployment.
 
-- SQL migrations live in `backend/migrations/`.
-- The codebase includes migrations for inventory scaling, listing templates, marketplace support, pricing, photo pipelines, sales detection, auth bootstrap, and more.
-- `Base.metadata.create_all(bind=engine)` in app startup ensures schema objects exist for ORM models.
-
-Recommended production pattern:
-1. Apply migrations in controlled release steps.
-2. Back up DB before major schema updates.
-3. Keep worker version and API version in sync after migration changes.
+Check:
+- backend startup logs for auto-added compatibility columns
+- `backend/app/main.py` bootstrap guards
+- whether the current release and database schema are actually aligned
 
 ---
 
-## Background Jobs and Worker Tasks
+## Security, Privacy, and Safety Notes
 
-PosterPro uses Celery workers for work that should not block API responses.
-
-Examples:
-- photo batch processing
-- storage-unit pipeline execution
-- clustering/import follow-up tasks
-- large inventory bulk job chunks
-- automation checks (offers/sales/relist patterns)
-
-Why this matters in plain terms:
-- Your UI stays responsive while heavy tasks run in the background.
-- You can process much larger inventories reliably.
-
----
-
-## How to Use PosterPro (Operator Walkthrough)
-
-1. **Sign in** using your workspace account.
-2. **Upload new inventory photos** from listing/ingestion workflows.
-3. Wait for **processing/enrichment** to complete.
-4. Open each listing, **review title/description/price/condition**.
-5. Use **photo tools** if needed to improve listing quality.
-6. Use **templates** to speed repetitive listing fields.
-7. Publish to marketplace (especially eBay flow).
-8. Manage **inventory filters** and run **bulk actions** for large updates.
-9. Monitor **sales/offers/intelligence** pages for operations and optimization opportunities.
-10. Use dashboard alerts/status sections to catch failures early.
-
----
-
-## Main API Areas
-
-- `GET /health` — service health.
-- Auth endpoints under auth router.
-- Listing/template/ingestion endpoints in `routes.py` (including photo tools and imports).
-- Inventory endpoints under `/inventory` and bulk job status at `/bulk-jobs/{job_id}`.
-- eBay flow endpoints in eBay router.
-- Marketplace orchestration routes in marketplace router.
-- Sales and intelligence routes in respective routers.
-
-Use `/docs` for interactive API exploration in local/dev mode.
+- Protect `.env` values; never commit secrets.
+- Run behind HTTPS in production.
+- Use separate credentials per environment.
+- Restrict DB/Redis network exposure.
+- Treat uploaded images and listing data as potentially sensitive business data.
+- Review autonomous and dry-run toggles before enabling full automation for staff.
 
 ---
 
 ## Testing
 
-Backend tests are in `backend/tests` and include:
-- eBay service/publish flows
-- marketplace API/connector behavior
-- offer services
-- inventory bulk sale paths
-- reseller intelligence
-- storage unit batch e2e patterns
+Backend tests include coverage for:
+- eBay publishing,
+- connector behavior,
+- marketplace APIs,
+- offer service,
+- reseller intelligence,
+- inventory bulk paths,
+- storage unit pipeline flows.
 
 Run:
 
@@ -365,54 +862,59 @@ cd backend
 PYTHONPATH=. DATABASE_URL=sqlite:///./test.db pytest tests -q
 ```
 
----
-
-## Troubleshooting
-
-### API starts but frontend cannot fetch data
-- Confirm frontend uses correct API base URL (`NEXT_PUBLIC_API_BASE`).
-- Confirm backend is running on expected host/port.
-
-### Jobs are stuck in queued/pending status
-- Confirm Redis is up.
-- Confirm Celery worker is running and pointed at same Redis URL as API.
-
-### eBay publish fails
-- Verify `EBAY_CLIENT_ID`, `EBAY_CLIENT_SECRET`, and redirect URI settings.
-- Re-run OAuth connect flow.
-- Check listing payload completeness before publish.
-
-### Photo background removal not working
-- Ensure `PHOTOROOM_API_KEY` is set.
-- Check network egress and API response errors.
-
-### Inventory bulk actions partially applied
-- Inspect bulk job status endpoint for error details and per-item failures.
+Frontend lint/build scripts available in `frontend/package.json`.
 
 ---
 
-## Security and Operational Notes
+## Roadmap-Ready Extension Points
 
-- Do not commit real API keys or session secrets.
-- Use HTTPS and secure cookies in production deployments.
-- Restrict who can run admin-level inventory and publishing actions.
-- Keep audit logs/backups for high-volume production usage.
-- Consider rate limits and marketplace policy compliance when enabling full automation.
+PosterPro already contains structural support for additional marketplace expansion and intelligence workflows:
+- connector registry pattern for marketplaces,
+- marketplace listing tracking model,
+- prediction and optimizer services,
+- AB test variant model,
+- chunked async processing primitives.
+
+As you evolve this app, you can add:
+- richer auth/user management,
+- webhook ingestion,
+- warehouse/bin location modules,
+- role-based permissions,
+- enhanced audit logs,
+- more deterministic migration tooling.
+
+Current deeper roadmap still pending:
+- true item-boundary segmentation for crowded photos,
+- stronger attribute extraction and recognition,
+- real external sold-comps ingestion,
+- fuller marketplace field completion and cross-channel publishing parity.
 
 ---
 
-## Development Notes and Next Improvements
+## Glossary
 
-Possible improvement areas you can implement next:
-- stronger migration runner integration and release automation
-- richer observability (metrics dashboards, tracing)
-- advanced role-based permissions and audit trails
-- fuller docs for each API path with request/response examples
-- expanded connector capability matrix by marketplace
+- **Autonomous Mode**: automatic post-enrichment publish behavior.
+- **Dry Run**: simulate autonomous behavior without live publish side effects.
+- **Stale Listing**: listing with old/absent refresh timestamp.
+- **Bulk Job**: asynchronous large-scale inventory action.
+- **Storage Batch**: grouped ingest unit for high-volume photo uploads.
+- **Crosspost**: publish one listing to multiple marketplaces.
 
 ---
 
-If you want, I can also produce:
-1. a separate **Operator SOP handbook** for non-technical assistants,
-2. a **Production Deployment Guide** (reverse proxy, SSL, backups, process supervision), and
-3. a **Marketplace-by-marketplace capability table** (publish/edit/sync/sale-detect support).
+## Final Notes
+
+If you are onboarding a new assistant, have them read in this order:
+1. [User Onboarding Guide](#user-onboarding-guide-non-technical)
+2. [UI Walkthrough by Page](#ui-walkthrough-by-page)
+3. [Feature Deep Dives](#feature-deep-dives)
+4. [Recommended Team SOPs](#recommended-team-sops)
+
+If you are setting up infrastructure, read in this order:
+1. [Prerequisites](#prerequisites)
+2. [Quick Start](#quick-start-local-development)
+3. [Configuration Reference](#configuration-reference-env)
+4. [Operational Runbook](#operational-runbook-admin)
+5. [Troubleshooting](#troubleshooting)
+
+PosterPro is built to help you move from chaotic reseller operations to repeatable systems.

@@ -1,11 +1,11 @@
 import { cn } from '../../lib/utils';
 
 export function Card({ className, ...props }) {
-  return <section className={cn('pp-card p-5', className)} {...props} />;
+  return <section className={cn('pp-card p-4 md:p-5', className)} {...props} />;
 }
 
 export function CardTitle({ className, ...props }) {
-  return <h2 className={cn('text-lg font-semibold tracking-[-0.03em] text-[#111827]', className)} {...props} />;
+  return <h2 className={cn('text-base font-semibold tracking-[-0.02em] text-[#101828]', className)} {...props} />;
 }
 
 export function CardDescription({ className, ...props }) {

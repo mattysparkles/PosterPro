@@ -127,7 +127,14 @@ async def ebay_offer_dashboard(
     current_user: User = Depends(get_current_user),
 ):
     scoped_user_id = resolve_user_scope(current_user, user_id)
-    account = await get_or_refresh_account(scoped_user_id, db)
+    try:
+        account = await get_or_refresh_account(scoped_user_id, db)
+    except EbayIntegrationError:
+        return {
+            "connected": False,
+            "active_offers": [],
+            "decision_log": [],
+        }
     active_offers = await get_incoming_best_offers(account, limit=50)
     decisions = db.execute(
         select(EbayOfferHistory)
@@ -136,6 +143,7 @@ async def ebay_offer_dashboard(
         .limit(100)
     ).scalars().all()
     return {
+        "connected": True,
         "active_offers": active_offers,
         "decision_log": [
             {

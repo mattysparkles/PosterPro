@@ -6,8 +6,8 @@ export default function SectionCard({ title, description, action, children, clas
       {(title || description || action) ? (
         <div className="flex items-start justify-between gap-4">
           <div>
-            {title ? <CardTitle className="text-xl tracking-tight">{title}</CardTitle> : null}
-            {description ? <CardDescription className="mt-2">{description}</CardDescription> : null}
+            {title ? <CardTitle>{title}</CardTitle> : null}
+            {description ? <CardDescription className="mt-1">{description}</CardDescription> : null}
           </div>
           {action ? <div>{action}</div> : null}
         </div>

@@ -63,6 +63,9 @@ export default function LoginPage() {
 
       <div className="pp-auth-links">
         <p>
+          <Link href="/forgot-password">Forgot password</Link>
+        </p>
+        <p>
           <Link href="/register">Create account</Link>
         </p>
         <p>

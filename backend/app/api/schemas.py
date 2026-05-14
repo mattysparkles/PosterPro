@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from pydantic import BaseModel, Field, HttpUrl
 
@@ -26,6 +26,7 @@ class ListingUpdateRequest(BaseModel):
     platform_quantities: dict | None = None
     custom_labels: list[str] | None = None
     last_refreshed: datetime | None = None
+    needs_review: bool | None = None
 
 
 class ListingResponse(BaseModel):
@@ -62,6 +63,13 @@ class ListingResponse(BaseModel):
     platform_quantities: dict | None = None
     custom_labels: list[str] | None = None
     last_refreshed: datetime | None = None
+    source_type: str | None = None
+    source_metadata: dict | None = None
+    needs_review: bool = False
+    restricted_review_required: bool = False
+    restricted_reasons: list[str] | None = None
+    detected_category_guess: str | None = None
+    marketplace_allowed_status: str | None = None
 
     class Config:
         from_attributes = True
@@ -209,11 +217,34 @@ class AuthLoginRequest(BaseModel):
     password: str = Field(min_length=8, max_length=128)
 
 
+class AuthForgotPasswordRequest(BaseModel):
+    email: str
+
+
+class AuthPasswordResetRequest(BaseModel):
+    token: str
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+class AuthChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=8, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+class AuthViewModeRequest(BaseModel):
+    view_as_regular: bool = False
+
+
 class UserResponse(BaseModel):
     id: int
     email: str
     full_name: str | None = None
     is_admin: bool = False
+    effective_is_admin: bool = False
+    view_as_regular: bool = False
+    role: str = "public"
+    can_access_vine_import: bool = False
+    workflow_preferences: dict = Field(default_factory=dict)
 
     class Config:
         from_attributes = True
@@ -226,6 +257,43 @@ class AuthSessionResponse(BaseModel):
 
 class UserUpdateRequest(BaseModel):
     full_name: str | None = None
+    review_before_publish: bool | None = None
+    auto_publish_after_approval: bool | None = None
+    bulk_approval_enabled: bool | None = None
+    listing_preview_mode: str | None = None
+
+
+class ServerSettingsUpdateRequest(BaseModel):
+    app_base_url: str | None = None
+    openai_api_key: str | None = None
+    photoroom_api_key: str | None = None
+    ebay_client_id: str | None = None
+    ebay_client_secret: str | None = None
+    ebay_redirect_uri: str | None = None
+    storage_root: str | None = None
+    environment: str | None = None
+    autonomous_dry_run: bool | None = None
+    autonomous_crosspost_enabled: bool | None = None
+    sale_detection_enabled: bool | None = None
+    sale_detection_dry_run: bool | None = None
+    sale_detection_poll_minutes: int | None = None
+    amazon_vine_import_enabled: bool | None = None
+    amazon_vine_import_premium_only: bool | None = None
+    amazon_media_lookup_enabled: bool | None = None
+    amazon_media_page_fallback_enabled: bool | None = None
+    amazon_marketplace_region: str | None = None
+    amazon_media_fetch_mode: str | None = None
+    amazon_media_rate_limit_per_minute: int | None = None
+    amazon_paapi_access_key: str | None = None
+    amazon_paapi_secret_key: str | None = None
+    amazon_paapi_partner_tag: str | None = None
+    smtp_host: str | None = None
+    smtp_port: int | None = None
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_from_email: str | None = None
+    smtp_from_name: str | None = None
+    smtp_use_tls: bool | None = None
 
 
 class MarketplaceConnectionStatusResponse(BaseModel):
@@ -239,6 +307,19 @@ class MarketplaceConnectionStatusResponse(BaseModel):
     external_account_id: str | None = None
     token_expires_at: datetime | None = None
     status_note: str | None = None
+    display_name: str | None = None
+    account_handle: str | None = None
+    notes: str | None = None
+    workflow_state: str | None = None
+    can_publish: bool = False
+    can_sync_sales: bool = False
+
+
+class MarketplaceConnectionUpdateRequest(BaseModel):
+    display_name: str | None = None
+    account_handle: str | None = None
+    notes: str | None = None
+    workflow_state: str | None = None
 
 
 class ServerReadinessResponse(BaseModel):
@@ -246,6 +327,77 @@ class ServerReadinessResponse(BaseModel):
     photoroom_configured: bool = False
     ebay_oauth_configured: bool = False
     storage_root_configured: bool = False
+    session_secret_configured: bool = False
+    amazon_vine_import_enabled: bool = False
+    amazon_media_lookup_enabled: bool = False
+    amazon_paapi_configured: bool = False
+
+
+class VineImportItemResponse(BaseModel):
+    id: int
+    batch_id: int
+    user_id: int
+    order_number: str | None = None
+    asin: str | None = None
+    product_name: str | None = None
+    order_type: str | None = None
+    order_date: date | None = None
+    shipped_date: date | None = None
+    cancelled_date: date | None = None
+    estimated_tax_value: float | None = None
+    eligible_after: date | None = None
+    eligibility_status: str
+    raw_row_json: dict | None = None
+    parse_warnings_json: list[str] | None = None
+    media_status: str | None = None
+    media_asset_ids_json: list[int] | None = None
+    restricted_review_required: bool = False
+    restricted_reasons: list[str] | None = None
+    detected_category_guess: str | None = None
+    marketplace_allowed_status: str | None = None
+    inventory_item_id: int | None = None
+    listing_id: int | None = None
+    source_confidence: str = "high"
+    reviewed: bool = False
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    class Config:
+        from_attributes = True
+
+
+class VineImportBatchResponse(BaseModel):
+    id: int
+    user_id: int
+    filename: str
+    source_type: str
+    report_year: int | None = None
+    status: str
+    parsed_count: int
+    eligible_count: int
+    locked_count: int
+    cancelled_count: int
+    error_count: int
+    drafts_created_count: int = 0
+    stats_json: dict | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    items: list[VineImportItemResponse] = Field(default_factory=list)
+
+    class Config:
+        from_attributes = True
+
+
+class VineImportActionRequest(BaseModel):
+    item_ids: list[int] = Field(default_factory=list)
+    include_locked: bool = True
+
+
+class VineImportItemUpdateRequest(BaseModel):
+    reviewed: bool | None = None
+    marketplace_allowed_status: str | None = None
+    restricted_review_required: bool | None = None
+    restricted_reasons: list[str] | None = None
 
 
 class AccountSetupSummaryResponse(BaseModel):

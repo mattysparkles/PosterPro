@@ -16,7 +16,7 @@ import {
 
 const MARKETPLACES = ['ebay', 'poshmark', 'mercari', 'depop', 'whatnot', 'vinted'];
 
-export default function SalesPage({ theme, setTheme }) {
+export default function SalesPage() {
   const { user } = useAuth();
   const [dashboard, setDashboard] = useState({ summary: { by_platform: {} }, sales: [] });
   const [autonomousConfig, setAutonomousConfig] = useState({ autonomous_mode: true, autonomous_dry_run: true });
@@ -74,17 +74,11 @@ export default function SalesPage({ theme, setTheme }) {
   return (
     <AppShell
       active="/sales"
+      title="Sales"
       autonomousConfig={autonomousConfig}
       onToggleAutonomous={async () => {
         await toggleAutonomousMode(!autonomousConfig.autonomous_mode);
         await reload();
-      }}
-      theme={theme}
-      onToggleTheme={() => {
-        const next = theme === 'dark' ? 'light' : 'dark';
-        setTheme(next);
-        localStorage.setItem('posterpro-theme', next);
-        document.documentElement.classList.toggle('dark', next === 'dark');
       }}
     >
       <div className="grid gap-4 md:grid-cols-3">

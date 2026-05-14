@@ -38,6 +38,7 @@ from app.services.listing_ai import ListingAIService
 from app.services.profit_service import ProfitService
 from app.services.storage import LocalStorage
 from app.services.pricing_service import PricingService
+from app.services.pricing_intelligence_service import PricingIntelligenceService
 from app.services.photo_editor import PhotoEditorService
 from app.services.listing_templates_service import listing_template_service
 from app.models.enums import ListingStatus
@@ -529,16 +530,102 @@ def generate_listing(
     ai = ListingAIService()
     ebay = EbayService()
 
-    generated = ai.generate({"title_hint": listing.cluster.title_hint if listing.cluster else None})
+    generated = ai.generate(
+        {
+            "title_hint": listing.cluster.title_hint if listing.cluster else None,
+            "source_type": listing.source_type,
+            "image_count": len(listing.image_urls or []),
+            "storage_unit_name": listing.storage_unit_name,
+            "existing_specifics": listing.item_specifics or {},
+            "existing_condition": listing.condition,
+            "custom_labels": listing.custom_labels or [],
+        }
+    )
     price_data = ebay.enrich_price(generated["title"], payload.barcode)
+    pricing_analysis = PricingIntelligenceService().recommend_price(
+        db,
+        listing_id,
+        external_comparables=price_data.get("comparables") or [],
+        estimated_value_override=generated.get("estimated_value"),
+    )
+
+    marketplace_data = dict(listing.marketplace_data or {})
+    marketplace_data["ai_draft"] = {
+        "draft_quality": generated.get("draft_quality"),
+        "missing_information": generated.get("missing_information") or [],
+        "photo_notes": generated.get("photo_notes") or [],
+        "research_queries": generated.get("research_queries") or [],
+        "generation_source": generated.get("generation_source"),
+        "model_used": generated.get("model_used"),
+    }
+    marketplace_data["pricing_analysis"] = pricing_analysis
+
+    source_metadata = dict(listing.source_metadata or {})
+    source_metadata["listing_intelligence"] = {
+        "title": generated.get("title"),
+        "category_suggestion": generated.get("category_suggestion"),
+        "condition": generated.get("condition"),
+        "item_specifics": generated.get("item_specifics") or {},
+        "tags": generated.get("tags") or [],
+        "estimated_value": generated.get("estimated_value"),
+        "missing_information": generated.get("missing_information") or [],
+        "photo_notes": generated.get("photo_notes") or [],
+        "research_queries": generated.get("research_queries") or [],
+        "draft_quality": generated.get("draft_quality"),
+        "generation_source": generated.get("generation_source"),
+        "model_used": generated.get("model_used"),
+    }
 
     listing.title = generated["title"]
     listing.description = generated["description"]
     listing.category_suggestion = generated["category_suggestion"]
+    listing.condition = generated.get("condition") or listing.condition
+    listing.item_specifics = generated.get("item_specifics") or listing.item_specifics
     listing.tags = generated["tags"]
-    listing.suggested_price = price_data["suggested_price"]
-    listing.listing_price = price_data["suggested_price"]
+    listing.estimated_value = generated.get("estimated_value") or listing.estimated_value
+    listing.suggested_price = pricing_analysis["recommended_price"]
+    listing.listing_price = pricing_analysis["recommended_price"]
+    listing.marketplace_data = marketplace_data
+    listing.source_metadata = source_metadata
+    listing.needs_review = True
     listing.status = "ready"
     db.commit()
     db.refresh(listing)
     return listing
+
+
+@router.get("/listings/{listing_id}/intelligence")
+def get_listing_intelligence(
+    listing_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    listing = db.get(Listing, listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    ensure_user_owns_resource(current_user, listing.user_id)
+
+    pricing_analysis = (listing.marketplace_data or {}).get("pricing_analysis")
+    if not pricing_analysis:
+        pricing_analysis = PricingIntelligenceService().recommend_price(db, listing_id)
+
+    intelligence = (listing.source_metadata or {}).get("listing_intelligence") or {}
+    draft_meta = (listing.marketplace_data or {}).get("ai_draft") or {}
+    readiness = {
+        "needs_review": bool(listing.needs_review or listing.restricted_review_required),
+        "missing_information_count": len(intelligence.get("missing_information") or []),
+        "ready_for_publish": bool(
+            listing.status == "ready"
+            and not listing.restricted_review_required
+            and bool(listing.title)
+            and bool(listing.description)
+        ),
+    }
+
+    return {
+        "listing_id": listing.id,
+        "intelligence": intelligence,
+        "draft_meta": draft_meta,
+        "pricing_analysis": pricing_analysis,
+        "readiness": readiness,
+    }

@@ -10,6 +10,31 @@ Input signals:
 """.strip()
 
 PHOTO_EXTRACTION_TEMPLATES = {
+    "generate_listing_intelligence": """
+You are a resale listing analyst building a marketplace draft from partial item signals.
+Return strict JSON with these keys:
+{
+  "title": "...",
+  "description": "...",
+  "category_suggestion": "...",
+  "condition": "...",
+  "item_specifics": {},
+  "tags": [],
+  "estimated_value": 0.0,
+  "missing_information": [],
+  "photo_notes": [],
+  "research_queries": [],
+  "draft_quality": "strong|partial|weak"
+}
+Rules:
+- Keep the title under 80 characters and factual.
+- The description must be plain, concise, and resale-safe.
+- Never invent authenticity, year, accessories, or working condition unless supported by the signals.
+- "missing_information" should list facts the operator still needs to confirm before publishing.
+- "photo_notes" should describe what appears incomplete or unclear from the provided signals.
+- "research_queries" should contain short sold-comps search phrases the operator could use.
+- "estimated_value" should be a conservative USD float estimate.
+""".strip(),
 
     "generate_pricing_recommendation": """
 You are a resale pricing analyst.

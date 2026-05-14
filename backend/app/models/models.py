@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import JSON, Boolean, Date, DateTime, Enum, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -20,6 +20,8 @@ class User(Base, TimestampMixin):
     full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    role: Mapped[str] = mapped_column(String(32), default="public", index=True)
+    settings_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     enabled_platforms: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     sale_detection_platforms: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
 
@@ -99,6 +101,13 @@ class Listing(Base, TimestampMixin):
     custom_labels: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     last_refreshed: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     stale_flag: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    source_type: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    source_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    needs_review: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    restricted_review_required: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    restricted_reasons: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    detected_category_guess: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    marketplace_allowed_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="listings")
     cluster: Mapped["Cluster | None"] = relationship(back_populates="listings")
@@ -292,3 +301,68 @@ class AutomatedOfferLog(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(32), default="SENT")
     details: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class VineImportBatch(Base, TimestampMixin):
+    __tablename__ = "vine_import_batches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    filename: Mapped[str] = mapped_column(String(255))
+    source_type: Mapped[str] = mapped_column(String(16), index=True)
+    report_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="uploaded", index=True)
+    parsed_count: Mapped[int] = mapped_column(Integer, default=0)
+    eligible_count: Mapped[int] = mapped_column(Integer, default=0)
+    locked_count: Mapped[int] = mapped_column(Integer, default=0)
+    cancelled_count: Mapped[int] = mapped_column(Integer, default=0)
+    error_count: Mapped[int] = mapped_column(Integer, default=0)
+    drafts_created_count: Mapped[int] = mapped_column(Integer, default=0)
+    stats_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class VineImportItem(Base, TimestampMixin):
+    __tablename__ = "vine_import_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    batch_id: Mapped[int] = mapped_column(ForeignKey("vine_import_batches.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    order_number: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    asin: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    product_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    order_type: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    order_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    shipped_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    cancelled_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    estimated_tax_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    eligible_after: Mapped[date | None] = mapped_column(Date, nullable=True)
+    eligibility_status: Mapped[str] = mapped_column(String(64), default="invalid", index=True)
+    raw_row_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    parse_warnings_json: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    media_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    media_asset_ids_json: Mapped[list[int] | None] = mapped_column(JSON, nullable=True)
+    restricted_review_required: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    restricted_reasons: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    detected_category_guess: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    marketplace_allowed_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    inventory_item_id: Mapped[int | None] = mapped_column(ForeignKey("listings.id"), nullable=True)
+    listing_id: Mapped[int | None] = mapped_column(ForeignKey("listings.id"), nullable=True)
+    source_confidence: Mapped[str] = mapped_column(String(16), default="high")
+    reviewed: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
+
+class ProductMediaCache(Base, TimestampMixin):
+    __tablename__ = "product_media_cache"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    asin: Mapped[str] = mapped_column(String(16), index=True)
+    marketplace_region: Mapped[str] = mapped_column(String(8), default="US", index=True)
+    product_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    primary_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    gallery_image_urls_json: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    local_asset_ids_json: Mapped[list[int] | None] = mapped_column(JSON, nullable=True)
+    source_provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    fetch_status: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    fetch_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

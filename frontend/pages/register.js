@@ -12,6 +12,7 @@ export default function RegisterPage() {
   const { user, register } = useAuth();
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [confirmPassword, setConfirmPassword] = useState('');
 
   useEffect(() => {
     if (user) {
@@ -31,11 +32,17 @@ export default function RegisterPage() {
           setSubmitting(true);
           setError('');
           const form = new FormData(event.currentTarget);
+          const password = String(form.get('password') || '');
+          if (password !== confirmPassword) {
+            setError('Passwords do not match.');
+            setSubmitting(false);
+            return;
+          }
           try {
             await register({
               full_name: String(form.get('full_name') || ''),
               email: String(form.get('email') || ''),
-              password: String(form.get('password') || ''),
+              password,
             });
             router.replace('/app');
           } catch (submissionError) {
@@ -58,6 +65,20 @@ export default function RegisterPage() {
         <div className="pp-field">
           <label htmlFor="register-password">Password</label>
           <Input id="register-password" name="password" type="password" required minLength={8} placeholder="Create a password" />
+        </div>
+
+        <div className="pp-field">
+          <label htmlFor="register-password-confirm">Confirm password</label>
+          <Input
+            id="register-password-confirm"
+            name="password_confirm"
+            type="password"
+            required
+            minLength={8}
+            value={confirmPassword}
+            onChange={(event) => setConfirmPassword(event.target.value)}
+            placeholder="Repeat your password"
+          />
         </div>
 
         {error ? <p className="text-sm font-medium text-rose-600">{error}</p> : null}

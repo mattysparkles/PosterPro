@@ -14,6 +14,7 @@ from app.core.database import get_db
 from app.models.enums import MarketplaceName
 from app.models.models import AutomatedOfferLog, Listing, MarketplaceAccount, OfferAutomationRule, Sale, User
 from app.services.offer_service import OfferService
+from app.services.marketplace_setup import marketplace_status_snapshot
 
 router = APIRouter(prefix="/sales", tags=["sales"])
 offer_service = OfferService()
@@ -100,7 +101,7 @@ def get_sale_detection_settings(
     user = db.get(User, scoped_user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    configured = user.sale_detection_platforms or [m.value for m in MarketplaceName]
+    configured = user.sale_detection_platforms or []
     return {"user_id": scoped_user_id, "marketplaces": configured}
 
 
@@ -118,6 +119,22 @@ def update_sale_detection_settings(
     invalid = [name for name in payload.marketplaces if name not in MarketplaceName._value2member_map_]
     if invalid:
         raise HTTPException(status_code=400, detail=f"Unsupported marketplaces: {', '.join(invalid)}")
+    accounts = {
+        account.marketplace.value: account
+        for account in db.execute(
+            select(MarketplaceAccount).where(MarketplaceAccount.user_id == scoped_user_id)
+        ).scalars().all()
+    }
+    blocked = [
+        name
+        for name in payload.marketplaces
+        if not marketplace_status_snapshot(marketplace=name, account=accounts.get(name), user=user)["can_sync_sales"]
+    ]
+    if blocked:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Sale sync is not available for: {', '.join(blocked)}",
+        )
     user.sale_detection_platforms = list(dict.fromkeys(payload.marketplaces))
     db.add(user)
     db.commit()

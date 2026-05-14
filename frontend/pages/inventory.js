@@ -1,14 +1,22 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ChevronDown, PencilLine, RefreshCcw, Tag, Trash2 } from 'lucide-react';
+import { ChevronDown, PencilLine, RefreshCcw, Search, Tag, Trash2 } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { useRouter } from 'next/router';
 
 import AppShell from '../components/layout/AppShell';
 import PhotoEditorModal from '../components/PhotoEditorModal';
-import Badge from '../components/ui/badge';
 import Button from '../components/ui/button';
-import Input from '../components/ui/input';
+import DataTable from '../components/ui/data-table';
+import DataTableRowAction from '../components/ui/data-table-row-action';
+import EmptyState from '../components/ui/empty-state';
 import { Tabs } from '../components/ui/tabs';
+import Input from '../components/ui/input';
+import MetricCard from '../components/ui/metric-card';
+import PageHeader from '../components/ui/page-header';
+import SectionPanel from '../components/ui/section-panel';
+import StatusPill from '../components/ui/status-pill';
+import Toolbar from '../components/ui/toolbar';
 import { useAuth } from '../contexts/AuthContext';
 import useDashboardData from '../hooks/useDashboardData';
 import { fetchInventory, processListingPhoto, runInventoryBulkJob, toggleAutonomousMode, toPublicImageUrl } from '../lib/api';
@@ -38,8 +46,9 @@ function getBatchLabel(item, storageBatches) {
   return batch?.name || (item.batch_id ? `Batch ${item.batch_id}` : 'Unassigned');
 }
 
-export default function InventoryPage({ theme, setTheme }) {
+export default function InventoryPage() {
   const { user } = useAuth();
+  const router = useRouter();
   const { autonomousConfig, reload, storageBatches, clusters } = useDashboardData(user?.id);
   const [activeTab, setActiveTab] = useState('active');
   const [search, setSearch] = useState('');
@@ -68,6 +77,14 @@ export default function InventoryPage({ theme, setTheme }) {
   useEffect(() => {
     loadInventory();
   }, [loadInventory]);
+
+  useEffect(() => {
+    if (!router.isReady) return;
+    const requestedTab = typeof router.query.tab === 'string' ? router.query.tab : 'active';
+    if (INVENTORY_TABS.some((tab) => tab.value === requestedTab)) {
+      setActiveTab(requestedTab);
+    }
+  }, [router.isReady, router.query.tab]);
 
   const filteredInventory = useMemo(() => {
     if (activeTab === 'sold') return inventory.filter((item) => item.quantity <= 0);
@@ -118,53 +135,92 @@ export default function InventoryPage({ theme, setTheme }) {
         photo_count: cluster.image_count || 0,
         status: 'Grouped',
       }));
+  const inventoryMetrics = useMemo(
+    () => [
+      { label: 'Intake rows', value: tabCounts.intake, detail: 'Photos and fresh items still early in the pipeline.' },
+      { label: 'Active inventory', value: tabCounts.active, detail: 'Current unsold listings and tracked items.' },
+      { label: 'Sold items', value: tabCounts.sold, detail: 'Inventory rows already marked sold or depleted.' },
+      { label: 'Batches', value: tabCounts.batches, detail: 'Batch containers or grouped clusters in the system.' },
+    ],
+    [tabCounts],
+  );
 
   return (
     <AppShell
       active="/inventory"
+      title="Inventory"
       autonomousConfig={autonomousConfig}
       onToggleAutonomous={async () => {
         await toggleAutonomousMode(!autonomousConfig.autonomous_mode);
         await reload();
       }}
-      theme={theme}
-      onToggleTheme={() => {
-        const next = theme === 'dark' ? 'light' : 'dark';
-        setTheme(next);
-        localStorage.setItem('posterpro-theme', next);
-        document.documentElement.classList.toggle('dark', next === 'dark');
-      }}
     >
-      <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-        <div>
-          <p className="text-sm font-semibold text-[#667085]">Inventory</p>
-          <h1 className="mt-1 text-[2rem] font-semibold tracking-[-0.04em] text-[#111827]">Inventory</h1>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <Button variant="outline" onClick={loadInventory}>
-            <RefreshCcw size={16} />
-            Refresh
-          </Button>
-          <Link href="/listings">
-            <Button variant="outline">Open listings</Button>
-          </Link>
-        </div>
-      </div>
+      <PageHeader
+        title="Inventory"
+        description="Track intake, active inventory, sold items, and batches."
+        actions={
+          user?.can_access_vine_import ? (
+            <Link href="/imports/vine">
+              <Button>Import Vine report</Button>
+            </Link>
+          ) : null
+        }
+      />
 
-      <div className="rounded-[18px] border border-[#e5e7eb] bg-white p-4">
-        <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-          <div className="flex flex-1 flex-col gap-3 sm:flex-row">
-            <Input
-              placeholder="Search inventory"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              className="w-full sm:max-w-[320px]"
-            />
+      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        {inventoryMetrics.map((card) => (
+          <MetricCard key={card.label} label={card.label} value={card.value} detail={card.detail} />
+        ))}
+      </section>
+
+      <section className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(320px,0.9fr)]">
+        <SectionPanel title="Inventory workflow" description="How this workspace should move inventory through the system cleanly.">
+          <div className="grid gap-3 md:grid-cols-4">
+            {[
+              ['1. Intake', 'Import photos and label the storage unit or batch source.'],
+              ['2. Group', 'Let PosterPro cluster images into item candidates and batches.'],
+              ['3. Review', 'Fix item metadata, quantities, and images before publish.'],
+              ['4. Maintain', 'Track active, stale, and sold inventory over time.'],
+            ].map(([title, detail]) => (
+              <div key={title} className="rounded-[12px] border border-[#e5e7eb] bg-white p-4">
+                <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">{title}</p>
+                <p className="mt-2 text-sm text-[#667085]">{detail}</p>
+              </div>
+            ))}
+          </div>
+        </SectionPanel>
+        <SectionPanel title="Bulk actions" description="Use selection-based actions carefully so inventory stays trustworthy.">
+          <div className="space-y-3">
+            {[
+              'Labeling is best for consistent operator review queues and storage-unit tracking.',
+              'Delist should be used only when a listing is actually leaving marketplace circulation.',
+              'Mark sold should follow a confirmed marketplace sale or manual local sale event.',
+            ].map((item) => (
+              <div key={item} className="rounded-[12px] border border-[#e5e7eb] bg-white p-4 text-sm text-[#667085]">
+                {item}
+              </div>
+            ))}
+          </div>
+        </SectionPanel>
+      </section>
+
+      <Toolbar
+        left={
+          <>
+            <div className="relative w-full sm:max-w-[320px]">
+              <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#98a2b3]" size={16} />
+              <Input
+                placeholder="Search inventory"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                className="w-full pl-9"
+              />
+            </div>
             <div className="relative w-full sm:w-[220px]">
               <select
                 value={filter}
                 onChange={(event) => setFilter(event.target.value)}
-                className="pp-input h-12 w-full appearance-none pr-10 text-sm text-[#111827]"
+                className="pp-input h-10 w-full appearance-none rounded-[10px] border border-[#e5e7eb] bg-white px-3 pr-10 text-sm text-[#101828] outline-none focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
               >
                 {FILTER_OPTIONS.map((option) => (
                   <option key={option.value} value={option.value}>
@@ -172,14 +228,16 @@ export default function InventoryPage({ theme, setTheme }) {
                   </option>
                 ))}
               </select>
-              <ChevronDown size={16} className="pointer-events-none absolute right-4 top-4 text-[#98a2b3]" />
+              <ChevronDown size={16} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[#98a2b3]" />
             </div>
-          </div>
-          <div className="text-sm text-[#667085]">
-            {isLoading ? 'Loading…' : activeTab === 'batches' ? `${batches.length} visible` : `${filteredInventory.length} visible`}
-          </div>
-        </div>
-      </div>
+            <Button variant="outline" onClick={loadInventory}>
+              <RefreshCcw size={16} />
+              Refresh
+            </Button>
+          </>
+        }
+        right={<span>{isLoading ? 'Loading…' : activeTab === 'batches' ? `${batches.length} visible` : `${filteredInventory.length} visible`}</span>}
+      />
 
       <Tabs
         items={INVENTORY_TABS.map((tab) => ({ ...tab, count: tabCounts[tab.value] || 0 }))}
@@ -191,8 +249,8 @@ export default function InventoryPage({ theme, setTheme }) {
       />
 
       {selectedIds.length && activeTab !== 'batches' ? (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-[18px] border border-[#e5e7eb] bg-white px-4 py-3">
-          <p className="text-sm font-semibold text-[#111827]">{selectedIds.length} selected</p>
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-3">
+          <p className="text-sm font-medium text-[#101828]">{selectedIds.length} selected</p>
           <div className="flex flex-wrap gap-2">
             <Button variant="outline" size="sm" onClick={() => setSelectedIds([])}>
               Clear
@@ -213,117 +271,68 @@ export default function InventoryPage({ theme, setTheme }) {
       ) : null}
 
       {activeTab === 'batches' ? (
-        <div className="overflow-hidden rounded-[18px] border border-[#e5e7eb] bg-white">
-          <div className="overflow-x-auto">
-            <table className="min-w-full text-left text-sm">
-              <thead className="bg-[#f8fafc]">
-                <tr>
-                  <th className="px-4 py-3 font-semibold text-[#667085]">Batch</th>
-                  <th className="px-4 py-3 font-semibold text-[#667085]">Items</th>
-                  <th className="px-4 py-3 font-semibold text-[#667085]">Photos</th>
-                  <th className="px-4 py-3 font-semibold text-[#667085]">Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {batches.length ? (
-                  batches.map((batch) => (
-                    <tr key={batch.id} className="border-t border-[#e5e7eb] hover:bg-[#fbfdff]">
-                      <td className="px-4 py-3 font-medium text-[#111827]">{batch.name}</td>
-                      <td className="px-4 py-3 text-[#111827]">{batch.item_count}</td>
-                      <td className="px-4 py-3 text-[#111827]">{batch.photo_count}</td>
-                      <td className="px-4 py-3">
-                        <Badge tone="info">{String(batch.status).toLowerCase()}</Badge>
-                      </td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td colSpan={4} className="px-4 py-10 text-center text-sm text-[#667085]">
-                      No batches available yet.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <DataTable
+          columns={[
+            { key: 'name', label: 'Batch' },
+            { key: 'item_count', label: 'Items' },
+            { key: 'photo_count', label: 'Photos' },
+            { key: 'status', label: 'Status', render: (batch) => <StatusPill status={String(batch.status).toLowerCase()} label={batch.status} /> },
+          ]}
+          rows={batches}
+          rowKey={(row) => row.id}
+          emptyState={<EmptyState title="No batches yet" description="New intake batches will appear here once photos are grouped." className="border-0 p-0 py-6" />}
+        />
       ) : (
-        <div className="overflow-hidden rounded-[18px] border border-[#e5e7eb] bg-white">
-          <div className="overflow-x-auto">
-            <table className="min-w-full text-left text-sm">
-              <thead className="bg-[#f8fafc]">
-                <tr>
-                  <th className="w-12 px-4 py-3">
-                    <input
-                      type="checkbox"
-                      checked={filteredInventory.length > 0 && selectedIds.length === filteredInventory.length}
-                      onChange={() =>
-                        setSelectedIds(selectedIds.length === filteredInventory.length ? [] : filteredInventory.map((item) => item.id))
-                      }
-                      className="h-4 w-4 rounded border-[#cbd5e1] text-[#2563eb] focus:ring-[#2563eb]"
-                    />
-                  </th>
-                  <th className="px-4 py-3 font-semibold text-[#667085]">Item</th>
-                  <th className="px-4 py-3 font-semibold text-[#667085]">Photo count</th>
-                  <th className="px-4 py-3 font-semibold text-[#667085]">Status</th>
-                  <th className="px-4 py-3 font-semibold text-[#667085]">Batch</th>
-                  <th className="px-4 py-3 font-semibold text-[#667085]">Value</th>
-                  <th className="px-4 py-3 font-semibold text-[#667085]">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredInventory.length ? (
-                  filteredInventory.map((item) => {
-                    const status = getInventoryStatus(item);
-                    return (
-                      <tr key={item.id} className="border-t border-[#e5e7eb] hover:bg-[#fbfdff]">
-                        <td className="px-4 py-3">
-                          <input
-                            type="checkbox"
-                            checked={selectedIds.includes(item.id)}
-                            onChange={() => toggleRow(item.id)}
-                            className="h-4 w-4 rounded border-[#cbd5e1] text-[#2563eb] focus:ring-[#2563eb]"
-                          />
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-3">
-                            <div className="h-11 w-11 overflow-hidden rounded-[12px] bg-[#f2f4f7]">
-                              {item.image_urls?.[0] ? (
-                                <img src={toPublicImageUrl(item.image_urls[0])} alt={item.title || `Item ${item.id}`} className="h-full w-full object-cover" />
-                              ) : null}
-                            </div>
-                            <div className="min-w-[220px]">
-                              <p className="truncate font-semibold text-[#111827]">{item.title || `Listing #${item.id}`}</p>
-                              <p className="mt-1 text-xs text-[#667085]">#{item.id}</p>
-                            </div>
-                          </div>
-                        </td>
-                        <td className="px-4 py-3 text-[#111827]">{item.image_urls?.length || 0}</td>
-                        <td className="px-4 py-3">
-                          <Badge tone={status.tone}>{status.label}</Badge>
-                        </td>
-                        <td className="px-4 py-3 text-[#667085]">{getBatchLabel(item, storageBatches)}</td>
-                        <td className="px-4 py-3 font-medium text-[#111827]">${Number(item.price || item.suggested_price || 0).toFixed(0)}</td>
-                        <td className="px-4 py-3">
-                          <Button variant="outline" size="sm" onClick={() => setEditingListing(item)}>
-                            <PencilLine size={14} />
-                            Edit photo
-                          </Button>
-                        </td>
-                      </tr>
-                    );
-                  })
-                ) : (
-                  <tr>
-                    <td colSpan={7} className="px-4 py-10 text-center text-sm text-[#667085]">
-                      No inventory records in this view.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <DataTable
+          columns={[
+            {
+              key: 'item',
+              label: 'Item',
+              cellClassName: 'min-w-[240px]',
+              render: (item) => (
+                <div className="flex items-center gap-3">
+                  <div className="h-10 w-10 overflow-hidden rounded-[10px] bg-[#f2f4f7]">
+                    {item.image_urls?.[0] ? (
+                      <img src={toPublicImageUrl(item.image_urls[0])} alt={item.title || `Item ${item.id}`} className="h-full w-full object-cover" />
+                    ) : null}
+                  </div>
+                  <div>
+                    <p className="truncate font-medium text-[#101828]">{item.title || `Listing #${item.id}`}</p>
+                    <p className="mt-1 text-xs text-[#667085]">#{item.id}</p>
+                  </div>
+                </div>
+              ),
+            },
+            { key: 'photos', label: 'Photos', render: (item) => item.image_urls?.length || 0 },
+            {
+              key: 'status',
+              label: 'Status',
+              render: (item) => {
+                const status = getInventoryStatus(item);
+                return <StatusPill status={status.label.toLowerCase()} label={status.label} />;
+              },
+            },
+            { key: 'batch', label: 'Batch', render: (item) => getBatchLabel(item, storageBatches) },
+            { key: 'value', label: 'Value', render: (item) => `$${Number(item.price || item.suggested_price || 0).toFixed(0)}` },
+            {
+              key: 'actions',
+              label: 'Actions',
+              render: (item) => (
+                <DataTableRowAction variant="outline" onClick={() => setEditingListing(item)}>
+                  <PencilLine size={14} />
+                  Edit photo
+                </DataTableRowAction>
+              ),
+            },
+          ]}
+          rows={filteredInventory}
+          rowKey={(row) => row.id}
+          selectedRows={selectedIds}
+          onToggleRow={toggleRow}
+          allSelected={filteredInventory.length > 0 && selectedIds.length === filteredInventory.length}
+          onToggleAll={() => setSelectedIds(selectedIds.length === filteredInventory.length ? [] : filteredInventory.map((item) => item.id))}
+          emptyState={<EmptyState title="No inventory records" description="This tab does not have any matching inventory items yet." className="border-0 p-0 py-6" />}
+        />
       )}
 
       <PhotoEditorModal

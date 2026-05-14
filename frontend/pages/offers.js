@@ -15,7 +15,7 @@ import {
   updateOfferRules,
 } from '../lib/api';
 
-export default function OffersPage({ theme, setTheme }) {
+export default function OffersPage() {
   const { user } = useAuth();
   const [autonomousConfig, setAutonomousConfig] = useState({ autonomous_mode: true, autonomous_dry_run: true });
   const [offerRule, setOfferRule] = useState({ is_enabled: false, rules: {} });
@@ -42,17 +42,11 @@ export default function OffersPage({ theme, setTheme }) {
   return (
     <AppShell
       active="/offers"
+      title="Offers"
       autonomousConfig={autonomousConfig}
       onToggleAutonomous={async () => {
         await toggleAutonomousMode(!autonomousConfig.autonomous_mode);
         await reload();
-      }}
-      theme={theme}
-      onToggleTheme={() => {
-        const next = theme === 'dark' ? 'light' : 'dark';
-        setTheme(next);
-        localStorage.setItem('posterpro-theme', next);
-        document.documentElement.classList.toggle('dark', next === 'dark');
       }}
     >
       <Card>

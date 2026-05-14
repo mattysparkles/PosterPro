@@ -11,10 +11,10 @@ export function Tabs({ items, value, onChange, className }) {
             type="button"
             onClick={() => onChange(item.value)}
             className={cn(
-              'inline-flex h-10 items-center rounded-xl border px-4 text-sm font-medium transition',
+              'inline-flex h-10 items-center rounded-[10px] border px-4 text-sm font-medium transition-colors',
               active
-                ? 'border-[#bfdbfe] bg-[#eff6ff] text-[#2563eb]'
-                : 'border-[#e5e7eb] bg-white text-[#475467] hover:bg-[#f8fafc] hover:text-[#111827]',
+                ? 'border-[#dbe7ff] bg-[#eef4ff] text-[#2563eb]'
+                : 'border-[#e5e7eb] bg-white text-[#475467] hover:bg-[#f9fafb] hover:text-[#101828]',
             )}
           >
             {item.label}

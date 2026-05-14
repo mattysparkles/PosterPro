@@ -1,10 +1,14 @@
 import { createContext, useContext, useEffect, useMemo, useState } from 'react';
 
 import {
+  changePassword,
   fetchCurrentUser,
+  forgotPassword,
   loginUser,
   logoutUser,
   registerUser,
+  resetPassword,
+  updateSessionViewMode,
 } from '../lib/api';
 
 const AuthContext = createContext(null);
@@ -48,6 +52,18 @@ export function AuthProvider({ children }) {
       logout: async () => {
         await logoutUser();
         setUser(null);
+      },
+      changePassword: async (payload) => changePassword(payload),
+      forgotPassword: async (payload) => forgotPassword(payload),
+      resetPassword: async (payload) => {
+        const session = await resetPassword(payload);
+        setUser(session.user);
+        return session;
+      },
+      setViewAsRegular: async (enabled) => {
+        const nextUser = await updateSessionViewMode(enabled);
+        setUser(nextUser);
+        return nextUser;
       },
     }),
     [loading, user],
