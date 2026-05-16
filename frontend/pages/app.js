@@ -174,84 +174,292 @@ export default function Dashboard() {
   );
 
   useEffect(() => {
-    if (typeof window === 'undefined') return undefined;
-    const updateActiveSection = () => {
-      const sections = dashboardSections
-        .map((section) => {
-          const element = document.getElementById(section.key);
-          if (!element) return null;
-          return { key: section.key, top: element.getBoundingClientRect().top };
-        })
-        .filter(Boolean);
-      const visible = sections.find((section) => section.top >= 0 && section.top < 220);
-      if (visible?.key) {
-        setActiveSection(visible.key);
-        return;
-      }
-      const passed = sections.filter((section) => section.top < 220).at(-1);
-      if (passed?.key) setActiveSection(passed.key);
-    };
+    if (!router.isReady) return;
+    const requested = typeof router.query.section === 'string' ? router.query.section : '';
+    if (requested && dashboardSections.some((section) => section.key === requested)) {
+      setActiveSection(requested);
+      return;
+    }
+    setActiveSection('overview');
+  }, [dashboardSections, router.isReady, router.query.section]);
 
-    updateActiveSection();
-    window.addEventListener('scroll', updateActiveSection, { passive: true });
-    window.addEventListener('resize', updateActiveSection);
-    return () => {
-      window.removeEventListener('scroll', updateActiveSection);
-      window.removeEventListener('resize', updateActiveSection);
-    };
-  }, [dashboardSections]);
-
-  useEffect(() => {
-    if (!router.isReady || typeof window === 'undefined') return;
-    const hash = window.location.hash.replace('#', '');
-    if (!hash) return;
-    const target = document.getElementById(hash);
-    if (!target) return;
-    window.setTimeout(() => {
-      target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      setActiveSection(hash);
-    }, 50);
-  }, [router.isReady]);
-
-  const jumpToSection = (key) => {
-    if (typeof window === 'undefined') return;
-    const target = document.getElementById(key);
-    if (!target) return;
+  const selectSection = (key) => {
     setActiveSection(key);
-    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    window.history.replaceState(null, '', `#${key}`);
+    router.replace(
+      {
+        pathname: '/app',
+        query: key === 'overview' ? {} : { section: key },
+      },
+      undefined,
+      { shallow: true }
+    );
   };
 
-  const dashboardSubnav = useMemo(
-    () => ({
-      eyebrow: 'Dashboard CMS',
-      title: 'Command Center',
-      description: 'Use a real dashboard rail to jump between overview, operations, channels, setup, and system sections.',
-      sections: [
-        {
-          label: 'Workspace',
-          items: dashboardSections.slice(0, 3).map((section) => ({
-            key: section.key,
-            label: section.label,
-            active: activeSection === section.key,
-            description: section.description,
-            onClick: () => jumpToSection(section.key),
-          })),
-        },
-        {
-          label: 'Operations',
-          items: dashboardSections.slice(3).map((section) => ({
-            key: section.key,
-            label: section.label,
-            active: activeSection === section.key,
-            description: section.description,
-            onClick: () => jumpToSection(section.key),
-          })),
-        },
-      ],
-    }),
-    [activeSection, dashboardSections],
+  const activeSectionMeta = dashboardSections.find((section) => section.key === activeSection) || dashboardSections[0];
+
+  const renderOverview = () => (
+    <div className="space-y-5">
+      <SectionPanel
+        title="Workspace overview"
+        description="Primary throughput, backlog, and publishing posture in one compact operator module."
+        action={
+          <Link href="/publishing" className="inline-flex items-center gap-1 text-sm font-medium text-[#2563eb]">
+            Open publish queue
+            <ArrowRight size={14} />
+          </Link>
+        }
+      >
+        <div className="space-y-4">
+          <div className="pp-dashboard-hero p-5">
+            <p className="pp-dashboard-hero__eyebrow">Control room</p>
+            <h2 className="pp-dashboard-hero__title mt-3">Run reseller operations from a structured admin workspace.</h2>
+            <p className="pp-dashboard-hero__body mt-3">
+              The dashboard now behaves more like a CMS backend: choose a section from the left menu, then work through a focused panel on the right instead of scanning one long page.
+            </p>
+          </div>
+          <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-4">
+            {topMetrics.map((card) => (
+              <MetricCard key={card.label} label={card.label} value={card.value} detail={card.detail} />
+            ))}
+          </div>
+        </div>
+      </SectionPanel>
+    </div>
   );
+
+  const renderActivity = () => (
+    <div className="space-y-5">
+      <DataTableCard
+        title="Recent listing activity"
+        description="Latest changes across drafts, review queue, and live marketplace rows."
+        action={<Link href="/listings" className="text-sm font-medium text-[#2563eb]">View all listings</Link>}
+        columns={[
+          {
+            key: 'title',
+            label: 'Listing',
+            render: (listing) => (
+              <div>
+                <p className="truncate font-medium text-[#101828]">{listing.title || `Listing #${listing.id}`}</p>
+                <p className="mt-1 text-xs text-[#667085]">#{listing.id}</p>
+              </div>
+            ),
+          },
+          {
+            key: 'status',
+            label: 'Status',
+            render: (listing) => <StatusPill status={listing.status || 'draft'} label={listing.status || 'Draft'} />,
+          },
+          {
+            key: 'updated',
+            label: 'Updated',
+            render: (listing) => formatTime(listing.updated_at || listing.created_at),
+          },
+        ]}
+        rows={recentActivity}
+        rowKey={(row) => row.id}
+        emptyState={<EmptyState title="No recent activity" description="Recent listing changes will appear here." className="border-0 p-0 py-6" />}
+      />
+
+      <SectionPanel title="Attention feed" description="Errors, alerts, and items that need an operator now.">
+        <div className="space-y-3">
+          {attentionItems.length ? (
+            attentionItems.map((listing) => (
+              <div key={listing.id} className="rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-3">
+                <div className="flex items-start gap-3">
+                  <AlertTriangle size={16} className="mt-0.5 shrink-0 text-[#b42318]" />
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium text-[#101828]">{listing.title || `Listing #${listing.id}`}</p>
+                    <p className="mt-1 text-sm text-[#667085]">Review publish or sync status before requeueing marketplace work.</p>
+                  </div>
+                </div>
+              </div>
+            ))
+          ) : alerts?.length ? (
+            alerts.slice(0, 5).map((alert, index) => (
+              <div key={`${alert.title || 'alert'}-${index}`} className="rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-3">
+                <p className="text-sm font-medium text-[#101828]">{alert.title || 'Alert'}</p>
+                <p className="mt-1 text-sm text-[#667085]">{alert.message || 'Check the latest workflow state.'}</p>
+              </div>
+            ))
+          ) : (
+            <div className="rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-8 text-center">
+              <Clock3 size={18} className="mx-auto text-[#2563eb]" />
+              <p className="mt-3 text-sm font-medium text-[#101828]">No urgent events right now</p>
+              <p className="mt-1 text-sm text-[#667085]">Failures, alerts, and queue issues will surface here.</p>
+            </div>
+          )}
+        </div>
+      </SectionPanel>
+    </div>
+  );
+
+  const renderJobs = () => (
+    <div className="space-y-5">
+      <DataTableCard
+        title="Batch processing status"
+        description="Recent import and cross-post jobs without leaving the dashboard."
+        action={<Link href="/jobs" className="text-sm font-medium text-[#2563eb]">Open jobs console</Link>}
+        columns={[
+          { key: 'job_type', label: 'Job type' },
+          { key: 'reference', label: 'Reference' },
+          { key: 'status', label: 'Status', render: (row) => <StatusPill status={row.status} label={row.status} /> },
+          { key: 'updated_at', label: 'Updated', render: (row) => formatTime(row.updated_at) },
+        ]}
+        rows={recentJobRows}
+        rowKey={(row) => row.id}
+        emptyState={<EmptyState title="No jobs yet" description="Import and cross-post jobs will appear here once work starts moving through the marketplace execution layer." className="border-0 p-0 py-6" />}
+      />
+      <div className="grid gap-3 md:grid-cols-3">
+        <MetricCard label="Queued or running" value={jobsSummary.queued} detail="Current job execution load." />
+        <MetricCard label="Completed" value={jobsSummary.completed} detail="Jobs that finished successfully." />
+        <MetricCard label="Failed" value={jobsSummary.failed} detail="Jobs that need review or retry." />
+      </div>
+    </div>
+  );
+
+  const renderOperations = () => (
+    <div className="space-y-5">
+      <SectionPanel title="Operational posture" description="Short-form status modules instead of one oversized narrative dashboard.">
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="rounded-[14px] border border-[#e5e7eb] bg-white p-4">
+            <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Marketplace sync</p>
+            <div className="mt-3">
+              <StatusPill status={failedPublishCount ? 'warning' : 'success'} label={failedPublishCount ? 'Attention needed' : 'Healthy'} />
+            </div>
+            <p className="mt-2 text-sm text-[#667085]">Derived from current publish failures and live listing state.</p>
+          </div>
+          <div className="rounded-[14px] border border-[#e5e7eb] bg-white p-4">
+            <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Automation mode</p>
+            <div className="mt-3">
+              <StatusPill status={autonomousConfig?.autonomous_mode ? 'success' : 'default'} label={autonomousConfig?.autonomous_mode ? 'Automation on' : 'Automation off'} />
+            </div>
+            <p className="mt-2 text-sm text-[#667085]">Controls how aggressively drafts advance without human intervention.</p>
+          </div>
+        </div>
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 2xl:grid-cols-4">
+          {workspaceStats.map((item) => (
+            <div key={item.label} className="rounded-[14px] border border-[#e5e7eb] bg-[#fcfcfd] p-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">{item.label}</p>
+              <p className="mt-2 text-2xl font-semibold text-[#101828]">{item.value}</p>
+              <p className="mt-1 text-sm text-[#667085]">{item.note}</p>
+            </div>
+          ))}
+        </div>
+      </SectionPanel>
+
+      <SectionPanel title="Quick actions" description="Most common workflow moves kept in a dedicated command module.">
+        <div className="grid gap-3 2xl:grid-cols-2">
+          <QuickActionCard href="/intake" icon={Upload} eyebrow="Intake" title="Upload Photos" description="Start a new intake batch with loose photos or a zip import." meta={`${listings.length} items`} />
+          <QuickActionCard href="/listings/new" icon={PlusCircle} eyebrow="Listings" title="Create Listing" description="Open the listing workspace directly for a manual item or imported draft." meta={`${draftCount} drafts`} />
+          <QuickActionCard href="/publishing" icon={RefreshCcw} eyebrow="Publishing" title="Publish Queue" description="Review approvals, queue health, and live marketplace rows." meta={`${readyCount} ready`} />
+          <QuickActionCard href="/sales" icon={ShoppingCart} eyebrow="Revenue" title="Sales & Orders" description="Monitor detected sales and finish bookkeeping adjustments." meta={`${salesDashboard.summary?.units || 0} units`} />
+        </div>
+      </SectionPanel>
+    </div>
+  );
+
+  const renderChannels = () => (
+    <div className="space-y-5">
+      <SectionPanel title="Marketplace connections" description="Channel state visible as a compact admin panel instead of a dashboard sidebar fragment.">
+        <div className="space-y-3">
+          {activeBridgeConnectSession ? (
+            <div className="rounded-[14px] border border-[#fde68a] bg-[#fffbeb] p-4">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-sm font-semibold text-[#101828]">Facebook login waiting</p>
+                <StatusPill status="warning" label={String(activeBridgeConnectSession.status || 'waiting_for_login').replace(/_/g, ' ')} />
+              </div>
+              <p className="mt-2 text-sm text-[#667085]">{activeBridgeConnectSession.message || 'PosterPro is waiting for Facebook authentication in the bridge workspace.'}</p>
+              <div className="mt-3">
+                <Link href={`/bridge-desktop?connectSessionId=${encodeURIComponent(activeBridgeConnectSession.connect_session_id)}`}>
+                  <Button variant="outline" size="sm">Resume Facebook login</Button>
+                </Link>
+              </div>
+            </div>
+          ) : null}
+          {marketplaceWidgets.length ? (
+            <div className="grid gap-3 2xl:grid-cols-2">
+              {marketplaceWidgets.map((connection) => (
+                <div key={connection.marketplace} className="rounded-[14px] border border-[#e5e7eb] bg-white p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-sm font-semibold text-[#101828]">{connection.display_name || connection.marketplace}</p>
+                    <StatusPill
+                      status={toStatusTone(connection.connected, connection.workflow_state === 'ready')}
+                      label={connection.connected ? 'Connected' : connection.workflow_state === 'ready' ? 'Ready' : 'Setup'}
+                    />
+                  </div>
+                  <p className="mt-2 text-sm text-[#667085]">
+                    {connection.account_handle ? `Account: ${connection.account_handle}` : 'No account handle saved yet.'}
+                  </p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <EmptyState title="No channel records yet" description="Connect eBay or add manual marketplace records from Settings." className="border-0 p-0 py-8" />
+          )}
+        </div>
+      </SectionPanel>
+    </div>
+  );
+
+  const renderSetup = () => (
+    <div className="space-y-5">
+      {setupSummary ? <SetupChecklistPanel setupSummary={setupSummary} /> : null}
+      <SectionPanel title="Current blockers" description="Missing setup or workflow conditions that still prevent clean end-to-end operation.">
+        <div className="space-y-3">
+          {blockers.length ? (
+            blockers.map((item) => (
+              <div key={item} className="rounded-[12px] border border-[#fecdca] bg-[#fff6f3] px-4 py-3">
+                <p className="text-sm text-[#912018]">{item}</p>
+              </div>
+            ))
+          ) : (
+            <div className="rounded-[12px] border border-[#d1fadf] bg-[#ecfdf3] px-4 py-8 text-center">
+              <CheckCircle2 size={18} className="mx-auto text-[#067647]" />
+              <p className="mt-3 text-sm font-medium text-[#101828]">Core setup looks healthy</p>
+              <p className="mt-1 text-sm text-[#667085]">This account can stay focused on intake, listings, and publishing throughput.</p>
+            </div>
+          )}
+        </div>
+      </SectionPanel>
+    </div>
+  );
+
+  const renderSystem = () => (
+    <div className="space-y-5">
+      <SectionPanel title="System readiness" description="Live dependencies that still control automation depth.">
+        <div className="grid gap-3 2xl:grid-cols-2">
+          {readinessRows.map(([label, ok, note]) => (
+            <div key={label} className="rounded-[12px] border border-[#e5e7eb] bg-white p-4">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <span className="inline-flex h-10 w-10 items-center justify-center rounded-[12px] bg-[#f8fafc] text-[#2563eb]">
+                    <Database size={16} />
+                  </span>
+                  <p className="text-sm font-semibold text-[#101828]">{label}</p>
+                </div>
+                <StatusPill status={ok ? 'success' : 'warning'} label={ok ? 'Ready' : 'Missing'} />
+              </div>
+              <p className="mt-2 text-sm text-[#667085]">{note}</p>
+            </div>
+          ))}
+        </div>
+      </SectionPanel>
+      <div className="grid gap-3 2xl:grid-cols-2">
+        <QuickActionCard href="/settings?tab=ebay" icon={Store} eyebrow="Integrations" title="Connect eBay" description="Finish OAuth setup or reconnect the current operator account." meta={setupSummary?.server_readiness?.ebay_oauth_configured ? 'Configured' : 'Needs setup'} />
+        <QuickActionCard href="/inventory" icon={Package} eyebrow="Inventory" title="View Inventory" description="Inspect intake, active items, sold units, and storage batches." meta={`${listings.length} tracked`} />
+      </div>
+    </div>
+  );
+
+  const sectionContent = {
+    overview: renderOverview(),
+    activity: renderActivity(),
+    jobs: renderJobs(),
+    operations: renderOperations(),
+    channels: renderChannels(),
+    setup: renderSetup(),
+    system: renderSystem(),
+  };
 
   return (
     <AppShell
@@ -263,7 +471,6 @@ export default function Dashboard() {
         await reload();
       }}
       contentWidth="wide"
-      subnav={dashboardSubnav}
     >
       <PageHeader
         title="Reseller command center"
@@ -286,238 +493,50 @@ export default function Dashboard() {
         }
       />
 
-      <div id="overview" className="pp-dashboard-layout">
-        <div className="pp-dashboard-main space-y-5">
-          <SectionPanel
-            title="Workspace overview"
-            description="Primary throughput, backlog, and publishing posture in one compact operator module."
-            action={
-              <Link href="/publishing" className="inline-flex items-center gap-1 text-sm font-medium text-[#2563eb]">
-                Open publish queue
-                <ArrowRight size={14} />
-              </Link>
-            }
-          >
-            <div className="space-y-4">
-              <div className="rounded-[18px] border border-[#dbe4f0] bg-[linear-gradient(135deg,#f8fbff_0%,#eef4ff_100%)] p-5">
-                <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#2563eb]">Control room</p>
-                <h2 className="mt-3 max-w-xl text-[24px] font-semibold tracking-[-0.04em] text-[#101828]">Run reseller operations from a multi-panel dashboard instead of one scrolling workspace.</h2>
-                <p className="mt-2 max-w-2xl text-sm leading-6 text-[#475467]">
-                  Intake, listing throughput, marketplace health, and operational blockers are separated into focused modules so the page behaves like a backend CMS panel rather than a long document.
-                </p>
-              </div>
-
-              <div className="grid gap-3 md:grid-cols-2">
-                {topMetrics.map((card) => (
-                  <MetricCard key={card.label} label={card.label} value={card.value} detail={card.detail} />
-                ))}
-              </div>
+      <div className="pp-section-workspace pp-dashboard-theme">
+        <aside className="pp-section-workspace__menu space-y-4">
+          <div className="pp-dashboard-menu-card p-4">
+            <p className="pp-dashboard-menu-label">Dashboard menu</p>
+            <p className="pp-dashboard-menu-copy mt-2 text-sm leading-6">Use the left rail like a CMS backend to switch the active workspace panel.</p>
+            <div className="mt-4 space-y-1.5">
+              {dashboardSections.map((section) => {
+                const active = activeSection === section.key;
+                return (
+                  <button
+                    key={section.key}
+                    type="button"
+                    onClick={() => selectSection(section.key)}
+                    className={`pp-dashboard-menu-button px-3 py-3 text-left ${active ? 'is-active' : ''}`}
+                  >
+                    <p className="pp-dashboard-menu-button__title">{section.label}</p>
+                    <p className="pp-dashboard-menu-button__copy">{section.description}</p>
+                  </button>
+                );
+              })}
             </div>
-          </SectionPanel>
-
-          <div id="activity" className="pp-dashboard-activity">
-            <DataTableCard
-              title="Recent listing activity"
-              description="Latest changes across drafts, review queue, and live marketplace rows."
-              action={<Link href="/listings" className="text-sm font-medium text-[#2563eb]">View all listings</Link>}
-              columns={[
-                {
-                  key: 'title',
-                  label: 'Listing',
-                  render: (listing) => (
-                    <div>
-                      <p className="truncate font-medium text-[#101828]">{listing.title || `Listing #${listing.id}`}</p>
-                      <p className="mt-1 text-xs text-[#667085]">#{listing.id}</p>
-                    </div>
-                  ),
-                },
-                {
-                  key: 'status',
-                  label: 'Status',
-                  render: (listing) => <StatusPill status={listing.status || 'draft'} label={listing.status || 'Draft'} />,
-                },
-                {
-                  key: 'updated',
-                  label: 'Updated',
-                  render: (listing) => formatTime(listing.updated_at || listing.created_at),
-                },
-              ]}
-              rows={recentActivity}
-              rowKey={(row) => row.id}
-              emptyState={<EmptyState title="No recent activity" description="Recent listing changes will appear here." className="border-0 p-0 py-6" />}
-            />
-
-            <SectionPanel title="Attention feed" description="Errors, alerts, and items that need an operator now.">
-              <div className="space-y-3">
-                {attentionItems.length ? (
-                  attentionItems.map((listing) => (
-                    <div key={listing.id} className="rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-3">
-                      <div className="flex items-start gap-3">
-                        <AlertTriangle size={16} className="mt-0.5 shrink-0 text-[#b42318]" />
-                        <div className="min-w-0">
-                          <p className="truncate text-sm font-medium text-[#101828]">{listing.title || `Listing #${listing.id}`}</p>
-                          <p className="mt-1 text-sm text-[#667085]">Review publish or sync status before requeueing marketplace work.</p>
-                        </div>
-                      </div>
-                    </div>
-                  ))
-                ) : alerts?.length ? (
-                  alerts.slice(0, 5).map((alert, index) => (
-                    <div key={`${alert.title || 'alert'}-${index}`} className="rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-3">
-                      <p className="text-sm font-medium text-[#101828]">{alert.title || 'Alert'}</p>
-                      <p className="mt-1 text-sm text-[#667085]">{alert.message || 'Check the latest workflow state.'}</p>
-                    </div>
-                  ))
-                ) : (
-                  <div className="rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-8 text-center">
-                    <Clock3 size={18} className="mx-auto text-[#2563eb]" />
-                    <p className="mt-3 text-sm font-medium text-[#101828]">No urgent events right now</p>
-                    <p className="mt-1 text-sm text-[#667085]">Failures, alerts, and queue issues will surface here.</p>
-                  </div>
-                )}
-              </div>
-            </SectionPanel>
           </div>
 
-          <div id="jobs">
-            <DataTableCard
-            title="Batch processing status"
-            description="Recent import and cross-post jobs without leaving the dashboard."
-            action={<Link href="/jobs" className="text-sm font-medium text-[#2563eb]">Open jobs console</Link>}
-            columns={[
-              { key: 'job_type', label: 'Job type' },
-              { key: 'reference', label: 'Reference' },
-              { key: 'status', label: 'Status', render: (row) => <StatusPill status={row.status} label={row.status} /> },
-              { key: 'updated_at', label: 'Updated', render: (row) => formatTime(row.updated_at) },
-            ]}
-            rows={recentJobRows}
-            rowKey={(row) => row.id}
-            emptyState={<EmptyState title="No jobs yet" description="Import and cross-post jobs will appear here once work starts moving through the marketplace execution layer." className="border-0 p-0 py-6" />}
-            />
+          <div className="pp-dashboard-note-card p-4">
+            <p className="pp-dashboard-note-label">Current view</p>
+            <p className="mt-2 font-[var(--pp-heading-font)] text-base font-semibold tracking-[-0.02em] text-[#172033]">{activeSectionMeta.label}</p>
+            <p className="pp-dashboard-note-copy mt-1 text-sm leading-6">{activeSectionMeta.description}</p>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <StatusPill status={autonomousConfig?.autonomous_mode ? 'success' : 'default'} label={autonomousConfig?.autonomous_mode ? 'Automation on' : 'Automation off'} />
+              <StatusPill status={blockers.length ? 'warning' : 'success'} label={blockers.length ? `${blockers.length} blockers` : 'Setup healthy'} />
+            </div>
           </div>
-        </div>
-
-        <div id="operations" className="pp-dashboard-ops space-y-5">
-          <SectionPanel title="Operational posture" description="Short-form status modules instead of one oversized narrative dashboard.">
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
-              <div className="rounded-[14px] border border-[#e5e7eb] bg-white p-4">
-                <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Marketplace sync</p>
-                <div className="mt-3">
-                  <StatusPill status={failedPublishCount ? 'warning' : 'success'} label={failedPublishCount ? 'Attention needed' : 'Healthy'} />
-                </div>
-                <p className="mt-2 text-sm text-[#667085]">Derived from current publish failures and live listing state.</p>
-              </div>
-              <div className="rounded-[14px] border border-[#e5e7eb] bg-white p-4">
-                <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Automation mode</p>
-                <div className="mt-3">
-                  <StatusPill status={autonomousConfig?.autonomous_mode ? 'success' : 'default'} label={autonomousConfig?.autonomous_mode ? 'Automation on' : 'Automation off'} />
-                </div>
-                <p className="mt-2 text-sm text-[#667085]">Controls how aggressively drafts advance without human intervention.</p>
-              </div>
-            </div>
-            <div className="mt-4 grid gap-3 sm:grid-cols-2">
-              {workspaceStats.map((item) => (
-                <div key={item.label} className="rounded-[14px] border border-[#e5e7eb] bg-[#fcfcfd] p-4">
-                  <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">{item.label}</p>
-                  <p className="mt-2 text-2xl font-semibold text-[#101828]">{item.value}</p>
-                  <p className="mt-1 text-sm text-[#667085]">{item.note}</p>
-                </div>
-              ))}
-            </div>
-          </SectionPanel>
-
-          <SectionPanel title="Quick actions" description="Most common workflow moves kept in a dedicated command module.">
-            <div className="grid gap-3">
-              <QuickActionCard href="/intake" icon={Upload} eyebrow="Intake" title="Upload Photos" description="Start a new intake batch with loose photos or a zip import." meta={`${listings.length} items`} />
-              <QuickActionCard href="/listings/new" icon={PlusCircle} eyebrow="Listings" title="Create Listing" description="Open the listing workspace directly for a manual item or imported draft." meta={`${draftCount} drafts`} />
-              <QuickActionCard href="/publishing" icon={RefreshCcw} eyebrow="Publishing" title="Publish Queue" description="Review approvals, queue health, and live marketplace rows." meta={`${readyCount} ready`} />
-              <QuickActionCard href="/sales" icon={ShoppingCart} eyebrow="Revenue" title="Sales & Orders" description="Monitor detected sales and finish bookkeeping adjustments." meta={`${salesDashboard.summary?.units || 0} units`} />
-            </div>
-          </SectionPanel>
-
-          <SectionPanel id="channels" title="Marketplace connections" description="Channel state visible as a compact dashboard module.">
-            <div className="space-y-3">
-              {activeBridgeConnectSession ? (
-                <div className="rounded-[14px] border border-[#fde68a] bg-[#fffbeb] p-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <p className="text-sm font-semibold text-[#101828]">Facebook login waiting</p>
-                    <StatusPill status="warning" label={String(activeBridgeConnectSession.status || 'waiting_for_login').replace(/_/g, ' ')} />
-                  </div>
-                  <p className="mt-2 text-sm text-[#667085]">{activeBridgeConnectSession.message || 'PosterPro is waiting for Facebook authentication in the bridge workspace.'}</p>
-                  <div className="mt-3">
-                    <Link href={`/bridge-desktop?connectSessionId=${encodeURIComponent(activeBridgeConnectSession.connect_session_id)}`}>
-                      <Button variant="outline" size="sm">Resume Facebook login</Button>
-                    </Link>
-                  </div>
-                </div>
-              ) : null}
-              {marketplaceWidgets.length ? (
-                marketplaceWidgets.slice(0, 4).map((connection) => (
-                  <div key={connection.marketplace} className="rounded-[14px] border border-[#e5e7eb] bg-white p-4">
-                    <div className="flex items-center justify-between gap-3">
-                      <p className="text-sm font-semibold text-[#101828]">{connection.display_name || connection.marketplace}</p>
-                      <StatusPill
-                        status={toStatusTone(connection.connected, connection.workflow_state === 'ready')}
-                        label={connection.connected ? 'Connected' : connection.workflow_state === 'ready' ? 'Ready' : 'Setup'}
-                      />
-                    </div>
-                    <p className="mt-2 text-sm text-[#667085]">
-                      {connection.account_handle ? `Account: ${connection.account_handle}` : 'No account handle saved yet.'}
-                    </p>
-                  </div>
-                ))
-              ) : (
-                <EmptyState title="No channel records yet" description="Connect eBay or add manual marketplace records from Settings." className="border-0 p-0 py-8" />
-              )}
-            </div>
-          </SectionPanel>
-        </div>
-
-        <aside className="pp-dashboard-rail space-y-5">
-          <div id="setup">
-            {setupSummary ? <SetupChecklistPanel setupSummary={setupSummary} /> : null}
-          </div>
-
-          <SectionPanel title="Current blockers" description="Missing setup or workflow conditions that still prevent clean end-to-end operation.">
-            <div className="space-y-3">
-              {blockers.length ? (
-                blockers.map((item) => (
-                  <div key={item} className="rounded-[12px] border border-[#fecdca] bg-[#fff6f3] px-4 py-3">
-                    <p className="text-sm text-[#912018]">{item}</p>
-                  </div>
-                ))
-              ) : (
-                <div className="rounded-[12px] border border-[#d1fadf] bg-[#ecfdf3] px-4 py-8 text-center">
-                  <CheckCircle2 size={18} className="mx-auto text-[#067647]" />
-                  <p className="mt-3 text-sm font-medium text-[#101828]">Core setup looks healthy</p>
-                  <p className="mt-1 text-sm text-[#667085]">This account can stay focused on intake, listings, and publishing throughput.</p>
-                </div>
-              )}
-            </div>
-          </SectionPanel>
-
-          <SectionPanel id="system" title="System readiness" description="Live dependencies that still control automation depth.">
-            <div className="grid gap-3">
-              {readinessRows.map(([label, ok, note]) => (
-                <div key={label} className="rounded-[12px] border border-[#e5e7eb] bg-white p-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-3">
-                      <span className="inline-flex h-10 w-10 items-center justify-center rounded-[12px] bg-[#f8fafc] text-[#2563eb]">
-                        <Database size={16} />
-                      </span>
-                      <p className="text-sm font-semibold text-[#101828]">{label}</p>
-                    </div>
-                    <StatusPill status={ok ? 'success' : 'warning'} label={ok ? 'Ready' : 'Missing'} />
-                  </div>
-                  <p className="mt-2 text-sm text-[#667085]">{note}</p>
-                </div>
-              ))}
-            </div>
-          </SectionPanel>
-
-          <QuickActionCard href="/settings?tab=ebay" icon={Store} eyebrow="Integrations" title="Connect eBay" description="Finish OAuth setup or reconnect the current operator account." meta={setupSummary?.server_readiness?.ebay_oauth_configured ? 'Configured' : 'Needs setup'} />
-          <QuickActionCard href="/inventory" icon={Package} eyebrow="Inventory" title="View Inventory" description="Inspect intake, active items, sold units, and storage batches." meta={`${listings.length} tracked`} />
         </aside>
+
+        <div className="pp-section-workspace__content space-y-5">
+          <div className="pp-dashboard-stage p-5">
+            <div className="pp-dashboard-stage__header pb-4">
+              <p className="pp-dashboard-stage-label">Workspace panel</p>
+              <h2 className="pp-dashboard-stage__title mt-2">{activeSectionMeta.label}</h2>
+              <p className="pp-dashboard-stage-copy mt-2 text-sm leading-6">{activeSectionMeta.description}</p>
+            </div>
+            <div className="pt-5">{sectionContent[activeSection]}</div>
+          </div>
+        </div>
       </div>
     </AppShell>
   );

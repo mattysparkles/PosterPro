@@ -328,15 +328,33 @@ class ServerSettingsUpdateRequest(BaseModel):
 
 class HostedPagesUpdateRequest(BaseModel):
     brand_name: str | None = None
+    active_theme_id: str | None = None
+    pages: dict | None = None
     privacy_policy_slug: str | None = None
     privacy_policy_title: str | None = None
     privacy_policy_html: str | None = None
+    trust_center_slug: str | None = None
+    trust_center_title: str | None = None
+    trust_center_html: str | None = None
+    operator_onboarding_slug: str | None = None
+    operator_onboarding_title: str | None = None
+    operator_onboarding_html: str | None = None
     ebay_auth_accepted_slug: str | None = None
     ebay_auth_accepted_title: str | None = None
     ebay_auth_accepted_html: str | None = None
     ebay_auth_declined_slug: str | None = None
     ebay_auth_declined_title: str | None = None
     ebay_auth_declined_html: str | None = None
+
+
+class HostedPagesThemeImportRequest(BaseModel):
+    theme_pack_json: str
+    replace_existing: bool = False
+    activate_imported: bool = True
+
+
+class HostedPagesPublishRequest(BaseModel):
+    page_keys: list[str] = Field(default_factory=list)
 
 
 class EbayManualConnectRequest(BaseModel):
