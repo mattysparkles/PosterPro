@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import HostedPageShell from '../../components/HostedPageShell';
 import { fetchPublicSitePage } from '../../lib/api';
 
-export default function HostedLegalPage() {
+export default function HostedSitePage() {
   const router = useRouter();
   const [page, setPage] = useState(null);
   const [error, setError] = useState('');
@@ -19,7 +19,7 @@ export default function HostedLegalPage() {
 
   if (error) {
     return (
-      <HostedPageShell title="Page not found" brandName="PosterPro" statusTone="danger" statusMessage={error}>
+      <HostedPageShell title="Page not found" brandName="PosterPro" statusTone="danger" statusMessage={error} primaryHref="/">
         <p className="text-sm text-[#475467]">{error}</p>
       </HostedPageShell>
     );
@@ -27,7 +27,7 @@ export default function HostedLegalPage() {
 
   if (!page) {
     return (
-      <HostedPageShell title="Loading" brandName="PosterPro" statusMessage="Loading page…">
+      <HostedPageShell title="Loading" brandName="PosterPro" statusMessage="Loading page…" primaryHref="/">
         <p className="text-sm text-[#475467]">Loading page…</p>
       </HostedPageShell>
     );

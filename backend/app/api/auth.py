@@ -15,6 +15,8 @@ from app.api.schemas import (
     AuthSessionResponse,
     AuthRegisterRequest,
     AuthViewModeRequest,
+    HostedPagesPublishRequest,
+    HostedPagesThemeImportRequest,
     HostedPagesUpdateRequest,
     ServerSettingsUpdateRequest,
     UserResponse,
@@ -40,7 +42,14 @@ from app.core.secrets import encrypt_secret, mask_secret
 from app.models.enums import MarketplaceName
 from app.models.models import MarketplaceAccount, User
 from app.services.email_service import EmailDeliveryError, send_password_reset_email, smtp_configured
-from app.services.site_content_service import build_public_page_urls, load_site_content, save_site_content
+from app.services.site_content_service import (
+    build_public_page_urls,
+    import_theme_pack,
+    load_site_content,
+    publish_draft_pages,
+    save_draft_pages,
+    save_site_content,
+)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -269,17 +278,29 @@ def _build_settings_panel_response(current_user: User, *, ebay_connected: bool) 
         "hosted_pages": {
             "can_manage": is_effective_admin(current_user),
             "brand_name": site_content["brand_name"],
-            "privacy_policy": {
-                **site_content["pages"]["privacy_policy"],
-                "url": page_urls["privacy_policy_url"],
-            },
-            "ebay_auth_accepted": {
-                **site_content["pages"]["ebay_auth_accepted"],
-                "url": page_urls["auth_accepted_url"],
-            },
-            "ebay_auth_declined": {
-                **site_content["pages"]["ebay_auth_declined"],
-                "url": page_urls["auth_declined_url"],
+            "active_theme_id": site_content["active_theme_id"],
+            "themes": site_content["themes"],
+            "pages": {
+                "privacy_policy": {
+                    **site_content["pages"]["privacy_policy"],
+                    "url": page_urls["privacy_policy_url"],
+                },
+                "trust_center": {
+                    **site_content["pages"]["trust_center"],
+                    "url": page_urls["trust_center_url"],
+                },
+                "operator_onboarding": {
+                    **site_content["pages"]["operator_onboarding"],
+                    "url": page_urls["operator_onboarding_url"],
+                },
+                "ebay_auth_accepted": {
+                    **site_content["pages"]["ebay_auth_accepted"],
+                    "url": page_urls["auth_accepted_url"],
+                },
+                "ebay_auth_declined": {
+                    **site_content["pages"]["ebay_auth_declined"],
+                    "url": page_urls["auth_declined_url"],
+                },
             },
         },
     }
@@ -404,27 +425,101 @@ def update_hosted_pages(
         raise HTTPException(status_code=403, detail="Admin preview mode cannot change hosted pages")
 
     current = load_site_content()
-    next_payload = {
-        "brand_name": payload.brand_name if payload.brand_name is not None else current["brand_name"],
-        "pages": {
-            "privacy_policy": {
-                "slug": payload.privacy_policy_slug if payload.privacy_policy_slug is not None else current["pages"]["privacy_policy"]["slug"],
-                "title": payload.privacy_policy_title if payload.privacy_policy_title is not None else current["pages"]["privacy_policy"]["title"],
-                "html": payload.privacy_policy_html if payload.privacy_policy_html is not None else current["pages"]["privacy_policy"]["html"],
+    incoming_pages = payload.pages if isinstance(payload.pages, dict) else {
+        "privacy_policy": {
+            "slug": payload.privacy_policy_slug if payload.privacy_policy_slug is not None else current["pages"]["privacy_policy"]["slug"],
+            "draft": {
+                "title": payload.privacy_policy_title if payload.privacy_policy_title is not None else current["pages"]["privacy_policy"]["draft"]["title"],
+                "blocks": [{"type": "rich_text", "html": payload.privacy_policy_html if payload.privacy_policy_html is not None else current["pages"]["privacy_policy"]["draft"]["blocks"][0].get("html", "")}],
             },
-            "ebay_auth_accepted": {
-                "slug": payload.ebay_auth_accepted_slug if payload.ebay_auth_accepted_slug is not None else current["pages"]["ebay_auth_accepted"]["slug"],
-                "title": payload.ebay_auth_accepted_title if payload.ebay_auth_accepted_title is not None else current["pages"]["ebay_auth_accepted"]["title"],
-                "html": payload.ebay_auth_accepted_html if payload.ebay_auth_accepted_html is not None else current["pages"]["ebay_auth_accepted"]["html"],
+        },
+        "trust_center": {
+            "slug": payload.trust_center_slug if payload.trust_center_slug is not None else current["pages"]["trust_center"]["slug"],
+            "draft": {
+                "title": payload.trust_center_title if payload.trust_center_title is not None else current["pages"]["trust_center"]["draft"]["title"],
+                "blocks": [{"type": "rich_text", "html": payload.trust_center_html if payload.trust_center_html is not None else current["pages"]["trust_center"]["draft"]["blocks"][0].get("html", "")}],
             },
-            "ebay_auth_declined": {
-                "slug": payload.ebay_auth_declined_slug if payload.ebay_auth_declined_slug is not None else current["pages"]["ebay_auth_declined"]["slug"],
-                "title": payload.ebay_auth_declined_title if payload.ebay_auth_declined_title is not None else current["pages"]["ebay_auth_declined"]["title"],
-                "html": payload.ebay_auth_declined_html if payload.ebay_auth_declined_html is not None else current["pages"]["ebay_auth_declined"]["html"],
+        },
+        "operator_onboarding": {
+            "slug": payload.operator_onboarding_slug if payload.operator_onboarding_slug is not None else current["pages"]["operator_onboarding"]["slug"],
+            "draft": {
+                "title": payload.operator_onboarding_title if payload.operator_onboarding_title is not None else current["pages"]["operator_onboarding"]["draft"]["title"],
+                "blocks": [{"type": "rich_text", "html": payload.operator_onboarding_html if payload.operator_onboarding_html is not None else current["pages"]["operator_onboarding"]["draft"]["blocks"][0].get("html", "")}],
+            },
+        },
+        "ebay_auth_accepted": {
+            "slug": payload.ebay_auth_accepted_slug if payload.ebay_auth_accepted_slug is not None else current["pages"]["ebay_auth_accepted"]["slug"],
+            "draft": {
+                "title": payload.ebay_auth_accepted_title if payload.ebay_auth_accepted_title is not None else current["pages"]["ebay_auth_accepted"]["draft"]["title"],
+                "blocks": [{"type": "rich_text", "html": payload.ebay_auth_accepted_html if payload.ebay_auth_accepted_html is not None else current["pages"]["ebay_auth_accepted"]["draft"]["blocks"][0].get("html", "")}],
+            },
+        },
+        "ebay_auth_declined": {
+            "slug": payload.ebay_auth_declined_slug if payload.ebay_auth_declined_slug is not None else current["pages"]["ebay_auth_declined"]["slug"],
+            "draft": {
+                "title": payload.ebay_auth_declined_title if payload.ebay_auth_declined_title is not None else current["pages"]["ebay_auth_declined"]["draft"]["title"],
+                "blocks": [{"type": "rich_text", "html": payload.ebay_auth_declined_html if payload.ebay_auth_declined_html is not None else current["pages"]["ebay_auth_declined"]["draft"]["blocks"][0].get("html", "")}],
             },
         },
     }
-    save_site_content(next_payload)
+    save_draft_pages(
+        brand_name=payload.brand_name,
+        active_theme_id=payload.active_theme_id,
+        pages=incoming_pages,
+    )
+
+    ebay_account = db.execute(
+        select(MarketplaceAccount).where(
+            MarketplaceAccount.user_id == current_user.id,
+            MarketplaceAccount.marketplace == MarketplaceName.ebay,
+        )
+    ).scalar_one_or_none()
+    return _build_settings_panel_response(current_user, ebay_connected=ebay_account is not None)
+
+
+@router.post("/settings/hosted-pages/publish")
+def publish_hosted_pages(
+    payload: HostedPagesPublishRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Only admins can publish CMS pages")
+    if not is_effective_admin(current_user):
+        raise HTTPException(status_code=403, detail="Admin preview mode cannot publish CMS pages")
+
+    publish_draft_pages(payload.page_keys)
+
+    ebay_account = db.execute(
+        select(MarketplaceAccount).where(
+            MarketplaceAccount.user_id == current_user.id,
+            MarketplaceAccount.marketplace == MarketplaceName.ebay,
+        )
+    ).scalar_one_or_none()
+    return _build_settings_panel_response(current_user, ebay_connected=ebay_account is not None)
+
+
+@router.post("/settings/hosted-pages/import-theme")
+def import_hosted_page_theme(
+    payload: HostedPagesThemeImportRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Only admins can import CMS themes")
+    if not is_effective_admin(current_user):
+        raise HTTPException(status_code=403, detail="Admin preview mode cannot import CMS themes")
+
+    try:
+        import_theme_pack(
+            payload.theme_pack_json,
+            replace_existing=payload.replace_existing,
+            activate_imported=payload.activate_imported,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Theme pack JSON could not be imported") from exc
 
     ebay_account = db.execute(
         select(MarketplaceAccount).where(

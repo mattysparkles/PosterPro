@@ -47,6 +47,22 @@ export async function updateHostedPages(body) {
   });
 }
 
+export async function importHostedPageTheme(body) {
+  return jsonFetch(`${API_BASE}/auth/settings/hosted-pages/import-theme`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function publishHostedPages(body) {
+  return jsonFetch(`${API_BASE}/auth/settings/hosted-pages/publish`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 export async function registerUser(body) {
   return jsonFetch(`${API_BASE}/auth/register`, {
     method: "POST",

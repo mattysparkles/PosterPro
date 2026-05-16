@@ -5,9 +5,11 @@ import { useRouter } from 'next/router';
 import toast from 'react-hot-toast';
 
 import AppShell from '../components/layout/AppShell';
+import CmsTemplateWorkspace from '../components/CmsTemplateWorkspace';
 import Button from '../components/ui/button';
 import Drawer from '../components/ui/drawer';
 import EmptyState from '../components/ui/empty-state';
+import FormSection from '../components/ui/form-section';
 import HelpTip from '../components/ui/help-tip';
 import Input from '../components/ui/input';
 import MetricCard from '../components/ui/metric-card';
@@ -24,7 +26,9 @@ import {
   fetchBridgeAccounts,
   fetchSaleDetectionSettings,
   fetchSettingsPanels,
+  importHostedPageTheme,
   importEbayTokens,
+  publishHostedPages,
   runAutomationBridgeSmokeTest,
   toggleAutonomousMode,
   updateBridgeAccountSession,
@@ -36,6 +40,7 @@ import {
   updateServerSettings,
   upsertBridgeAccount,
 } from '../lib/api';
+import { buildTemplateDraftForPage, CMS_PAGE_CONFIG, CMS_PAGE_KEYS, createDefaultCmsPages } from '../lib/cmsTemplates';
 
 const SETTINGS_TABS = [
   { value: 'overview', label: 'Overview' },
@@ -46,7 +51,7 @@ const SETTINGS_TABS = [
   { value: 'marketplaces', label: 'Marketplaces' },
   { value: 'automation', label: 'Automation' },
   { value: 'api-keys', label: 'API Keys' },
-  { value: 'hosted-pages', label: 'Hosted Pages' },
+  { value: 'hosted-pages', label: 'CMS + Themes' },
   { value: 'email', label: 'Email' },
   { value: 'server', label: 'Server' },
 ];
@@ -228,6 +233,55 @@ const CREDENTIAL_INSTRUCTIONS = {
   ],
 };
 
+const DEFAULT_THEME_IMPORT_TEMPLATE = JSON.stringify(
+  {
+    activate_theme_id: 'boardroom-ink',
+    themes: [
+      {
+        id: 'boardroom-ink',
+        name: 'Boardroom Ink',
+        description: 'A restrained corporate theme with a darker hero and high-clarity policy pages.',
+        hero_eyebrow: 'Investor-grade operations',
+        hero_title: 'Clean public handoff pages',
+        hero_body: 'Use this theme when the hosted CMS should feel more like a polished SaaS trust center than a default product install.',
+        layout: {
+          align: 'left',
+          content_width: '920px',
+          hero_style: 'split-band',
+          card_style: 'elevated',
+          show_brand_badge: true,
+        },
+        palette: {
+          page_background: 'linear-gradient(180deg, #edf2f8 0%, #ffffff 45%, #eef2f7 100%)',
+          hero_background: 'linear-gradient(135deg, #111827 0%, #1f2937 46%, #2563eb 100%)',
+          hero_foreground: '#f8fafc',
+          surface_background: 'rgba(255, 255, 255, 0.97)',
+          surface_foreground: '#0f172a',
+          surface_muted: '#475467',
+          border_color: '#d0d9e5',
+          accent_color: '#1d4ed8',
+          accent_soft: '#dbeafe',
+          success_color: '#166534',
+          warning_color: '#b54708',
+          danger_color: '#b42318',
+        },
+        typography: {
+          font_family: "'Plus Jakarta Sans', 'Segoe UI', sans-serif",
+          heading_family: "'Plus Jakarta Sans', 'Segoe UI', sans-serif",
+          base_size: '15px',
+        },
+        chrome: {
+          footer_note: 'Boardroom Ink is intended as a clean baseline import for PosterPro hosted CMS pages.',
+          primary_cta_label: 'Open PosterPro',
+          secondary_cta_label: 'Close window',
+        },
+      },
+    ],
+  },
+  null,
+  2,
+);
+
 function GuideCard({ title, description, tooltip, prerequisites = [], steps = [], tone = 'blue' }) {
   const toneClass =
     tone === 'amber'
@@ -364,16 +418,15 @@ export default function SettingsPage() {
   const [ebayForm, setEbayForm] = useState({ ebay_client_id: '', ebay_client_secret: '', ebay_redirect_uri: '' });
   const [hostedPagesForm, setHostedPagesForm] = useState({
     brand_name: 'PosterPro',
-    privacy_policy_slug: 'privacy-policy',
-    privacy_policy_title: 'Privacy Policy',
-    privacy_policy_html: '',
-    ebay_auth_accepted_slug: 'ebay-auth-complete',
-    ebay_auth_accepted_title: 'eBay Connection Complete',
-    ebay_auth_accepted_html: '',
-    ebay_auth_declined_slug: 'ebay-auth-declined',
-    ebay_auth_declined_title: 'eBay Access Declined',
-    ebay_auth_declined_html: '',
+    active_theme_id: 'corporate-sky',
+    pages: createDefaultCmsPages(),
   });
+  const [themeImportForm, setThemeImportForm] = useState({
+    theme_pack_json: DEFAULT_THEME_IMPORT_TEMPLATE,
+    replace_existing: false,
+    activate_imported: true,
+  });
+  const [activeCmsPreview, setActiveCmsPreview] = useState(CMS_PAGE_KEYS[0]);
   const [ebayTokenForm, setEbayTokenForm] = useState({
     access_token: '',
     refresh_token: '',
@@ -459,7 +512,7 @@ export default function SettingsPage() {
               : tab.value === 'ebay'
               ? 'OAuth and account connection'
               : tab.value === 'hosted-pages'
-              ? 'Public white-label pages'
+              ? 'CMS themes and public pages'
               : tab.value === 'server'
               ? 'Deployment settings'
               : tab.value === 'workflow'
@@ -496,15 +549,8 @@ export default function SettingsPage() {
       });
       setHostedPagesForm({
         brand_name: panels.hosted_pages?.brand_name || 'PosterPro',
-        privacy_policy_slug: panels.hosted_pages?.privacy_policy?.slug || 'privacy-policy',
-        privacy_policy_title: panels.hosted_pages?.privacy_policy?.title || 'Privacy Policy',
-        privacy_policy_html: panels.hosted_pages?.privacy_policy?.html || '',
-        ebay_auth_accepted_slug: panels.hosted_pages?.ebay_auth_accepted?.slug || 'ebay-auth-complete',
-        ebay_auth_accepted_title: panels.hosted_pages?.ebay_auth_accepted?.title || 'eBay Connection Complete',
-        ebay_auth_accepted_html: panels.hosted_pages?.ebay_auth_accepted?.html || '',
-        ebay_auth_declined_slug: panels.hosted_pages?.ebay_auth_declined?.slug || 'ebay-auth-declined',
-        ebay_auth_declined_title: panels.hosted_pages?.ebay_auth_declined?.title || 'eBay Access Declined',
-        ebay_auth_declined_html: panels.hosted_pages?.ebay_auth_declined?.html || '',
+        active_theme_id: panels.hosted_pages?.active_theme_id || 'corporate-sky',
+        pages: panels.hosted_pages?.pages || {},
       });
       setApiKeyForm({
         openai_api_key: '',
@@ -605,6 +651,80 @@ export default function SettingsPage() {
     () => (setupSummary?.marketplace_connections || []).find((item) => item.marketplace === selectedMarketplace) || null,
     [selectedMarketplace, setupSummary],
   );
+  const activeHostedTheme = useMemo(
+    () => (settingsPanels?.hosted_pages?.themes || []).find((theme) => theme.id === hostedPagesForm.active_theme_id) || null,
+    [hostedPagesForm.active_theme_id, settingsPanels?.hosted_pages?.themes],
+  );
+  const updateCmsPage = (pageKey, updater) => {
+    setHostedPagesForm((current) => {
+      const page = current.pages?.[pageKey] || createDefaultCmsPages()[pageKey];
+      const nextPage = typeof updater === 'function' ? updater(page) : updater;
+      return {
+        ...current,
+        pages: {
+          ...(current.pages || {}),
+          [pageKey]: nextPage,
+        },
+      };
+    });
+  };
+  const cmsPreviewPages = useMemo(
+    () =>
+      CMS_PAGE_CONFIG.map((entry) => {
+        const key = entry.key;
+        const pageRecord = hostedPagesForm.pages?.[key] || {};
+        const draft = pageRecord.draft || {};
+        return {
+          key,
+          label: entry.label,
+          pageRecord,
+          page: {
+            brand_name: hostedPagesForm.brand_name || 'PosterPro',
+            title: draft.title || 'Untitled page',
+            summary: draft.summary || '',
+            hero: draft.hero || {},
+            primary_button: draft.primary_button || {},
+            secondary_button: draft.secondary_button || {},
+            blocks: draft.blocks || [],
+            theme: activeHostedTheme || {},
+          },
+          statusTone: entry.statusTone,
+          statusMessage: entry.statusMessage,
+        };
+      }),
+    [activeHostedTheme, hostedPagesForm],
+  );
+  const activeCmsPreviewEntry = useMemo(
+    () => cmsPreviewPages.find((entry) => entry.key === activeCmsPreview) || cmsPreviewPages[0] || null,
+    [activeCmsPreview, cmsPreviewPages],
+  );
+  const applyCmsTemplate = (pageKey) => {
+    const templateDraft = buildTemplateDraftForPage(pageKey);
+    updateCmsPage(pageKey, (currentPage) => ({
+      ...currentPage,
+      slug: templateDraft.slug,
+      route_group: templateDraft.route_group,
+      draft: templateDraft.draft,
+    }));
+    setActiveCmsPreview(pageKey);
+  };
+  const applyCmsTemplatePack = () => {
+    setHostedPagesForm((current) => ({
+      ...current,
+      pages: CMS_PAGE_KEYS.reduce((pages, key) => {
+        const existing = current.pages?.[key] || createDefaultCmsPages()[key];
+        const templateDraft = buildTemplateDraftForPage(key);
+        pages[key] = {
+          ...existing,
+          slug: templateDraft.slug,
+          route_group: templateDraft.route_group,
+          draft: templateDraft.draft,
+        };
+        return pages;
+      }, {}),
+    }));
+    setActiveCmsPreview(CMS_PAGE_KEYS[0]);
+  };
 
   const openMarketplaceDrawer = (marketplace) => {
     if (!marketplace) return;
@@ -1007,7 +1127,7 @@ export default function SettingsPage() {
                     <div className="space-y-3">
                       {[
                         ['API Keys', 'OpenAI and PhotoRoom secrets for AI enrichment and photo tooling.', 'api-keys'],
-                        ['Hosted Pages', 'White-label public pages for privacy policy and eBay OAuth handoff.', 'hosted-pages'],
+                        ['CMS + Themes', 'Hosted public pages, theme imports, and clean OAuth handoff content.', 'hosted-pages'],
                         ['Email Delivery', 'SMTP relay settings for real forgot-password delivery.', 'email'],
                         ['Server', 'Public URL, storage root, and deployment-wide environment values.', 'server'],
                         ['Automation', 'Global publish and polling behavior that affects every user.', 'automation'],
@@ -1536,20 +1656,26 @@ export default function SettingsPage() {
           ) : null}
 
           {activeTab === 'hosted-pages' ? (
-            <SectionPanel title="Hosted Pages" description="Manage the public white-label pages PosterPro serves for privacy policy and eBay OAuth handoff.">
+            <SectionPanel title="CMS + Themes" description="Manage the public hosted CMS pages PosterPro serves for privacy policy, account handoff, and future branded customer-facing content.">
               <div className="space-y-6">
                 <GuideCard
-                  title="Why this exists"
-                  description="eBay user OAuth needs a privacy policy URL plus accepted and declined URLs. This admin surface lets a self-hosting operator generate and maintain those pages from inside PosterPro."
-                  prerequisites={['APP_BASE_URL points at the real public frontend host', 'Admin knows the final slugs they want exposed publicly', 'Policy copy has been reviewed for the real business']}
+                  title="CMS onboarding flow"
+                  description="Treat the hosted CMS like a lightweight SaaS trust center: choose a base theme, review the public URLs, then tailor the content for policy and login handoff pages."
+                  prerequisites={['APP_BASE_URL points at the real public frontend host', 'Admin has reviewed the public brand name and desired public tone', 'Policy copy and OAuth handoff text have been reviewed for the real business']}
                   steps={[
-                    'Choose the public slug for each page.',
-                    'Edit the title and HTML body that should render at that URL.',
-                    'Save the hosted pages, then copy the generated URLs back into the eBay RuName settings.',
+                    'Choose the active CMS theme that should wrap every hosted page.',
+                    'Import an additional theme pack when the default theme is not enough for the brand.',
+                    'Confirm the generated privacy, accepted, and declined URLs before copying them back into eBay.',
+                    'Edit the page slugs, titles, and HTML copy so the public experience reads like a polished SaaS trust surface.',
                   ]}
                   tone="slate"
                 />
-                <div className="grid gap-5 xl:grid-cols-[minmax(0,1.05fr)_minmax(340px,0.95fr)]">
+                <div className="grid gap-4 md:grid-cols-3">
+                  <MetricCard label="Available themes" value={(settingsPanels?.hosted_pages?.themes || []).length} detail="Theme packs currently saved in the CMS workspace." />
+                  <MetricCard label="Published pages" value={cmsPreviewPages.length} detail="Trust, onboarding, and OAuth handoff pages live from the CMS route set." />
+                  <MetricCard label="Active theme" value={settingsPanels?.hosted_pages?.themes?.find((theme) => theme.id === hostedPagesForm.active_theme_id)?.name || 'Default'} detail="Theme currently applied to every public CMS page." />
+                </div>
+                <div className="grid gap-5 xl:grid-cols-[minmax(0,1.1fr)_minmax(340px,0.9fr)]">
                   <form
                     className="space-y-4 rounded-[18px] border border-[#e5e7eb] bg-white p-5"
                     onSubmit={async (event) => {
@@ -1560,9 +1686,13 @@ export default function SettingsPage() {
                       }
                       setSavingServer(true);
                       try {
-                        await updateHostedPages(hostedPagesForm);
+                        await updateHostedPages({
+                          brand_name: hostedPagesForm.brand_name,
+                          active_theme_id: hostedPagesForm.active_theme_id,
+                          pages: hostedPagesForm.pages,
+                        });
                         await reload();
-                        toast.success('Hosted pages updated.');
+                        toast.success('CMS draft saved.');
                       } catch (error) {
                         toast.error(error.message);
                       } finally {
@@ -1570,63 +1700,182 @@ export default function SettingsPage() {
                       }
                     }}
                   >
-                    <div className="space-y-2">
-                      <label className="text-sm font-medium text-[#101828]">Brand name</label>
-                      <Input
-                        value={hostedPagesForm.brand_name}
-                        onChange={(event) => setHostedPagesForm((current) => ({ ...current, brand_name: event.target.value }))}
-                        placeholder="PosterPro"
-                      />
-                    </div>
-                    {[
-                      ['privacy_policy', 'Privacy policy'],
-                      ['ebay_auth_accepted', 'eBay auth accepted'],
-                      ['ebay_auth_declined', 'eBay auth declined'],
-                    ].map(([prefix, label]) => (
-                      <div key={prefix} className="rounded-[16px] border border-[#eaecf0] bg-[#fcfcfd] p-4">
-                        <p className="text-sm font-semibold text-[#101828]">{label}</p>
-                        <div className="mt-3 grid gap-3 md:grid-cols-2">
-                          <div className="space-y-2">
-                            <label className="text-sm font-medium text-[#101828]">URL slug</label>
-                            <Input
-                              value={hostedPagesForm[`${prefix}_slug`]}
-                              onChange={(event) => setHostedPagesForm((current) => ({ ...current, [`${prefix}_slug`]: event.target.value }))}
-                            />
-                          </div>
-                          <div className="space-y-2">
-                            <label className="text-sm font-medium text-[#101828]">Page title</label>
-                            <Input
-                              value={hostedPagesForm[`${prefix}_title`]}
-                              onChange={(event) => setHostedPagesForm((current) => ({ ...current, [`${prefix}_title`]: event.target.value }))}
-                            />
-                          </div>
-                        </div>
-                        <div className="mt-3 space-y-2">
-                          <label className="text-sm font-medium text-[#101828]">HTML content</label>
-                          <textarea
-                            value={hostedPagesForm[`${prefix}_html`]}
-                            onChange={(event) => setHostedPagesForm((current) => ({ ...current, [`${prefix}_html`]: event.target.value }))}
-                            className="min-h-40 w-full rounded-[10px] border border-[#e5e7eb] bg-white p-3 text-sm text-[#101828] outline-none transition placeholder:text-[#98a2b3] focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
-                          />
-                        </div>
+                    <FormSection
+                      title="Brand + theme"
+                      description="Set the public brand and choose the active theme template that wraps every hosted CMS page."
+                    >
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium text-[#101828]">Brand name</label>
+                        <Input
+                          value={hostedPagesForm.brand_name}
+                          onChange={(event) => setHostedPagesForm((current) => ({ ...current, brand_name: event.target.value }))}
+                          placeholder="PosterPro"
+                        />
                       </div>
-                    ))}
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium text-[#101828]">Active CMS theme</label>
+                        <select
+                          value={hostedPagesForm.active_theme_id}
+                          onChange={(event) => setHostedPagesForm((current) => ({ ...current, active_theme_id: event.target.value }))}
+                          className="w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 py-2 text-sm text-[#101828] outline-none transition focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                        >
+                          {(settingsPanels?.hosted_pages?.themes || []).map((theme) => (
+                            <option key={theme.id} value={theme.id}>
+                              {theme.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="grid gap-3 md:grid-cols-2">
+                        {(settingsPanels?.hosted_pages?.themes || []).map((theme) => (
+                          <div
+                            key={theme.id}
+                            className={`rounded-[14px] border p-4 ${hostedPagesForm.active_theme_id === theme.id ? 'border-[#2563eb] bg-[#f6f9ff]' : 'border-[#e5e7eb] bg-[#fcfcfd]'}`}
+                          >
+                            <p className="text-sm font-semibold text-[#101828]">{theme.name}</p>
+                            <p className="mt-1 text-sm text-[#667085]">{theme.description}</p>
+                            <div className="mt-3 flex items-center gap-2">
+                              <span className="h-4 w-4 rounded-full border border-white shadow-sm" style={{ background: theme.palette?.accent_color || '#2563eb' }} />
+                              <span className="h-4 w-4 rounded-full border border-white shadow-sm" style={{ background: theme.palette?.hero_background || '#0f172a' }} />
+                              <span className="h-4 w-4 rounded-full border border-white shadow-sm" style={{ background: theme.palette?.surface_background || '#ffffff' }} />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </FormSection>
+
+                    <FormSection
+                      title="Theme import"
+                      description="Import a JSON theme pack so the hosted CMS can switch visual systems without custom code changes."
+                    >
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <label className="flex items-center justify-between rounded-[10px] border border-[#e5e7eb] bg-white px-4 py-3 text-sm text-[#101828]">
+                          Replace existing themes
+                          <input
+                            type="checkbox"
+                            checked={themeImportForm.replace_existing}
+                            onChange={(event) => setThemeImportForm((current) => ({ ...current, replace_existing: event.target.checked }))}
+                          />
+                        </label>
+                        <label className="flex items-center justify-between rounded-[10px] border border-[#e5e7eb] bg-white px-4 py-3 text-sm text-[#101828]">
+                          Activate imported theme
+                          <input
+                            type="checkbox"
+                            checked={themeImportForm.activate_imported}
+                            onChange={(event) => setThemeImportForm((current) => ({ ...current, activate_imported: event.target.checked }))}
+                          />
+                        </label>
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium text-[#101828]">Theme pack JSON</label>
+                        <textarea
+                          value={themeImportForm.theme_pack_json}
+                          onChange={(event) => setThemeImportForm((current) => ({ ...current, theme_pack_json: event.target.value }))}
+                          className="min-h-56 w-full rounded-[10px] border border-[#e5e7eb] bg-white p-3 font-mono text-xs text-[#101828] outline-none transition placeholder:text-[#98a2b3] focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                        />
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          disabled={savingServer || !canManageServer}
+                          onClick={async () => {
+                            if (!canManageServer) {
+                              toast.error('Admin access is required to import CMS themes.');
+                              return;
+                            }
+                            setSavingServer(true);
+                            try {
+                              await importHostedPageTheme(themeImportForm);
+                              await reload();
+                              toast.success('Theme pack imported.');
+                            } catch (error) {
+                              toast.error(error.message);
+                            } finally {
+                              setSavingServer(false);
+                            }
+                          }}
+                        >
+                          Import theme pack
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          onClick={() => setThemeImportForm((current) => ({ ...current, theme_pack_json: DEFAULT_THEME_IMPORT_TEMPLATE }))}
+                        >
+                          Reset sample template
+                        </Button>
+                      </div>
+                    </FormSection>
+
+                    <FormSection
+                      title="Structured page drafts"
+                      description="Use the page list and standard template pack like a lightweight WordPress backend, then save or publish the hosted pages live."
+                    >
+                      <CmsTemplateWorkspace
+                        pages={hostedPagesForm.pages}
+                        activePageKey={activeCmsPreview}
+                        onSelectPage={setActiveCmsPreview}
+                        onUpdatePage={updateCmsPage}
+                        onApplyTemplate={applyCmsTemplate}
+                        onApplyTemplatePack={applyCmsTemplatePack}
+                        canManageServer={canManageServer}
+                        previewPage={activeCmsPreviewEntry?.page}
+                        previewBrandName={activeCmsPreviewEntry?.page?.brand_name}
+                        previewTitle={activeCmsPreviewEntry?.page?.title}
+                        previewStatusTone={activeCmsPreviewEntry?.statusTone}
+                        previewStatusMessage={activeCmsPreviewEntry?.statusMessage}
+                        activeTheme={activeHostedTheme}
+                        liveUrl={settingsPanels?.hosted_pages?.pages?.[activeCmsPreview]?.url}
+                      />
+                    </FormSection>
                     <div className="flex flex-wrap gap-2">
                       <Button type="submit" disabled={savingServer || !canManageServer}>
-                        {savingServer ? 'Saving...' : 'Save hosted pages'}
+                        {savingServer ? 'Saving...' : 'Save draft'}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        disabled={savingServer || !canManageServer}
+                        onClick={async () => {
+                          if (!canManageServer) return;
+                          setSavingServer(true);
+                          try {
+                            await publishHostedPages({ page_keys: CMS_PAGE_KEYS });
+                            await reload();
+                            toast.success('CMS draft published.');
+                          } catch (error) {
+                            toast.error(error.message);
+                          } finally {
+                            setSavingServer(false);
+                          }
+                        }}
+                      >
+                        Publish draft
                       </Button>
                     </div>
                   </form>
 
                   <div className="space-y-4">
                     <div className="rounded-[18px] border border-[#dbe7ff] bg-[#f7faff] p-5">
+                      <p className="text-sm font-semibold text-[#101828]">CMS workflow</p>
+                      <div className="mt-4 space-y-3 text-sm text-[#475467]">
+                        <p><span className="font-semibold text-[#101828]">1.</span> Select the active theme to set the overall public visual system.</p>
+                        <p><span className="font-semibold text-[#101828]">2.</span> Import a new theme pack when a customer or brand needs a different tone.</p>
+                        <p><span className="font-semibold text-[#101828]">3.</span> Verify the generated URLs before copying them into eBay developer settings.</p>
+                        <p><span className="font-semibold text-[#101828]">4.</span> Edit the copy so the onboarding and trust flow feels crisp and operator-friendly.</p>
+                      </div>
+                    </div>
+                    <div className="rounded-[18px] border border-[#dbe7ff] bg-[#f7faff] p-5">
                       <p className="text-sm font-semibold text-[#101828]">Generated URLs</p>
-                      <p className="mt-1 text-sm text-[#667085]">These are the live URLs to use in eBay once APP_BASE_URL and the slugs are correct.</p>
+                      <p className="mt-1 text-sm text-[#667085]">These are the live URLs for the broader CMS surface. The eBay-specific ones still need to be copied back into the RuName settings.</p>
                       <div className="mt-4 space-y-3">
                         {[
-                          ['Privacy policy', settingsPanels?.hosted_pages?.privacy_policy?.url],
-                          ['Accepted', settingsPanels?.hosted_pages?.ebay_auth_accepted?.url],
-                          ['Declined', settingsPanels?.hosted_pages?.ebay_auth_declined?.url],
+                          ['Privacy policy', settingsPanels?.hosted_pages?.pages?.privacy_policy?.url],
+                          ['Trust center', settingsPanels?.hosted_pages?.pages?.trust_center?.url],
+                          ['Operator onboarding', settingsPanels?.hosted_pages?.pages?.operator_onboarding?.url],
+                          ['Accepted', settingsPanels?.hosted_pages?.pages?.ebay_auth_accepted?.url],
+                          ['Declined', settingsPanels?.hosted_pages?.pages?.ebay_auth_declined?.url],
                         ].map(([label, value]) => (
                           <div key={label} className="rounded-[12px] border border-white/80 bg-white/90 p-3">
                             <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[#667085]">{label}</p>
@@ -1636,8 +1885,34 @@ export default function SettingsPage() {
                       </div>
                     </div>
                     <div className="rounded-[18px] border border-[#e5e7eb] bg-white p-5">
+                      <p className="text-sm font-semibold text-[#101828]">Current theme details</p>
+                      {(() => {
+                        const activeTheme = (settingsPanels?.hosted_pages?.themes || []).find((theme) => theme.id === hostedPagesForm.active_theme_id);
+                        if (!activeTheme) {
+                          return <p className="mt-1 text-sm text-[#667085]">No active theme data loaded yet.</p>;
+                        }
+                        return (
+                          <div className="mt-3 space-y-3">
+                            <p className="text-sm text-[#667085]">{activeTheme.description}</p>
+                            <div className="grid gap-3 sm:grid-cols-3">
+                              {[
+                                ['Accent', activeTheme.palette?.accent_color],
+                                ['Hero', activeTheme.palette?.hero_background],
+                                ['Surface', activeTheme.palette?.surface_background],
+                              ].map(([label, value]) => (
+                                <div key={label} className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+                                  <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[#667085]">{label}</p>
+                                  <div className="mt-2 h-10 rounded-[10px] border border-white/80" style={{ background: value || '#ffffff' }} />
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </div>
+                    <div className="rounded-[18px] border border-[#e5e7eb] bg-white p-5">
                       <p className="text-sm font-semibold text-[#101828]">Operator note</p>
-                      <p className="mt-1 text-sm text-[#667085]">The accepted page finalizes the eBay OAuth callback and refreshes the opener window. The declined page gives the operator a clean way back into PosterPro instead of leaving them on a generic eBay response.</p>
+                      <p className="mt-1 text-sm text-[#667085]">The accepted page finalizes the eBay OAuth callback and refreshes the opener window. The declined page gives the operator a clean way back into PosterPro instead of leaving them on a generic eBay response. Trust center and onboarding pages extend the same theme system into broader marketing and credibility flows without needing a second site stack.</p>
                     </div>
                   </div>
                 </div>

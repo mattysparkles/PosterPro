@@ -223,29 +223,31 @@ export default function AppShell({
     contentWidth === 'narrow'
       ? 'max-w-[880px]'
       : contentWidth === 'wide'
-      ? 'max-w-[1280px]'
+      ? 'max-w-[1180px]'
       : 'max-w-[1040px]';
 
   return (
-    <div className="posterpro-app-shell min-h-screen bg-[#f3f5f8] text-[#101828]">
+    <div className="posterpro-app-shell min-h-screen text-[#101828]">
       <div className="grid min-h-screen lg:grid-cols-[272px_minmax(0,1fr)]">
-        <aside className="hidden min-h-screen border-r border-[#e4e7ec] bg-white lg:block">
+        <aside className="pp-app-sidebar hidden min-h-screen lg:block">
           <div className="sticky top-0 p-5">
-            <div className="border-b border-[#eaecf0] pb-5">
+            <div className="border-b border-[rgba(148,163,184,0.18)] pb-5">
               <Link href="/app" className="block">
-                <strong className="block text-lg font-semibold tracking-[-0.02em] text-[#101828]">PosterPro</strong>
-                <span className="mt-1 block text-sm text-[#667085]">CMS resale workspace</span>
+                <strong className="pp-app-brand__title block">PosterPro</strong>
+                <span className="pp-app-brand__subtitle mt-1 block text-sm">CMS resale workspace</span>
               </Link>
             </div>
-            <div className="mt-5 rounded-[16px] border border-[#e4e7ec] bg-[#f8fafc] p-4">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[#667085]">Reseller OS</p>
-              <p className="mt-2 text-sm font-semibold text-[#101828]">{autonomousConfig?.autonomous_mode ? 'Automation enabled' : 'Operator-led review'}</p>
-              <p className="mt-1 text-sm leading-6 text-[#667085]">Use one structured admin workspace for intake, review, publishing, and system setup.</p>
+            <div className="pp-app-status-card mt-5 p-4">
+              <p className="pp-app-status-card__label">Reseller OS</p>
+              <p className="pp-app-status-card__title mt-2 text-sm">
+                {autonomousConfig?.autonomous_mode ? 'Automation enabled' : 'Operator-led review'}
+              </p>
+              <p className="pp-app-status-card__copy mt-1 text-sm leading-6">Use one structured admin workspace for intake, review, publishing, and system setup.</p>
             </div>
             <nav className="mt-6 space-y-6">
               {navGroups.map((group) => (
                 <div key={group.label}>
-                  <p className="mb-2 px-3 text-xs font-semibold uppercase tracking-[0.12em] text-[#667085]">{group.label}</p>
+                  <p className="pp-app-nav-group-label mb-2 px-3 text-xs">{group.label}</p>
                   <div className="space-y-1.5">
                     {group.items.map((item) => {
                       const Icon = item.icon;
@@ -254,26 +256,22 @@ export default function AppShell({
                       return (
                         <div key={item.label} className="rounded-[14px]">
                           <div
-                            className={`group flex items-center rounded-[14px] border px-3 py-3 transition-colors ${
-                              selected
-                                ? 'border-[#bfd2ff] bg-[#eef4ff] text-[#2563eb]'
-                                : 'border-transparent bg-white text-[#344054] hover:border-[#e4e7ec] hover:bg-[#f8fafc]'
-                            }`}
+                            className={`pp-app-nav-item group flex items-center rounded-[14px] border px-3 py-3 ${selected ? 'is-active' : ''}`}
                           >
                             <Link href={item.href} onClick={() => setMobileMenuOpen(false)} className="flex min-w-0 flex-1 items-center gap-3">
-                              <span className={`inline-flex h-9 w-9 items-center justify-center rounded-[11px] ${selected ? 'bg-white text-[#2563eb]' : 'bg-[#f8fafc] text-[#667085] group-hover:bg-[#f2f4f7]'}`}>
+                              <span className={`pp-app-nav-item__icon inline-flex h-9 w-9 items-center justify-center rounded-[11px] ${selected ? 'is-active' : ''}`}>
                                 <Icon size={17} />
                               </span>
                               <span className="min-w-0">
-                                <span className="block truncate text-sm font-semibold">{item.label}</span>
-                                {item.children?.length ? <span className="mt-0.5 block text-xs text-[#667085]">{item.children.length} related views</span> : null}
+                                <span className="pp-app-nav-item__title block truncate text-sm">{item.label}</span>
+                                {item.children?.length ? <span className="pp-app-nav-item__meta mt-0.5 block text-xs">{item.children.length} related views</span> : null}
                               </span>
                             </Link>
                             {item.children?.length ? (
                               <button
                                 type="button"
                                 onClick={() => toggleExpanded(item.href)}
-                                className="ml-2 inline-flex h-8 w-8 items-center justify-center rounded-[10px] text-[#667085] transition hover:bg-white"
+                                className="pp-app-nav-item__toggle ml-2 inline-flex h-8 w-8 items-center justify-center rounded-[10px]"
                                 aria-label={`Toggle ${item.label} menu`}
                               >
                                 <ChevronDown size={16} className={`transition-transform ${expanded ? 'rotate-180' : ''}`} />
@@ -281,7 +279,7 @@ export default function AppShell({
                             ) : null}
                           </div>
                           {item.children?.length && expanded ? (
-                            <div className="mt-2 ml-5 border-l border-[#dbe3ef] pl-4">
+                            <div className="pp-app-nav-children mt-2 ml-5 border-l pl-4">
                               <div className="space-y-1.5">
                                 {item.children.map((child) => {
                                   const childSelected = isSelected(child.href);
@@ -289,9 +287,7 @@ export default function AppShell({
                                     <Link
                                       key={child.href}
                                       href={child.href}
-                                      className={`flex items-center rounded-[10px] px-3 py-2 text-sm transition ${
-                                        childSelected ? 'bg-white font-semibold text-[#1d4ed8]' : 'text-[#667085] hover:bg-white hover:text-[#344054]'
-                                      }`}
+                                      className={`pp-app-nav-child-link flex items-center rounded-[10px] px-3 py-2 text-sm ${childSelected ? 'is-active' : ''}`}
                                     >
                                       {child.label}
                                     </Link>
@@ -311,14 +307,14 @@ export default function AppShell({
         </aside>
 
         <div className="min-w-0">
-          <header className="sticky top-0 z-30 border-b border-[#e5e7eb] bg-white/94 backdrop-blur">
+          <header className="pp-app-header sticky top-0 z-30 border-b backdrop-blur">
             <div className="mx-auto flex h-[68px] w-full max-w-[1320px] items-center gap-3 px-4 md:px-6">
-              <Link href="/" className="text-sm font-semibold tracking-[-0.02em] text-[#101828] lg:hidden">
+              <Link href="/" className="pp-app-header__brand text-sm lg:hidden">
                 PosterPro
               </Link>
 
               <div className="min-w-0 flex-1">
-                <h1 className="truncate text-base font-semibold text-[#101828]">{title}</h1>
+                <h1 className="pp-app-header__title truncate text-base">{title}</h1>
               </div>
 
               <div className="flex items-center gap-2">
@@ -332,30 +328,30 @@ export default function AppShell({
                   <Menu size={18} />
                 </Button>
                 <form onSubmit={submitSearch} className="relative hidden md:block">
-                  <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#98a2b3]" size={16} />
+                  <Search className="pp-app-search__icon pointer-events-none absolute left-3 top-1/2 -translate-y-1/2" size={16} />
                   <Input
                     value={searchValue}
                     onChange={(event) => setSearchValue(event.target.value)}
                     placeholder="Search listings"
-                    className="w-[220px] pl-9"
+                    className="pp-app-search w-[220px] pl-9"
                   />
                 </form>
                 <button
                   type="button"
                   onClick={onToggleAutonomous}
-                  className="inline-flex h-9 items-center gap-2 rounded-full border border-[#e5e7eb] bg-white px-3 text-sm font-medium text-[#475467] transition-colors hover:bg-[#f9fafb]"
+                  className="pp-app-mode-toggle inline-flex h-9 items-center gap-2 rounded-full border px-3 text-sm font-medium"
                 >
-                  <Bot size={14} className="text-[#2563eb]" />
+                  <Bot size={14} className="text-[var(--pp-dashboard-accent)]" />
                   <StatusPill
                     status={autonomousConfig?.autonomous_mode ? 'success' : 'default'}
                     label={autonomousConfig?.autonomous_mode ? 'Automation on' : 'Automation off'}
                   />
                 </button>
-                <div className="hidden items-center gap-2 rounded-[10px] border border-[#e5e7eb] bg-white px-3 py-2 lg:flex">
-                  <span className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-[#f9fafb] text-[#101828]">
+                <div className="pp-app-user-pill hidden items-center gap-2 rounded-[10px] border px-3 py-2 lg:flex">
+                  <span className="pp-app-user-pill__icon inline-flex h-8 w-8 items-center justify-center rounded-full">
                     <User size={15} />
                   </span>
-                  <span className="max-w-[140px] truncate text-sm font-medium text-[#475467]">
+                  <span className="pp-app-user-pill__text max-w-[140px] truncate text-sm font-medium">
                     {user?.full_name || user?.email || 'Account'}
                   </span>
                 </div>
@@ -378,10 +374,10 @@ export default function AppShell({
             {subnav ? (
               <div className="grid gap-6 lg:grid-cols-[240px_minmax(0,1fr)]">
                 <div className="lg:hidden">
-                  <div className="rounded-[20px] border border-[#e5e7eb] bg-white p-4">
-                    <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">{subnav.eyebrow || 'Section menu'}</p>
-                    <p className="mt-2 text-lg font-semibold tracking-[-0.02em] text-[#101828]">{subnav.title}</p>
-                    {subnav.description ? <p className="mt-2 text-sm leading-6 text-[#667085]">{subnav.description}</p> : null}
+                  <div className="pp-app-subnav-card p-4">
+                    <p className="pp-app-subnav-card__label">{subnav.eyebrow || 'Section menu'}</p>
+                    <p className="pp-app-subnav-card__title mt-2 text-lg">{subnav.title}</p>
+                    {subnav.description ? <p className="pp-app-subnav-card__copy mt-2 text-sm leading-6">{subnav.description}</p> : null}
                     <div className="mt-4 flex gap-2 overflow-x-auto pb-1">
                       {subnav.sections?.flatMap((section) =>
                         section.items.map((item) => (
@@ -389,11 +385,7 @@ export default function AppShell({
                             key={item.key || item.label}
                             type="button"
                             onClick={item.onClick}
-                            className={`shrink-0 rounded-full border px-3 py-2 text-sm font-medium transition ${
-                              item.active
-                                ? 'border-[#bfd2ff] bg-[#eef4ff] text-[#1d4ed8]'
-                                : 'border-[#e5e7eb] bg-white text-[#475467]'
-                            }`}
+                            className={`pp-app-subnav-chip shrink-0 rounded-full border px-3 py-2 text-sm font-medium ${item.active ? 'is-active' : ''}`}
                           >
                             {item.label}
                           </button>
@@ -404,31 +396,29 @@ export default function AppShell({
                 </div>
                 <aside className="hidden lg:block">
                   <div className="sticky top-[88px] space-y-4">
-                    <div className="rounded-[22px] border border-[#e5e7eb] bg-white p-4">
-                      <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">{subnav.eyebrow || 'Section menu'}</p>
-                      <p className="mt-2 text-lg font-semibold tracking-[-0.02em] text-[#101828]">{subnav.title}</p>
-                      {subnav.description ? <p className="mt-2 text-sm leading-6 text-[#667085]">{subnav.description}</p> : null}
+                    <div className="pp-app-subnav-card p-4">
+                      <p className="pp-app-subnav-card__label">{subnav.eyebrow || 'Section menu'}</p>
+                      <p className="pp-app-subnav-card__title mt-2 text-lg">{subnav.title}</p>
+                      {subnav.description ? <p className="pp-app-subnav-card__copy mt-2 text-sm leading-6">{subnav.description}</p> : null}
                     </div>
-                    <div className="rounded-[22px] border border-[#e5e7eb] bg-white p-3">
+                    <div className="pp-app-subnav-card p-3">
                       <div className="space-y-4">
                         {subnav.sections?.map((section) => (
                           <div key={section.label}>
-                            <p className="mb-2 px-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-[#667085]">{section.label}</p>
+                            <p className="pp-app-subnav-card__label mb-2 px-3 text-[11px]">{section.label}</p>
                             <div className="space-y-1.5">
                               {section.items.map((item) => (
                                 <button
                                   key={item.key || item.label}
                                   type="button"
                                   onClick={item.onClick}
-                                  className={`flex w-full items-center justify-between rounded-[12px] px-3 py-3 text-left transition ${
-                                    item.active ? 'bg-[#eef4ff] text-[#1d4ed8]' : 'text-[#475467] hover:bg-[#f8fafc]'
-                                  }`}
+                                  className={`pp-app-subnav-item flex w-full items-center justify-between rounded-[12px] px-3 py-3 text-left ${item.active ? 'is-active' : ''}`}
                                 >
                                   <span className="min-w-0">
-                                    <span className="block truncate text-sm font-semibold">{item.label}</span>
-                                    {item.description ? <span className="mt-0.5 block truncate text-xs text-[#667085]">{item.description}</span> : null}
+                                    <span className="pp-app-subnav-item__title block truncate text-sm">{item.label}</span>
+                                    {item.description ? <span className="pp-app-subnav-item__copy mt-0.5 block truncate text-xs">{item.description}</span> : null}
                                   </span>
-                                  {item.badge ? <span className="ml-3 rounded-full bg-white px-2 py-1 text-[11px] font-semibold text-[#2563eb]">{item.badge}</span> : null}
+                                  {item.badge ? <span className="pp-app-subnav-item__badge ml-3 rounded-full px-2 py-1 text-[11px] font-semibold">{item.badge}</span> : null}
                                 </button>
                               ))}
                             </div>
@@ -448,7 +438,7 @@ export default function AppShell({
         </div>
       </div>
 
-      <nav className="fixed bottom-0 left-0 right-0 z-40 border-t border-[#e5e7eb] bg-white/98 p-2 backdrop-blur lg:hidden">
+      <nav className="pp-app-mobile-bar fixed bottom-0 left-0 right-0 z-40 border-t p-2 backdrop-blur lg:hidden">
         <div className="mx-auto grid max-w-3xl grid-cols-5 gap-1">
           {mobilePrimaryItems.map((item) => {
             const Icon = item.icon;
@@ -457,9 +447,7 @@ export default function AppShell({
               <Link
                 key={item.href}
                 href={item.href}
-                className={`flex flex-col items-center justify-center gap-1 rounded-[10px] px-2 py-2 text-[11px] font-medium ${
-                  selected ? 'bg-[#eef4ff] text-[#2563eb]' : 'text-[#667085]'
-                }`}
+                className={`pp-app-mobile-link flex flex-col items-center justify-center gap-1 rounded-[10px] px-2 py-2 text-[11px] font-medium ${selected ? 'is-active' : ''}`}
               >
                 <Icon size={16} />
                 <span>{item.label}</span>
@@ -469,8 +457,8 @@ export default function AppShell({
           <button
             type="button"
             onClick={() => setMobileMenuOpen(true)}
-            className={`flex flex-col items-center justify-center gap-1 rounded-[10px] px-2 py-2 text-[11px] font-medium ${
-              isSelected('/settings') || mobileMenuOpen ? 'bg-[#eef4ff] text-[#2563eb]' : 'text-[#667085]'
+            className={`pp-app-mobile-link flex flex-col items-center justify-center gap-1 rounded-[10px] px-2 py-2 text-[11px] font-medium ${
+              isSelected('/settings') || mobileMenuOpen ? 'is-active' : ''
             }`}
           >
             <Settings2 size={16} />
@@ -487,29 +475,27 @@ export default function AppShell({
         widthClassName="max-w-[420px]"
       >
         <div className="space-y-5">
-          <div className="rounded-[14px] border border-[#e5e7eb] bg-[#f8fafc] p-4">
-            <p className="text-sm font-semibold text-[#101828]">{user?.full_name || user?.email || 'PosterPro account'}</p>
-            <p className="mt-1 text-sm text-[#667085]">Signed in workspace operator</p>
+          <div className="pp-app-subnav-card p-4">
+            <p className="pp-app-subnav-card__title text-sm">{user?.full_name || user?.email || 'PosterPro account'}</p>
+            <p className="pp-app-subnav-card__copy mt-1 text-sm">Signed in workspace operator</p>
           </div>
 
           {navGroups.map((group) => (
             <div key={group.label}>
-              <p className="mb-2 text-xs font-medium uppercase tracking-[0.08em] text-[#667085]">{group.label}</p>
+              <p className="pp-app-nav-group-label mb-2 text-xs">{group.label}</p>
               <div className="space-y-1">
                 {group.items.map((item) => {
                   const Icon = item.icon;
                   const selected = isSelected(item.href);
                   return (
-                    <div key={item.href} className="rounded-[12px] border border-[#e5e7eb] bg-white">
+                    <div key={item.href} className="pp-app-drawer-card rounded-[12px] border">
                       <Link
                         href={item.href}
                         onClick={() => setMobileMenuOpen(false)}
-                        className={`flex items-center justify-between px-3 py-3 text-sm font-medium ${
-                          selected ? 'text-[#2563eb]' : 'text-[#475467]'
-                        }`}
+                        className={`pp-app-drawer-link flex items-center justify-between px-3 py-3 text-sm font-medium ${selected ? 'is-active' : ''}`}
                       >
                         <span className="flex items-center gap-3">
-                          <Icon size={17} className={selected ? 'text-[#2563eb]' : 'text-[#667085]'} />
+                          <Icon size={17} className={selected ? 'text-[var(--pp-dashboard-accent)]' : 'text-[#6c7a91]'} />
                           {item.label}
                         </span>
                         {selected ? <StatusPill status="success" label="Open" /> : null}
