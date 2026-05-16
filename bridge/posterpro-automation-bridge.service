@@ -1,0 +1,14 @@
+[Unit]
+Description=PosterPro Automation Bridge
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/apps/posterpro/repo/bridge
+EnvironmentFile=/opt/apps/posterpro/repo/backend/.env
+ExecStart=/opt/apps/posterpro/repo/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8040
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

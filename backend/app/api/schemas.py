@@ -12,12 +12,26 @@ class ListingGenerateRequest(BaseModel):
     barcode: str | None = None
 
 
-class ListingUpdateRequest(BaseModel):
+class ListingCreateRequest(BaseModel):
+    status: str | None = None
+    image_urls: list[str] | None = None
+    raw_photo_path: str | None = None
+    storage_unit_name: str | None = None
     title: str | None = None
     description: str | None = None
+    category_id: str | None = None
+    category_suggestion: str | None = None
+    item_specifics: dict | None = None
+    tags: list[str] | None = None
+    estimated_value: float | None = None
+    start_price: float | None = None
+    buy_it_now_price: float | None = None
+    min_acceptable_offer: float | None = None
     suggested_price: float | None = None
     listing_price: float | None = None
     purchase_cost: float | None = None
+    fees_estimated: float | None = None
+    fees_actual: float | None = None
     shipping_cost: float | None = None
     sale_price: float | None = None
     condition: str | None = None
@@ -26,7 +40,18 @@ class ListingUpdateRequest(BaseModel):
     platform_quantities: dict | None = None
     custom_labels: list[str] | None = None
     last_refreshed: datetime | None = None
+    source_type: str | None = None
+    source_metadata: dict | None = None
+    marketplace_data: dict | None = None
     needs_review: bool | None = None
+    restricted_review_required: bool | None = None
+    restricted_reasons: list[str] | None = None
+    detected_category_guess: str | None = None
+    marketplace_allowed_status: str | None = None
+
+
+class ListingUpdateRequest(ListingCreateRequest):
+    pass
 
 
 class ListingResponse(BaseModel):
@@ -269,11 +294,16 @@ class ServerSettingsUpdateRequest(BaseModel):
     photoroom_api_key: str | None = None
     ebay_client_id: str | None = None
     ebay_client_secret: str | None = None
+    ebay_runame: str | None = None
     ebay_redirect_uri: str | None = None
     storage_root: str | None = None
     environment: str | None = None
     autonomous_dry_run: bool | None = None
     autonomous_crosspost_enabled: bool | None = None
+    automation_bridge_enabled: bool | None = None
+    automation_bridge_url: str | None = None
+    automation_bridge_timeout_seconds: int | None = None
+    automation_bridge_api_key: str | None = None
     sale_detection_enabled: bool | None = None
     sale_detection_dry_run: bool | None = None
     sale_detection_poll_minutes: int | None = None
@@ -296,6 +326,26 @@ class ServerSettingsUpdateRequest(BaseModel):
     smtp_use_tls: bool | None = None
 
 
+class HostedPagesUpdateRequest(BaseModel):
+    brand_name: str | None = None
+    privacy_policy_slug: str | None = None
+    privacy_policy_title: str | None = None
+    privacy_policy_html: str | None = None
+    ebay_auth_accepted_slug: str | None = None
+    ebay_auth_accepted_title: str | None = None
+    ebay_auth_accepted_html: str | None = None
+    ebay_auth_declined_slug: str | None = None
+    ebay_auth_declined_title: str | None = None
+    ebay_auth_declined_html: str | None = None
+
+
+class EbayManualConnectRequest(BaseModel):
+    access_token: str | None = None
+    refresh_token: str | None = None
+    expires_in_seconds: int | None = None
+    external_account_id: str | None = None
+
+
 class MarketplaceConnectionStatusResponse(BaseModel):
     marketplace: str
     supports_oauth: bool = False
@@ -311,6 +361,13 @@ class MarketplaceConnectionStatusResponse(BaseModel):
     account_handle: str | None = None
     notes: str | None = None
     workflow_state: str | None = None
+    import_mode: str | None = None
+    publish_mode: str | None = None
+    shipping_scope: str | None = None
+    renewal_mode: str | None = None
+    support_url: str | None = None
+    bridge_account_key: str | None = None
+    import_listing_limit: int | None = None
     can_publish: bool = False
     can_sync_sales: bool = False
 
@@ -320,6 +377,179 @@ class MarketplaceConnectionUpdateRequest(BaseModel):
     account_handle: str | None = None
     notes: str | None = None
     workflow_state: str | None = None
+    import_mode: str | None = None
+    publish_mode: str | None = None
+    shipping_scope: str | None = None
+    renewal_mode: str | None = None
+    support_url: str | None = None
+    bridge_account_key: str | None = None
+    import_listing_limit: int | None = None
+
+
+class CrosspostQueueRequest(BaseModel):
+    marketplaces: list[str] = Field(default_factory=list)
+    requested_mode: str | None = None
+
+
+class CrosspostPreviewEntry(BaseModel):
+    marketplace: str
+    execution_mode: str
+    payload: dict = Field(default_factory=dict)
+    notes: list[str] = Field(default_factory=list)
+
+
+class CrosspostJobResponse(BaseModel):
+    id: int
+    user_id: int
+    listing_id: int
+    source_marketplace: str | None = None
+    target_marketplaces: list[str] = Field(default_factory=list)
+    requested_mode: str | None = None
+    status: str
+    execution_plan: dict | None = None
+    result_summary: dict | None = None
+    task_id: str | None = None
+    last_error: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    class Config:
+        from_attributes = True
+
+
+class MarketplaceImportJobCreateRequest(BaseModel):
+    source_marketplace: str
+    source_listing_reference: str | None = None
+    import_mode: str = "manual"
+    payload: dict = Field(default_factory=dict)
+
+
+class MarketplaceImportJobResponse(BaseModel):
+    id: int
+    user_id: int
+    source_marketplace: str
+    source_listing_reference: str | None = None
+    import_mode: str
+    status: str
+    payload: dict | None = None
+    normalized_preview: dict | None = None
+    created_listing_id: int | None = None
+    task_id: str | None = None
+    last_error: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    class Config:
+        from_attributes = True
+
+
+class MarketplaceJobsOverviewResponse(BaseModel):
+    import_jobs: list[MarketplaceImportJobResponse] = Field(default_factory=list)
+    crosspost_jobs: list[CrosspostJobResponse] = Field(default_factory=list)
+
+
+class AutomationBridgeSmokeTestResponse(BaseModel):
+    ok: bool
+    status: str
+    message: str | None = None
+    bridge_url: str | None = None
+    checked_url: str | None = None
+    http_status: int | None = None
+    response: dict | str | None = None
+    errors: list[str] = Field(default_factory=list)
+
+
+class BridgeMarketplaceAccountUpsertRequest(BaseModel):
+    display_name: str | None = None
+    login_handle: str | None = None
+    credential_secret: str | None = None
+    notes: str | None = None
+    provider_enabled: bool = False
+    browser_enabled: bool = False
+    session_state: str = "draft"
+    session_payload: dict = Field(default_factory=dict)
+    expires_at: str | None = None
+
+
+class BridgeMarketplaceAccountSessionRequest(BaseModel):
+    session_state: str = "draft"
+    session_payload: dict = Field(default_factory=dict)
+    expires_at: str | None = None
+    last_tested_at: str | None = None
+    notes: str | None = None
+
+
+class BridgeMarketplaceAccountConnectRequest(BaseModel):
+    display_name: str | None = None
+    login_handle: str | None = None
+    credential_secret: str | None = None
+    notes: str | None = None
+    provider_enabled: bool = False
+    browser_enabled: bool = True
+    expires_at: str | None = None
+    wait_timeout_seconds: int = 300
+
+
+class BridgeDesktopAccessResponse(BaseModel):
+    token: str
+    websocket_path: str
+    expires_at: str
+
+
+class BridgeMarketplaceAccountResponse(BaseModel):
+    account_id: str
+    marketplace: str
+    account_key: str
+    display_name: str | None = None
+    login_handle: str | None = None
+    notes: str | None = None
+    provider_enabled: bool = False
+    browser_enabled: bool = False
+    credential_configured: bool = False
+    session_state: str = "draft"
+    session_payload: dict = Field(default_factory=dict)
+    expires_at: str | None = None
+    last_tested_at: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class BridgeMarketplaceAccountsEnvelope(BaseModel):
+    accounts: list[BridgeMarketplaceAccountResponse] = Field(default_factory=list)
+
+
+class BridgeMarketplaceConnectSessionResponse(BaseModel):
+    connect_session_id: str
+    marketplace: str
+    account_key: str
+    display_name: str | None = None
+    login_handle: str | None = None
+    status: str
+    created_at: str
+    updated_at: str
+    started_at: str | None = None
+    completed_at: str | None = None
+    wait_timeout_seconds: int = 300
+    message: str | None = None
+    error: str | None = None
+    result: BridgeMarketplaceAccountResponse | None = None
+    desktop_access: BridgeDesktopAccessResponse | None = None
+
+
+class ActiveBridgeConnectSessionSummaryResponse(BaseModel):
+    connect_session_id: str
+    marketplace: str
+    account_key: str
+    display_name: str | None = None
+    login_handle: str | None = None
+    status: str
+    created_at: str
+    updated_at: str
+    started_at: str | None = None
+    completed_at: str | None = None
+    wait_timeout_seconds: int = 300
+    message: str | None = None
+    error: str | None = None
 
 
 class ServerReadinessResponse(BaseModel):
@@ -408,4 +638,5 @@ class AccountSetupSummaryResponse(BaseModel):
     has_templates: bool = False
     account_profile_complete: bool = False
     marketplace_connections: list[MarketplaceConnectionStatusResponse] = Field(default_factory=list)
+    active_bridge_connect_session: ActiveBridgeConnectSessionSummaryResponse | None = None
     server_readiness: ServerReadinessResponse

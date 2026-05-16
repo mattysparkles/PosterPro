@@ -15,6 +15,7 @@ from app.api.schemas import (
     AuthSessionResponse,
     AuthRegisterRequest,
     AuthViewModeRequest,
+    HostedPagesUpdateRequest,
     ServerSettingsUpdateRequest,
     UserResponse,
     UserUpdateRequest,
@@ -39,6 +40,7 @@ from app.core.secrets import encrypt_secret, mask_secret
 from app.models.enums import MarketplaceName
 from app.models.models import MarketplaceAccount, User
 from app.services.email_service import EmailDeliveryError, send_password_reset_email, smtp_configured
+from app.services.site_content_service import build_public_page_urls, load_site_content, save_site_content
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -46,6 +48,7 @@ _BACKEND_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 _STRING_SETTING_FIELDS = {
     "app_base_url": "APP_BASE_URL",
     "ebay_client_id": "EBAY_CLIENT_ID",
+    "ebay_runame": "EBAY_RUNAME",
     "ebay_redirect_uri": "EBAY_REDIRECT_URI",
     "storage_root": "STORAGE_ROOT",
     "environment": "ENVIRONMENT",
@@ -55,10 +58,12 @@ _STRING_SETTING_FIELDS = {
     "smtp_username": "SMTP_USERNAME",
     "smtp_from_email": "SMTP_FROM_EMAIL",
     "smtp_from_name": "SMTP_FROM_NAME",
+    "automation_bridge_url": "AUTOMATION_BRIDGE_URL",
 }
 _BOOL_SETTING_FIELDS = {
     "autonomous_dry_run": "AUTONOMOUS_DRY_RUN",
     "autonomous_crosspost_enabled": "AUTONOMOUS_CROSSPOST_ENABLED",
+    "automation_bridge_enabled": "AUTOMATION_BRIDGE_ENABLED",
     "sale_detection_enabled": "SALE_DETECTION_ENABLED",
     "sale_detection_dry_run": "SALE_DETECTION_DRY_RUN",
     "amazon_vine_import_enabled": "AMAZON_VINE_IMPORT_ENABLED",
@@ -68,6 +73,7 @@ _BOOL_SETTING_FIELDS = {
     "smtp_use_tls": "SMTP_USE_TLS",
 }
 _INT_SETTING_FIELDS = {
+    "automation_bridge_timeout_seconds": "AUTOMATION_BRIDGE_TIMEOUT_SECONDS",
     "sale_detection_poll_minutes": "SALE_DETECTION_POLL_MINUTES",
     "amazon_media_rate_limit_per_minute": "AMAZON_MEDIA_RATE_LIMIT_PER_MINUTE",
     "smtp_port": "SMTP_PORT",
@@ -75,6 +81,7 @@ _INT_SETTING_FIELDS = {
 _SECRET_SETTING_FIELDS = {
     "openai_api_key": "OPENAI_API_KEY_ENC",
     "photoroom_api_key": "PHOTOROOM_API_KEY_ENC",
+    "automation_bridge_api_key": "AUTOMATION_BRIDGE_API_KEY_ENC",
     "ebay_client_secret": "EBAY_CLIENT_SECRET_ENC",
     "amazon_paapi_access_key": "AMAZON_PAAPI_ACCESS_KEY_ENC",
     "amazon_paapi_secret_key": "AMAZON_PAAPI_SECRET_KEY_ENC",
@@ -84,6 +91,7 @@ _SECRET_SETTING_FIELDS = {
 _SECRET_PLAIN_ENV_FIELDS = {
     "openai_api_key": "OPENAI_API_KEY",
     "photoroom_api_key": "PHOTOROOM_API_KEY",
+    "automation_bridge_api_key": "AUTOMATION_BRIDGE_API_KEY",
     "ebay_client_secret": "EBAY_CLIENT_SECRET",
     "smtp_password": "SMTP_PASSWORD",
 }
@@ -184,6 +192,9 @@ def _write_env_overrides(updates: dict[str, str | None]) -> None:
 
 
 def _build_settings_panel_response(current_user: User, *, ebay_connected: bool) -> dict:
+    site_content = load_site_content()
+    page_urls = build_public_page_urls(settings.app_base_url)
+    runame = settings.ebay_runame or settings.ebay_redirect_uri or ""
     return {
         "profile": {
             "full_name": current_user.full_name,
@@ -198,9 +209,13 @@ def _build_settings_panel_response(current_user: User, *, ebay_connected: bool) 
         "ebay": {
             "client_id_configured": bool(settings.ebay_client_id),
             "client_secret_configured": bool(settings.ebay_client_secret),
+            "runame": runame,
             "redirect_uri": settings.ebay_redirect_uri or "",
-            "oauth_ready": bool(settings.ebay_client_id and settings.ebay_client_secret and settings.ebay_redirect_uri),
+            "oauth_ready": bool(settings.ebay_client_id and settings.ebay_client_secret and runame),
             "connected": ebay_connected,
+            "privacy_policy_url": page_urls["privacy_policy_url"],
+            "auth_accepted_url": page_urls["auth_accepted_url"],
+            "auth_declined_url": page_urls["auth_declined_url"],
         },
         "api_keys": {
             "openai_configured": bool(settings.openai_api_key),
@@ -210,6 +225,10 @@ def _build_settings_panel_response(current_user: User, *, ebay_connected: bool) 
             "autonomous_mode": settings.autonomous_mode,
             "autonomous_dry_run": settings.autonomous_dry_run,
             "autonomous_crosspost_enabled": settings.autonomous_crosspost_enabled,
+            "automation_bridge_enabled": settings.automation_bridge_enabled,
+            "automation_bridge_url": settings.automation_bridge_url or "",
+            "automation_bridge_timeout_seconds": settings.automation_bridge_timeout_seconds,
+            "automation_bridge_configured": bool(settings.automation_bridge_enabled and settings.automation_bridge_url and settings.automation_bridge_api_key),
             "sale_detection_enabled": settings.sale_detection_enabled,
             "sale_detection_dry_run": settings.sale_detection_dry_run,
             "sale_detection_poll_minutes": settings.sale_detection_poll_minutes,
@@ -246,6 +265,22 @@ def _build_settings_panel_response(current_user: User, *, ebay_connected: bool) 
             "paapi_partner_tag_configured": bool(settings.amazon_paapi_partner_tag),
             "paapi_access_key_masked": mask_secret(settings.amazon_paapi_access_key),
             "paapi_partner_tag_masked": mask_secret(settings.amazon_paapi_partner_tag),
+        },
+        "hosted_pages": {
+            "can_manage": is_effective_admin(current_user),
+            "brand_name": site_content["brand_name"],
+            "privacy_policy": {
+                **site_content["pages"]["privacy_policy"],
+                "url": page_urls["privacy_policy_url"],
+            },
+            "ebay_auth_accepted": {
+                **site_content["pages"]["ebay_auth_accepted"],
+                "url": page_urls["auth_accepted_url"],
+            },
+            "ebay_auth_declined": {
+                **site_content["pages"]["ebay_auth_declined"],
+                "url": page_urls["auth_declined_url"],
+            },
         },
     }
 
@@ -355,6 +390,59 @@ def update_server_settings(
         )
     ).scalar_one_or_none()
     return _build_settings_panel_response(current_user, ebay_connected=ebay_account is not None)
+
+
+@router.put("/settings/hosted-pages")
+def update_hosted_pages(
+    payload: HostedPagesUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Only admins can change hosted pages")
+    if not is_effective_admin(current_user):
+        raise HTTPException(status_code=403, detail="Admin preview mode cannot change hosted pages")
+
+    current = load_site_content()
+    next_payload = {
+        "brand_name": payload.brand_name if payload.brand_name is not None else current["brand_name"],
+        "pages": {
+            "privacy_policy": {
+                "slug": payload.privacy_policy_slug if payload.privacy_policy_slug is not None else current["pages"]["privacy_policy"]["slug"],
+                "title": payload.privacy_policy_title if payload.privacy_policy_title is not None else current["pages"]["privacy_policy"]["title"],
+                "html": payload.privacy_policy_html if payload.privacy_policy_html is not None else current["pages"]["privacy_policy"]["html"],
+            },
+            "ebay_auth_accepted": {
+                "slug": payload.ebay_auth_accepted_slug if payload.ebay_auth_accepted_slug is not None else current["pages"]["ebay_auth_accepted"]["slug"],
+                "title": payload.ebay_auth_accepted_title if payload.ebay_auth_accepted_title is not None else current["pages"]["ebay_auth_accepted"]["title"],
+                "html": payload.ebay_auth_accepted_html if payload.ebay_auth_accepted_html is not None else current["pages"]["ebay_auth_accepted"]["html"],
+            },
+            "ebay_auth_declined": {
+                "slug": payload.ebay_auth_declined_slug if payload.ebay_auth_declined_slug is not None else current["pages"]["ebay_auth_declined"]["slug"],
+                "title": payload.ebay_auth_declined_title if payload.ebay_auth_declined_title is not None else current["pages"]["ebay_auth_declined"]["title"],
+                "html": payload.ebay_auth_declined_html if payload.ebay_auth_declined_html is not None else current["pages"]["ebay_auth_declined"]["html"],
+            },
+        },
+    }
+    save_site_content(next_payload)
+
+    ebay_account = db.execute(
+        select(MarketplaceAccount).where(
+            MarketplaceAccount.user_id == current_user.id,
+            MarketplaceAccount.marketplace == MarketplaceName.ebay,
+        )
+    ).scalar_one_or_none()
+    return _build_settings_panel_response(current_user, ebay_connected=ebay_account is not None)
+
+
+@router.get("/public/site-pages/{slug}")
+def get_public_site_page(slug: str):
+    from app.services.site_content_service import get_public_page_by_slug
+
+    page = get_public_page_by_slug(slug)
+    if not page:
+        raise HTTPException(status_code=404, detail="Page not found")
+    return page
 
 
 @router.post("/register", response_model=AuthSessionResponse, status_code=status.HTTP_201_CREATED)

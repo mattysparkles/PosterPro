@@ -29,6 +29,7 @@ import {
   fetchAutonomousConfig,
   toggleAutonomousMode,
 } from '../lib/api';
+import { useRouter } from 'next/router';
 
 const CHART_COLORS = ['#2563eb', '#14b8a6', '#f59e0b', '#ef4444'];
 const ANALYTICS_TABS = [
@@ -40,6 +41,7 @@ const ANALYTICS_TABS = [
 ];
 
 export default function AnalyticsPage() {
+  const router = useRouter();
   const { user } = useAuth();
   const [dashboard, setDashboard] = useState({ kpis: {}, top_items: [], revenue_by_marketplace: [], sales_trend: [] });
   const [periodDays, setPeriodDays] = useState(30);
@@ -91,6 +93,56 @@ export default function AnalyticsPage() {
     ];
   }, [dashboard]);
 
+  useEffect(() => {
+    const tab = typeof router.query.tab === 'string' ? router.query.tab : '';
+    if (tab && ANALYTICS_TABS.some((item) => item.value === tab)) {
+      setActiveTab(tab);
+    }
+  }, [router.query.tab]);
+
+  const selectTab = (nextTab) => {
+    setActiveTab(nextTab);
+    if (!router.isReady) return;
+    router.replace({ pathname: router.pathname, query: { ...router.query, tab: nextTab } }, undefined, { shallow: true });
+  };
+
+  const analyticsSubnav = useMemo(
+    () => ({
+      eyebrow: 'Analytics CMS',
+      title: 'Reporting',
+      description: 'Use a dedicated analytics rail to move between revenue, pricing, profit, and performance views.',
+      sections: [
+        {
+          label: 'Analytics Views',
+          items: ANALYTICS_TABS.map((tab) => ({
+            key: tab.value,
+            label: tab.label,
+            active: activeTab === tab.value,
+            description:
+              tab.value === 'revenue'
+                ? 'Revenue and marketplace mix'
+                : tab.value === 'profit'
+                ? 'Top sellers by profit'
+                : tab.value === 'categories'
+                ? 'Marketplace category mix'
+                : tab.value === 'pricing'
+                ? 'AOV and sell-through'
+                : 'Marketplace order volume',
+            onClick: () => selectTab(tab.value),
+          })),
+        },
+        {
+          label: 'Sections',
+          items: [
+            { key: 'analytics-guide', label: 'Reading Guide', active: false, description: 'How to use the dashboard', onClick: () => document.getElementById('analytics-guide')?.scrollIntoView({ behavior: 'smooth', block: 'start' }) },
+            { key: 'analytics-tabs', label: 'Reports', active: false, description: 'Current chart/report area', onClick: () => document.getElementById('analytics-tabs')?.scrollIntoView({ behavior: 'smooth', block: 'start' }) },
+          ],
+        },
+      ],
+    }),
+    [activeTab],
+  );
+
   return (
     <AppShell
       active="/analytics"
@@ -100,6 +152,7 @@ export default function AnalyticsPage() {
         await toggleAutonomousMode(!autonomousConfig.autonomous_mode);
         await reload(periodDays);
       }}
+      subnav={analyticsSubnav}
     >
       <PageHeader
         title="Analytics"
@@ -129,7 +182,7 @@ export default function AnalyticsPage() {
         ))}
       </section>
 
-      <section className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(320px,0.9fr)]">
+      <section id="analytics-guide" className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(320px,0.9fr)]">
         <SectionPanel title="Analytics reading guide" description="Use these sections as operational decision tools, not just charts for their own sake.">
           <div className="grid gap-3 md:grid-cols-4">
             {[
@@ -158,7 +211,9 @@ export default function AnalyticsPage() {
         </SectionPanel>
       </section>
 
-      <Tabs items={ANALYTICS_TABS} value={activeTab} onChange={setActiveTab} />
+      <div id="analytics-tabs">
+        <Tabs items={ANALYTICS_TABS} value={activeTab} onChange={selectTab} />
+      </div>
 
       {activeTab === 'revenue' ? (
         <div className="grid gap-5 xl:grid-cols-[1.2fr_0.8fr]">

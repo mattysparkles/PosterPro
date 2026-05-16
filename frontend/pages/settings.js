@@ -18,15 +18,23 @@ import { useAuth } from '../contexts/AuthContext';
 import { useEbayAuth } from '../hooks/useEbayAuth';
 import useDashboardData from '../hooks/useDashboardData';
 import {
+  createMarketplaceImportJob,
+  fetchMarketplaceImportJob,
   fetchAccountSetupSummary,
+  fetchBridgeAccounts,
   fetchSaleDetectionSettings,
   fetchSettingsPanels,
+  importEbayTokens,
+  runAutomationBridgeSmokeTest,
   toggleAutonomousMode,
+  updateBridgeAccountSession,
   updateCurrentUser,
+  updateHostedPages,
   updateMarketplaceConnection,
   updatePlatformConfig,
   updateSaleDetectionSettings,
   updateServerSettings,
+  upsertBridgeAccount,
 } from '../lib/api';
 
 const SETTINGS_TABS = [
@@ -38,6 +46,7 @@ const SETTINGS_TABS = [
   { value: 'marketplaces', label: 'Marketplaces' },
   { value: 'automation', label: 'Automation' },
   { value: 'api-keys', label: 'API Keys' },
+  { value: 'hosted-pages', label: 'Hosted Pages' },
   { value: 'email', label: 'Email' },
   { value: 'server', label: 'Server' },
 ];
@@ -45,7 +54,7 @@ const SETTINGS_TABS = [
 const SETTINGS_GROUPS = [
   { label: 'Account', tabs: ['overview', 'profile', 'workflow'] },
   { label: 'Channels', tabs: ['ebay', 'amazon', 'marketplaces'] },
-  { label: 'Admin', tabs: ['automation', 'api-keys', 'email', 'server'] },
+  { label: 'Admin', tabs: ['automation', 'api-keys', 'hosted-pages', 'email', 'server'] },
 ];
 
 const MARKETPLACE_LABELS = {
@@ -59,15 +68,19 @@ const MARKETPLACE_LABELS = {
   vinted: 'Vinted',
 };
 
+const BRIDGE_MARKETPLACE_OPTIONS = ['facebook', 'etsy', 'mercari', 'poshmark', 'depop', 'whatnot', 'vinted'];
+const BROWSER_CONNECT_MARKETPLACES = ['facebook', 'mercari', 'poshmark', 'etsy', 'whatnot'];
+const BROWSER_IMPORT_MARKETPLACES = ['facebook'];
+
 const MARKETPLACE_GUIDES = {
   ebay: {
-    summary: 'Use eBay OAuth for the real account connection, then enable publishing and sales sync from the same workspace.',
-    tooltip: 'PosterPro needs the server eBay app first, then each operator connects their own eBay account.',
-    prerequisites: ['Admin saves App ID, Cert ID, and redirect URI', 'Operator signs into the correct eBay seller account', 'Publishing policy data is ready in the eBay app'],
+    summary: 'Use the eBay app credentials plus the RuName-backed hosted pages to connect each operator account cleanly.',
+    tooltip: 'PosterPro stores the server app settings, generates the three public URLs eBay asks for, and then lets each operator connect their own account.',
+    prerequisites: ['Admin saves App ID, Cert ID, and RuName', 'Admin pastes the generated privacy, accepted, and declined URLs into the eBay developer RuName config', 'Operator signs into the correct eBay seller account'],
     steps: [
-      'Open the eBay tab and save the server OAuth credentials.',
-      'Click Connect eBay and complete the eBay consent flow in the seller account you want tied to this workspace.',
-      'Return here and confirm the account shows Ready before enabling publishing or sales sync.',
+      'Open the eBay tab and save the server OAuth credentials, especially the RuName value from eBay.',
+      'Open Hosted Pages and confirm the privacy policy and eBay landing pages are published at the generated URLs.',
+      'Paste those three generated URLs into the matching eBay RuName fields, then click Connect eBay from the operator account you want tied to this workspace.',
     ],
   },
   amazon: {
@@ -88,6 +101,16 @@ const MARKETPLACE_GUIDES = {
       'Save the storefront name and account handle for the operator.',
       'Document any posting or shipping rules in Workflow notes.',
       'Mark the workflow Ready only when the human posting process is actually ready to use.',
+    ],
+  },
+  etsy: {
+    summary: 'Etsy is modeled as a catalog-first manual/provider-assisted channel with stronger product-specific prep than a casual resale marketplace.',
+    tooltip: 'Use this setup to capture shop identity, fulfillment defaults, and handmade or vintage listing notes before the team publishes.',
+    prerequisites: ['Shop name', 'Etsy seller handle', 'Production or fulfillment notes', 'Category and attribute expectations for handmade or vintage items'],
+    steps: [
+      'Save the Etsy shop identity and operator handle that will own the listings.',
+      'Document fulfillment, production, and attribute expectations in notes so repeatable product data is not improvised.',
+      'Move the channel to Ready only after the team has validated the listing template and shipping workflow for Etsy.',
     ],
   },
   poshmark: {
@@ -187,7 +210,10 @@ const CREDENTIAL_INSTRUCTIONS = {
   ebay: [
     { field: 'App ID', where: 'eBay Developers Program -> Application Keys', how: 'Create or open the production app, then copy the App ID exactly as shown.', purpose: 'Identifies the PosterPro app during eBay OAuth.' },
     { field: 'Cert ID', where: 'eBay Developers Program -> Application Keys', how: 'Copy the production Cert ID from the same eBay app and save it here.', purpose: 'Authenticates PosterPro when it exchanges eBay OAuth tokens.' },
-    { field: 'Redirect URI', where: 'eBay Developers Program -> User Tokens / RuName', how: 'Register the live callback URL and paste the exact same value here.', purpose: 'Lets eBay return the operator back to PosterPro after consent.' },
+    { field: 'RuName / redirect_uri value', where: 'eBay Developers Program -> User Tokens / RuName', how: 'Copy the OAuth-enabled RuName exactly as eBay generated it, for example matthew_ruderma-matthewr-poster-cyatix.', purpose: 'This is the exact redirect_uri value eBay expects in the OAuth authorize and token-exchange flow.' },
+    { field: 'Privacy Policy URL', where: 'eBay Developers Program -> User Tokens / RuName', how: 'Use the generated Hosted Pages privacy policy URL from PosterPro and paste it into the RuName settings.', purpose: 'Required by eBay for user-token OAuth applications.' },
+    { field: 'Auth Accepted URL', where: 'eBay Developers Program -> User Tokens / RuName', how: 'Use the generated Hosted Pages accepted URL from PosterPro and paste it into the RuName settings.', purpose: 'This is where eBay sends the operator after they approve PosterPro access.' },
+    { field: 'Auth Declined URL', where: 'eBay Developers Program -> User Tokens / RuName', how: 'Use the generated Hosted Pages declined URL from PosterPro and paste it into the RuName settings.', purpose: 'This is where eBay sends the operator if they decline or cancel the consent flow.' },
   ],
   amazon: [
     { field: 'PA-API access key', where: 'Amazon Associates / Product Advertising API console', how: 'Generate access credentials for the account that will handle media lookup.', purpose: 'Lets PosterPro request Amazon product metadata and media.' },
@@ -294,17 +320,66 @@ export default function SettingsPage() {
   const [savingPassword, setSavingPassword] = useState(false);
   const [savingViewMode, setSavingViewMode] = useState(false);
   const [savingServer, setSavingServer] = useState(false);
+  const [testingBridge, setTestingBridge] = useState(false);
+  const [bridgeSmokeResult, setBridgeSmokeResult] = useState(null);
+  const [bridgeAccounts, setBridgeAccounts] = useState([]);
+  const [bridgeAccountForm, setBridgeAccountForm] = useState({
+    marketplace: 'facebook',
+    account_key: '',
+    display_name: '',
+    login_handle: '',
+    credential_secret: '',
+    notes: '',
+    provider_enabled: false,
+    browser_enabled: true,
+    session_state: 'draft',
+    session_payload_text: '',
+    expires_at: '',
+  });
+  const [savingBridgeAccount, setSavingBridgeAccount] = useState(false);
   const [savingPublishing, setSavingPublishing] = useState(false);
   const [savingSales, setSavingSales] = useState(false);
   const [savingMarketplace, setSavingMarketplace] = useState(false);
+  const [savingBrowserSession, setSavingBrowserSession] = useState(false);
+  const [launchingBrowserWorkspace, setLaunchingBrowserWorkspace] = useState(false);
+  const [runningMarketplaceImport, setRunningMarketplaceImport] = useState(false);
   const [selectedMarketplace, setSelectedMarketplace] = useState('');
   const [marketplaceForm, setMarketplaceForm] = useState({
     display_name: '',
     account_handle: '',
     notes: '',
     workflow_state: 'draft',
+    import_mode: 'manual',
+    publish_mode: 'manual_review',
+    shipping_scope: 'local_only',
+    renewal_mode: 'manual',
+    support_url: '',
+    bridge_account_key: '',
+    import_listing_limit: 10,
+    bridge_session_state: 'draft',
+    bridge_session_payload_text: '',
   });
+  const activeBridgeConnectSession = setupSummary?.active_bridge_connect_session || null;
+  const activeBridgeConnectMarketplace = String(activeBridgeConnectSession?.marketplace || '').toLowerCase();
   const [ebayForm, setEbayForm] = useState({ ebay_client_id: '', ebay_client_secret: '', ebay_redirect_uri: '' });
+  const [hostedPagesForm, setHostedPagesForm] = useState({
+    brand_name: 'PosterPro',
+    privacy_policy_slug: 'privacy-policy',
+    privacy_policy_title: 'Privacy Policy',
+    privacy_policy_html: '',
+    ebay_auth_accepted_slug: 'ebay-auth-complete',
+    ebay_auth_accepted_title: 'eBay Connection Complete',
+    ebay_auth_accepted_html: '',
+    ebay_auth_declined_slug: 'ebay-auth-declined',
+    ebay_auth_declined_title: 'eBay Access Declined',
+    ebay_auth_declined_html: '',
+  });
+  const [ebayTokenForm, setEbayTokenForm] = useState({
+    access_token: '',
+    refresh_token: '',
+    expires_in_seconds: 7200,
+    external_account_id: '',
+  });
   const [apiKeyForm, setApiKeyForm] = useState({ openai_api_key: '', photoroom_api_key: '' });
   const [workflowForm, setWorkflowForm] = useState({
     review_before_publish: true,
@@ -315,6 +390,10 @@ export default function SettingsPage() {
   const [automationForm, setAutomationForm] = useState({
     autonomous_dry_run: false,
     autonomous_crosspost_enabled: false,
+    automation_bridge_enabled: false,
+    automation_bridge_url: '',
+    automation_bridge_timeout_seconds: 30,
+    automation_bridge_api_key: '',
     sale_detection_enabled: false,
     sale_detection_dry_run: false,
     sale_detection_poll_minutes: 15,
@@ -346,6 +425,12 @@ export default function SettingsPage() {
     amazon_paapi_secret_key: '',
     amazon_paapi_partner_tag: '',
   });
+  const selectTab = (nextTab) => {
+    setActiveTab(nextTab);
+    if (!router.isReady) return;
+    const nextQuery = { ...router.query, tab: nextTab };
+    router.replace({ pathname: router.pathname, query: nextQuery }, undefined, { shallow: true });
+  };
   const canManageServer = !!settingsPanels?.server?.can_manage;
   const visibleTabs = SETTINGS_TABS.filter((tab) => {
     if (canManageServer) return true;
@@ -357,24 +442,69 @@ export default function SettingsPage() {
       .map((value) => visibleTabs.find((tab) => tab.value === value))
       .filter(Boolean),
   })).filter((group) => group.tabs.length);
+  const settingsSubnav = useMemo(
+    () => ({
+      eyebrow: 'Settings CMS',
+      title: 'Configuration',
+      description: 'Move through account, channel, and platform configuration from a dedicated admin rail instead of a single stacked settings page.',
+      sections: visibleTabGroups.map((group) => ({
+        label: group.label,
+        items: group.tabs.map((tab) => ({
+          key: tab.value,
+          label: tab.label,
+          active: activeTab === tab.value,
+          description:
+            tab.value === 'overview'
+              ? 'Control center'
+              : tab.value === 'ebay'
+              ? 'OAuth and account connection'
+              : tab.value === 'hosted-pages'
+              ? 'Public white-label pages'
+              : tab.value === 'server'
+              ? 'Deployment settings'
+              : tab.value === 'workflow'
+              ? 'Operator rules'
+              : tab.value === 'marketplaces'
+              ? 'Channel readiness'
+              : undefined,
+          onClick: () => selectTab(tab.value),
+        })),
+      })),
+    }),
+    [activeTab, visibleTabGroups],
+  );
 
   const reload = async () => {
     if (!user?.id) return;
     setLoading(true);
     try {
-      const [summary, salesConfig, panels] = await Promise.all([
+      const [summary, salesConfig, panels, bridgeAccountData] = await Promise.all([
         fetchAccountSetupSummary(user.id),
         fetchSaleDetectionSettings(user.id),
         fetchSettingsPanels(),
+        fetchBridgeAccounts().catch(() => ({ accounts: [] })),
       ]);
       setSetupSummary(summary);
       setSalePlatforms(salesConfig.marketplaces || []);
       setSettingsPanels(panels);
+      setBridgeAccounts(bridgeAccountData?.accounts || []);
       setProfileName(panels.profile.full_name || '');
       setEbayForm({
         ebay_client_id: '',
         ebay_client_secret: '',
-        ebay_redirect_uri: panels.ebay.redirect_uri || '',
+        ebay_redirect_uri: panels.ebay.runame || panels.ebay.redirect_uri || '',
+      });
+      setHostedPagesForm({
+        brand_name: panels.hosted_pages?.brand_name || 'PosterPro',
+        privacy_policy_slug: panels.hosted_pages?.privacy_policy?.slug || 'privacy-policy',
+        privacy_policy_title: panels.hosted_pages?.privacy_policy?.title || 'Privacy Policy',
+        privacy_policy_html: panels.hosted_pages?.privacy_policy?.html || '',
+        ebay_auth_accepted_slug: panels.hosted_pages?.ebay_auth_accepted?.slug || 'ebay-auth-complete',
+        ebay_auth_accepted_title: panels.hosted_pages?.ebay_auth_accepted?.title || 'eBay Connection Complete',
+        ebay_auth_accepted_html: panels.hosted_pages?.ebay_auth_accepted?.html || '',
+        ebay_auth_declined_slug: panels.hosted_pages?.ebay_auth_declined?.slug || 'ebay-auth-declined',
+        ebay_auth_declined_title: panels.hosted_pages?.ebay_auth_declined?.title || 'eBay Access Declined',
+        ebay_auth_declined_html: panels.hosted_pages?.ebay_auth_declined?.html || '',
       });
       setApiKeyForm({
         openai_api_key: '',
@@ -389,6 +519,10 @@ export default function SettingsPage() {
       setAutomationForm({
         autonomous_dry_run: !!panels.automation.autonomous_dry_run,
         autonomous_crosspost_enabled: !!panels.automation.autonomous_crosspost_enabled,
+        automation_bridge_enabled: !!panels.automation.automation_bridge_enabled,
+        automation_bridge_url: panels.automation.automation_bridge_url || '',
+        automation_bridge_timeout_seconds: Number(panels.automation.automation_bridge_timeout_seconds || 30),
+        automation_bridge_api_key: '',
         sale_detection_enabled: !!panels.automation.sale_detection_enabled,
         sale_detection_dry_run: !!panels.automation.sale_detection_dry_run,
         sale_detection_poll_minutes: Number(panels.automation.sale_detection_poll_minutes || 15),
@@ -429,6 +563,23 @@ export default function SettingsPage() {
   }, [user?.id]);
 
   useEffect(() => {
+    const handleStorage = (event) => {
+      if (!String(event.key || '').startsWith('posterpro-marketplace-connect-complete:') || !event.newValue) return;
+      let payload = null;
+      try {
+        payload = JSON.parse(event.newValue);
+      } catch (error) {
+        payload = null;
+      }
+      reload();
+      const marketplace = String(payload?.marketplace || event.key.split(':').pop() || 'marketplace');
+      toast.success(`${MARKETPLACE_LABELS[marketplace] || marketplace} account connected and bridge session captured.`);
+    };
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
+  }, [reload]);
+
+  useEffect(() => {
     if (!router.isReady) return;
     const tab = typeof router.query.tab === 'string' ? router.query.tab : '';
     const marketplace = typeof router.query.marketplace === 'string' ? router.query.marketplace : '';
@@ -442,7 +593,7 @@ export default function SettingsPage() {
 
   useEffect(() => {
     if (visibleTabs.some((tab) => tab.value === activeTab)) return;
-    setActiveTab(visibleTabs[0]?.value || 'profile');
+      setActiveTab(visibleTabs[0]?.value || 'profile');
   }, [activeTab, visibleTabs]);
 
   const publishingPlatforms = useMemo(
@@ -457,12 +608,22 @@ export default function SettingsPage() {
 
   const openMarketplaceDrawer = (marketplace) => {
     if (!marketplace) return;
+    const usesBrowserAssistDefaults = BROWSER_CONNECT_MARKETPLACES.includes(marketplace.marketplace);
     setSelectedMarketplace(marketplace.marketplace);
     setMarketplaceForm({
       display_name: marketplace.display_name || '',
       account_handle: marketplace.account_handle || '',
       notes: marketplace.notes || '',
       workflow_state: marketplace.workflow_state || 'draft',
+      import_mode: marketplace.import_mode || (usesBrowserAssistDefaults && BROWSER_IMPORT_MARKETPLACES.includes(marketplace.marketplace) ? 'browser_assist' : 'manual'),
+      publish_mode: marketplace.publish_mode || (usesBrowserAssistDefaults ? 'browser_assist' : 'manual_review'),
+      shipping_scope: marketplace.shipping_scope || 'local_only',
+      renewal_mode: marketplace.renewal_mode || 'manual',
+      support_url: marketplace.support_url || '',
+      bridge_account_key: marketplace.bridge_account_key || '',
+      import_listing_limit: Number(marketplace.import_listing_limit || 10),
+      bridge_session_state: 'draft',
+      bridge_session_payload_text: '',
     });
   };
 
@@ -470,6 +631,45 @@ export default function SettingsPage() {
     MARKETPLACE_GUIDES[selectedMarketplace] ||
     MARKETPLACE_GUIDES[configuredMarketplace?.marketplace] ||
     null;
+  const getBridgeAccountForMarketplace = (marketplace) => {
+    if (!marketplace) return null;
+    const accountKey = String(marketplace.bridge_account_key || '').trim().toLowerCase();
+    if (!accountKey) return null;
+    return (
+      bridgeAccounts.find(
+        (account) =>
+          account.marketplace === marketplace.marketplace &&
+          account.account_key === accountKey,
+      ) || null
+    );
+  };
+  const isBridgeSessionReady = (account) => (
+    !!account && ['ready', 'active', 'valid'].includes(String(account.session_state || '').toLowerCase())
+  );
+  const selectedBridgeAccount = useMemo(
+    () =>
+      bridgeAccounts.find(
+        (account) =>
+          account.marketplace === configuredMarketplace?.marketplace &&
+          account.account_key === String(marketplaceForm.bridge_account_key || '').trim().toLowerCase(),
+      ) || null,
+    [bridgeAccounts, configuredMarketplace?.marketplace, marketplaceForm.bridge_account_key],
+  );
+  const browserConnectInProgress =
+    !!configuredMarketplace &&
+    activeBridgeConnectMarketplace === String(configuredMarketplace.marketplace || '').toLowerCase();
+
+  useEffect(() => {
+    if (!BROWSER_CONNECT_MARKETPLACES.includes(String(configuredMarketplace?.marketplace || '')) || !selectedBridgeAccount) return;
+    setMarketplaceForm((current) => {
+      if ((current.bridge_session_payload_text || '').trim()) return current;
+      return {
+        ...current,
+        bridge_session_state: selectedBridgeAccount.session_state || current.bridge_session_state,
+        bridge_session_payload_text: JSON.stringify(selectedBridgeAccount.session_payload || {}, null, 2),
+      };
+    });
+  }, [configuredMarketplace?.marketplace, selectedBridgeAccount]);
   const workflowCards = useMemo(() => {
     const serverReadiness = setupSummary?.server_readiness || {};
     return [
@@ -496,11 +696,256 @@ export default function SettingsPage() {
     ];
   }, [setupSummary, workflowForm.review_before_publish]);
 
+  const saveBrowserSession = async () => {
+    const marketplaceName = String(configuredMarketplace?.marketplace || '').toLowerCase();
+    if (!BROWSER_CONNECT_MARKETPLACES.includes(marketplaceName)) {
+      toast.error('Browser session saving is only available for browser-assist marketplaces.');
+      return;
+    }
+    const accountKey = String(marketplaceForm.bridge_account_key || '').trim().toLowerCase();
+    if (!accountKey) {
+      toast.error('Bridge account key is required.');
+      return;
+    }
+    let sessionPayload = {};
+    try {
+      sessionPayload = marketplaceForm.bridge_session_payload_text.trim()
+        ? JSON.parse(marketplaceForm.bridge_session_payload_text)
+        : {};
+    } catch (error) {
+      toast.error('Session payload JSON is invalid.');
+      return;
+    }
+
+    setSavingBrowserSession(true);
+    try {
+      await upsertBridgeAccount(marketplaceName, accountKey, {
+        display_name: marketplaceForm.display_name || configuredMarketplace?.display_name || MARKETPLACE_LABELS[marketplaceName] || marketplaceName,
+        login_handle: marketplaceForm.account_handle || configuredMarketplace?.account_handle || '',
+        credential_secret: selectedBridgeAccount?.credential_configured ? undefined : `${marketplaceName}-session-managed-in-dashboard`,
+        notes: marketplaceForm.notes,
+        provider_enabled: false,
+        browser_enabled: true,
+        session_state: marketplaceForm.bridge_session_state,
+        session_payload: sessionPayload,
+      });
+      await updateBridgeAccountSession(marketplaceName, accountKey, {
+        session_state: marketplaceForm.bridge_session_state,
+        session_payload: sessionPayload,
+        last_tested_at: new Date().toISOString(),
+        notes: marketplaceForm.notes,
+      });
+      await reload();
+      toast.success(`${MARKETPLACE_LABELS[marketplaceName] || marketplaceName} browser session saved.`);
+    } catch (error) {
+      toast.error(error.message);
+    } finally {
+      setSavingBrowserSession(false);
+    }
+  };
+
+  const launchBrowserConnectWorkspace = async ({ marketplace, accountKey, displayName, loginHandle, notes }) => {
+    if (!automationForm.automation_bridge_enabled || !String(automationForm.automation_bridge_url || '').trim()) {
+      toast.error('Enable and configure the automation bridge first.');
+      selectTab('automation');
+      return;
+    }
+    if (!accountKey) {
+      toast.error('Bridge account key is required.');
+      return;
+    }
+
+    setLaunchingBrowserWorkspace(true);
+    try {
+      const params = new URLSearchParams({
+        marketplace,
+        accountKey,
+        displayName: displayName || MARKETPLACE_LABELS[marketplace] || marketplace,
+        notes: notes || '',
+      });
+      if (String(loginHandle || '').trim()) {
+        params.set('loginHandle', String(loginHandle).trim());
+      }
+      const href = `/bridge-desktop?${params.toString()}`;
+      await router.push(href);
+    } catch (error) {
+      toast.error(error.message);
+    } finally {
+      setLaunchingBrowserWorkspace(false);
+    }
+  };
+
+  const connectBrowserMarketplaceAccount = async () => {
+    const marketplaceName = String(configuredMarketplace?.marketplace || '').toLowerCase();
+    if (!BROWSER_CONNECT_MARKETPLACES.includes(marketplaceName)) {
+      toast.error('Browser connect is only available for configured browser-assist marketplaces.');
+      return;
+    }
+    await launchBrowserConnectWorkspace({
+      marketplace: marketplaceName,
+      accountKey: String(marketplaceForm.bridge_account_key || '').trim().toLowerCase(),
+      displayName: marketplaceForm.display_name || configuredMarketplace?.display_name || MARKETPLACE_LABELS[marketplaceName] || marketplaceName,
+      loginHandle: marketplaceForm.account_handle || '',
+      notes: marketplaceForm.notes,
+    });
+  };
+
+  const connectBrowserMarketplaceFromCard = async (marketplace) => {
+    if (!marketplace || !BROWSER_CONNECT_MARKETPLACES.includes(String(marketplace.marketplace || '').toLowerCase())) {
+      return;
+    }
+    const accountKey = String(marketplace.bridge_account_key || '').trim().toLowerCase();
+    if (!accountKey) {
+      openMarketplaceDrawer(marketplace);
+      toast.error(`Save a bridge account key in ${MARKETPLACE_LABELS[marketplace.marketplace] || marketplace.marketplace} setup before running the live connect flow.`);
+      return;
+    }
+    setSelectedMarketplace(marketplace.marketplace);
+    await launchBrowserConnectWorkspace({
+      marketplace: marketplace.marketplace,
+      accountKey,
+      displayName: marketplace.display_name || MARKETPLACE_LABELS[marketplace.marketplace] || marketplace.marketplace,
+      loginHandle: '',
+      notes: marketplace.notes || '',
+    });
+  };
+
+  const waitForMarketplaceImportJob = async (jobId, { timeoutMs = 180000, pollMs = 1500 } = {}) => {
+    const deadline = Date.now() + timeoutMs;
+    let latestJob = await fetchMarketplaceImportJob(jobId);
+    while (!['completed', 'failed', 'canceled'].includes(String(latestJob?.status || '').toLowerCase())) {
+      if (Date.now() >= deadline) {
+        throw new Error(`Facebook import job ${jobId} did not finish within ${Math.round(timeoutMs / 1000)} seconds.`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+      latestJob = await fetchMarketplaceImportJob(jobId);
+    }
+    return latestJob;
+  };
+
+  const runFacebookImport = async ({
+    accountKey,
+    displayName,
+    importMode = 'browser_assist',
+    maxListings = 10,
+  }) => {
+    const normalizedAccountKey = String(accountKey || '').trim().toLowerCase();
+    if (!normalizedAccountKey) {
+      throw new Error('Save a bridge account key first.');
+    }
+
+    setRunningMarketplaceImport(true);
+    try {
+      const job = await createMarketplaceImportJob({
+        source_marketplace: 'facebook',
+        source_listing_reference: 'https://www.facebook.com/marketplace/you/selling',
+        import_mode: importMode || 'browser_assist',
+        payload: {
+          account_key: normalizedAccountKey,
+          max_listings: Number(maxListings || 10),
+          seller_label: displayName || '',
+        },
+      });
+      const finalJob = await waitForMarketplaceImportJob(job.id);
+      const status = String(finalJob?.status || '').toLowerCase();
+      if (status === 'failed') {
+        throw new Error(finalJob?.last_error || `Facebook import job ${job.id} failed.`);
+      }
+      if (status === 'canceled') {
+        throw new Error(`Facebook import job ${job.id} was canceled.`);
+      }
+
+      const createdListingIds = finalJob?.normalized_preview?.created_listing_ids || [];
+      const newListingIds = finalJob?.normalized_preview?.new_listing_ids || [];
+      const reusedListingIds = finalJob?.normalized_preview?.reused_listing_ids || [];
+      const importedCount = Number(createdListingIds.length || 0);
+      if (importedCount > 0 || finalJob?.created_listing_id) {
+        const count = importedCount || 1;
+        if (reusedListingIds.length && !newListingIds.length) {
+          toast.success(`Reused ${count} existing Facebook draft${count === 1 ? '' : 's'} in PosterPro.`);
+        } else if (reusedListingIds.length) {
+          toast.success(
+            `Prepared ${count} Facebook draft${count === 1 ? '' : 's'} in PosterPro (${newListingIds.length} new, ${reusedListingIds.length} existing).`
+          );
+        } else {
+          toast.success(`Imported ${count} Facebook listing${count === 1 ? '' : 's'} into PosterPro drafts.`);
+        }
+        await reload();
+        await router.push('/listings?tab=drafts');
+        return;
+      }
+
+      toast.success(`Facebook import job ${job.id} finished. Review the import job details if no drafts were created.`);
+      await reload();
+      await router.push('/jobs');
+    } finally {
+      setRunningMarketplaceImport(false);
+    }
+  };
+
+  const importFacebookFromMarketplaceCard = async (marketplace) => {
+    if (!marketplace || marketplace.marketplace !== 'facebook') {
+      return;
+    }
+    const accountKey = String(marketplace.bridge_account_key || '').trim().toLowerCase();
+    if (!accountKey) {
+      openMarketplaceDrawer(marketplace);
+      toast.error('Save a bridge account key in Facebook setup before importing listings.');
+      return;
+    }
+    const bridgeAccount = getBridgeAccountForMarketplace(marketplace);
+    if (!isBridgeSessionReady(bridgeAccount)) {
+      openMarketplaceDrawer(marketplace);
+      toast.error('Connect Facebook first so PosterPro has an active browser session to import from.');
+      return;
+    }
+    if ((marketplace.import_mode || 'manual') !== 'browser_assist') {
+      openMarketplaceDrawer(marketplace);
+      toast.error('Set Facebook import mode to browser assist before importing listings.');
+      return;
+    }
+    setSelectedMarketplace(marketplace.marketplace);
+    await runFacebookImport({
+      accountKey,
+      displayName: marketplace.display_name || marketplace.account_handle || 'Facebook Marketplace',
+      importMode: marketplace.import_mode || 'browser_assist',
+      maxListings: Number(marketplace.import_listing_limit || 10),
+    });
+  };
+
+  const importExistingFacebookListings = async () => {
+    if (configuredMarketplace?.marketplace !== 'facebook') {
+      toast.error('This import action is only available for Facebook Marketplace.');
+      return;
+    }
+    const accountKey = String(marketplaceForm.bridge_account_key || '').trim().toLowerCase();
+    if (!accountKey) {
+      toast.error('Save a bridge account key first.');
+      return;
+    }
+
+    try {
+      if (!isBridgeSessionReady(selectedBridgeAccount)) {
+        toast.error('Connect Facebook first so PosterPro has an active browser session to import from.');
+        return;
+      }
+      await runFacebookImport({
+        accountKey,
+        displayName: marketplaceForm.display_name || marketplaceForm.account_handle || '',
+        importMode: marketplaceForm.import_mode || 'browser_assist',
+        maxListings: Number(marketplaceForm.import_listing_limit || 10),
+      });
+    } catch (error) {
+      toast.error(error.message);
+    }
+  };
+
   return (
     <AppShell
       active="/settings"
       title="Settings"
       autonomousConfig={autonomousConfig}
+      subnav={settingsSubnav}
       onToggleAutonomous={async () => {
         await toggleAutonomousMode(!autonomousConfig.autonomous_mode);
         await reloadDashboard();
@@ -518,32 +963,7 @@ export default function SettingsPage() {
         }
       />
 
-      <div className="grid gap-5 xl:grid-cols-[220px_minmax(0,1fr)]">
-        <nav className="pp-card p-3">
-          <div className="space-y-4">
-            {visibleTabGroups.map((group) => (
-              <div key={group.label}>
-                <p className="mb-2 px-3 text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">{group.label}</p>
-                <div className="space-y-1">
-                  {group.tabs.map((tab) => (
-                    <button
-                      key={tab.value}
-                      type="button"
-                      onClick={() => setActiveTab(tab.value)}
-                      className={`flex h-10 w-full items-center rounded-[10px] px-3 text-left text-sm font-medium transition-colors ${
-                        activeTab === tab.value ? 'bg-[#eef4ff] text-[#2563eb]' : 'text-[#475467] hover:bg-[#f9fafb]'
-                      }`}
-                    >
-                      {tab.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        </nav>
-
-        <div>
+      <div>
           {activeTab === 'overview' ? (
             <SectionPanel title="Settings Overview" description="A clean summary of operator-level choices, channel setup, and admin credentials that still need attention.">
               <div className="space-y-6">
@@ -560,19 +980,19 @@ export default function SettingsPage() {
                     description="Controls that belong to the signed-in operator rather than the server."
                   >
                     <div className="grid gap-3 md:grid-cols-2">
-                      <button type="button" onClick={() => setActiveTab('profile')} className="rounded-[12px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#bfd2ff] hover:bg-[#f8fbff]">
+                      <button type="button" onClick={() => selectTab('profile')} className="rounded-[12px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#bfd2ff] hover:bg-[#f8fbff]">
                         <p className="text-sm font-semibold text-[#101828]">Profile</p>
                         <p className="mt-1 text-sm text-[#667085]">Operator name, password changes, and account-level identity.</p>
                       </button>
-                      <button type="button" onClick={() => setActiveTab('workflow')} className="rounded-[12px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#bfd2ff] hover:bg-[#f8fbff]">
+                      <button type="button" onClick={() => selectTab('workflow')} className="rounded-[12px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#bfd2ff] hover:bg-[#f8fbff]">
                         <p className="text-sm font-semibold text-[#101828]">Workflow</p>
                         <p className="mt-1 text-sm text-[#667085]">Review-before-publish, bulk approvals, and preview layout.</p>
                       </button>
-                      <button type="button" onClick={() => setActiveTab('ebay')} className="rounded-[12px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#bfd2ff] hover:bg-[#f8fbff]">
+                      <button type="button" onClick={() => selectTab('ebay')} className="rounded-[12px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#bfd2ff] hover:bg-[#f8fbff]">
                         <p className="text-sm font-semibold text-[#101828]">eBay account</p>
                         <p className="mt-1 text-sm text-[#667085]">Server OAuth setup plus the current user connection state.</p>
                       </button>
-                      <button type="button" onClick={() => setActiveTab('marketplaces')} className="rounded-[12px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#bfd2ff] hover:bg-[#f8fbff]">
+                      <button type="button" onClick={() => selectTab('marketplaces')} className="rounded-[12px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#bfd2ff] hover:bg-[#f8fbff]">
                         <p className="text-sm font-semibold text-[#101828]">Channel onboarding</p>
                         <p className="mt-1 text-sm text-[#667085]">Manual and connected marketplace readiness for this workspace.</p>
                       </button>
@@ -587,11 +1007,12 @@ export default function SettingsPage() {
                     <div className="space-y-3">
                       {[
                         ['API Keys', 'OpenAI and PhotoRoom secrets for AI enrichment and photo tooling.', 'api-keys'],
+                        ['Hosted Pages', 'White-label public pages for privacy policy and eBay OAuth handoff.', 'hosted-pages'],
                         ['Email Delivery', 'SMTP relay settings for real forgot-password delivery.', 'email'],
                         ['Server', 'Public URL, storage root, and deployment-wide environment values.', 'server'],
                         ['Automation', 'Global publish and polling behavior that affects every user.', 'automation'],
                       ].map(([title, note, tab]) => (
-                        <button key={tab} type="button" onClick={() => setActiveTab(tab)} className="w-full rounded-[12px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#bfd2ff] hover:bg-[#f8fbff]">
+                        <button key={tab} type="button" onClick={() => selectTab(tab)} className="w-full rounded-[12px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#bfd2ff] hover:bg-[#f8fbff]">
                           <p className="text-sm font-semibold text-[#101828]">{title}</p>
                           <p className="mt-1 text-sm text-[#667085]">{note}</p>
                         </button>
@@ -901,32 +1322,8 @@ export default function SettingsPage() {
           ) : null}
 
           {activeTab === 'ebay' ? (
-            <SectionPanel title="eBay" description="Store the OAuth app settings on the server, then connect the current account.">
-              <form
-                className="space-y-4"
-                onSubmit={async (event) => {
-                  event.preventDefault();
-                  if (!canManageServer) {
-                    toast.error('Admin access is required to change server credentials.');
-                    return;
-                  }
-                  const payload = {};
-                  if (ebayForm.ebay_client_id.trim()) payload.ebay_client_id = ebayForm.ebay_client_id.trim();
-                  if (ebayForm.ebay_client_secret.trim()) payload.ebay_client_secret = ebayForm.ebay_client_secret.trim();
-                  payload.ebay_redirect_uri = ebayForm.ebay_redirect_uri.trim();
-                  setSavingServer(true);
-                  try {
-                    await updateServerSettings(payload);
-                    await reload();
-                    setEbayForm((current) => ({ ...current, ebay_client_id: '', ebay_client_secret: '' }));
-                    toast.success('eBay server settings saved.');
-                  } catch (error) {
-                    toast.error(error.message);
-                  } finally {
-                    setSavingServer(false);
-                  }
-                }}
-              >
+            <SectionPanel title="eBay" description="Configure the server app, publish the three required public URLs, and connect the current operator account.">
+              <div className="space-y-6">
                 <GuideCard
                   title="eBay onboarding"
                   description={MARKETPLACE_GUIDES.ebay.summary}
@@ -934,57 +1331,317 @@ export default function SettingsPage() {
                   prerequisites={MARKETPLACE_GUIDES.ebay.prerequisites}
                   steps={MARKETPLACE_GUIDES.ebay.steps}
                 />
-                <InstructionTable title="eBay credentials" rows={CREDENTIAL_INSTRUCTIONS.ebay} />
-                <div className="grid gap-4 md:grid-cols-2">
-                  <div className="space-y-2">
-                    <label className="flex items-center gap-2 text-sm font-medium text-[#101828]">
-                      App ID
-                      <HelpTip label="eBay App ID help">This is the public application identifier from the eBay developer dashboard.</HelpTip>
-                    </label>
-                    <Input
-                      value={ebayForm.ebay_client_id}
-                      onChange={(event) => setEbayForm((current) => ({ ...current, ebay_client_id: event.target.value }))}
-                      placeholder={settingsPanels?.ebay?.client_id_configured ? 'Configured on server' : 'Your eBay App ID'}
-                    />
+                <div className="grid gap-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(340px,0.85fr)]">
+                  <form
+                    className="space-y-4 rounded-[18px] border border-[#e5e7eb] bg-[#fcfcfd] p-5"
+                    onSubmit={async (event) => {
+                      event.preventDefault();
+                      if (!canManageServer) {
+                        toast.error('Admin access is required to change server credentials.');
+                        return;
+                      }
+                      const payload = {};
+                      if (ebayForm.ebay_client_id.trim()) payload.ebay_client_id = ebayForm.ebay_client_id.trim();
+                      if (ebayForm.ebay_client_secret.trim()) payload.ebay_client_secret = ebayForm.ebay_client_secret.trim();
+                      payload.ebay_runame = ebayForm.ebay_redirect_uri.trim();
+                      payload.ebay_redirect_uri = ebayForm.ebay_redirect_uri.trim();
+                      setSavingServer(true);
+                      try {
+                        await updateServerSettings(payload);
+                        await reload();
+                        setEbayForm((current) => ({ ...current, ebay_client_id: '', ebay_client_secret: '' }));
+                        toast.success('eBay server settings saved.');
+                      } catch (error) {
+                        toast.error(error.message);
+                      } finally {
+                        setSavingServer(false);
+                      }
+                    }}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-semibold text-[#101828]">Server OAuth app</p>
+                        <p className="mt-1 text-sm text-[#667085]">These values belong to the hosted PosterPro deployment, not to an individual operator account.</p>
+                      </div>
+                      <StatusPill status={settingsPanels?.ebay?.oauth_ready ? 'success' : 'warning'} label={settingsPanels?.ebay?.oauth_ready ? 'OAuth ready' : 'Credentials incomplete'} />
+                    </div>
+                    <InstructionTable title="eBay credentials" rows={CREDENTIAL_INSTRUCTIONS.ebay} />
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <div className="space-y-2">
+                        <label className="flex items-center gap-2 text-sm font-medium text-[#101828]">
+                          App ID
+                          <HelpTip label="eBay App ID help">This is the public application identifier from the eBay developer dashboard.</HelpTip>
+                        </label>
+                        <Input
+                          value={ebayForm.ebay_client_id}
+                          onChange={(event) => setEbayForm((current) => ({ ...current, ebay_client_id: event.target.value }))}
+                          placeholder={settingsPanels?.ebay?.client_id_configured ? 'Configured on server' : 'Your eBay App ID'}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label className="flex items-center gap-2 text-sm font-medium text-[#101828]">
+                          Cert ID
+                          <HelpTip label="eBay Cert ID help">PosterPro stores the eBay client secret encrypted at rest after you save it.</HelpTip>
+                        </label>
+                        <Input
+                          value={ebayForm.ebay_client_secret}
+                          onChange={(event) => setEbayForm((current) => ({ ...current, ebay_client_secret: event.target.value }))}
+                          placeholder={settingsPanels?.ebay?.client_secret_configured ? 'Configured on server' : 'Your eBay Cert ID'}
+                        />
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="flex items-center gap-2 text-sm font-medium text-[#101828]">
+                        RuName / redirect_uri value
+                        <HelpTip label="eBay RuName help">For eBay user OAuth, redirect_uri is the RuName value, not a raw callback URL. Paste the exact OAuth-enabled RuName from eBay.</HelpTip>
+                      </label>
+                      <Input
+                        value={ebayForm.ebay_redirect_uri}
+                        onChange={(event) => setEbayForm((current) => ({ ...current, ebay_redirect_uri: event.target.value }))}
+                        placeholder="matthew_ruderma-matthewr-poster-cyatix"
+                      />
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Button type="submit" disabled={savingServer || !canManageServer}>
+                        {savingServer ? 'Saving...' : 'Save eBay app settings'}
+                      </Button>
+                      {!canManageServer ? <p className="text-sm text-[#667085]">Only the bootstrap admin can change server-side credentials.</p> : null}
+                    </div>
+                  </form>
+
+                  <div className="space-y-4">
+                    <div className="rounded-[18px] border border-[#dbe7ff] bg-[#f7faff] p-5">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-semibold text-[#101828]">Required eBay URLs</p>
+                          <p className="mt-1 text-sm text-[#667085]">Paste these exact values into the matching RuName fields inside the eBay developer dashboard.</p>
+                        </div>
+                        <StatusPill status={settingsPanels?.server?.app_base_url ? 'info' : 'warning'} label={settingsPanels?.server?.app_base_url ? 'Base URL ready' : 'App base URL missing'} />
+                      </div>
+                      <div className="mt-4 space-y-3">
+                        {[
+                          ['Privacy Policy URL', settingsPanels?.ebay?.privacy_policy_url],
+                          ['Auth Accepted URL', settingsPanels?.ebay?.auth_accepted_url],
+                          ['Auth Declined URL', settingsPanels?.ebay?.auth_declined_url],
+                        ].map(([label, value]) => (
+                          <div key={label} className="rounded-[12px] border border-white/80 bg-white/90 p-3">
+                            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[#667085]">{label}</p>
+                            <p className="mt-2 break-all text-sm text-[#101828]">{value || 'Set APP_BASE_URL and Hosted Pages slugs to generate this URL.'}</p>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="mt-4 flex flex-wrap gap-2">
+                        <Button type="button" variant="outline" onClick={() => selectTab('hosted-pages')}>
+                          Open hosted pages CMS
+                        </Button>
+                      </div>
+                    </div>
+
+                    <div className="rounded-[18px] border border-[#e5e7eb] bg-white p-5">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-semibold text-[#101828]">Current operator connection</p>
+                          <p className="mt-1 text-sm text-[#667085]">Use the OAuth flow for the real long-term connection. Manual token import is available for advanced recovery or testing.</p>
+                        </div>
+                        <StatusPill status={settingsPanels?.ebay?.connected ? 'success' : 'default'} label={settingsPanels?.ebay?.connected ? 'Connected' : 'Not connected'} />
+                      </div>
+                      <div className="mt-4 flex flex-wrap gap-2">
+                        <Button type="button" onClick={connectEbay} disabled={connectingEbay || !settingsPanels?.ebay?.oauth_ready}>
+                          {connectingEbay ? 'Opening OAuth...' : 'Connect eBay'}
+                        </Button>
+                      </div>
+                      {ebayConnectError ? <p className="mt-3 text-sm text-[#b42318]">{ebayConnectError}</p> : null}
+                    </div>
+
+                    <form
+                      className="space-y-3 rounded-[18px] border border-[#e5e7eb] bg-white p-5"
+                      onSubmit={async (event) => {
+                        event.preventDefault();
+                        setSavingMarketplace(true);
+                        try {
+                          await importEbayTokens(
+                            {
+                              access_token: ebayTokenForm.access_token.trim(),
+                              refresh_token: ebayTokenForm.refresh_token.trim() || undefined,
+                              expires_in_seconds: Number(ebayTokenForm.expires_in_seconds || 7200),
+                              external_account_id: ebayTokenForm.external_account_id.trim() || undefined,
+                            },
+                            user?.id,
+                          );
+                          setEbayTokenForm({
+                            access_token: '',
+                            refresh_token: '',
+                            expires_in_seconds: 7200,
+                            external_account_id: '',
+                          });
+                          await reload();
+                          toast.success('eBay token data saved for this operator.');
+                        } catch (error) {
+                          toast.error(error.message);
+                        } finally {
+                          setSavingMarketplace(false);
+                        }
+                      }}
+                    >
+                      <div>
+                        <p className="text-sm font-semibold text-[#101828]">Advanced token import</p>
+                        <p className="mt-1 text-sm text-[#667085]">Only use this if you intentionally generated a user token outside PosterPro. A refresh token is strongly recommended for anything beyond short-lived testing.</p>
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium text-[#101828]">Access token</label>
+                        <textarea
+                          value={ebayTokenForm.access_token}
+                          onChange={(event) => setEbayTokenForm((current) => ({ ...current, access_token: event.target.value }))}
+                          placeholder="Paste the eBay user access token if you need a manual import."
+                          className="min-h-24 w-full rounded-[10px] border border-[#e5e7eb] bg-white p-3 text-sm text-[#101828] outline-none transition placeholder:text-[#98a2b3] focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium text-[#101828]">Refresh token</label>
+                        <textarea
+                          value={ebayTokenForm.refresh_token}
+                          onChange={(event) => setEbayTokenForm((current) => ({ ...current, refresh_token: event.target.value }))}
+                          placeholder="Paste the refresh token when available so PosterPro can keep the connection alive."
+                          className="min-h-24 w-full rounded-[10px] border border-[#e5e7eb] bg-white p-3 text-sm text-[#101828] outline-none transition placeholder:text-[#98a2b3] focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                        />
+                      </div>
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <div className="space-y-2">
+                          <label className="text-sm font-medium text-[#101828]">Token lifetime in seconds</label>
+                          <Input
+                            type="number"
+                            value={ebayTokenForm.expires_in_seconds}
+                            onChange={(event) => setEbayTokenForm((current) => ({ ...current, expires_in_seconds: event.target.value }))}
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <label className="text-sm font-medium text-[#101828]">External account label</label>
+                          <Input
+                            value={ebayTokenForm.external_account_id}
+                            onChange={(event) => setEbayTokenForm((current) => ({ ...current, external_account_id: event.target.value }))}
+                            placeholder="optional-seller-handle"
+                          />
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <Button type="submit" variant="outline" disabled={savingMarketplace}>
+                          {savingMarketplace ? 'Saving...' : 'Import tokens'}
+                        </Button>
+                      </div>
+                    </form>
                   </div>
-                  <div className="space-y-2">
-                    <label className="flex items-center gap-2 text-sm font-medium text-[#101828]">
-                      Cert ID
-                      <HelpTip label="eBay Cert ID help">PosterPro stores the eBay client secret encrypted at rest after you save it.</HelpTip>
-                    </label>
-                    <Input
-                      value={ebayForm.ebay_client_secret}
-                      onChange={(event) => setEbayForm((current) => ({ ...current, ebay_client_secret: event.target.value }))}
-                      placeholder={settingsPanels?.ebay?.client_secret_configured ? 'Configured on server' : 'Your eBay Cert ID'}
-                    />
+                </div>
+              </div>
+            </SectionPanel>
+          ) : null}
+
+          {activeTab === 'hosted-pages' ? (
+            <SectionPanel title="Hosted Pages" description="Manage the public white-label pages PosterPro serves for privacy policy and eBay OAuth handoff.">
+              <div className="space-y-6">
+                <GuideCard
+                  title="Why this exists"
+                  description="eBay user OAuth needs a privacy policy URL plus accepted and declined URLs. This admin surface lets a self-hosting operator generate and maintain those pages from inside PosterPro."
+                  prerequisites={['APP_BASE_URL points at the real public frontend host', 'Admin knows the final slugs they want exposed publicly', 'Policy copy has been reviewed for the real business']}
+                  steps={[
+                    'Choose the public slug for each page.',
+                    'Edit the title and HTML body that should render at that URL.',
+                    'Save the hosted pages, then copy the generated URLs back into the eBay RuName settings.',
+                  ]}
+                  tone="slate"
+                />
+                <div className="grid gap-5 xl:grid-cols-[minmax(0,1.05fr)_minmax(340px,0.95fr)]">
+                  <form
+                    className="space-y-4 rounded-[18px] border border-[#e5e7eb] bg-white p-5"
+                    onSubmit={async (event) => {
+                      event.preventDefault();
+                      if (!canManageServer) {
+                        toast.error('Admin access is required to change hosted pages.');
+                        return;
+                      }
+                      setSavingServer(true);
+                      try {
+                        await updateHostedPages(hostedPagesForm);
+                        await reload();
+                        toast.success('Hosted pages updated.');
+                      } catch (error) {
+                        toast.error(error.message);
+                      } finally {
+                        setSavingServer(false);
+                      }
+                    }}
+                  >
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-[#101828]">Brand name</label>
+                      <Input
+                        value={hostedPagesForm.brand_name}
+                        onChange={(event) => setHostedPagesForm((current) => ({ ...current, brand_name: event.target.value }))}
+                        placeholder="PosterPro"
+                      />
+                    </div>
+                    {[
+                      ['privacy_policy', 'Privacy policy'],
+                      ['ebay_auth_accepted', 'eBay auth accepted'],
+                      ['ebay_auth_declined', 'eBay auth declined'],
+                    ].map(([prefix, label]) => (
+                      <div key={prefix} className="rounded-[16px] border border-[#eaecf0] bg-[#fcfcfd] p-4">
+                        <p className="text-sm font-semibold text-[#101828]">{label}</p>
+                        <div className="mt-3 grid gap-3 md:grid-cols-2">
+                          <div className="space-y-2">
+                            <label className="text-sm font-medium text-[#101828]">URL slug</label>
+                            <Input
+                              value={hostedPagesForm[`${prefix}_slug`]}
+                              onChange={(event) => setHostedPagesForm((current) => ({ ...current, [`${prefix}_slug`]: event.target.value }))}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <label className="text-sm font-medium text-[#101828]">Page title</label>
+                            <Input
+                              value={hostedPagesForm[`${prefix}_title`]}
+                              onChange={(event) => setHostedPagesForm((current) => ({ ...current, [`${prefix}_title`]: event.target.value }))}
+                            />
+                          </div>
+                        </div>
+                        <div className="mt-3 space-y-2">
+                          <label className="text-sm font-medium text-[#101828]">HTML content</label>
+                          <textarea
+                            value={hostedPagesForm[`${prefix}_html`]}
+                            onChange={(event) => setHostedPagesForm((current) => ({ ...current, [`${prefix}_html`]: event.target.value }))}
+                            className="min-h-40 w-full rounded-[10px] border border-[#e5e7eb] bg-white p-3 text-sm text-[#101828] outline-none transition placeholder:text-[#98a2b3] focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                          />
+                        </div>
+                      </div>
+                    ))}
+                    <div className="flex flex-wrap gap-2">
+                      <Button type="submit" disabled={savingServer || !canManageServer}>
+                        {savingServer ? 'Saving...' : 'Save hosted pages'}
+                      </Button>
+                    </div>
+                  </form>
+
+                  <div className="space-y-4">
+                    <div className="rounded-[18px] border border-[#dbe7ff] bg-[#f7faff] p-5">
+                      <p className="text-sm font-semibold text-[#101828]">Generated URLs</p>
+                      <p className="mt-1 text-sm text-[#667085]">These are the live URLs to use in eBay once APP_BASE_URL and the slugs are correct.</p>
+                      <div className="mt-4 space-y-3">
+                        {[
+                          ['Privacy policy', settingsPanels?.hosted_pages?.privacy_policy?.url],
+                          ['Accepted', settingsPanels?.hosted_pages?.ebay_auth_accepted?.url],
+                          ['Declined', settingsPanels?.hosted_pages?.ebay_auth_declined?.url],
+                        ].map(([label, value]) => (
+                          <div key={label} className="rounded-[12px] border border-white/80 bg-white/90 p-3">
+                            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[#667085]">{label}</p>
+                            <p className="mt-2 break-all text-sm text-[#101828]">{value || 'Set APP_BASE_URL first to generate the public URL.'}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="rounded-[18px] border border-[#e5e7eb] bg-white p-5">
+                      <p className="text-sm font-semibold text-[#101828]">Operator note</p>
+                      <p className="mt-1 text-sm text-[#667085]">The accepted page finalizes the eBay OAuth callback and refreshes the opener window. The declined page gives the operator a clean way back into PosterPro instead of leaving them on a generic eBay response.</p>
+                    </div>
                   </div>
                 </div>
-                <div className="space-y-2">
-                  <label className="flex items-center gap-2 text-sm font-medium text-[#101828]">
-                    Redirect URI
-                    <HelpTip label="eBay Redirect URI help">This must match the exact callback URL configured in the eBay developer app.</HelpTip>
-                  </label>
-                  <Input
-                    value={ebayForm.ebay_redirect_uri}
-                    onChange={(event) => setEbayForm((current) => ({ ...current, ebay_redirect_uri: event.target.value }))}
-                    placeholder="https://posterpro.sparkleserver.site/api/ebay/callback"
-                  />
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <StatusPill status={settingsPanels?.ebay?.oauth_ready ? 'success' : 'warning'} label={settingsPanels?.ebay?.oauth_ready ? 'OAuth ready' : 'Credentials incomplete'} />
-                  <StatusPill status={settingsPanels?.ebay?.connected ? 'success' : 'default'} label={settingsPanels?.ebay?.connected ? 'Connected' : 'Not connected'} />
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <Button type="submit" disabled={savingServer || !canManageServer}>
-                    {savingServer ? 'Saving...' : 'Save eBay settings'}
-                  </Button>
-                  <Button type="button" variant="outline" onClick={connectEbay} disabled={connectingEbay || !settingsPanels?.ebay?.oauth_ready}>
-                    {connectingEbay ? 'Opening OAuth...' : 'Connect eBay'}
-                  </Button>
-                </div>
-                {!canManageServer ? <p className="text-sm text-[#667085]">Only the bootstrap admin can change server-side credentials.</p> : null}
-                {ebayConnectError ? <p className="text-sm text-[#b42318]">{ebayConnectError}</p> : null}
-              </form>
+              </div>
             </SectionPanel>
           ) : null}
 
@@ -1149,6 +1806,13 @@ export default function SettingsPage() {
                   const salesEnabled = salePlatforms.includes(marketplace.marketplace);
                   const manualMode = marketplace.connection_mode === 'manual';
                   const guide = MARKETPLACE_GUIDES[marketplace.marketplace];
+                  const bridgeAccount = getBridgeAccountForMarketplace(marketplace);
+                  const supportsBrowserConnect = BROWSER_CONNECT_MARKETPLACES.includes(marketplace.marketplace);
+                  const supportsBrowserImport = BROWSER_IMPORT_MARKETPLACES.includes(marketplace.marketplace);
+                  const browserSessionReady =
+                    supportsBrowserConnect &&
+                    bridgeAccount &&
+                    ['ready', 'active', 'valid'].includes(String(bridgeAccount.session_state || '').toLowerCase());
                   return (
                     <div key={marketplace.marketplace} className="rounded-[10px] border border-[#e5e7eb] bg-white p-4">
                       <div className="flex items-center justify-between gap-4">
@@ -1171,19 +1835,93 @@ export default function SettingsPage() {
                           {marketplace.display_name || marketplace.account_handle || marketplace.external_account_id}
                         </div>
                       ) : null}
+                      {supportsBrowserConnect ? (
+                        <div className="mt-3 rounded-[10px] border border-[#dbe7ff] bg-[#f7faff] px-3 py-3 text-sm text-[#475467]">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <p className="font-medium text-[#101828]">{`${MARKETPLACE_LABELS[marketplace.marketplace] || marketplace.marketplace} browser session`}</p>
+                            <StatusPill status={browserSessionReady ? 'success' : 'warning'} label={bridgeAccount?.session_state || 'Not connected'} />
+                          </div>
+                          <p className="mt-2">
+                            {`Use `}
+                            <span className="font-medium text-[#101828]">{`Connect ${MARKETPLACE_LABELS[marketplace.marketplace] || marketplace.marketplace} account`}</span>
+                            {` to capture the cookies and browser storage state required for browser-assist posting.`}
+                          </p>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            <Button
+                              size="sm"
+                              onClick={() => {
+                                void connectBrowserMarketplaceFromCard(marketplace);
+                              }}
+                              disabled={launchingBrowserWorkspace}
+                            >
+                              {launchingBrowserWorkspace ? 'Opening workspace...' : 'Connect now'}
+                            </Button>
+                            {supportsBrowserImport ? (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => {
+                                  void importFacebookFromMarketplaceCard(marketplace);
+                                }}
+                                disabled={
+                                  runningMarketplaceImport ||
+                                  !String(marketplace.bridge_account_key || '').trim() ||
+                                  (marketplace.import_mode || 'manual') !== 'browser_assist' ||
+                                  !browserSessionReady
+                                }
+                              >
+                                {runningMarketplaceImport ? 'Importing listings...' : 'Import listings'}
+                              </Button>
+                            ) : null}
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => openMarketplaceDrawer(marketplace)}
+                            >
+                              {`Open ${MARKETPLACE_LABELS[marketplace.marketplace] || marketplace.marketplace} setup`}
+                            </Button>
+                          </div>
+                        </div>
+                      ) : null}
+                      {manualMode ? (
+                        <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+                          <div className="rounded-[10px] border border-[#e5e7eb] bg-[#fcfcfd] px-3 py-2">
+                            <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Import mode</p>
+                            <p className="mt-1 text-sm text-[#101828]">{marketplace.import_mode || 'manual'}</p>
+                          </div>
+                          <div className="rounded-[10px] border border-[#e5e7eb] bg-[#fcfcfd] px-3 py-2">
+                            <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Publish mode</p>
+                            <p className="mt-1 text-sm text-[#101828]">{marketplace.publish_mode || 'manual_review'}</p>
+                          </div>
+                          <div className="rounded-[10px] border border-[#e5e7eb] bg-[#fcfcfd] px-3 py-2">
+                            <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Shipping scope</p>
+                            <p className="mt-1 text-sm text-[#101828]">{marketplace.shipping_scope || 'local_only'}</p>
+                          </div>
+                          <div className="rounded-[10px] border border-[#e5e7eb] bg-[#fcfcfd] px-3 py-2">
+                            <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Renewal mode</p>
+                            <p className="mt-1 text-sm text-[#101828]">{marketplace.renewal_mode || 'manual'}</p>
+                          </div>
+                        </div>
+                      ) : null}
                       <div className="mt-4 flex flex-wrap gap-2">
                         <Button
                           variant="outline"
                           size="sm"
                           onClick={() => {
                             if (marketplace.marketplace === 'ebay') {
-                              setActiveTab('ebay');
+                              selectTab('ebay');
                               return;
                             }
                             openMarketplaceDrawer(marketplace);
                           }}
                         >
-                          {marketplace.marketplace === 'ebay' ? 'Open eBay setup' : manualMode ? 'Configure account' : 'Review setup'}
+                          {marketplace.marketplace === 'ebay'
+                            ? 'Open eBay setup'
+                            : supportsBrowserConnect
+                            ? `Open ${MARKETPLACE_LABELS[marketplace.marketplace] || marketplace.marketplace} setup`
+                            : manualMode
+                            ? 'Configure account'
+                            : 'Review setup'}
                         </Button>
                         <Button
                           variant={publishingEnabled ? 'default' : 'outline'}
@@ -1233,6 +1971,11 @@ export default function SettingsPage() {
                         <StatusPill status={marketplace.can_publish ? 'success' : 'warning'} label={marketplace.can_publish ? 'Publishing ready' : 'Publishing blocked'} />
                         <StatusPill status={marketplace.can_sync_sales ? 'success' : 'default'} label={marketplace.can_sync_sales ? 'Sales sync ready' : 'Sales sync unavailable'} />
                       </div>
+                      {marketplace.support_url ? (
+                        <p className="mt-3 text-sm text-[#475467]">
+                          Runbook: <a href={marketplace.support_url} target="_blank" rel="noreferrer" className="font-medium text-[#2563eb]">{marketplace.support_url}</a>
+                        </p>
+                      ) : null}
                       {guide?.steps?.length ? (
                         <div className="mt-4 rounded-[12px] bg-[#f8fafc] p-3">
                           <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">Setup steps</p>
@@ -1296,6 +2039,280 @@ export default function SettingsPage() {
                     >
                       Toggle
                     </Button>
+                  </div>
+                </div>
+                <div className="rounded-[14px] border border-[#dbe7ff] bg-[#f7faff] p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-[#101828]">Automation bridge</p>
+                      <p className="mt-1 text-sm text-[#667085]">
+                        This is the transport layer for unsupported marketplaces like Facebook when PosterPro needs a browser-assist or provider-assist runner.
+                      </p>
+                    </div>
+                    <StatusPill
+                      status={settingsPanels?.automation?.automation_bridge_configured ? 'success' : 'warning'}
+                      label={settingsPanels?.automation?.automation_bridge_configured ? 'Bridge ready' : 'Bridge not configured'}
+                    />
+                  </div>
+                  <div className="mt-4 grid gap-4 md:grid-cols-2">
+                    <label className="flex items-center justify-between rounded-[10px] border border-white/80 bg-white px-4 py-3 text-sm text-[#101828]">
+                      Bridge enabled
+                      <input
+                        type="checkbox"
+                        checked={automationForm.automation_bridge_enabled}
+                        onChange={(event) => setAutomationForm((current) => ({ ...current, automation_bridge_enabled: event.target.checked }))}
+                      />
+                    </label>
+                    <div className="space-y-2 rounded-[10px] border border-white/80 bg-white p-3">
+                      <label className="text-sm font-medium text-[#101828]">Bridge timeout (seconds)</label>
+                      <Input
+                        type="number"
+                        min="5"
+                        value={automationForm.automation_bridge_timeout_seconds}
+                        onChange={(event) => setAutomationForm((current) => ({ ...current, automation_bridge_timeout_seconds: Number(event.target.value || 5) }))}
+                      />
+                    </div>
+                  </div>
+                  <div className="mt-4 grid gap-4 md:grid-cols-2">
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-[#101828]">Bridge base URL</label>
+                      <Input
+                        value={automationForm.automation_bridge_url}
+                        onChange={(event) => setAutomationForm((current) => ({ ...current, automation_bridge_url: event.target.value }))}
+                        placeholder="https://automation-bridge.yourdomain.com"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-[#101828]">Bridge API key</label>
+                      <Input
+                        value={automationForm.automation_bridge_api_key}
+                        onChange={(event) => setAutomationForm((current) => ({ ...current, automation_bridge_api_key: event.target.value }))}
+                        placeholder={settingsPanels?.automation?.automation_bridge_configured ? 'Configured on server' : 'Paste bridge API key'}
+                      />
+                    </div>
+                  </div>
+                  <div className="mt-4 rounded-[10px] border border-white/80 bg-white p-3 text-sm text-[#475467]">
+                    PosterPro will submit `crosspost` and `import` jobs to:
+                    <span className="ml-1 font-mono text-xs">POST /jobs/crosspost</span>
+                    <span className="mx-1">and</span>
+                    <span className="font-mono text-xs">POST /jobs/import</span>
+                    on the configured bridge using bearer-token auth.
+                  </div>
+                  <div className="mt-4 flex flex-wrap items-center gap-3">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={!canManageServer || testingBridge}
+                      onClick={async () => {
+                        if (!canManageServer) {
+                          toast.error('Admin access is required to test the automation bridge.');
+                          return;
+                        }
+                        setTestingBridge(true);
+                        try {
+                          const result = await runAutomationBridgeSmokeTest();
+                          setBridgeSmokeResult(result);
+                          toast.success(result.ok ? 'Automation bridge reachable.' : 'Automation bridge smoke test failed.');
+                        } catch (error) {
+                          toast.error(error.message);
+                        } finally {
+                          setTestingBridge(false);
+                        }
+                      }}
+                    >
+                      {testingBridge ? 'Testing bridge...' : 'Run bridge smoke test'}
+                    </Button>
+                    {bridgeSmokeResult ? (
+                      <StatusPill
+                        status={bridgeSmokeResult.ok ? 'success' : 'warning'}
+                        label={bridgeSmokeResult.ok ? 'Bridge reachable' : bridgeSmokeResult.status || 'Bridge check failed'}
+                      />
+                    ) : null}
+                  </div>
+                  {bridgeSmokeResult ? (
+                    <div className={`mt-4 rounded-[10px] border p-3 text-sm ${bridgeSmokeResult.ok ? 'border-[#d1fadf] bg-[#ecfdf3] text-[#067647]' : 'border-[#fecdca] bg-[#fff6f3] text-[#912018]'}`}>
+                      <p className="font-medium">{bridgeSmokeResult.message || (bridgeSmokeResult.ok ? 'The bridge responded successfully to the connectivity probe.' : 'The bridge did not respond successfully.')}</p>
+                      {bridgeSmokeResult.checked_url ? <p className="mt-1 font-mono text-xs">{bridgeSmokeResult.checked_url}</p> : null}
+                      {bridgeSmokeResult.errors?.length ? (
+                        <div className="mt-2 space-y-1">
+                          {bridgeSmokeResult.errors.map((item) => (
+                            <p key={item} className="font-mono text-xs">{item}</p>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+                <div className="rounded-[14px] border border-[#e5e7eb] bg-white p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-[#101828]">Bridge marketplace accounts</p>
+                      <p className="mt-1 text-sm text-[#667085]">
+                        Store bridge-side login profiles and session state for browser-assist and provider-assist marketplaces like Facebook Marketplace.
+                      </p>
+                    </div>
+                    <StatusPill status={bridgeAccounts.length ? 'success' : 'warning'} label={bridgeAccounts.length ? `${bridgeAccounts.length} saved` : 'No bridge accounts'} />
+                  </div>
+                  <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)]">
+                    <form
+                      className="space-y-4"
+                      onSubmit={async (event) => {
+                        event.preventDefault();
+                        if (!canManageServer) {
+                          toast.error('Admin access is required to manage bridge accounts.');
+                          return;
+                        }
+                        if (!bridgeAccountForm.account_key.trim()) {
+                          toast.error('Account key is required.');
+                          return;
+                        }
+                        setSavingBridgeAccount(true);
+                        try {
+                          await upsertBridgeAccount(bridgeAccountForm.marketplace, bridgeAccountForm.account_key, {
+                            display_name: bridgeAccountForm.display_name,
+                            login_handle: bridgeAccountForm.login_handle,
+                            credential_secret: bridgeAccountForm.credential_secret || undefined,
+                            notes: bridgeAccountForm.notes,
+                            provider_enabled: bridgeAccountForm.provider_enabled,
+                            browser_enabled: bridgeAccountForm.browser_enabled,
+                            session_state: bridgeAccountForm.session_state,
+                            session_payload: bridgeAccountForm.session_payload_text.trim() ? JSON.parse(bridgeAccountForm.session_payload_text) : {},
+                            expires_at: bridgeAccountForm.expires_at || null,
+                          });
+                          await updateBridgeAccountSession(bridgeAccountForm.marketplace, bridgeAccountForm.account_key, {
+                            session_state: bridgeAccountForm.session_state,
+                            session_payload: bridgeAccountForm.session_payload_text.trim() ? JSON.parse(bridgeAccountForm.session_payload_text) : {},
+                            expires_at: bridgeAccountForm.expires_at || null,
+                            last_tested_at: new Date().toISOString(),
+                            notes: bridgeAccountForm.notes,
+                          });
+                          await reload();
+                          toast.success('Bridge account saved.');
+                          setBridgeAccountForm((current) => ({ ...current, credential_secret: '', session_payload_text: '' }));
+                        } catch (error) {
+                          toast.error(error.message);
+                        } finally {
+                          setSavingBridgeAccount(false);
+                        }
+                      }}
+                    >
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <div className="space-y-2">
+                          <label className="text-sm font-medium text-[#101828]">Marketplace</label>
+                          <select
+                            value={bridgeAccountForm.marketplace}
+                            onChange={(event) => setBridgeAccountForm((current) => ({ ...current, marketplace: event.target.value }))}
+                            className="pp-input h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]"
+                          >
+                            {BRIDGE_MARKETPLACE_OPTIONS.map((name) => (
+                              <option key={name} value={name}>{MARKETPLACE_LABELS[name] || name}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="space-y-2">
+                          <label className="text-sm font-medium text-[#101828]">Account key</label>
+                          <Input value={bridgeAccountForm.account_key} onChange={(event) => setBridgeAccountForm((current) => ({ ...current, account_key: event.target.value }))} placeholder="facebook-main" />
+                        </div>
+                        <div className="space-y-2">
+                          <label className="text-sm font-medium text-[#101828]">Display name</label>
+                          <Input value={bridgeAccountForm.display_name} onChange={(event) => setBridgeAccountForm((current) => ({ ...current, display_name: event.target.value }))} placeholder="Main FB seller profile" />
+                        </div>
+                        <div className="space-y-2">
+                          <label className="text-sm font-medium text-[#101828]">Login handle</label>
+                          <Input value={bridgeAccountForm.login_handle} onChange={(event) => setBridgeAccountForm((current) => ({ ...current, login_handle: event.target.value }))} placeholder="seller@example.com" />
+                        </div>
+                      </div>
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <div className="space-y-2">
+                          <label className="text-sm font-medium text-[#101828]">Credential secret</label>
+                          <Input type="password" value={bridgeAccountForm.credential_secret} onChange={(event) => setBridgeAccountForm((current) => ({ ...current, credential_secret: event.target.value }))} placeholder="Paste bridge-side login secret" />
+                        </div>
+                        <div className="space-y-2">
+                          <label className="text-sm font-medium text-[#101828]">Session state</label>
+                          <select
+                            value={bridgeAccountForm.session_state}
+                            onChange={(event) => setBridgeAccountForm((current) => ({ ...current, session_state: event.target.value }))}
+                            className="pp-input h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]"
+                          >
+                            <option value="draft">Draft</option>
+                            <option value="ready">Ready</option>
+                            <option value="active">Active</option>
+                            <option value="expired">Expired</option>
+                            <option value="invalid">Invalid</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <label className="flex items-center justify-between rounded-[10px] border border-[#e5e7eb] bg-[#f9fafb] px-4 py-3 text-sm text-[#101828]">
+                          Provider assist enabled
+                          <input type="checkbox" checked={bridgeAccountForm.provider_enabled} onChange={(event) => setBridgeAccountForm((current) => ({ ...current, provider_enabled: event.target.checked }))} />
+                        </label>
+                        <label className="flex items-center justify-between rounded-[10px] border border-[#e5e7eb] bg-[#f9fafb] px-4 py-3 text-sm text-[#101828]">
+                          Browser assist enabled
+                          <input type="checkbox" checked={bridgeAccountForm.browser_enabled} onChange={(event) => setBridgeAccountForm((current) => ({ ...current, browser_enabled: event.target.checked }))} />
+                        </label>
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium text-[#101828]">Session payload JSON</label>
+                        <textarea
+                          value={bridgeAccountForm.session_payload_text}
+                          onChange={(event) => setBridgeAccountForm((current) => ({ ...current, session_payload_text: event.target.value }))}
+                          placeholder='{"cookies":[{"name":"c_user","value":"..."}]}'
+                          className="mt-1 h-28 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 py-2 text-sm text-[#101828]"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium text-[#101828]">Notes</label>
+                        <textarea
+                          value={bridgeAccountForm.notes}
+                          onChange={(event) => setBridgeAccountForm((current) => ({ ...current, notes: event.target.value }))}
+                          placeholder="Browser profile notes, MFA expectations, proxy requirements, etc."
+                          className="mt-1 h-20 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 py-2 text-sm text-[#101828]"
+                        />
+                      </div>
+                      <div className="flex justify-end">
+                        <Button type="submit" disabled={savingBridgeAccount}>
+                          {savingBridgeAccount ? 'Saving bridge account...' : 'Save bridge account'}
+                        </Button>
+                      </div>
+                    </form>
+                    <div className="space-y-3">
+                      {bridgeAccounts.length ? bridgeAccounts.map((account) => (
+                        <button
+                          key={account.account_id}
+                          type="button"
+                          onClick={() =>
+                            setBridgeAccountForm({
+                              marketplace: account.marketplace,
+                              account_key: account.account_key,
+                              display_name: account.display_name || '',
+                              login_handle: account.login_handle || '',
+                              credential_secret: '',
+                              notes: account.notes || '',
+                              provider_enabled: !!account.provider_enabled,
+                              browser_enabled: !!account.browser_enabled,
+                              session_state: account.session_state || 'draft',
+                              session_payload_text: JSON.stringify(account.session_payload || {}, null, 2),
+                              expires_at: account.expires_at || '',
+                            })
+                          }
+                          className="w-full rounded-[12px] border border-[#e5e7eb] bg-[#f9fafb] p-4 text-left transition hover:border-[#bfd2ff] hover:bg-[#f8fbff]"
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <p className="text-sm font-semibold text-[#101828]">{account.display_name || account.account_key}</p>
+                            <StatusPill status={['ready', 'active', 'valid'].includes(String(account.session_state).toLowerCase()) ? 'success' : 'warning'} label={account.session_state || 'draft'} />
+                          </div>
+                          <p className="mt-1 text-sm text-[#667085]">{MARKETPLACE_LABELS[account.marketplace] || account.marketplace}{account.login_handle ? ` · ${account.login_handle}` : ''}</p>
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {account.provider_enabled ? <span className="pp-chip">Provider</span> : null}
+                            {account.browser_enabled ? <span className="pp-chip">Browser</span> : null}
+                            {account.credential_configured ? <span className="pp-chip">Credential saved</span> : <span className="pp-chip">No credential</span>}
+                          </div>
+                        </button>
+                      )) : (
+                        <EmptyState title="No bridge accounts yet" description="Add a Facebook or secondary-marketplace bridge account so provider/browser-assisted jobs have a real runner-side identity." className="border-0 p-0 py-8" />
+                      )}
+                    </div>
                   </div>
                 </div>
                 <label className="flex items-center justify-between rounded-[10px] border border-[#e5e7eb] bg-white px-4 py-3 text-sm text-[#101828]">
@@ -1601,14 +2618,23 @@ export default function SettingsPage() {
               </form>
             </SectionPanel>
           ) : null}
-        </div>
       </div>
 
       <Drawer
         open={activeTab === 'marketplaces' && !!configuredMarketplace && configuredMarketplace.connection_mode === 'manual'}
         onClose={() => setSelectedMarketplace('')}
-        title={configuredMarketplace ? `${MARKETPLACE_LABELS[configuredMarketplace.marketplace] || configuredMarketplace.marketplace} account setup` : 'Marketplace setup'}
-        description="Save the operator-facing account details for this channel, then mark it ready when this user can work it from PosterPro."
+        title={
+          configuredMarketplace
+            ? BROWSER_CONNECT_MARKETPLACES.includes(configuredMarketplace.marketplace)
+              ? `Connect ${MARKETPLACE_LABELS[configuredMarketplace.marketplace] || configuredMarketplace.marketplace} account`
+              : `${MARKETPLACE_LABELS[configuredMarketplace.marketplace] || configuredMarketplace.marketplace} account setup`
+            : 'Marketplace setup'
+        }
+        description={
+          BROWSER_CONNECT_MARKETPLACES.includes(String(configuredMarketplace?.marketplace || ''))
+            ? 'Capture the browser session first, then save the operator account details and workflow settings.'
+            : 'Save the operator-facing account details for this channel, then mark it ready when this user can work it from PosterPro.'
+        }
         widthClassName="xl:w-[520px]"
       >
         {configuredMarketplace ? (
@@ -1639,6 +2665,115 @@ export default function SettingsPage() {
                 tone="slate"
               />
             ) : null}
+            {BROWSER_CONNECT_MARKETPLACES.includes(configuredMarketplace.marketplace) ? (
+              <div className="space-y-4 rounded-[14px] border border-[#dbe7ff] bg-[#f7faff] p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-[#101828]">{`${MARKETPLACE_LABELS[configuredMarketplace.marketplace] || configuredMarketplace.marketplace} browser connection`}</p>
+                    <p className="mt-1 text-sm text-[#667085]">
+                      Use the bridge browser to capture the cookies and storage state PosterPro needs for browser-assist posting.
+                    </p>
+                  </div>
+                  <StatusPill
+                    status={selectedBridgeAccount && ['ready', 'active', 'valid'].includes(String(selectedBridgeAccount.session_state || '').toLowerCase()) ? 'success' : 'warning'}
+                    label={selectedBridgeAccount ? selectedBridgeAccount.session_state || 'draft' : 'No session'}
+                  />
+                </div>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium text-[#101828]">Bridge account key</label>
+                    <Input
+                      value={marketplaceForm.bridge_account_key}
+                      onChange={(event) => setMarketplaceForm((current) => ({ ...current, bridge_account_key: event.target.value.toLowerCase() }))}
+                      placeholder={`${configuredMarketplace.marketplace}-main`}
+                    />
+                  </div>
+                  {BROWSER_IMPORT_MARKETPLACES.includes(configuredMarketplace.marketplace) ? (
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-[#101828]">Listings to import</label>
+                      <Input
+                        type="number"
+                        min="1"
+                        max="25"
+                        value={marketplaceForm.import_listing_limit}
+                        onChange={(event) => setMarketplaceForm((current) => ({ ...current, import_listing_limit: Number(event.target.value || 1) }))}
+                      />
+                    </div>
+                  ) : null}
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-[#101828]">Bridge session state</label>
+                  <select
+                    value={marketplaceForm.bridge_session_state}
+                    onChange={(event) => setMarketplaceForm((current) => ({ ...current, bridge_session_state: event.target.value }))}
+                    className="pp-input h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828] outline-none focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                  >
+                    <option value="draft">Draft</option>
+                    <option value="ready">Ready</option>
+                    <option value="active">Active</option>
+                    <option value="expired">Expired</option>
+                    <option value="invalid">Invalid</option>
+                  </select>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-[#101828]">{`${MARKETPLACE_LABELS[configuredMarketplace.marketplace] || configuredMarketplace.marketplace} storage-state JSON`}</label>
+                  <textarea
+                    value={marketplaceForm.bridge_session_payload_text}
+                    onChange={(event) => setMarketplaceForm((current) => ({ ...current, bridge_session_payload_text: event.target.value }))}
+                    placeholder='{"cookies":[{"name":"session","value":"..."}],"origins":[]}'
+                    className="min-h-40 w-full rounded-[10px] border border-[#e5e7eb] bg-white p-3 font-mono text-xs text-[#101828] outline-none transition placeholder:text-[#98a2b3] focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                  />
+                </div>
+                <div className="rounded-[12px] border border-white/80 bg-white p-3 text-sm text-[#475467]">
+                  {`PosterPro cannot rely on a native ${MARKETPLACE_LABELS[configuredMarketplace.marketplace] || configuredMarketplace.marketplace} API here. The bridge must capture a real authenticated browser session. Use the connect action when the bridge is running on a machine where you can complete the login flow, or paste a Playwright storage-state export as a fallback.`}
+                </div>
+                <div className="rounded-[12px] border border-[#dbe7ff] bg-[#eff6ff] p-3 text-sm text-[#1d4ed8]">
+                  {`Click `}
+                  <span className="font-semibold">{`Connect ${MARKETPLACE_LABELS[configuredMarketplace.marketplace] || configuredMarketplace.marketplace} account`}</span>
+                  {` to open the browser-based connect workspace, then complete the login and any MFA inside the embedded bridge desktop.`}
+                </div>
+                {browserConnectInProgress ? (
+                  <div className="rounded-[12px] border border-[#fde68a] bg-[#fffbeb] p-3 text-sm text-[#92400e]">
+                    <p className="font-semibold text-[#101828]">{`${MARKETPLACE_LABELS[configuredMarketplace.marketplace] || configuredMarketplace.marketplace} connection in progress`}</p>
+                    <p className="mt-1">{activeBridgeConnectSession.message || 'PosterPro is waiting for login in the bridge workspace.'}</p>
+                    <p className="mt-1">
+                      Status: <span className="font-medium">{String(activeBridgeConnectSession.status || 'waiting_for_login').replace(/_/g, ' ')}</span>
+                    </p>
+                    <div className="mt-3">
+                      <Link href={`/bridge-desktop?marketplace=${encodeURIComponent(configuredMarketplace.marketplace)}&connectSessionId=${encodeURIComponent(activeBridgeConnectSession.connect_session_id)}`}>
+                        <Button type="button" variant="outline">{`Resume ${MARKETPLACE_LABELS[configuredMarketplace.marketplace] || configuredMarketplace.marketplace} login`}</Button>
+                      </Link>
+                    </div>
+                  </div>
+                ) : null}
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    onClick={connectBrowserMarketplaceAccount}
+                    disabled={launchingBrowserWorkspace || !String(marketplaceForm.bridge_account_key || '').trim()}
+                  >
+                    {launchingBrowserWorkspace ? 'Opening workspace...' : `Connect ${MARKETPLACE_LABELS[configuredMarketplace.marketplace] || configuredMarketplace.marketplace} account`}
+                  </Button>
+                  <Button type="button" variant="outline" onClick={saveBrowserSession} disabled={savingBrowserSession}>
+                    {savingBrowserSession ? 'Saving session...' : `Save ${MARKETPLACE_LABELS[configuredMarketplace.marketplace] || configuredMarketplace.marketplace} session`}
+                  </Button>
+                  {BROWSER_IMPORT_MARKETPLACES.includes(configuredMarketplace.marketplace) ? (
+                    <Button
+                      type="button"
+                      onClick={importExistingFacebookListings}
+                      disabled={
+                        runningMarketplaceImport ||
+                        !String(marketplaceForm.bridge_account_key || '').trim() ||
+                        (marketplaceForm.import_mode || 'manual') !== 'browser_assist' ||
+                        !isBridgeSessionReady(selectedBridgeAccount)
+                      }
+                    >
+                      {runningMarketplaceImport ? 'Importing listings...' : `Import existing ${MARKETPLACE_LABELS[configuredMarketplace.marketplace] || configuredMarketplace.marketplace} listings`}
+                    </Button>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
             <div className="space-y-2">
               <label className="text-sm font-medium text-[#101828]">Store or closet name</label>
               <Input
@@ -1662,6 +2797,66 @@ export default function SettingsPage() {
                 onChange={(event) => setMarketplaceForm((current) => ({ ...current, notes: event.target.value }))}
                 placeholder="Capture anything the operator needs to know: shipping profile, posting cadence, manual review steps, or account caveats."
                 className="min-h-28 w-full rounded-[10px] border border-[#e5e7eb] bg-white p-3 text-sm text-[#101828] outline-none transition placeholder:text-[#98a2b3] focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+              />
+            </div>
+            <div className="grid gap-3 md:grid-cols-2">
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-[#101828]">Import mode</label>
+                <select
+                  value={marketplaceForm.import_mode}
+                  onChange={(event) => setMarketplaceForm((current) => ({ ...current, import_mode: event.target.value }))}
+                  className="pp-input h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828] outline-none focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                >
+                  <option value="manual">Manual import</option>
+                  <option value="csv_assist">CSV assist</option>
+                  <option value="provider_assist">Provider assist</option>
+                  <option value="browser_assist">Browser assist</option>
+                </select>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-[#101828]">Publish mode</label>
+                <select
+                  value={marketplaceForm.publish_mode}
+                  onChange={(event) => setMarketplaceForm((current) => ({ ...current, publish_mode: event.target.value }))}
+                  className="pp-input h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828] outline-none focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                >
+                  <option value="manual_review">Manual review</option>
+                  <option value="draft_only">Draft only</option>
+                  <option value="provider_assist">Provider assist</option>
+                  <option value="browser_assist">Browser assist</option>
+                </select>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-[#101828]">Shipping scope</label>
+                <select
+                  value={marketplaceForm.shipping_scope}
+                  onChange={(event) => setMarketplaceForm((current) => ({ ...current, shipping_scope: event.target.value }))}
+                  className="pp-input h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828] outline-none focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                >
+                  <option value="local_only">Local only</option>
+                  <option value="shipping_only">Shipping only</option>
+                  <option value="local_and_shipping">Local and shipping</option>
+                </select>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-[#101828]">Renewal mode</label>
+                <select
+                  value={marketplaceForm.renewal_mode}
+                  onChange={(event) => setMarketplaceForm((current) => ({ ...current, renewal_mode: event.target.value }))}
+                  className="pp-input h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828] outline-none focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                >
+                  <option value="manual">Manual</option>
+                  <option value="daily">Daily plan</option>
+                  <option value="scheduled">Scheduled plan</option>
+                </select>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-[#101828]">Support URL or runbook link</label>
+              <Input
+                value={marketplaceForm.support_url}
+                onChange={(event) => setMarketplaceForm((current) => ({ ...current, support_url: event.target.value }))}
+                placeholder="https://yourdomain.com/facebook-marketplace-runbook"
               />
             </div>
             <div className="space-y-2">
@@ -1692,6 +2887,15 @@ export default function SettingsPage() {
                     account_handle: '',
                     notes: '',
                     workflow_state: 'draft',
+                    import_mode: BROWSER_IMPORT_MARKETPLACES.includes(configuredMarketplace.marketplace) ? 'browser_assist' : 'manual',
+                    publish_mode: BROWSER_CONNECT_MARKETPLACES.includes(configuredMarketplace.marketplace) ? 'browser_assist' : 'manual_review',
+                    shipping_scope: 'local_only',
+                    renewal_mode: 'manual',
+                    support_url: '',
+                    bridge_account_key: '',
+                    import_listing_limit: 10,
+                    bridge_session_state: 'draft',
+                    bridge_session_payload_text: '',
                   })
                 }
               >

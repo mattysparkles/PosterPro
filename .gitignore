@@ -6,4 +6,6 @@ backend/storage/
 backend/celerybeat-schedule*
 frontend/node_modules/
 frontend/.next/
+bridge/app/__pycache__/
+bridge/data/
 .DS_Store

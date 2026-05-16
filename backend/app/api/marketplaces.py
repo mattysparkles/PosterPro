@@ -7,6 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.schemas import (
+    ActiveBridgeConnectSessionSummaryResponse,
     AccountSetupSummaryResponse,
     ConnectMarketplaceResponse,
     MarketplaceConnectionUpdateRequest,
@@ -27,6 +28,7 @@ from app.services.marketplace_setup import (
     marketplace_status_snapshot,
     save_manual_marketplace_settings,
 )
+from app.services.automation_bridge import AutomationBridgeError, get_active_bridge_connect_session
 from app.services.marketplace_orchestrator import (
     list_marketplaces,
     listing_marketplace_status,
@@ -230,12 +232,12 @@ def update_marketplace_connection(
     db.add(user)
     db.commit()
     db.refresh(user)
-    snapshot = marketplace_status_snapshot(marketplace=marketplace, account=None, user=user)
-    return MarketplaceConnectionStatusResponse(
-        **snapshot,
-        enabled_for_publishing=marketplace in (user.enabled_platforms or []),
-        enabled_for_sale_detection=marketplace in (user.sale_detection_platforms or []),
-    )
+    snapshot = {
+        **marketplace_status_snapshot(marketplace=marketplace, account=None, user=user),
+        "enabled_for_publishing": marketplace in (user.enabled_platforms or []),
+        "enabled_for_sale_detection": marketplace in (user.sale_detection_platforms or []),
+    }
+    return MarketplaceConnectionStatusResponse(**snapshot)
 
 
 @router.get("/users/{user_id}/setup", response_model=AccountSetupSummaryResponse)
@@ -263,7 +265,11 @@ def get_account_setup_summary(
     ).scalar_one() > 0
 
     marketplace_connections = _build_marketplace_connections(user=user, accounts=accounts)
-    server_has_ebay = bool(settings.ebay_client_id and settings.ebay_client_secret and settings.ebay_redirect_uri)
+    try:
+        active_bridge_connect_session = get_active_bridge_connect_session()
+    except AutomationBridgeError:
+        active_bridge_connect_session = None
+    server_has_ebay = bool(settings.ebay_client_id and settings.ebay_client_secret and (settings.ebay_runame or settings.ebay_redirect_uri))
 
     return AccountSetupSummaryResponse(
         user=UserResponse.model_validate(_serialize_user(user)),
@@ -273,6 +279,11 @@ def get_account_setup_summary(
         has_templates=has_templates,
         account_profile_complete=bool((user.full_name or "").strip()),
         marketplace_connections=marketplace_connections,
+        active_bridge_connect_session=(
+            ActiveBridgeConnectSessionSummaryResponse(**active_bridge_connect_session)
+            if isinstance(active_bridge_connect_session, dict)
+            else None
+        ),
         server_readiness=ServerReadinessResponse(
             openai_configured=bool(settings.openai_api_key),
             photoroom_configured=bool(settings.photoroom_api_key),

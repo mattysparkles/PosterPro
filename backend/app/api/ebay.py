@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.api.schemas import EbayManualConnectRequest
 from app.core.auth import ensure_user_owns_resource, get_current_user, resolve_user_scope
 from app.core.config import settings
 from app.core.database import get_db
@@ -30,9 +31,9 @@ async def ebay_auth_url(
     redirect_uri: str | None = Query(None),
     current_user: User = Depends(get_current_user),
 ):
-    callback = redirect_uri or settings.ebay_redirect_uri
+    callback = redirect_uri or settings.ebay_runame or settings.ebay_redirect_uri
     if not callback:
-        raise HTTPException(status_code=400, detail="redirect_uri is required")
+        raise HTTPException(status_code=400, detail="eBay RuName is required")
     try:
         url = await authenticate_user_ebay(user_id=resolve_user_scope(current_user, user_id), redirect_uri=callback)
     except EbayIntegrationError as exc:
@@ -47,9 +48,9 @@ async def ebay_callback(
     redirect_uri: str | None = Query(None),
     db: Session = Depends(get_db),
 ):
-    callback = redirect_uri or settings.ebay_redirect_uri
+    callback = redirect_uri or settings.ebay_runame or settings.ebay_redirect_uri
     if not callback:
-        raise HTTPException(status_code=400, detail="redirect_uri is required")
+        raise HTTPException(status_code=400, detail="eBay RuName is required")
 
     try:
         user_id = parse_oauth_state(state)
@@ -80,6 +81,52 @@ async def ebay_callback(
     db.add(account)
     db.commit()
     return {"connected": True, "user_id": user_id, "marketplace": "ebay"}
+
+
+@router.put("/ebay/account/manual")
+async def save_ebay_tokens_manually(
+    payload: EbayManualConnectRequest,
+    user_id: int | None = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    scoped_user_id = resolve_user_scope(current_user, user_id)
+    access_token = (payload.access_token or "").strip()
+    refresh_token = (payload.refresh_token or "").strip() or None
+    if not access_token:
+        raise HTTPException(status_code=400, detail="An access token is required for manual import")
+
+    expires_in = payload.expires_in_seconds or 7200
+    account = db.execute(
+        select(MarketplaceAccount).where(
+            MarketplaceAccount.user_id == scoped_user_id,
+            MarketplaceAccount.marketplace == MarketplaceName.ebay,
+        )
+    ).scalar_one_or_none()
+    if not account:
+        account = MarketplaceAccount(
+            user_id=scoped_user_id,
+            marketplace=MarketplaceName.ebay,
+            external_account_id=(payload.external_account_id or "").strip() or f"ebay-user-{scoped_user_id}",
+            access_token=access_token,
+            refresh_token=refresh_token,
+            token_expires_at=datetime.now(UTC).replace(tzinfo=None) + timedelta(seconds=expires_in),
+        )
+    else:
+        account.external_account_id = (payload.external_account_id or "").strip() or account.external_account_id
+        account.access_token = access_token
+        account.refresh_token = refresh_token or account.refresh_token
+        account.token_expires_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(seconds=expires_in)
+
+    db.add(account)
+    db.commit()
+    return {
+        "connected": True,
+        "user_id": scoped_user_id,
+        "marketplace": "ebay",
+        "manual_import": True,
+        "token_expires_at": account.token_expires_at.isoformat() if account.token_expires_at else None,
+    }
 
 
 @router.post("/listings/{listing_id}/publish/ebay")

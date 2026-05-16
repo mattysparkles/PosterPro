@@ -86,6 +86,13 @@ export default function InventoryPage() {
     }
   }, [router.isReady, router.query.tab]);
 
+  const selectTab = (nextTab) => {
+    setActiveTab(nextTab);
+    setSelectedIds([]);
+    if (!router.isReady) return;
+    router.replace({ pathname: router.pathname, query: { ...router.query, tab: nextTab } }, undefined, { shallow: true });
+  };
+
   const filteredInventory = useMemo(() => {
     if (activeTab === 'sold') return inventory.filter((item) => item.quantity <= 0);
     if (activeTab === 'intake') return inventory.filter((item) => item.status === 'ingested' || item.status === 'INGESTED');
@@ -145,6 +152,43 @@ export default function InventoryPage() {
     [tabCounts],
   );
 
+  const inventorySubnav = useMemo(
+    () => ({
+      eyebrow: 'Inventory CMS',
+      title: 'Inventory Control',
+      description: 'Use a dedicated inventory rail for stock state, batch tracking, and bulk operations.',
+      sections: [
+        {
+          label: 'Inventory Views',
+          items: INVENTORY_TABS.map((tab) => ({
+            key: tab.value,
+            label: tab.label,
+            active: activeTab === tab.value,
+            badge: tabCounts[tab.value] || 0,
+            description:
+              tab.value === 'intake'
+                ? 'Fresh intake-side rows'
+                : tab.value === 'active'
+                ? 'Available inventory'
+                : tab.value === 'sold'
+                ? 'Depleted or sold inventory'
+                : 'Storage units and grouped batches',
+            onClick: () => selectTab(tab.value),
+          })),
+        },
+        {
+          label: 'Sections',
+          items: [
+            { key: 'inventory-workflow', label: 'Workflow', active: false, description: 'Inventory lifecycle guide', onClick: () => document.getElementById('inventory-workflow')?.scrollIntoView({ behavior: 'smooth', block: 'start' }) },
+            { key: 'bulk-actions', label: 'Bulk Actions', active: false, description: 'Selection-based operations', onClick: () => document.getElementById('bulk-actions')?.scrollIntoView({ behavior: 'smooth', block: 'start' }) },
+            { key: 'inventory-table', label: 'Inventory Table', active: false, description: 'Current table view', onClick: () => document.getElementById('inventory-table')?.scrollIntoView({ behavior: 'smooth', block: 'start' }) },
+          ],
+        },
+      ],
+    }),
+    [activeTab, tabCounts],
+  );
+
   return (
     <AppShell
       active="/inventory"
@@ -154,6 +198,7 @@ export default function InventoryPage() {
         await toggleAutonomousMode(!autonomousConfig.autonomous_mode);
         await reload();
       }}
+      subnav={inventorySubnav}
     >
       <PageHeader
         title="Inventory"
@@ -173,7 +218,7 @@ export default function InventoryPage() {
         ))}
       </section>
 
-      <section className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(320px,0.9fr)]">
+      <section id="inventory-workflow" className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(320px,0.9fr)]">
         <SectionPanel title="Inventory workflow" description="How this workspace should move inventory through the system cleanly.">
           <div className="grid gap-3 md:grid-cols-4">
             {[
@@ -189,7 +234,7 @@ export default function InventoryPage() {
             ))}
           </div>
         </SectionPanel>
-        <SectionPanel title="Bulk actions" description="Use selection-based actions carefully so inventory stays trustworthy.">
+        <SectionPanel id="bulk-actions" title="Bulk actions" description="Use selection-based actions carefully so inventory stays trustworthy.">
           <div className="space-y-3">
             {[
               'Labeling is best for consistent operator review queues and storage-unit tracking.',
@@ -242,10 +287,7 @@ export default function InventoryPage() {
       <Tabs
         items={INVENTORY_TABS.map((tab) => ({ ...tab, count: tabCounts[tab.value] || 0 }))}
         value={activeTab}
-        onChange={(value) => {
-          setActiveTab(value);
-          setSelectedIds([]);
-        }}
+        onChange={selectTab}
       />
 
       {selectedIds.length && activeTab !== 'batches' ? (
@@ -270,6 +312,7 @@ export default function InventoryPage() {
         </div>
       ) : null}
 
+      <div id="inventory-table">
       {activeTab === 'batches' ? (
         <DataTable
           columns={[
@@ -334,6 +377,7 @@ export default function InventoryPage() {
           emptyState={<EmptyState title="No inventory records" description="This tab does not have any matching inventory items yet." className="border-0 p-0 py-6" />}
         />
       )}
+      </div>
 
       <PhotoEditorModal
         open={!!editingListing}

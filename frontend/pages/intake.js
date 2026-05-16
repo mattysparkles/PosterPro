@@ -1,6 +1,7 @@
-import { useMemo, useRef, useState } from 'react';
-import { Camera, ChevronDown, Upload } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Camera, ChevronDown, FolderOpen, Upload } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { useRouter } from 'next/router';
 
 import AppShell from '../components/layout/AppShell';
 import Button from '../components/ui/button';
@@ -29,6 +30,7 @@ function formatStatus(value) {
 }
 
 export default function IntakePage() {
+  const router = useRouter();
   const { user } = useAuth();
   const { autonomousConfig, listings, storageBatches, clusters, reload } = useDashboardData(user?.id);
   const [activeTab, setActiveTab] = useState('batches');
@@ -162,6 +164,33 @@ export default function IntakePage() {
     },
   ];
 
+  const intakeSubnav = useMemo(
+    () => ({
+      eyebrow: 'Intake CMS',
+      title: 'Uploads Workflow',
+      description: 'Move between upload setup, batch tracking, and grouped intake views from one intake-specific rail.',
+      sections: [
+        {
+          label: 'Workflow Views',
+          items: [
+            { key: 'batches', label: 'Batches', active: activeTab === 'batches', badge: batchRows.length, description: 'Current batch queue', onClick: () => selectTab('batches') },
+            { key: 'ungrouped', label: 'Ungrouped', active: activeTab === 'ungrouped', badge: ungroupedRows.length, description: 'Singles awaiting grouping', onClick: () => selectTab('ungrouped') },
+            { key: 'grouped', label: 'Grouped', active: activeTab === 'grouped', badge: groupedRows.length, description: 'Ready item clusters', onClick: () => selectTab('grouped') },
+          ],
+        },
+        {
+          label: 'Sections',
+          items: [
+            { key: 'upload-workspace', label: 'Upload Workspace', active: false, description: 'Import photos or zip batches', onClick: () => document.getElementById('upload-workspace')?.scrollIntoView({ behavior: 'smooth', block: 'start' }) },
+            { key: 'workflow', label: 'Workflow Guide', active: false, description: 'Next-step operator guidance', onClick: () => document.getElementById('workflow')?.scrollIntoView({ behavior: 'smooth', block: 'start' }) },
+            { key: 'intake-table', label: 'Intake Table', active: false, description: 'Current batch or grouping table', onClick: () => document.getElementById('intake-table')?.scrollIntoView({ behavior: 'smooth', block: 'start' }) },
+          ],
+        },
+      ],
+    }),
+    [activeTab, batchRows.length, groupedRows.length, ungroupedRows.length],
+  );
+
   return (
     <AppShell
       active="/intake"
@@ -171,6 +200,7 @@ export default function IntakePage() {
         await toggleAutonomousMode(!autonomousConfig.autonomous_mode);
         await reload();
       }}
+      subnav={intakeSubnav}
     >
       <PageHeader
         title="Intake"
@@ -191,16 +221,93 @@ export default function IntakePage() {
         }
       />
 
-      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+      <section id="workflow" className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <MetricCard label="Uploaded items" value={processingCounts.uploaded} detail="Fresh photo rows waiting for grouping or enrichment." />
         <MetricCard label="Grouped sets" value={processingCounts.grouped} detail="Photo groups that PosterPro believes belong to the same item." />
         <MetricCard label="Ungrouped rows" value={processingCounts.ungrouped} detail="Single rows that still need grouping or manual review." />
         <MetricCard label="Open batches" value={processingCounts.queued_batches} detail="Batch jobs still progressing through intake." />
       </section>
 
-      <section className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)]">
-        <SectionPanel title="Folder import flow" description="How to move from a folder of photos into reviewable drafts.">
-          <div className="grid gap-3 md:grid-cols-4">
+      <section id="upload-workspace" className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(340px,0.9fr)]">
+        <SectionPanel title="New intake batch" description="Start photo ingestion here, then use the tabs below to move the batch through grouping and review.">
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+            <div className="rounded-[18px] border border-dashed border-[#bfd2ff] bg-[linear-gradient(135deg,#f8fbff_0%,#eef4ff_100%)] p-6">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#2563eb]">Upload workspace</p>
+                  <h2 className="mt-3 text-[28px] font-semibold tracking-[-0.04em] text-[#101828]">Bring in a batch without mixing it into the rest of the dashboard.</h2>
+                  <p className="mt-2 max-w-2xl text-sm leading-6 text-[#475467]">
+                    Use loose image upload for quick intake or zip import for storage-unit sized batches. Add a storage label first so the resulting rows stay organized downstream.
+                  </p>
+                </div>
+                <span className="inline-flex h-12 w-12 items-center justify-center rounded-[16px] bg-white text-[#2563eb]">
+                  <FolderOpen size={20} />
+                </span>
+              </div>
+              <div className="mt-5 flex flex-wrap gap-3">
+                <Button onClick={() => photoInputRef.current?.click()} disabled={isUploading}>
+                  <Camera size={16} />
+                  {isUploading ? 'Importing…' : 'Upload loose photos'}
+                </Button>
+                <Button variant="outline" onClick={() => zipInputRef.current?.click()} disabled={isUploading}>
+                  <Upload size={16} />
+                  Queue zip batch
+                </Button>
+              </div>
+              <div className="mt-5 grid gap-3 md:grid-cols-3">
+                <div className="rounded-[14px] bg-white/85 p-4">
+                  <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Storage label</p>
+                  <p className="mt-2 text-sm text-[#101828]">{storageUnitName || 'Not set yet'}</p>
+                </div>
+                <div className="rounded-[14px] bg-white/85 p-4">
+                  <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Overnight mode</p>
+                  <p className="mt-2 text-sm text-[#101828]">{overnightMode ? 'Queued' : 'Standard'}</p>
+                </div>
+                <div className="rounded-[14px] bg-white/85 p-4">
+                  <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Open batches</p>
+                  <p className="mt-2 text-sm text-[#101828]">{processingCounts.queued_batches}</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <div className="rounded-[14px] border border-[#e5e7eb] bg-white p-4">
+                <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Next steps</p>
+                <div className="mt-3 space-y-3">
+                  {[
+                    'Upload the source photos or batch zip.',
+                    'Review grouped vs ungrouped rows in the intake tabs.',
+                    'Move clean groups downstream into listings for pricing and publish review.',
+                  ].map((step) => (
+                    <div key={step} className="rounded-[12px] bg-[#f8fafc] px-3 py-3 text-sm text-[#667085]">
+                      {step}
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="rounded-[14px] border border-[#e5e7eb] bg-white p-4">
+                <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Pipeline status</p>
+                <div className="mt-3 grid gap-3">
+                  <div className="flex items-center justify-between rounded-[12px] bg-[#f8fafc] px-3 py-3">
+                    <span className="text-sm text-[#667085]">Grouping candidates</span>
+                    <span className="text-sm font-semibold text-[#101828]">{processingCounts.grouped}</span>
+                  </div>
+                  <div className="flex items-center justify-between rounded-[12px] bg-[#f8fafc] px-3 py-3">
+                    <span className="text-sm text-[#667085]">Ungrouped rows</span>
+                    <span className="text-sm font-semibold text-[#101828]">{processingCounts.ungrouped}</span>
+                  </div>
+                  <div className="flex items-center justify-between rounded-[12px] bg-[#f8fafc] px-3 py-3">
+                    <span className="text-sm text-[#667085]">Uploaded items</span>
+                    <span className="text-sm font-semibold text-[#101828]">{processingCounts.uploaded}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </SectionPanel>
+
+        <SectionPanel title="Workflow guide" description="How intake should behave in a reseller CMS instead of a generic upload form.">
+          <div id="workflow" className="grid gap-3">
             {[
               { label: '1. Upload', note: 'Import loose photos or a zip batch from a storage unit folder.' },
               { label: '2. Group', note: 'PosterPro clusters visually related images into item candidates.' },
@@ -212,13 +319,11 @@ export default function IntakePage() {
                 <p className="mt-2 text-sm text-[#475467]">{step.note}</p>
               </div>
             ))}
-          </div>
-        </SectionPanel>
-        <SectionPanel title="Current limitation" description="Important reality check for the intake pipeline.">
-          <div className="rounded-[12px] border border-[#e5e7eb] bg-white p-4">
-            <p className="text-sm text-[#475467]">
-              PosterPro can already accept a folder-style intake through multi-photo upload or zip batch upload, but it does not yet perform true object boundary detection inside crowded photos. The current grouping logic is still heuristic clustering, so mixed-item scenes may need operator review before draft generation.
-            </p>
+            <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fffdf7] p-4">
+              <p className="text-sm text-[#475467]">
+                PosterPro can already accept folder-style intake through multi-photo upload or zip batch upload, but it does not yet perform true object boundary detection inside crowded photos. Mixed-item scenes may still need operator review before draft generation.
+              </p>
+            </div>
           </div>
         </SectionPanel>
       </section>
@@ -267,9 +372,10 @@ export default function IntakePage() {
           { value: 'grouped', label: 'Grouped', count: groupedRows.length },
         ]}
         value={activeTab}
-        onChange={setActiveTab}
+        onChange={selectTab}
       />
 
+      <div id="intake-table">
       {activeTab === 'batches' ? (
         <DataTable
           columns={[
@@ -297,8 +403,22 @@ export default function IntakePage() {
           emptyState={<EmptyState title="No ungrouped items" description="New single-photo intake items will appear here before they are grouped." className="border-0 p-0 py-6" />}
         />
       )}
+      </div>
     </AppShell>
   );
 }
 
 IntakePage.requireAuth = true;
+  const selectTab = (nextTab) => {
+    setActiveTab(nextTab);
+    if (!router.isReady) return;
+    router.replace({ pathname: router.pathname, query: { ...router.query, tab: nextTab } }, undefined, { shallow: true });
+  };
+
+  useEffect(() => {
+    if (!router.isReady) return;
+    const tab = typeof router.query.tab === 'string' ? router.query.tab : '';
+    if (tab && INTAKE_TABS.some((item) => item.value === tab) && tab !== activeTab) {
+      setActiveTab(tab);
+    }
+  }, [activeTab, router.isReady, router.query.tab]);

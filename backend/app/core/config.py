@@ -19,10 +19,18 @@ class Settings(BaseSettings):
     ebay_client_id: str | None = None
     ebay_client_secret_plain: str | None = Field(default=None, validation_alias=AliasChoices("EBAY_CLIENT_SECRET"))
     ebay_client_secret_enc: str | None = Field(default=None, validation_alias=AliasChoices("EBAY_CLIENT_SECRET_ENC"))
+    ebay_runame: str | None = None
     ebay_redirect_uri: str | None = None
     photoroom_api_key_plain: str | None = Field(default=None, validation_alias=AliasChoices("PHOTOROOM_API_KEY"))
     photoroom_api_key_enc: str | None = Field(default=None, validation_alias=AliasChoices("PHOTOROOM_API_KEY_ENC"))
     photoroom_api_url: str = "https://sdk.photoroom.com/v1/segment"
+    automation_bridge_enabled: bool = False
+    automation_bridge_url: str | None = None
+    automation_bridge_timeout_seconds: int = 30
+    automation_bridge_vnc_host: str = "127.0.0.1"
+    automation_bridge_vnc_port: int = 5901
+    automation_bridge_api_key_plain: str | None = Field(default=None, validation_alias=AliasChoices("AUTOMATION_BRIDGE_API_KEY"))
+    automation_bridge_api_key_enc: str | None = Field(default=None, validation_alias=AliasChoices("AUTOMATION_BRIDGE_API_KEY_ENC"))
     autonomous_mode: bool = True
     autonomous_dry_run: bool = False
     autonomous_crosspost_enabled: bool = True
@@ -66,6 +74,10 @@ class Settings(BaseSettings):
     @property
     def photoroom_api_key(self) -> str | None:
         return decrypt_secret_if_needed(self.photoroom_api_key_enc, secret_key=self.session_secret) or self.photoroom_api_key_plain
+
+    @property
+    def automation_bridge_api_key(self) -> str | None:
+        return decrypt_secret_if_needed(self.automation_bridge_api_key_enc, secret_key=self.session_secret) or self.automation_bridge_api_key_plain
 
     @property
     def amazon_paapi_access_key(self) -> str | None:

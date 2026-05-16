@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.api.schemas import (
     BatchStorageUnitUrlRequest,
     GooglePhotosImportRequest,
+    ListingCreateRequest,
     ListingGenerateRequest,
     ListingResponse,
     ListingTemplateApplyRequest,
@@ -35,6 +36,7 @@ from app.services.google_photos import GooglePhotosService
 from app.services.image_pipeline import ImagePipelineService
 from app.services.inventory_service import InventorySafetyError, InventoryService
 from app.services.listing_ai import ListingAIService
+from app.services.listing_workspace import normalize_marketplace_data
 from app.services.profit_service import ProfitService
 from app.services.storage import LocalStorage
 from app.services.pricing_service import PricingService
@@ -195,6 +197,69 @@ def get_listings(
     return db.execute(select(Listing).where(Listing.user_id == current_user.id).order_by(Listing.updated_at.desc())).scalars().all()
 
 
+@router.get("/listings/{listing_id}", response_model=ListingResponse)
+def get_listing(
+    listing_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    listing = db.get(Listing, listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    ensure_user_owns_resource(current_user, listing.user_id)
+    return listing
+
+
+@router.post("/listings", response_model=ListingResponse)
+def create_listing(
+    payload: ListingCreateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    listing = Listing(
+        user_id=current_user.id,
+        status=ListingStatus(payload.status) if payload.status else ListingStatus.draft,
+        image_urls=payload.image_urls or [],
+        raw_photo_path=payload.raw_photo_path,
+        storage_unit_name=payload.storage_unit_name,
+        title=payload.title,
+        description=payload.description,
+        category_id=payload.category_id,
+        category_suggestion=payload.category_suggestion,
+        item_specifics=payload.item_specifics or {},
+        tags=payload.tags or [],
+        estimated_value=payload.estimated_value,
+        start_price=payload.start_price,
+        buy_it_now_price=payload.buy_it_now_price,
+        min_acceptable_offer=payload.min_acceptable_offer,
+        suggested_price=payload.suggested_price,
+        listing_price=payload.listing_price,
+        purchase_cost=payload.purchase_cost,
+        fees_estimated=payload.fees_estimated,
+        fees_actual=payload.fees_actual,
+        shipping_cost=payload.shipping_cost,
+        sale_price=payload.sale_price,
+        condition=payload.condition,
+        photo_quality_score=payload.photo_quality_score,
+        quantity=payload.quantity or 1,
+        platform_quantities=payload.platform_quantities or {},
+        custom_labels=payload.custom_labels or [],
+        last_refreshed=payload.last_refreshed,
+        source_type=payload.source_type or "manual",
+        source_metadata=payload.source_metadata or {},
+        marketplace_data=normalize_marketplace_data(payload.marketplace_data),
+        needs_review=payload.needs_review if payload.needs_review is not None else True,
+        restricted_review_required=bool(payload.restricted_review_required),
+        restricted_reasons=payload.restricted_reasons or [],
+        detected_category_guess=payload.detected_category_guess,
+        marketplace_allowed_status=payload.marketplace_allowed_status,
+    )
+    db.add(listing)
+    db.commit()
+    db.refresh(listing)
+    return listing
+
+
 @router.patch("/listings/{listing_id}", response_model=ListingResponse)
 def update_listing(
     listing_id: int,
@@ -206,8 +271,16 @@ def update_listing(
     if not listing:
         raise HTTPException(status_code=404, detail="Listing not found")
     ensure_user_owns_resource(current_user, listing.user_id)
-    for key, value in payload.model_dump(exclude_none=True, exclude={"quantity", "platform_quantities", "custom_labels"}).items():
+    direct_updates = payload.model_dump(
+        exclude_none=True,
+        exclude={"quantity", "platform_quantities", "custom_labels", "marketplace_data"},
+    )
+    if "status" in direct_updates:
+        direct_updates["status"] = ListingStatus(direct_updates["status"])
+    for key, value in direct_updates.items():
         setattr(listing, key, value)
+    if payload.marketplace_data is not None:
+        listing.marketplace_data = normalize_marketplace_data(payload.marketplace_data)
     try:
         inventory_service.update_listing_inventory(
             listing,

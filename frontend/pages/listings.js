@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
-import { ChevronDown, MoreHorizontal, PencilLine, Search, Send } from 'lucide-react';
+import { ChevronDown, Grid2X2, List, MoreHorizontal, PencilLine, Search, Send } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useRouter } from 'next/router';
 
@@ -42,9 +42,12 @@ const LISTING_TABS = [
 const FILTER_OPTIONS = [
   { value: 'all', label: 'All marketplaces' },
   { value: 'ebay', label: 'eBay' },
+  { value: 'etsy', label: 'Etsy' },
   { value: 'poshmark', label: 'Poshmark' },
   { value: 'mercari', label: 'Mercari' },
   { value: 'depop', label: 'Depop' },
+  { value: 'whatnot', label: 'Whatnot' },
+  { value: 'vinted', label: 'Vinted' },
 ];
 
 const SOURCE_OPTIONS = [
@@ -95,6 +98,7 @@ export default function ListingsPage() {
   const [sourceFilter, setSourceFilter] = useState('all');
   const [selectedIds, setSelectedIds] = useState([]);
   const [selectedListingId, setSelectedListingId] = useState(null);
+  const [viewMode, setViewMode] = useState('table');
   const [pricingRecommendation, setPricingRecommendation] = useState(null);
   const [listingIntelligence, setListingIntelligence] = useState(null);
   const [workflowPreferences, setWorkflowPreferences] = useState({
@@ -114,6 +118,13 @@ export default function ListingsPage() {
       setActiveTab(tab);
     }
   }, [router.query.tab]);
+
+  const selectTab = (nextTab) => {
+    setActiveTab(nextTab);
+    setSelectedIds([]);
+    if (!router.isReady) return;
+    router.replace({ pathname: router.pathname, query: { ...router.query, tab: nextTab } }, undefined, { shallow: true });
+  };
 
   useEffect(() => {
     if (!user?.id) return;
@@ -155,6 +166,45 @@ export default function ListingsPage() {
       .then(setListingIntelligence)
       .catch(() => setListingIntelligence(null));
   }, [refreshStatus, selectedListingId]);
+
+  const listingsSubnav = useMemo(
+    () => ({
+      eyebrow: 'Listings CMS',
+      title: 'Listings Manager',
+      description: 'Navigate review queues, draft states, and editor workflows from a dedicated listings rail.',
+      sections: [
+        {
+          label: 'Queues',
+          items: LISTING_TABS.map((tab) => ({
+            key: tab.value,
+            label: tab.label,
+            active: activeTab === tab.value,
+            badge: tabCounts[tab.value] || 0,
+            description:
+              tab.value === 'review'
+                ? 'Items waiting for approval'
+                : tab.value === 'drafts'
+                ? 'Editable in-progress listings'
+                : tab.value === 'ready'
+                ? 'Publishable listings'
+                : tab.value === 'published'
+                ? 'Live marketplace records'
+                : 'Rows with publish problems',
+            onClick: () => selectTab(tab.value),
+          })),
+        },
+        {
+          label: 'Sections',
+          items: [
+            { key: 'listing-toolbar', label: 'Filters', active: false, description: 'Search and filter controls', onClick: () => document.getElementById('listing-toolbar')?.scrollIntoView({ behavior: 'smooth', block: 'start' }) },
+            { key: 'listing-status', label: 'Workflow Status', active: false, description: 'Approval and preview policy', onClick: () => document.getElementById('listing-status')?.scrollIntoView({ behavior: 'smooth', block: 'start' }) },
+            { key: 'listing-results', label: 'Results', active: false, description: 'Table or grid listing results', onClick: () => document.getElementById('listing-results')?.scrollIntoView({ behavior: 'smooth', block: 'start' }) },
+          ],
+        },
+      ],
+    }),
+    [activeTab, tabCounts],
+  );
 
   const approveListing = async (listingId) => {
     await updateListing(listingId, { status: 'ready', needs_review: false });
@@ -213,17 +263,24 @@ export default function ListingsPage() {
         await toggleAutonomousMode(!autonomousConfig.autonomous_mode);
         await reload();
       }}
+      subnav={listingsSubnav}
     >
       <PageHeader
         title="Listings"
         description="Edit, review, and publish marketplace listing drafts."
         actions={
-          <Link href="/intake">
-            <Button>Import photos</Button>
-          </Link>
+          <div className="flex flex-wrap gap-2">
+            <Link href="/listings/new">
+              <Button variant="outline">New item</Button>
+            </Link>
+            <Link href="/intake">
+              <Button>Import photos</Button>
+            </Link>
+          </div>
         }
       />
 
+      <div id="listing-toolbar">
       <Toolbar
         left={
           <>
@@ -278,20 +335,44 @@ export default function ListingsPage() {
             </div>
           </>
         }
-        right={<span>{filteredListings.length} visible</span>}
+        right={
+          <div className="flex items-center gap-2">
+            <span>{filteredListings.length} visible</span>
+            <div className="hidden rounded-[10px] border border-[#e5e7eb] bg-white p-1 md:flex">
+              <button
+                type="button"
+                onClick={() => setViewMode('table')}
+                className={`inline-flex h-8 items-center gap-2 rounded-[8px] px-3 text-xs font-medium ${
+                  viewMode === 'table' ? 'bg-[#eef4ff] text-[#2563eb]' : 'text-[#667085]'
+                }`}
+              >
+                <List size={14} />
+                Table
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode('grid')}
+                className={`inline-flex h-8 items-center gap-2 rounded-[8px] px-3 text-xs font-medium ${
+                  viewMode === 'grid' ? 'bg-[#eef4ff] text-[#2563eb]' : 'text-[#667085]'
+                }`}
+              >
+                <Grid2X2 size={14} />
+                Grid
+              </button>
+            </div>
+          </div>
+        }
       />
+      </div>
 
       <Tabs
         className="hidden md:flex"
         items={LISTING_TABS.map((tab) => ({ ...tab, count: tabCounts[tab.value] || 0 }))}
         value={activeTab}
-        onChange={(value) => {
-          setActiveTab(value);
-          setSelectedIds([]);
-        }}
+        onChange={selectTab}
       />
 
-      <section className="grid gap-4 xl:grid-cols-3">
+      <section id="listing-status" className="grid gap-4 xl:grid-cols-3">
         <div className="rounded-[14px] border border-[#e5e7eb] bg-white p-4">
           <p className="text-sm font-semibold text-[#101828]">Approval mode</p>
           <p className="mt-2 text-sm text-[#667085]">
@@ -337,8 +418,9 @@ export default function ListingsPage() {
         </div>
       ) : null}
 
-      <div className={`grid gap-5 ${selectedListing ? 'xl:grid-cols-[minmax(0,1fr)_480px]' : 'grid-cols-1'}`}>
-        <DataTable
+      <div id="listing-results" className={`grid gap-5 ${selectedListing ? 'xl:grid-cols-[minmax(0,1fr)_480px]' : 'grid-cols-1'}`}>
+        {viewMode === 'table' ? (
+          <DataTable
           columns={[
             {
               key: 'thumbnail',
@@ -360,6 +442,7 @@ export default function ListingsPage() {
                   <p className="truncate font-medium text-[#101828]">{getListingTitle(listing)}</p>
                   <div className="mt-1 flex flex-wrap items-center gap-2">
                     <p className="text-xs text-[#667085]">#{listing.id}</p>
+                    {listing.sku ? <span className="pp-chip">SKU {listing.sku}</span> : null}
                     {listing.source_type === 'amazon_vine' ? <span className="pp-chip">Vine</span> : null}
                     {listing.needs_review ? <span className="pp-chip">Needs Review</span> : null}
                     {listing.restricted_review_required ? <span className="pp-chip">Restricted Review</span> : null}
@@ -372,6 +455,11 @@ export default function ListingsPage() {
               key: 'price',
               label: 'Price',
               render: (listing) => `$${getListingPrice(listing)}`,
+            },
+            {
+              key: 'quantity',
+              label: 'Quantity',
+              render: (listing) => listing.quantity ?? 1,
             },
             {
               key: 'marketplaces',
@@ -418,6 +506,9 @@ export default function ListingsPage() {
                       <PencilLine size={14} />
                       Edit
                     </DataTableRowAction>
+                    <DataTableRowAction variant="outline" onClick={() => router.push(`/listings/${listing.id}`)}>
+                      Open
+                    </DataTableRowAction>
                     {bucket === 'review' ? (
                       <DataTableRowAction
                         variant="outline"
@@ -456,7 +547,113 @@ export default function ListingsPage() {
           onToggleAll={() => setSelectedIds(selectedIds.length === filteredListings.length ? [] : filteredListings.map((listing) => listing.id))}
           onRowClick={(listing) => setSelectedListingId(listing.id)}
           emptyState={<EmptyState title="No listings found" description="Adjust the current filters or import new inventory to create drafts." className="border-0 p-0 py-6" />}
-        />
+          />
+        ) : (
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {filteredListings.length ? (
+              filteredListings.map((listing) => {
+                const bucket = getListingBucket(listing);
+                const marketplaces = getListingMarketplaces(listing, enabledPlatforms);
+                const canPublish = workflowPreferences.review_before_publish ? bucket === 'ready' : bucket === 'drafts' || bucket === 'ready';
+                const selected = selectedIds.includes(listing.id);
+                return (
+                  <button
+                    key={listing.id}
+                    type="button"
+                    onClick={() => setSelectedListingId(listing.id)}
+                    className={`rounded-[16px] border bg-white p-4 text-left transition hover:border-[#bfd2ff] hover:bg-[#f8fbff] ${
+                      selected ? 'border-[#bfd2ff] ring-2 ring-[#dbe7ff]' : 'border-[#e5e7eb]'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex min-w-0 items-center gap-3">
+                        <div className="h-16 w-16 overflow-hidden rounded-[14px] bg-[#f2f4f7]">
+                          {listing.image_urls?.[0] ? <img src={listing.image_urls[0]} alt={getListingTitle(listing)} className="h-full w-full object-cover" /> : null}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-semibold text-[#101828]">{getListingTitle(listing)}</p>
+                          <p className="mt-1 text-xs text-[#667085]">#{listing.id}{listing.sku ? ` · SKU ${listing.sku}` : ''}</p>
+                        </div>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        onChange={(event) => {
+                          event.stopPropagation();
+                          toggleRow(listing.id);
+                        }}
+                        onClick={(event) => event.stopPropagation()}
+                        className="mt-1 h-4 w-4 rounded border-[#cbd5e1] text-[#2563eb]"
+                      />
+                    </div>
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      <StatusPill status={bucket} label={bucket.charAt(0).toUpperCase() + bucket.slice(1)} />
+                      {marketplaces.map((marketplace) => (
+                        <span key={`${listing.id}-${marketplace}`} className="pp-chip">
+                          {formatMarketplace(marketplace)}
+                        </span>
+                      ))}
+                    </div>
+                    <div className="mt-4 grid grid-cols-3 gap-3">
+                      <div>
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[#667085]">Price</p>
+                        <p className="mt-1 text-sm font-semibold text-[#101828]">${getListingPrice(listing)}</p>
+                      </div>
+                      <div>
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[#667085]">Qty</p>
+                        <p className="mt-1 text-sm font-semibold text-[#101828]">{listing.quantity ?? 1}</p>
+                      </div>
+                      <div>
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[#667085]">Updated</p>
+                        <p className="mt-1 text-sm font-semibold text-[#101828]">
+                          {new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(new Date(listing.updated_at || listing.created_at || Date.now()))}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      {bucket === 'review' ? (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={async (event) => {
+                            event.stopPropagation();
+                            await approveListing(listing.id);
+                          }}
+                        >
+                          Approve
+                        </Button>
+                      ) : null}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          router.push(`/listings/${listing.id}`);
+                        }}
+                      >
+                        Open
+                      </Button>
+                      {canPublish ? (
+                        <Button
+                          size="sm"
+                          onClick={async (event) => {
+                            event.stopPropagation();
+                            await publish(listing.id, marketplaces.length ? marketplaces : ['ebay']);
+                            await reload();
+                          }}
+                        >
+                          {publishing[listing.id] ? 'Publishing…' : 'Publish'}
+                        </Button>
+                      ) : null}
+                    </div>
+                  </button>
+                );
+              })
+            ) : (
+              <EmptyState title="No listings found" description="Adjust the current filters or import new inventory to create drafts." />
+            )}
+          </div>
+        )}
 
         <Drawer
           open={!!selectedListing}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.connectors.base import BaseMarketplaceConnector
 from app.models.models import Listing
+from app.services.marketplace_field_mapper import build_marketplace_payload
 
 
 class ProxyAutomationConnector(BaseMarketplaceConnector):
@@ -15,8 +16,9 @@ class ProxyAutomationConnector(BaseMarketplaceConnector):
     async def authenticate(self, user_id: int) -> dict:
         return {
             "status": "manual_required",
-            "message": f"{self.name} requires unified provider credentials or automation service login.",
+            "message": f"{self.name} uses the PosterPro manual/provider-assisted setup path today.",
             "user_id": user_id,
+            "settings_route": f"/settings?tab=marketplaces&marketplace={self.name}",
         }
 
     async def refresh_tokens(self, user_id: int) -> dict:
@@ -51,9 +53,4 @@ class ProxyAutomationConnector(BaseMarketplaceConnector):
         ]
 
     def to_marketplace_payload(self, listing: Listing) -> dict:
-        return {
-            "headline": listing.title,
-            "details": listing.description,
-            "amount": listing.suggested_price,
-            "metadata": {"cluster_id": listing.cluster_id},
-        }
+        return build_marketplace_payload(listing, self.name)

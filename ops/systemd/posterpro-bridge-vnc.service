@@ -1,0 +1,13 @@
+[Unit]
+Description=PosterPro Bridge X11VNC Access
+After=posterpro-bridge-xvfb.service posterpro-bridge-fluxbox.service
+Requires=posterpro-bridge-xvfb.service posterpro-bridge-fluxbox.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/x11vnc -display :99 -forever -shared -localhost -rfbport 5901 -nopw -quiet -noxdamage
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

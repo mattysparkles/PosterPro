@@ -161,6 +161,38 @@ class MarketplaceListing(Base, TimestampMixin):
     listing: Mapped["Listing"] = relationship(back_populates="marketplace_listings")
 
 
+class MarketplaceImportJob(Base, TimestampMixin):
+    __tablename__ = "marketplace_import_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    source_marketplace: Mapped[str] = mapped_column(String(64), index=True)
+    source_listing_reference: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    import_mode: Mapped[str] = mapped_column(String(64), default="manual", index=True)
+    status: Mapped[str] = mapped_column(String(64), default="queued", index=True)
+    payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    normalized_preview: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_listing_id: Mapped[int | None] = mapped_column(ForeignKey("listings.id"), nullable=True, index=True)
+    task_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class MarketplaceCrosspostJob(Base, TimestampMixin):
+    __tablename__ = "marketplace_crosspost_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    listing_id: Mapped[int] = mapped_column(ForeignKey("listings.id"), index=True)
+    source_marketplace: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    target_marketplaces: Mapped[list[str]] = mapped_column(JSON, default=list)
+    requested_mode: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(64), default="queued", index=True)
+    execution_plan: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    result_summary: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    task_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class ListingTemplate(Base, TimestampMixin):
     __tablename__ = "listing_templates"
 

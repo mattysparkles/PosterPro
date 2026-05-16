@@ -1,8 +1,8 @@
 import { cn } from '../../lib/utils';
 
-export default function SectionPanel({ title, description, action, children, className }) {
+export default function SectionPanel({ title, description, action, children, className, ...props }) {
   return (
-    <section className={cn('pp-card p-4 md:p-5', className)}>
+    <section className={cn('pp-card p-4 md:p-5', className)} {...props}>
       {(title || description || action) ? (
         <div className="flex items-start justify-between gap-4 border-b border-[#e5e7eb] pb-4">
           <div>

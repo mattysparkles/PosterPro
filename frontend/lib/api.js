@@ -39,6 +39,14 @@ export async function updateServerSettings(body) {
   });
 }
 
+export async function updateHostedPages(body) {
+  return jsonFetch(`${API_BASE}/auth/settings/hosted-pages`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 export async function registerUser(body) {
   return jsonFetch(`${API_BASE}/auth/register`, {
     method: "POST",
@@ -95,6 +103,158 @@ export async function updateSessionViewMode(viewAsRegular) {
 
 export async function fetchListings() {
   return jsonFetch(`${API_BASE}/listings`);
+}
+
+export async function fetchListing(id) {
+  return jsonFetch(`${API_BASE}/listings/${id}`);
+}
+
+export async function createListing(body) {
+  return jsonFetch(`${API_BASE}/listings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function fetchCrosspostPreview(id, marketplaces = []) {
+  const url = new URL(`${API_BASE}/listings/${id}/crosspost-preview`);
+  if (marketplaces.length) {
+    url.searchParams.set("marketplaces", marketplaces.join(","));
+  }
+  return jsonFetch(url.toString());
+}
+
+export async function queueCrosspostJob(id, body) {
+  return jsonFetch(`${API_BASE}/listings/${id}/crosspost-jobs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function fetchCrosspostJobs(id) {
+  return jsonFetch(`${API_BASE}/listings/${id}/crosspost-jobs`);
+}
+
+export async function createMarketplaceImportJob(body) {
+  return jsonFetch(`${API_BASE}/imports/marketplaces/jobs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function fetchMarketplaceImportJobs() {
+  return jsonFetch(`${API_BASE}/imports/marketplaces/jobs`);
+}
+
+export async function fetchMarketplaceJobsOverview() {
+  return jsonFetch(`${API_BASE}/marketplace-jobs/overview`);
+}
+
+export async function fetchCrosspostJob(jobId) {
+  return jsonFetch(`${API_BASE}/marketplace-crosspost-jobs/${jobId}`);
+}
+
+export async function fetchMarketplaceImportJob(jobId) {
+  return jsonFetch(`${API_BASE}/marketplace-import-jobs/${jobId}`);
+}
+
+export async function retryCrosspostJob(jobId) {
+  return jsonFetch(`${API_BASE}/marketplace-crosspost-jobs/${jobId}/retry`, {
+    method: "POST",
+  });
+}
+
+export async function cancelCrosspostJob(jobId) {
+  return jsonFetch(`${API_BASE}/marketplace-crosspost-jobs/${jobId}/cancel`, {
+    method: "POST",
+  });
+}
+
+export async function retryMarketplaceImportJob(jobId) {
+  return jsonFetch(`${API_BASE}/marketplace-import-jobs/${jobId}/retry`, {
+    method: "POST",
+  });
+}
+
+export async function cancelMarketplaceImportJob(jobId) {
+  return jsonFetch(`${API_BASE}/marketplace-import-jobs/${jobId}/cancel`, {
+    method: "POST",
+  });
+}
+
+export async function runAutomationBridgeSmokeTest() {
+  return jsonFetch(`${API_BASE}/marketplace-jobs/bridge-smoke-test`, {
+    method: "POST",
+  });
+}
+
+export async function fetchBridgeAccounts(marketplace) {
+  const url = new URL(`${API_BASE}/marketplace-jobs/bridge-accounts`);
+  if (marketplace) {
+    url.searchParams.set("marketplace", marketplace);
+  }
+  return jsonFetch(url.toString());
+}
+
+export async function upsertBridgeAccount(marketplace, accountKey, body) {
+  return jsonFetch(`${API_BASE}/marketplace-jobs/bridge-accounts/${encodeURIComponent(marketplace)}/${encodeURIComponent(accountKey)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function updateBridgeAccountSession(marketplace, accountKey, body) {
+  return jsonFetch(`${API_BASE}/marketplace-jobs/bridge-accounts/${encodeURIComponent(marketplace)}/${encodeURIComponent(accountKey)}/session`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function connectBridgeAccount(marketplace, accountKey, body) {
+  return jsonFetch(`${API_BASE}/marketplace-jobs/bridge-accounts/${encodeURIComponent(marketplace)}/${encodeURIComponent(accountKey)}/connect`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function startBridgeAccountConnectSession(marketplace, accountKey, body) {
+  return jsonFetch(`${API_BASE}/marketplace-jobs/bridge-accounts/${encodeURIComponent(marketplace)}/${encodeURIComponent(accountKey)}/connect/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function fetchBridgeConnectSession(connectSessionId) {
+  return jsonFetch(`${API_BASE}/marketplace-jobs/bridge-connect-sessions/${encodeURIComponent(connectSessionId)}`);
+}
+
+export function buildBridgeDesktopFrameUrl(connectSessionId, cacheKey = Date.now()) {
+  return `${API_BASE}/marketplace-jobs/bridge-connect-sessions/${encodeURIComponent(connectSessionId)}/desktop-frame?ts=${encodeURIComponent(cacheKey)}`;
+}
+
+export async function sendBridgeDesktopAction(connectSessionId, action, body) {
+  return jsonFetch(`${API_BASE}/marketplace-jobs/bridge-connect-sessions/${encodeURIComponent(connectSessionId)}/desktop-actions/${encodeURIComponent(action)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export function buildBridgeDesktopWebsocketUrl(websocketPath, token) {
+  const apiUrl = new URL(API_BASE);
+  const basePath = apiUrl.pathname.endsWith("/") ? apiUrl.pathname : `${apiUrl.pathname}/`;
+  const normalizedPath = String(websocketPath || "").replace(/^\/+/, "");
+  const websocketUrl = new URL(normalizedPath, `${apiUrl.origin}${basePath}`);
+  websocketUrl.protocol = apiUrl.protocol === "https:" ? "wss:" : "ws:";
+  websocketUrl.searchParams.set("token", token);
+  return websocketUrl.toString();
 }
 
 export async function fetchClusters() {
@@ -175,6 +335,20 @@ export async function fetchEbayAuthUrl(userId, redirectUri) {
   url.searchParams.set("user_id", userId);
   if (redirectUri) url.searchParams.set("redirect_uri", redirectUri);
   return jsonFetch(url.toString());
+}
+
+export async function importEbayTokens(body, userId) {
+  const url = new URL(`${API_BASE}/ebay/account/manual`);
+  if (userId) url.searchParams.set("user_id", String(userId));
+  return jsonFetch(url.toString(), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function fetchPublicSitePage(slug) {
+  return jsonFetch(`${API_BASE}/auth/public/site-pages/${encodeURIComponent(slug)}`);
 }
 
 export async function fetchEbayStatus(id) {

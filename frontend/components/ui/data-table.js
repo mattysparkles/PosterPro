@@ -4,6 +4,7 @@ export default function DataTable({
   columns,
   rows,
   emptyState,
+  className,
   rowKey = (row, index) => index,
   selectedRows = [],
   onToggleRow,
@@ -13,7 +14,7 @@ export default function DataTable({
   onRowClick,
 }) {
   return (
-    <div className="overflow-hidden rounded-[12px] border border-[#e5e7eb] bg-white">
+    <div className={cn('overflow-hidden rounded-[12px] border border-[#e5e7eb] bg-white', className)}>
       <div className="overflow-x-auto">
         <table className="min-w-full text-left text-sm">
           <thead className="bg-[#f9fafb]">
@@ -32,7 +33,7 @@ export default function DataTable({
                 <th
                   key={column.key}
                   className={cn(
-                    'px-4 py-3 font-medium text-[#667085]',
+                    'px-4 py-3 text-[12px] font-semibold uppercase tracking-[0.08em] text-[#667085]',
                     column.headerClassName,
                   )}
                 >

@@ -87,6 +87,12 @@ export default function PublishingPage() {
     }
   }, [router.query.tab]);
 
+  const selectTab = (nextTab) => {
+    setActiveTab(nextTab);
+    if (!router.isReady) return;
+    router.replace({ pathname: router.pathname, query: { ...router.query, tab: nextTab } }, undefined, { shallow: true });
+  };
+
   const marketplaceRows = useMemo(
     () =>
       listings.flatMap((listing) =>
@@ -190,6 +196,34 @@ export default function PublishingPage() {
     { key: 'last_sync', label: 'Last sync', render: (row) => formatTime(row.last_sync) },
   ];
 
+  const publishingSubnav = useMemo(
+    () => ({
+      eyebrow: 'Publishing CMS',
+      title: 'Marketplace Control',
+      description: 'Separate approvals, queue state, live listings, and sync health through a dedicated publishing rail.',
+      sections: [
+        {
+          label: 'Publishing Views',
+          items: [
+            { key: 'approvals', label: 'Approvals', active: activeTab === 'approvals', badge: approvalRows.length, description: 'Drafts waiting for sign-off', onClick: () => selectTab('approvals') },
+            { key: 'queue', label: 'Queue', active: activeTab === 'queue', badge: queueRows.length, description: 'Rows still publishing', onClick: () => selectTab('queue') },
+            { key: 'live', label: 'Live Listings', active: activeTab === 'live', badge: liveRows.length, description: 'Posted marketplace rows', onClick: () => selectTab('live') },
+            { key: 'sync', label: 'Sync Status', active: activeTab === 'sync', badge: syncRows.length, description: 'Channel-level status health', onClick: () => selectTab('sync') },
+          ],
+        },
+        {
+          label: 'Sections',
+          items: [
+            { key: 'publish-policy', label: 'Publish Policy', active: false, description: 'Approval and workflow rules', onClick: () => document.getElementById('publish-policy')?.scrollIntoView({ behavior: 'smooth', block: 'start' }) },
+            { key: 'publish-next', label: 'Next Steps', active: false, description: 'Recommended operator actions', onClick: () => document.getElementById('publish-next')?.scrollIntoView({ behavior: 'smooth', block: 'start' }) },
+            { key: 'publishing-table', label: 'Queue Table', active: false, description: 'Current publishing data', onClick: () => document.getElementById('publishing-table')?.scrollIntoView({ behavior: 'smooth', block: 'start' }) },
+          ],
+        },
+      ],
+    }),
+    [activeTab, approvalRows.length, liveRows.length, queueRows.length, syncRows.length],
+  );
+
   return (
     <AppShell
       active="/publishing"
@@ -199,14 +233,20 @@ export default function PublishingPage() {
         await toggleAutonomousMode(!autonomousConfig.autonomous_mode);
         await reload();
       }}
+      subnav={publishingSubnav}
     >
       <PageHeader
         title="Publishing"
         description="Watch the publish queue, live marketplace listings, and sync health from one place."
         actions={
-          <Link href="/listings">
-            <Button>Open listings</Button>
-          </Link>
+          <div className="flex flex-wrap gap-2">
+            <Link href="/jobs">
+              <Button variant="outline">Open jobs console</Button>
+            </Link>
+            <Link href="/listings">
+              <Button>Open listings</Button>
+            </Link>
+          </div>
         }
       />
 
@@ -218,7 +258,7 @@ export default function PublishingPage() {
       </section>
 
       <section className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]">
-        <SectionPanel title="Publish policy" description="Current operator workflow and queue behavior.">
+        <SectionPanel id="publish-policy" title="Publish policy" description="Current operator workflow and queue behavior.">
           <div className="grid gap-3 md:grid-cols-3">
             <div className="rounded-[12px] border border-[#e5e7eb] bg-white p-4">
               <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Approval gate</p>
@@ -234,7 +274,7 @@ export default function PublishingPage() {
             </div>
           </div>
         </SectionPanel>
-        <SectionPanel title="What to do next" description="Shortest path from draft queue to live listings.">
+        <SectionPanel id="publish-next" title="What to do next" description="Shortest path from draft queue to live listings.">
           <div className="space-y-3">
             <Link href="/listings?tab=review" className="block rounded-[12px] border border-[#e5e7eb] bg-white p-4 transition hover:border-[#bfd2ff] hover:bg-[#f8fbff]">
               <p className="text-sm font-semibold text-[#101828]">Review waiting drafts</p>
@@ -243,6 +283,10 @@ export default function PublishingPage() {
             <Link href="/settings?tab=workflow" className="block rounded-[12px] border border-[#e5e7eb] bg-white p-4 transition hover:border-[#bfd2ff] hover:bg-[#f8fbff]">
               <p className="text-sm font-semibold text-[#101828]">Adjust publish policy</p>
               <p className="mt-1 text-sm text-[#667085]">Change whether operators must approve drafts before any live publish call is queued.</p>
+            </Link>
+            <Link href="/jobs" className="block rounded-[12px] border border-[#e5e7eb] bg-white p-4 transition hover:border-[#bfd2ff] hover:bg-[#f8fbff]">
+              <p className="text-sm font-semibold text-[#101828]">Review import and cross-post jobs</p>
+              <p className="mt-1 text-sm text-[#667085]">Use the jobs console to inspect queued work, structured handoff results, and retry failed jobs.</p>
             </Link>
           </div>
         </SectionPanel>
@@ -281,9 +325,10 @@ export default function PublishingPage() {
           { value: 'sync', label: 'Sync Status', count: syncRows.length },
         ]}
         value={activeTab}
-        onChange={setActiveTab}
+        onChange={selectTab}
       />
 
+      <div id="publishing-table">
       {activeTab === 'approvals' ? (
         <DataTable
           columns={[
@@ -338,6 +383,7 @@ export default function PublishingPage() {
           emptyState={<EmptyState title={`No ${activeTab === 'queue' ? 'queued' : 'live'} marketplace rows`} description="Listings will appear here as they move through publishing." className="border-0 p-0 py-6" />}
         />
       )}
+      </div>
     </AppShell>
   );
 }

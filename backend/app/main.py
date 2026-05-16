@@ -1,7 +1,9 @@
+import asyncio
+import contextlib
 import logging
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -16,11 +18,15 @@ from app.api.inventory import bulk_router as bulk_jobs_router
 from app.api.inventory import router as inventory_router
 from app.api.intelligence import router as intelligence_router
 from app.api.marketplaces import router as marketplaces_router
+from app.api.marketplace_jobs import router as marketplace_jobs_router
 from app.api.routes import router
 from app.api.sales import router as sales_router
 from app.api.vine_imports import router as vine_imports_router
+from app.core.auth import SESSION_COOKIE_NAME, parse_session_token
 from app.core.config import settings
-from app.core.database import Base, engine
+from app.core.database import Base, SessionLocal, engine
+from app.models.models import User
+from app.services.bridge_desktop import BridgeDesktopTokenError, bridge_desktop_target, parse_bridge_desktop_token
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +108,7 @@ app.include_router(auth_router)
 app.include_router(router)
 app.include_router(ebay_router)
 app.include_router(marketplaces_router)
+app.include_router(marketplace_jobs_router)
 app.include_router(intelligence_router)
 app.include_router(inventory_router)
 app.include_router(bulk_jobs_router)
@@ -133,3 +140,77 @@ def health():
     if database_ready:
         return payload
     return JSONResponse(status_code=503, content=payload)
+
+
+def _websocket_user_id(websocket: WebSocket) -> int:
+    session_token = websocket.cookies.get(SESSION_COOKIE_NAME)
+    if not session_token:
+        raise PermissionError("Not authenticated")
+    user_id, _ = parse_session_token(session_token)
+    db = SessionLocal()
+    try:
+        user = db.get(User, user_id)
+        if not user:
+            raise PermissionError("User not found")
+        return int(user.id)
+    finally:
+        db.close()
+
+
+@app.websocket("/marketplace-jobs/bridge-desktop/ws")
+async def bridge_desktop_websocket(websocket: WebSocket) -> None:
+    token = websocket.query_params.get("token") or ""
+    try:
+        claims = parse_bridge_desktop_token(token)
+        current_user_id = _websocket_user_id(websocket)
+        if int(claims["user_id"]) != current_user_id:
+            raise PermissionError("Bridge desktop token does not match the current user")
+    except (BridgeDesktopTokenError, PermissionError, Exception):
+        await websocket.close(code=1008)
+        return
+
+    host, port = bridge_desktop_target()
+    try:
+        reader, writer = await asyncio.open_connection(host=host, port=port)
+    except Exception:
+        await websocket.close(code=1011)
+        return
+
+    await websocket.accept()
+
+    async def _client_to_vnc() -> None:
+        try:
+            while True:
+                message = await websocket.receive()
+                if message.get("type") == "websocket.disconnect":
+                    break
+                data = message.get("bytes")
+                text = message.get("text")
+                if data is not None:
+                    writer.write(data)
+                    await writer.drain()
+                elif text is not None:
+                    writer.write(text.encode("utf-8"))
+                    await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    async def _vnc_to_client() -> None:
+        try:
+            while True:
+                chunk = await reader.read(65536)
+                if not chunk:
+                    break
+                await websocket.send_bytes(chunk)
+        finally:
+            await websocket.close()
+
+    client_task = asyncio.create_task(_client_to_vnc())
+    vnc_task = asyncio.create_task(_vnc_to_client())
+    done, pending = await asyncio.wait({client_task, vnc_task}, return_when=asyncio.FIRST_COMPLETED)
+    for task in pending:
+        task.cancel()
+    for task in done:
+        with contextlib.suppress(Exception):
+            await task

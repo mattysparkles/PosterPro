@@ -1,0 +1,6 @@
+fastapi
+httpx
+playwright
+pydantic
+pydantic-settings
+uvicorn

@@ -16,8 +16,7 @@ export function useEbayAuth(userId) {
       if (!resolvedUserId) {
         throw new Error('Sign in before connecting a marketplace');
       }
-      const redirect = `${window.location.origin}/api/ebay/callback`;
-      const data = await fetchEbayAuthUrl(resolvedUserId, redirect);
+      const data = await fetchEbayAuthUrl(resolvedUserId);
       window.open(data.auth_url, '_blank', 'noopener');
     } catch (err) {
       setError(err.message);
