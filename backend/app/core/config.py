@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./posterpro.db"
     redis_url: str = "redis://localhost:6379/1"
     storage_root: str = "./storage"
+    startup_schema_compat_enabled: bool = True
     session_secret: str | None = None
     openai_api_key_plain: str | None = Field(default=None, validation_alias=AliasChoices("OPENAI_API_KEY"))
     openai_api_key_enc: str | None = Field(default=None, validation_alias=AliasChoices("OPENAI_API_KEY_ENC"))

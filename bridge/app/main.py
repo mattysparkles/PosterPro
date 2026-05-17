@@ -152,6 +152,14 @@ class BridgeAssetResponse(BaseModel):
     download_path: str
 
 
+def _sanitize_connect_session_account_result(account: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(account, dict):
+        return None
+    sanitized = deepcopy(account)
+    sanitized["session_payload"] = {}
+    return sanitized
+
+
 class JobStore:
     def __init__(self, data_dir: Path, *, default_delay_seconds: float, max_workers: int) -> None:
         self.data_dir = data_dir
@@ -655,7 +663,9 @@ class ConnectSessionStore:
         return datetime.now(UTC).isoformat()
 
     def _serialize(self, session: dict[str, Any]) -> dict[str, Any]:
-        return deepcopy(session)
+        serialized = deepcopy(session)
+        serialized["result"] = _sanitize_connect_session_account_result(serialized.get("result"))
+        return serialized
 
     def _active_session_locked(self) -> dict[str, Any] | None:
         for session in self.sessions.values():
@@ -796,7 +806,7 @@ class ConnectSessionStore:
                 status="completed",
                 completed_at=self._now(),
                 message=f"{marketplace.capitalize()} account connected and session captured.",
-                result=account,
+                result=_sanitize_connect_session_account_result(account),
                 error=None,
             )
         except BrowserRunnerError as exc:
@@ -949,6 +959,17 @@ def _require_connect_session(connect_session_id: str) -> dict[str, Any]:
     session = connect_session_store.get_session(connect_session_id.strip())
     if not session:
         raise HTTPException(status_code=404, detail="Bridge connect session not found")
+    return session
+
+
+def _require_live_connect_session(connect_session_id: str) -> dict[str, Any]:
+    session = _require_connect_session(connect_session_id)
+    status_value = str(session.get("status") or "").strip().lower()
+    if status_value not in ConnectSessionStore.ACTIVE_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Bridge connect session is no longer active (status: {status_value or 'unknown'})",
+        )
     return session
 
 
@@ -1109,7 +1130,7 @@ def update_account_session(marketplace: str, account_key: str, payload: BridgeAc
 def _prepare_connect_account(marketplace: str, account_key: str, payload: BridgeAccountConnectRequest) -> tuple[str, str, dict[str, Any], dict[str, Any] | None]:
     normalized_marketplace = marketplace.strip().lower()
     normalized_key = account_key.strip().lower()
-    supported_marketplaces = {"facebook", "mercari", "poshmark", "etsy", "whatnot"}
+    supported_marketplaces = {"facebook", "mercari", "poshmark", "etsy", "depop", "whatnot", "vinted"}
     if normalized_marketplace not in supported_marketplaces:
         raise HTTPException(
             status_code=400,
@@ -1159,7 +1180,7 @@ def get_connect_session(connect_session_id: str) -> BridgeConnectSessionResponse
 
 @app.get("/connect-sessions/{connect_session_id}/desktop-frame", dependencies=[Depends(_require_auth)])
 def get_connect_session_desktop_frame(connect_session_id: str) -> Response:
-    _require_connect_session(connect_session_id)
+    _require_live_connect_session(connect_session_id)
     return Response(
         content=_desktop_frame_png(),
         media_type="image/png",
@@ -1187,7 +1208,7 @@ def get_asset(asset_id: str) -> Response:
 
 @app.post("/connect-sessions/{connect_session_id}/desktop-actions/click", dependencies=[Depends(_require_auth)])
 def click_connect_session_desktop(connect_session_id: str, payload: BridgeDesktopActionRequest) -> dict[str, Any]:
-    _require_connect_session(connect_session_id)
+    _require_live_connect_session(connect_session_id)
     if payload.x is None or payload.y is None:
         raise HTTPException(status_code=400, detail="Desktop click requires x and y coordinates")
     _run_xdotool(["mousemove", "--sync", str(int(payload.x)), str(int(payload.y)), "click", "1"])
@@ -1196,7 +1217,7 @@ def click_connect_session_desktop(connect_session_id: str, payload: BridgeDeskto
 
 @app.post("/connect-sessions/{connect_session_id}/desktop-actions/type", dependencies=[Depends(_require_auth)])
 def type_connect_session_desktop(connect_session_id: str, payload: BridgeDesktopActionRequest) -> dict[str, Any]:
-    _require_connect_session(connect_session_id)
+    _require_live_connect_session(connect_session_id)
     text = str(payload.text or "")
     if not text:
         raise HTTPException(status_code=400, detail="Desktop type requires text")
@@ -1206,7 +1227,7 @@ def type_connect_session_desktop(connect_session_id: str, payload: BridgeDesktop
 
 @app.post("/connect-sessions/{connect_session_id}/desktop-actions/key", dependencies=[Depends(_require_auth)])
 def key_connect_session_desktop(connect_session_id: str, payload: BridgeDesktopActionRequest) -> dict[str, Any]:
-    _require_connect_session(connect_session_id)
+    _require_live_connect_session(connect_session_id)
     key = str(payload.key or "").strip()
     if not key:
         raise HTTPException(status_code=400, detail="Desktop key action requires a key")

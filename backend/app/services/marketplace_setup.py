@@ -148,7 +148,26 @@ def save_manual_marketplace_settings(user: User, marketplace: str, payload: Mapp
     if renewal_mode not in {"manual", "daily", "scheduled"}:
         renewal_mode = "manual"
 
-    if display_name or account_handle or notes or support_url or workflow_state == MANUAL_WORKFLOW_READY:
+    default_import_mode = str(profile.get("default_import_mode") or "manual")
+    default_publish_mode = str(profile.get("default_publish_mode") or "manual_review")
+    default_shipping_scope = str(profile.get("default_shipping_scope") or "local_only")
+    has_saved_state = any(
+        [
+            display_name,
+            account_handle,
+            notes,
+            support_url,
+            bridge_account_key,
+            workflow_state == MANUAL_WORKFLOW_READY,
+            import_mode != default_import_mode,
+            publish_mode != default_publish_mode,
+            shipping_scope != default_shipping_scope,
+            renewal_mode != "manual",
+            import_listing_limit != 10,
+        ]
+    )
+
+    if has_saved_state:
         manual_settings[name] = {
             "display_name": display_name,
             "account_handle": account_handle,
@@ -182,9 +201,9 @@ def marketplace_status_snapshot(
     account_handle = str(manual_settings.get("account_handle") or "").strip()
     notes = str(manual_settings.get("notes") or "").strip()
     workflow_state = str(manual_settings.get("workflow_state") or "").strip().lower() or "draft"
-    import_mode = str(manual_settings.get("import_mode") or "").strip().lower() or "manual"
-    publish_mode = str(manual_settings.get("publish_mode") or "").strip().lower() or "manual_review"
-    shipping_scope = str(manual_settings.get("shipping_scope") or "").strip().lower() or "local_only"
+    import_mode = str(manual_settings.get("import_mode") or "").strip().lower() or str(profile.get("default_import_mode") or "manual")
+    publish_mode = str(manual_settings.get("publish_mode") or "").strip().lower() or str(profile.get("default_publish_mode") or "manual_review")
+    shipping_scope = str(manual_settings.get("shipping_scope") or "").strip().lower() or str(profile.get("default_shipping_scope") or "local_only")
     renewal_mode = str(manual_settings.get("renewal_mode") or "").strip().lower() or "manual"
     support_url = str(manual_settings.get("support_url") or "").strip()
     bridge_account_key = str(manual_settings.get("bridge_account_key") or "").strip().lower()
@@ -217,7 +236,7 @@ def marketplace_status_snapshot(
         }
 
     is_manual = name in MANUAL_MARKETPLACES
-    has_profile = bool(display_name or account_handle)
+    has_profile = bool(display_name or account_handle or bridge_account_key)
     connected = is_manual and workflow_state == MANUAL_WORKFLOW_READY and has_profile
     return {
         "marketplace": name,

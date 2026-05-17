@@ -51,6 +51,20 @@ sale_detection_service = SaleDetectionService()
 inventory_service = InventoryService()
 
 
+def _is_placeholder_import_title(value: str | None) -> bool:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return True
+    placeholder_titles = {
+        "chat",
+        "chats",
+        "marketplace",
+        "facebook marketplace",
+        "facebook",
+    }
+    return normalized in placeholder_titles or normalized.startswith("chat |") or normalized.startswith("marketplace |")
+
+
 def _crosspost_job_canceled(db, job_id: int) -> bool:
     job = db.get(MarketplaceCrosspostJob, job_id)
     return bool(job and str(job.status).lower() == "canceled")
@@ -203,8 +217,9 @@ def _create_imported_listing(
         }
     )
     if existing_listing:
-        if not existing_listing.title:
-            existing_listing.title = normalized.get("title") or None
+        incoming_title = normalized.get("title") or None
+        if (not existing_listing.title or _is_placeholder_import_title(existing_listing.title)) and incoming_title:
+            existing_listing.title = incoming_title
         if not existing_listing.description:
             existing_listing.description = normalized.get("description") or None
         if not existing_listing.category_id:
@@ -325,19 +340,49 @@ def publish_listing_to_marketplace_task(self, listing_id: int, marketplace: str)
         listing = db.get(Listing, listing_id)
         if not listing:
             raise ValueError("Listing not found")
+        user = db.get(User, listing.user_id)
+        if not user:
+            raise ValueError("User not found")
 
         try:
             rate_limiter.acquire(marketplace)
-            result = multi_platform_publisher.publish(db, listing, marketplace)
+            execution_mode = resolve_execution_mode(listing=listing, user=user, marketplace=marketplace)
+            if execution_mode == "direct_api":
+                result = multi_platform_publisher.publish(db, listing, marketplace)
+                upsert_marketplace_listing(
+                    db,
+                    listing_id=listing_id,
+                    marketplace=marketplace,
+                    status=result.status,
+                    response=result.response,
+                )
+                db.commit()
+                return {
+                    "marketplace": marketplace,
+                    "execution_mode": execution_mode,
+                    "status": result.status.value,
+                    "response": result.response,
+                }
+
+            response = execute_secondary_marketplace_path(
+                listing=listing,
+                marketplace=marketplace,
+                execution_mode=execution_mode,
+            )
             upsert_marketplace_listing(
                 db,
-                listing_id=listing_id,
+                listing_id=listing.id,
                 marketplace=marketplace,
-                status=result.status,
-                response=result.response,
+                status=MarketplaceListingStatus.PENDING,
+                response=response,
             )
             db.commit()
-            return {"marketplace": marketplace, "status": result.status.value, "response": result.response}
+            return {
+                "marketplace": marketplace,
+                "execution_mode": execution_mode,
+                "status": "planned",
+                "response": response,
+            }
         except Exception as exc:
             upsert_marketplace_listing(
                 db,

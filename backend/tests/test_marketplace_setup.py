@@ -65,3 +65,66 @@ def test_manual_marketplace_setup_controls_publish_readiness():
     assert mercari_final["enabled_for_publishing"] is True
     assert mercari_final["display_name"] == "Sparkles Mercari"
     assert mercari_final["account_handle"] == "@sparkles"
+
+
+def test_manual_marketplace_setup_uses_profile_defaults_before_save():
+    client = TestClient(app)
+
+    register = client.post(
+        "/auth/register",
+        json={
+            "full_name": "Owner Defaults",
+            "email": "owner-defaults@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+
+    summary = client.get(f"/users/{user_id}/setup")
+    assert summary.status_code == 200
+
+    etsy = next(item for item in summary.json()["marketplace_connections"] if item["marketplace"] == "etsy")
+    depop = next(item for item in summary.json()["marketplace_connections"] if item["marketplace"] == "depop")
+
+    assert etsy["import_mode"] == "csv_assist"
+    assert etsy["publish_mode"] == "browser_assist"
+    assert etsy["shipping_scope"] == "shipping_only"
+
+    assert depop["import_mode"] == "provider_assist"
+    assert depop["publish_mode"] == "provider_assist"
+    assert depop["shipping_scope"] == "shipping_only"
+
+
+def test_manual_marketplace_setup_persists_bridge_account_key_only():
+    client = TestClient(app)
+
+    register = client.post(
+        "/auth/register",
+        json={
+            "full_name": "Owner Bridge",
+            "email": "owner-bridge@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+
+    save = client.put(
+        f"/users/{user_id}/marketplace-connections/mercari",
+        json={
+            "bridge_account_key": "mercari-main",
+            "publish_mode": "browser_assist",
+            "workflow_state": "draft",
+        },
+    )
+    assert save.status_code == 200
+    saved = save.json()
+    assert saved["bridge_account_key"] == "mercari-main"
+    assert saved["publish_mode"] == "browser_assist"
+
+    summary = client.get(f"/users/{user_id}/setup")
+    assert summary.status_code == 200
+    mercari = next(item for item in summary.json()["marketplace_connections"] if item["marketplace"] == "mercari")
+    assert mercari["bridge_account_key"] == "mercari-main"
+    assert mercari["publish_mode"] == "browser_assist"

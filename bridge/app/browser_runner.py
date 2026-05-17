@@ -209,6 +209,70 @@ MARKETPLACE_BROWSER_SPECS: dict[str, MarketplaceBrowserSpec] = {
         auth_required_text=("listings", "seller hub", "create listing"),
         auth_forbidden_text=("404: page not found", "page not found", "sorry, the page you were trying to view does not exist"),
     ),
+    "depop": MarketplaceBrowserSpec(
+        marketplace="depop",
+        label="Depop",
+        home_url="https://www.depop.com/",
+        create_url="https://www.depop.com/sell/",
+        auth_check_url="https://www.depop.com/sell/",
+        connect_start_url="https://www.depop.com/login/",
+        title_selectors=(
+            'input[name*="title" i]',
+            'input[placeholder*="Title" i]',
+            'input[maxlength="100"]',
+        ),
+        price_selectors=(
+            'input[name*="price" i]',
+            'input[placeholder*="Price" i]',
+            'input[inputmode="decimal"]',
+            'input[inputmode="numeric"]',
+        ),
+        description_selectors=(
+            'textarea[name*="description" i]',
+            'textarea[placeholder*="Describe" i]',
+            "textarea",
+        ),
+        submit_selectors=(
+            'button:has-text("List item")',
+            'button:has-text("Publish")',
+            'button:has-text("Next")',
+            'button:has-text("Save")',
+        ),
+        auth_url_tokens=("/sell", "/mydepop"),
+        auth_required_text=("sell", "my depop", "list an item"),
+    ),
+    "vinted": MarketplaceBrowserSpec(
+        marketplace="vinted",
+        label="Vinted",
+        home_url="https://www.vinted.com/",
+        create_url="https://www.vinted.com/items/new",
+        auth_check_url="https://www.vinted.com/items/new",
+        connect_start_url="https://www.vinted.com/member/login",
+        title_selectors=(
+            'input[name*="title" i]',
+            'input[placeholder*="Title" i]',
+            'input[maxlength="100"]',
+        ),
+        price_selectors=(
+            'input[name*="price" i]',
+            'input[placeholder*="Price" i]',
+            'input[inputmode="decimal"]',
+            'input[inputmode="numeric"]',
+        ),
+        description_selectors=(
+            'textarea[name*="description" i]',
+            'textarea[placeholder*="Describe" i]',
+            "textarea",
+        ),
+        submit_selectors=(
+            'button:has-text("Upload")',
+            'button:has-text("List item")',
+            'button:has-text("Next")',
+            'button:has-text("Save")',
+        ),
+        auth_url_tokens=("/items/new", "/member/"),
+        auth_required_text=("sell now", "upload item", "list your item"),
+    ),
 }
 
 
@@ -783,10 +847,11 @@ class MarketplaceBrowserRunner:
         meta_title = self._read_meta(page, 'meta[property="og:title"]')
         meta_description = self._read_meta(page, 'meta[property="og:description"]')
         meta_image = self._read_meta(page, 'meta[property="og:image"]')
+        page_heading = self._first_text(page, ["h1", '[role="main"] h1'])
         title = (
             ld_product.get("name")
-            or meta_title
-            or self._first_text(page, ["h1", '[role="main"] h1'])
+            or page_heading
+            or (meta_title if not self._looks_like_generic_listing_title(meta_title) else "")
         )
         description = (
             ld_product.get("description")
@@ -826,6 +891,19 @@ class MarketplaceBrowserRunner:
             },
             "tags": ["facebook", "imported"],
         }
+
+    def _looks_like_generic_listing_title(self, value: str | None) -> bool:
+        normalized = str(value or "").strip().lower()
+        if not normalized:
+            return True
+        generic_titles = {
+            "chat",
+            "chats",
+            "marketplace",
+            "facebook marketplace",
+            "facebook",
+        }
+        return normalized in generic_titles or normalized.startswith("chat |") or normalized.startswith("marketplace |")
 
     def _extract_ld_product(self, page: Any) -> dict[str, Any]:
         for script_text in page.locator('script[type="application/ld+json"]').all_text_contents():
@@ -1092,6 +1170,16 @@ class WhatnotMarketplaceBrowserRunner(MarketplaceBrowserRunner):
             return False
 
 
+class DepopMarketplaceBrowserRunner(MarketplaceBrowserRunner):
+    def __init__(self, config: BrowserRunnerConfig) -> None:
+        super().__init__(config, MARKETPLACE_BROWSER_SPECS["depop"])
+
+
+class VintedMarketplaceBrowserRunner(MarketplaceBrowserRunner):
+    def __init__(self, config: BrowserRunnerConfig) -> None:
+        super().__init__(config, MARKETPLACE_BROWSER_SPECS["vinted"])
+
+
 def create_marketplace_browser_runner(marketplace: str, config: BrowserRunnerConfig) -> MarketplaceBrowserRunner:
     normalized = str(marketplace or "").strip().lower()
     runners: dict[str, type[MarketplaceBrowserRunner]] = {
@@ -1099,7 +1187,9 @@ def create_marketplace_browser_runner(marketplace: str, config: BrowserRunnerCon
         "mercari": MercariMarketplaceBrowserRunner,
         "poshmark": PoshmarkMarketplaceBrowserRunner,
         "etsy": EtsyMarketplaceBrowserRunner,
+        "depop": DepopMarketplaceBrowserRunner,
         "whatnot": WhatnotMarketplaceBrowserRunner,
+        "vinted": VintedMarketplaceBrowserRunner,
     }
     runner_class = runners.get(normalized)
     if not runner_class:

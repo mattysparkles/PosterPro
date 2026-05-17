@@ -74,7 +74,7 @@ const MARKETPLACE_LABELS = {
 };
 
 const BRIDGE_MARKETPLACE_OPTIONS = ['facebook', 'etsy', 'mercari', 'poshmark', 'depop', 'whatnot', 'vinted'];
-const BROWSER_CONNECT_MARKETPLACES = ['facebook', 'mercari', 'poshmark', 'etsy', 'whatnot'];
+const BROWSER_CONNECT_MARKETPLACES = ['facebook', 'mercari', 'poshmark', 'etsy', 'depop', 'whatnot', 'vinted'];
 const BROWSER_IMPORT_MARKETPLACES = ['facebook'];
 
 const MARKETPLACE_GUIDES = {
