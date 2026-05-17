@@ -7,6 +7,7 @@ import mimetypes
 import re
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
+from typing import Any
 
 from celery import chord, group
 from sqlalchemy import select
@@ -41,6 +42,7 @@ from app.services.pricing_service import PricingService
 from app.services.multi_platform_publisher import get_enabled_platforms, multi_platform_publisher, upsert_marketplace_listing
 from app.services.offer_service import OfferService
 from app.services.sale_detection_service import SaleDetectionService
+from app.services.ebay_service import get_active_ebay_listings
 from app.workers.celery_app import celery_app
 from app.services.clustering import cluster_embeddings
 from app.services.rate_limiter import rate_limiter
@@ -63,6 +65,68 @@ def _is_placeholder_import_title(value: str | None) -> bool:
         "facebook",
     }
     return normalized in placeholder_titles or normalized.startswith("chat |") or normalized.startswith("marketplace |")
+
+
+def _normalize_title_for_match(value: str | None) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+    return re.sub(r"\s+", " ", normalized)
+
+
+def _coerce_price_number(value: Any) -> float | None:
+    try:
+        return round(float(value), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_source_identifiers(source_metadata: dict | None) -> dict[str, str]:
+    if not isinstance(source_metadata, dict):
+        return {}
+    raw_payload = source_metadata.get("raw_payload") if isinstance(source_metadata.get("raw_payload"), dict) else {}
+    nested = raw_payload.get("source_identifiers") if isinstance(raw_payload.get("source_identifiers"), dict) else {}
+    merged = {}
+    for payload in (nested, raw_payload, source_metadata):
+        for key in ("ebay_listing_id", "offer_id", "sku", "source_listing_reference", "source_url"):
+            value = str(payload.get(key) or "").strip() if isinstance(payload, dict) else ""
+            if value:
+                merged[key] = value
+    return merged
+
+
+def _find_duplicate_import_candidate(
+    *,
+    db,
+    user_id: int,
+    source_marketplace: str,
+    raw_payload: dict,
+    normalized: dict,
+) -> Listing | None:
+    incoming_identifiers = _extract_source_identifiers({"raw_payload": raw_payload})
+    incoming_ebay_listing_id = incoming_identifiers.get("ebay_listing_id")
+    incoming_title = _normalize_title_for_match(normalized.get("title"))
+    incoming_price = _coerce_price_number(normalized.get("listing_price"))
+    if not incoming_title and not incoming_ebay_listing_id:
+        return None
+
+    candidates = db.execute(select(Listing).where(Listing.user_id == user_id)).scalars().all()
+    for candidate in candidates:
+        if str(candidate.status).lower() in {"published", "sold"}:
+            continue
+        candidate_metadata = candidate.source_metadata if isinstance(candidate.source_metadata, dict) else {}
+        candidate_identifiers = _extract_source_identifiers(candidate_metadata)
+
+        if incoming_ebay_listing_id and (
+            candidate.ebay_listing_id == incoming_ebay_listing_id
+            or candidate_identifiers.get("ebay_listing_id") == incoming_ebay_listing_id
+        ):
+            return candidate
+
+        candidate_title = _normalize_title_for_match(candidate.title)
+        candidate_price = _coerce_price_number(candidate.listing_price or candidate.suggested_price or candidate.buy_it_now_price)
+        if incoming_title and candidate_title == incoming_title:
+            if incoming_price is None or candidate_price is None or abs(candidate_price - incoming_price) <= 1.0:
+                return candidate
+    return None
 
 
 def _crosspost_job_canceled(db, job_id: int) -> bool:
@@ -209,6 +273,14 @@ def _create_imported_listing(
         or (raw_payload.get("source_listing_reference") if isinstance(raw_payload, dict) else None)
         or (raw_payload.get("source_url") if isinstance(raw_payload, dict) else None),
     )
+    if not existing_listing:
+        existing_listing = _find_duplicate_import_candidate(
+            db=db,
+            user_id=user_id,
+            source_marketplace=source_marketplace,
+            raw_payload=raw_payload,
+            normalized=normalized,
+        )
     marketplace_data = normalize_marketplace_data(
         {
             "source_marketplace": source_marketplace,
@@ -514,19 +586,31 @@ def process_marketplace_import_job_task(self, job_id: int) -> dict:
         job.status = "running"
         db.add(job)
         db.commit()
-
-        normalized = normalize_import_payload(
-            source_marketplace=job.source_marketplace,
-            payload=job.payload or {},
-        )
-        imported_payloads: list[dict] = []
-        bridge_result: dict | None = None
-        bridge_completion: dict | None = None
-        db.expire_all()
-        if _import_job_canceled(db, job_id):
-            return {"job_id": job_id, "status": "canceled"}
-        if job.import_mode in {"provider_assist", "browser_assist"}:
-            try:
+        try:
+            normalized = normalize_import_payload(
+                source_marketplace=job.source_marketplace,
+                payload=job.payload or {},
+            )
+            imported_payloads: list[dict] = []
+            bridge_result: dict | None = None
+            bridge_completion: dict | None = None
+            db.expire_all()
+            if _import_job_canceled(db, job_id):
+                return {"job_id": job_id, "status": "canceled"}
+            if job.source_marketplace == MarketplaceName.ebay.value:
+                imported_payloads = asyncio.run(
+                    get_active_ebay_listings(
+                        user.id,
+                        db,
+                        limit=int((job.payload or {}).get("max_listings") or 25),
+                    )
+                )
+                normalized = {
+                    **normalized,
+                    "imported_listing_count": len(imported_payloads),
+                    "import_source": "ebay_api",
+                }
+            elif job.import_mode in {"provider_assist", "browser_assist"}:
                 bridge_result = submit_bridge_job(
                     job_type="import",
                     execution_mode=job.import_mode,
@@ -538,14 +622,6 @@ def process_marketplace_import_job_task(self, job_id: int) -> dict:
                         "normalized_preview": normalized,
                     },
                 )
-            except AutomationBridgeError as exc:
-                job.status = "failed"
-                job.last_error = str(exc)
-                job.normalized_preview = normalized
-                db.add(job)
-                db.commit()
-                raise
-            else:
                 bridge_job = ((bridge_result.get("bridge_response") or {}) if isinstance(bridge_result, dict) else {})
                 bridge_job_id = str(bridge_job.get("job_id") or "").strip()
                 if bridge_job_id:
@@ -561,7 +637,7 @@ def process_marketplace_import_job_task(self, job_id: int) -> dict:
                         }
                         db.add(job)
                         db.commit()
-                        raise AutomationBridgeError(job.last_error)
+                        return {"job_id": job.id, "status": "failed", "error": job.last_error}
                     bridge_payload = bridge_completion.get("result") or {}
                     imported_payloads = [
                         item for item in (bridge_payload.get("imported_listings") or []) if isinstance(item, dict)
@@ -584,80 +660,91 @@ def process_marketplace_import_job_task(self, job_id: int) -> dict:
                         **normalized,
                         "bridge_submission": bridge_result,
                     }
-        created_listing_ids: list[int] = []
-        reused_listing_ids: list[int] = []
-        if imported_payloads:
-            for imported_payload in imported_payloads:
-                normalized_item = normalize_import_payload(
-                    source_marketplace=job.source_marketplace,
-                    payload=imported_payload,
-                )
-                listing, created = _create_imported_listing(
-                    db=db,
-                    user_id=user.id,
-                    source_marketplace=job.source_marketplace,
-                    import_job_id=job.id,
-                    import_mode=job.import_mode,
-                    source_listing_reference=imported_payload.get("source_listing_reference") or imported_payload.get("source_url") or job.source_listing_reference,
-                    raw_payload=imported_payload,
-                    normalized=normalized_item,
-                )
-                if created:
-                    created_listing_ids.append(listing.id)
-                else:
-                    reused_listing_ids.append(listing.id)
-            resolved_listing_ids = [*created_listing_ids, *reused_listing_ids]
-            job.created_listing_id = resolved_listing_ids[0] if resolved_listing_ids else None
+            created_listing_ids: list[int] = []
+            reused_listing_ids: list[int] = []
+            if imported_payloads:
+                for imported_payload in imported_payloads:
+                    normalized_item = normalize_import_payload(
+                        source_marketplace=job.source_marketplace,
+                        payload=imported_payload,
+                    )
+                    listing, created = _create_imported_listing(
+                        db=db,
+                        user_id=user.id,
+                        source_marketplace=job.source_marketplace,
+                        import_job_id=job.id,
+                        import_mode=job.import_mode,
+                        source_listing_reference=imported_payload.get("source_listing_reference") or imported_payload.get("source_url") or job.source_listing_reference,
+                        raw_payload=imported_payload,
+                        normalized=normalized_item,
+                    )
+                    if created:
+                        created_listing_ids.append(listing.id)
+                    else:
+                        reused_listing_ids.append(listing.id)
+                resolved_listing_ids = [*created_listing_ids, *reused_listing_ids]
+                job.created_listing_id = resolved_listing_ids[0] if resolved_listing_ids else None
+                job.normalized_preview = {
+                    **(normalized if isinstance(normalized, dict) else {}),
+                    "created_listing_ids": resolved_listing_ids,
+                    "new_listing_ids": created_listing_ids,
+                    "reused_listing_ids": reused_listing_ids,
+                }
+                job.status = "completed"
+                db.add(job)
+                db.commit()
+                return {
+                    "job_id": job.id,
+                    "created_listing_ids": resolved_listing_ids,
+                    "new_listing_ids": created_listing_ids,
+                    "reused_listing_ids": reused_listing_ids,
+                }
+
+            job.normalized_preview = normalized
+            db.expire_all()
+            if _import_job_canceled(db, job_id):
+                db.add(job)
+                db.commit()
+                return {"job_id": job_id, "status": "canceled", "normalized_preview": normalized}
+
+            listing, created = _create_imported_listing(
+                db=db,
+                user_id=user.id,
+                source_marketplace=job.source_marketplace,
+                import_job_id=job.id,
+                import_mode=job.import_mode,
+                source_listing_reference=job.source_listing_reference,
+                raw_payload=job.payload or {},
+                normalized=normalized,
+            )
+
+            job.created_listing_id = listing.id
             job.normalized_preview = {
                 **(normalized if isinstance(normalized, dict) else {}),
-                "created_listing_ids": resolved_listing_ids,
-                "new_listing_ids": created_listing_ids,
-                "reused_listing_ids": reused_listing_ids,
+                "created_listing_ids": [listing.id],
+                "new_listing_ids": [listing.id] if created else [],
+                "reused_listing_ids": [] if created else [listing.id],
             }
             job.status = "completed"
             db.add(job)
             db.commit()
             return {
                 "job_id": job.id,
-                "created_listing_ids": resolved_listing_ids,
-                "new_listing_ids": created_listing_ids,
-                "reused_listing_ids": reused_listing_ids,
+                "created_listing_id": listing.id,
+                "new_listing_ids": [listing.id] if created else [],
+                "reused_listing_ids": [] if created else [listing.id],
             }
-
-        job.normalized_preview = normalized
-        db.expire_all()
-        if _import_job_canceled(db, job_id):
+        except Exception as exc:
+            job.status = "failed"
+            job.last_error = str(exc)
+            if not job.normalized_preview:
+                job.normalized_preview = normalize_import_payload(
+                    source_marketplace=job.source_marketplace,
+                    payload=job.payload or {},
+                )
             db.add(job)
             db.commit()
-            return {"job_id": job_id, "status": "canceled", "normalized_preview": normalized}
-
-        listing, created = _create_imported_listing(
-            db=db,
-            user_id=user.id,
-            source_marketplace=job.source_marketplace,
-            import_job_id=job.id,
-            import_mode=job.import_mode,
-            source_listing_reference=job.source_listing_reference,
-            raw_payload=job.payload or {},
-            normalized=normalized,
-        )
-
-        job.created_listing_id = listing.id
-        job.normalized_preview = {
-            **(normalized if isinstance(normalized, dict) else {}),
-            "created_listing_ids": [listing.id],
-            "new_listing_ids": [listing.id] if created else [],
-            "reused_listing_ids": [] if created else [listing.id],
-        }
-        job.status = "completed"
-        db.add(job)
-        db.commit()
-        return {
-            "job_id": job.id,
-            "created_listing_id": listing.id,
-            "new_listing_ids": [listing.id] if created else [],
-            "reused_listing_ids": [] if created else [listing.id],
-        }
+            return {"job_id": job.id, "status": "failed", "error": job.last_error}
 
 
 @celery_app.task(

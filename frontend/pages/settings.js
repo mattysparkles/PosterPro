@@ -1003,6 +1003,35 @@ export default function SettingsPage() {
     }
   };
 
+  const runEbayImport = async ({ maxListings = 25 } = {}) => {
+    setRunningMarketplaceImport(true);
+    try {
+      const job = await createMarketplaceImportJob({
+        source_marketplace: 'ebay',
+        source_listing_reference: 'ebay-active-listings',
+        import_mode: 'direct_api',
+        payload: {
+          max_listings: Number(maxListings || 25),
+        },
+      });
+      const finalJob = await waitForMarketplaceImportJob(job.id);
+      const status = String(finalJob?.status || '').toLowerCase();
+      if (status === 'failed') {
+        throw new Error(finalJob?.last_error || `eBay import job ${job.id} failed.`);
+      }
+      if (status === 'canceled') {
+        throw new Error(`eBay import job ${job.id} was canceled.`);
+      }
+      const newListingIds = finalJob?.normalized_preview?.new_listing_ids || [];
+      const reusedListingIds = finalJob?.normalized_preview?.reused_listing_ids || [];
+      toast.success(`eBay import finished. ${newListingIds.length} new draft${newListingIds.length === 1 ? '' : 's'}, ${reusedListingIds.length} reused.`);
+      await reload();
+      await router.push('/jobs');
+    } finally {
+      setRunningMarketplaceImport(false);
+    }
+  };
+
   const importFacebookFromMarketplaceCard = async (marketplace) => {
     if (!marketplace || marketplace.marketplace !== 'facebook') {
       return;
@@ -1568,6 +1597,20 @@ export default function SettingsPage() {
                       <div className="mt-4 flex flex-wrap gap-2">
                         <Button type="button" onClick={connectEbay} disabled={connectingEbay || !settingsPanels?.ebay?.oauth_ready}>
                           {connectingEbay ? 'Opening OAuth...' : 'Connect eBay'}
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          disabled={runningMarketplaceImport || !settingsPanels?.ebay?.connected}
+                          onClick={async () => {
+                            try {
+                              await runEbayImport({ maxListings: 50 });
+                            } catch (error) {
+                              toast.error(error.message);
+                            }
+                          }}
+                        >
+                          {runningMarketplaceImport ? 'Importing listings...' : 'Import existing eBay listings'}
                         </Button>
                       </div>
                       {ebayConnectError ? <p className="mt-3 text-sm text-[#b42318]">{ebayConnectError}</p> : null}
