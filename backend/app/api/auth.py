@@ -42,6 +42,7 @@ from app.core.secrets import encrypt_secret, mask_secret
 from app.models.enums import MarketplaceName
 from app.models.models import MarketplaceAccount, User
 from app.services.email_service import EmailDeliveryError, send_password_reset_email, smtp_configured
+from app.services.ebay_service import summarize_ebay_account_health
 from app.services.site_content_service import (
     build_public_page_urls,
     import_theme_pack,
@@ -200,10 +201,11 @@ def _write_env_overrides(updates: dict[str, str | None]) -> None:
     _BACKEND_ENV_PATH.write_text("\n".join(next_lines).rstrip() + "\n", encoding="utf-8")
 
 
-def _build_settings_panel_response(current_user: User, *, ebay_connected: bool) -> dict:
+def _build_settings_panel_response(current_user: User, *, ebay_account: MarketplaceAccount | None) -> dict:
     site_content = load_site_content()
     page_urls = build_public_page_urls(settings.app_base_url)
     runame = settings.ebay_runame or settings.ebay_redirect_uri or ""
+    ebay_health = summarize_ebay_account_health(ebay_account)
     return {
         "profile": {
             "full_name": current_user.full_name,
@@ -221,7 +223,14 @@ def _build_settings_panel_response(current_user: User, *, ebay_connected: bool) 
             "runame": runame,
             "redirect_uri": settings.ebay_redirect_uri or "",
             "oauth_ready": bool(settings.ebay_client_id and settings.ebay_client_secret and runame),
-            "connected": ebay_connected,
+            "connected": ebay_health["connected"],
+            "external_account_id": ebay_account.external_account_id if ebay_account else None,
+            "token_expires_at": ebay_account.token_expires_at.isoformat() if ebay_account and ebay_account.token_expires_at else None,
+            "has_refresh_token": ebay_health["has_refresh_token"],
+            "token_status": ebay_health["token_status"],
+            "import_ready": ebay_health["import_ready"],
+            "reconnect_required": ebay_health["reconnect_required"],
+            "status_note": ebay_health["status_note"],
             "privacy_policy_url": page_urls["privacy_policy_url"],
             "auth_accepted_url": page_urls["auth_accepted_url"],
             "auth_declined_url": page_urls["auth_declined_url"],
@@ -348,7 +357,7 @@ def get_settings_panels(
             MarketplaceAccount.marketplace == MarketplaceName.ebay,
         )
     ).scalar_one_or_none()
-    return _build_settings_panel_response(current_user, ebay_connected=ebay_account is not None)
+    return _build_settings_panel_response(current_user, ebay_account=ebay_account)
 
 
 @router.put("/settings/server")
@@ -410,7 +419,7 @@ def update_server_settings(
             MarketplaceAccount.marketplace == MarketplaceName.ebay,
         )
     ).scalar_one_or_none()
-    return _build_settings_panel_response(current_user, ebay_connected=ebay_account is not None)
+    return _build_settings_panel_response(current_user, ebay_account=ebay_account)
 
 
 @router.put("/settings/hosted-pages")
@@ -474,7 +483,7 @@ def update_hosted_pages(
             MarketplaceAccount.marketplace == MarketplaceName.ebay,
         )
     ).scalar_one_or_none()
-    return _build_settings_panel_response(current_user, ebay_connected=ebay_account is not None)
+    return _build_settings_panel_response(current_user, ebay_account=ebay_account)
 
 
 @router.post("/settings/hosted-pages/publish")
@@ -496,7 +505,7 @@ def publish_hosted_pages(
             MarketplaceAccount.marketplace == MarketplaceName.ebay,
         )
     ).scalar_one_or_none()
-    return _build_settings_panel_response(current_user, ebay_connected=ebay_account is not None)
+    return _build_settings_panel_response(current_user, ebay_account=ebay_account)
 
 
 @router.post("/settings/hosted-pages/import-theme")
@@ -527,7 +536,7 @@ def import_hosted_page_theme(
             MarketplaceAccount.marketplace == MarketplaceName.ebay,
         )
     ).scalar_one_or_none()
-    return _build_settings_panel_response(current_user, ebay_connected=ebay_account is not None)
+    return _build_settings_panel_response(current_user, ebay_account=ebay_account)
 
 
 @router.get("/public/site-pages/{slug}")

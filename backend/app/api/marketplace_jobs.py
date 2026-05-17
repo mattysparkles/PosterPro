@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -38,10 +40,48 @@ from app.services.automation_bridge import (
     AutomationBridgeError,
 )
 from app.services.bridge_desktop import issue_bridge_desktop_token
-from app.workers.tasks import process_marketplace_crosspost_job_task, process_marketplace_import_job_task
+from app.workers.tasks import STALE_IMPORT_JOB_AFTER, _import_job_is_stale, process_marketplace_crosspost_job_task, process_marketplace_import_job_task
 from app.workers.celery_app import celery_app
 
 router = APIRouter()
+
+
+def _serialize_import_job(job: MarketplaceImportJob) -> dict:
+    status_value = str(job.status or "").lower()
+    is_stale = _import_job_is_stale(job)
+    can_cancel = status_value in {"queued", "running"} and not is_stale
+    can_retry = status_value in {"completed", "failed", "canceled"} or is_stale
+
+    operator_note = None
+    if is_stale:
+        operator_note = (
+            f"This import job has not updated in over {int(STALE_IMPORT_JOB_AFTER.total_seconds() // 60)} minutes. "
+            "Use Recover to reset the stuck worker record and queue a fresh attempt."
+        )
+    elif job.source_marketplace == MarketplaceName.ebay.value and job.last_error:
+        lowered = str(job.last_error).lower()
+        if "reconnect ebay" in lowered or "connect ebay" in lowered:
+            operator_note = "Reconnect eBay from Settings, then recover or retry this import job."
+
+    return {
+        "id": job.id,
+        "user_id": job.user_id,
+        "source_marketplace": job.source_marketplace,
+        "source_listing_reference": job.source_listing_reference,
+        "import_mode": job.import_mode,
+        "status": job.status,
+        "payload": job.payload,
+        "normalized_preview": job.normalized_preview,
+        "created_listing_id": job.created_listing_id,
+        "task_id": job.task_id,
+        "last_error": job.last_error,
+        "is_stale": is_stale,
+        "can_retry": can_retry,
+        "can_cancel": can_cancel,
+        "operator_note": operator_note,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+    }
 
 
 def _bridge_desktop_access_payload(*, user_id: int, connect_session_id: str) -> dict[str, str]:
@@ -196,7 +236,7 @@ def create_marketplace_import_job(
     db.add(job)
     db.commit()
     db.refresh(job)
-    return job
+    return _serialize_import_job(job)
 
 
 @router.get("/imports/marketplaces/jobs", response_model=list[MarketplaceImportJobResponse])
@@ -204,11 +244,12 @@ def list_marketplace_import_jobs(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return db.execute(
+    jobs = db.execute(
         select(MarketplaceImportJob)
         .where(MarketplaceImportJob.user_id == current_user.id)
         .order_by(MarketplaceImportJob.created_at.desc())
     ).scalars().all()
+    return [_serialize_import_job(job) for job in jobs]
 
 
 @router.get("/marketplace-jobs/overview", response_model=MarketplaceJobsOverviewResponse)
@@ -227,7 +268,7 @@ def get_marketplace_jobs_overview(
         .order_by(MarketplaceCrosspostJob.created_at.desc())
     ).scalars().all()
     return {
-        "import_jobs": import_jobs,
+        "import_jobs": [_serialize_import_job(job) for job in import_jobs],
         "crosspost_jobs": crosspost_jobs,
     }
 
@@ -299,15 +340,26 @@ def retry_import_job(
     if not job:
         raise HTTPException(status_code=404, detail="Import job not found")
     ensure_user_owns_resource(current_user, job.user_id)
+    status_value = str(job.status or "").lower()
+    is_stale = _import_job_is_stale(job)
+    if status_value in {"queued", "running"} and not is_stale:
+        raise HTTPException(status_code=400, detail="Only failed, completed, canceled, or stale jobs can be retried")
+    previous_status = status_value or "unknown"
+    if is_stale and job.task_id:
+        celery_app.control.revoke(job.task_id, terminate=False)
     job.status = "queued"
-    job.last_error = None
+    job.last_error = (
+        f"Recovered by operator from stale {previous_status} state at {datetime.utcnow().isoformat()}."
+        if is_stale
+        else None
+    )
     job.created_listing_id = None
     task = process_marketplace_import_job_task.delay(job.id)
     job.task_id = task.id
     db.add(job)
     db.commit()
     db.refresh(job)
-    return job
+    return _serialize_import_job(job)
 
 
 @router.get("/marketplace-import-jobs/{job_id}", response_model=MarketplaceImportJobResponse)
@@ -320,7 +372,7 @@ def get_import_job(
     if not job:
         raise HTTPException(status_code=404, detail="Import job not found")
     ensure_user_owns_resource(current_user, job.user_id)
-    return job
+    return _serialize_import_job(job)
 
 
 @router.post("/marketplace-import-jobs/{job_id}/cancel", response_model=MarketplaceImportJobResponse)
@@ -333,7 +385,7 @@ def cancel_import_job(
     if not job:
         raise HTTPException(status_code=404, detail="Import job not found")
     ensure_user_owns_resource(current_user, job.user_id)
-    if str(job.status).lower() in {"completed", "failed", "canceled"}:
+    if str(job.status).lower() in {"completed", "failed", "canceled"} or _import_job_is_stale(job):
         raise HTTPException(status_code=400, detail="Only queued or running jobs can be canceled")
     job.status = "canceled"
     if not job.last_error:
@@ -343,7 +395,7 @@ def cancel_import_job(
     db.add(job)
     db.commit()
     db.refresh(job)
-    return job
+    return _serialize_import_job(job)
 
 
 @router.post("/marketplace-jobs/bridge-smoke-test", response_model=AutomationBridgeSmokeTestResponse)

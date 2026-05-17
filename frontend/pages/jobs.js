@@ -188,21 +188,25 @@ export default function JobsPage() {
     {
       key: "actions",
       label: "Actions",
-      render: (row) => (
+      render: (row) => {
+        const recoverAction = ["queued", "running"].includes(String(row.status).toLowerCase()) && row.is_stale;
+        return (
         <div className="flex flex-wrap gap-2">
-          {["queued", "running"].includes(String(row.status).toLowerCase()) ? (
+          {row.can_cancel ? (
             <Button variant="outline" size="sm" onClick={() => cancelImport(row.id)} disabled={!!canceling[`import-${row.id}`]}>
               {canceling[`import-${row.id}`] ? "Canceling..." : "Cancel"}
             </Button>
           ) : null}
-          <Button variant="outline" size="sm" onClick={() => retryImport(row.id)} disabled={!!retrying[`import-${row.id}`]}>
-            {retrying[`import-${row.id}`] ? "Retrying..." : "Retry"}
-          </Button>
+          {row.can_retry ? (
+            <Button variant="outline" size="sm" onClick={() => retryImport(row.id)} disabled={!!retrying[`import-${row.id}`]}>
+              {retrying[`import-${row.id}`] ? (recoverAction ? "Recovering..." : "Retrying...") : (recoverAction ? "Recover" : "Retry")}
+            </Button>
+          ) : null}
           <Button variant="outline" size="sm" onClick={() => setActiveJob({ type: "import", job: row })}>
             Details
           </Button>
         </div>
-      ),
+      )},
     },
   ];
 
@@ -349,6 +353,12 @@ export default function JobsPage() {
                   <p className="text-sm font-semibold text-[#101828]">Source marketplace</p>
                   <p className="mt-2 text-sm text-[#667085]">{activeJob.job.source_marketplace}</p>
                 </div>
+                {activeJob.job.operator_note ? (
+                  <div className="rounded-[12px] border border-[#fde68a] bg-[#fffbeb] p-4">
+                    <p className="text-sm font-semibold text-[#92400e]">Operator note</p>
+                    <p className="mt-2 text-sm text-[#92400e]">{activeJob.job.operator_note}</p>
+                  </div>
+                ) : null}
                 {activeJob.job.normalized_preview ? (
                   <div className="rounded-[12px] border border-[#e5e7eb] bg-white p-4">
                     <p className="text-sm font-semibold text-[#101828]">Normalized preview</p>

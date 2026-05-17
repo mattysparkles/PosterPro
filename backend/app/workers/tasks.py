@@ -42,12 +42,14 @@ from app.services.pricing_service import PricingService
 from app.services.multi_platform_publisher import get_enabled_platforms, multi_platform_publisher, upsert_marketplace_listing
 from app.services.offer_service import OfferService
 from app.services.sale_detection_service import SaleDetectionService
-from app.services.ebay_service import get_active_ebay_listings
+from app.services.ebay_service import EbayIntegrationError, get_active_ebay_listings
 from app.workers.celery_app import celery_app
 from app.services.clustering import cluster_embeddings
 from app.services.rate_limiter import rate_limiter
 
 logger = logging.getLogger(__name__)
+
+STALE_IMPORT_JOB_AFTER = timedelta(minutes=20)
 
 sale_detection_service = SaleDetectionService()
 inventory_service = InventoryService()
@@ -115,6 +117,11 @@ def _find_duplicate_import_candidate(
         candidate_metadata = candidate.source_metadata if isinstance(candidate.source_metadata, dict) else {}
         candidate_identifiers = _extract_source_identifiers(candidate_metadata)
 
+        for key in ("source_listing_reference", "source_url", "offer_id", "sku"):
+            incoming_value = incoming_identifiers.get(key)
+            if incoming_value and candidate_identifiers.get(key) == incoming_value:
+                return candidate
+
         if incoming_ebay_listing_id and (
             candidate.ebay_listing_id == incoming_ebay_listing_id
             or candidate_identifiers.get("ebay_listing_id") == incoming_ebay_listing_id
@@ -137,6 +144,30 @@ def _crosspost_job_canceled(db, job_id: int) -> bool:
 def _import_job_canceled(db, job_id: int) -> bool:
     job = db.get(MarketplaceImportJob, job_id)
     return bool(job and str(job.status).lower() == "canceled")
+
+
+def _import_job_is_stale(job: MarketplaceImportJob, *, now: datetime | None = None) -> bool:
+    status_value = str(job.status or "").lower()
+    if status_value not in {"queued", "running"}:
+        return False
+    updated_at = job.updated_at or job.created_at
+    if not updated_at:
+        return False
+    current_time = now or datetime.utcnow()
+    return updated_at <= current_time - STALE_IMPORT_JOB_AFTER
+
+
+def _friendly_import_failure_message(*, source_marketplace: str, error: Exception) -> str:
+    message = str(error)
+    normalized = message.lower()
+    if source_marketplace == MarketplaceName.ebay.value:
+        if "no connected ebay account for user" in normalized:
+            return "Connect eBay in Settings before importing existing eBay listings."
+        if "no ebay account with refresh token found" in normalized:
+            return "Reconnect eBay in Settings or import a fresh access token plus refresh token before retrying the import."
+        if "token refresh failed" in normalized or "invalid access token" in normalized:
+            return "The saved eBay connection is no longer valid. Reconnect eBay in Settings or import fresh user tokens, then retry the import."
+    return message
 
 
 def _best_effort_localize_import_images(image_urls: list[str] | None) -> tuple[list[str], list[str]]:
@@ -598,13 +629,21 @@ def process_marketplace_import_job_task(self, job_id: int) -> dict:
             if _import_job_canceled(db, job_id):
                 return {"job_id": job_id, "status": "canceled"}
             if job.source_marketplace == MarketplaceName.ebay.value:
-                imported_payloads = asyncio.run(
-                    get_active_ebay_listings(
-                        user.id,
-                        db,
-                        limit=int((job.payload or {}).get("max_listings") or 25),
+                try:
+                    imported_payloads = asyncio.run(
+                        get_active_ebay_listings(
+                            user.id,
+                            db,
+                            limit=int((job.payload or {}).get("max_listings") or 25),
+                        )
                     )
-                )
+                except EbayIntegrationError as exc:
+                    raise RuntimeError(
+                        _friendly_import_failure_message(
+                            source_marketplace=job.source_marketplace,
+                            error=exc,
+                        )
+                    ) from exc
                 normalized = {
                     **normalized,
                     "imported_listing_count": len(imported_payloads),
@@ -736,7 +775,10 @@ def process_marketplace_import_job_task(self, job_id: int) -> dict:
             }
         except Exception as exc:
             job.status = "failed"
-            job.last_error = str(exc)
+            job.last_error = _friendly_import_failure_message(
+                source_marketplace=job.source_marketplace,
+                error=exc,
+            )
             if not job.normalized_preview:
                 job.normalized_preview = normalize_import_payload(
                     source_marketplace=job.source_marketplace,

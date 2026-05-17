@@ -374,6 +374,10 @@ class MarketplaceConnectionStatusResponse(BaseModel):
     enabled_for_sale_detection: bool = False
     external_account_id: str | None = None
     token_expires_at: datetime | None = None
+    has_refresh_token: bool = False
+    token_status: str | None = None
+    import_ready: bool = False
+    reconnect_required: bool = False
     status_note: str | None = None
     display_name: str | None = None
     account_handle: str | None = None
@@ -454,6 +458,10 @@ class MarketplaceImportJobResponse(BaseModel):
     created_listing_id: int | None = None
     task_id: str | None = None
     last_error: str | None = None
+    is_stale: bool = False
+    can_retry: bool = True
+    can_cancel: bool = False
+    operator_note: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

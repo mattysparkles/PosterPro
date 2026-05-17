@@ -415,6 +415,10 @@ export default function SettingsPage() {
   });
   const activeBridgeConnectSession = setupSummary?.active_bridge_connect_session || null;
   const activeBridgeConnectMarketplace = String(activeBridgeConnectSession?.marketplace || '').toLowerCase();
+  const ebayConnection = settingsPanels?.ebay || {};
+  const ebaySetupStatus = (setupSummary?.marketplace_connections || []).find((item) => item.marketplace === 'ebay') || null;
+  const ebayImportReady = Boolean(ebayConnection.connected && ebayConnection.import_ready);
+  const ebayReconnectRequired = Boolean(ebayConnection.reconnect_required);
   const [ebayForm, setEbayForm] = useState({ ebay_client_id: '', ebay_client_secret: '', ebay_redirect_uri: '' });
   const [hostedPagesForm, setHostedPagesForm] = useState({
     brand_name: 'PosterPro',
@@ -930,12 +934,12 @@ export default function SettingsPage() {
     });
   };
 
-  const waitForMarketplaceImportJob = async (jobId, { timeoutMs = 180000, pollMs = 1500 } = {}) => {
+  const waitForMarketplaceImportJob = async (jobId, { label = 'Marketplace', timeoutMs = 180000, pollMs = 1500 } = {}) => {
     const deadline = Date.now() + timeoutMs;
     let latestJob = await fetchMarketplaceImportJob(jobId);
     while (!['completed', 'failed', 'canceled'].includes(String(latestJob?.status || '').toLowerCase())) {
       if (Date.now() >= deadline) {
-        throw new Error(`Facebook import job ${jobId} did not finish within ${Math.round(timeoutMs / 1000)} seconds.`);
+        throw new Error(`${label} import job ${jobId} did not finish within ${Math.round(timeoutMs / 1000)} seconds.`);
       }
       await new Promise((resolve) => setTimeout(resolve, pollMs));
       latestJob = await fetchMarketplaceImportJob(jobId);
@@ -966,7 +970,7 @@ export default function SettingsPage() {
           seller_label: displayName || '',
         },
       });
-      const finalJob = await waitForMarketplaceImportJob(job.id);
+      const finalJob = await waitForMarketplaceImportJob(job.id, { label: 'Facebook' });
       const status = String(finalJob?.status || '').toLowerCase();
       if (status === 'failed') {
         throw new Error(finalJob?.last_error || `Facebook import job ${job.id} failed.`);
@@ -1004,6 +1008,11 @@ export default function SettingsPage() {
   };
 
   const runEbayImport = async ({ maxListings = 25 } = {}) => {
+    if (!ebayImportReady) {
+      throw new Error(ebayReconnectRequired
+        ? 'Reconnect eBay in Settings before importing listings.'
+        : 'Connect eBay in Settings before importing listings.');
+    }
     setRunningMarketplaceImport(true);
     try {
       const job = await createMarketplaceImportJob({
@@ -1014,7 +1023,7 @@ export default function SettingsPage() {
           max_listings: Number(maxListings || 25),
         },
       });
-      const finalJob = await waitForMarketplaceImportJob(job.id);
+      const finalJob = await waitForMarketplaceImportJob(job.id, { label: 'eBay' });
       const status = String(finalJob?.status || '').toLowerCase();
       if (status === 'failed') {
         throw new Error(finalJob?.last_error || `eBay import job ${job.id} failed.`);
@@ -1595,13 +1604,32 @@ export default function SettingsPage() {
                         <StatusPill status={settingsPanels?.ebay?.connected ? 'success' : 'default'} label={settingsPanels?.ebay?.connected ? 'Connected' : 'Not connected'} />
                       </div>
                       <div className="mt-4 flex flex-wrap gap-2">
+                        <StatusPill
+                          status={ebayImportReady ? 'success' : ebayReconnectRequired ? 'warning' : 'default'}
+                          label={ebayImportReady ? 'Import ready' : ebayReconnectRequired ? 'Reconnect required' : 'Import blocked'}
+                        />
+                        <StatusPill
+                          status={ebayConnection?.has_refresh_token ? 'success' : 'warning'}
+                          label={ebayConnection?.has_refresh_token ? 'Refresh token saved' : 'Manual token only'}
+                        />
+                      </div>
+                      <div className="mt-4 rounded-[14px] border border-[#e5e7eb] bg-[#f8fafc] p-4">
+                        <p className="text-sm font-medium text-[#101828]">{ebayConnection?.status_note || ebaySetupStatus?.status_note || 'Connect eBay for this operator.'}</p>
+                        {(ebayConnection?.external_account_id || ebaySetupStatus?.external_account_id || ebayConnection?.token_expires_at) ? (
+                          <div className="mt-2 space-y-1 text-sm text-[#667085]">
+                            <p>Account: {ebayConnection?.external_account_id || ebaySetupStatus?.external_account_id || 'Unknown'}</p>
+                            <p>Token expiry: {ebayConnection?.token_expires_at ? new Date(ebayConnection.token_expires_at).toLocaleString() : 'Not reported'}</p>
+                          </div>
+                        ) : null}
+                      </div>
+                      <div className="mt-4 flex flex-wrap gap-2">
                         <Button type="button" onClick={connectEbay} disabled={connectingEbay || !settingsPanels?.ebay?.oauth_ready}>
-                          {connectingEbay ? 'Opening OAuth...' : 'Connect eBay'}
+                          {connectingEbay ? 'Opening OAuth...' : ebayReconnectRequired ? 'Reconnect eBay' : 'Connect eBay'}
                         </Button>
                         <Button
                           type="button"
                           variant="outline"
-                          disabled={runningMarketplaceImport || !settingsPanels?.ebay?.connected}
+                          disabled={runningMarketplaceImport || !ebayImportReady}
                           onClick={async () => {
                             try {
                               await runEbayImport({ maxListings: 50 });

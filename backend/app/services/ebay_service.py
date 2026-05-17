@@ -234,6 +234,61 @@ async def refresh_ebay_token(user_id: int, db: Session) -> MarketplaceAccount:
     return account
 
 
+def summarize_ebay_account_health(account: MarketplaceAccount | None) -> dict[str, Any]:
+    now = datetime.utcnow()
+    connected = bool(account and account.access_token)
+    has_refresh_token = bool(account and account.refresh_token)
+    token_expires_at = account.token_expires_at if account else None
+
+    token_status = "disconnected"
+    import_ready = False
+    reconnect_required = False
+    status_note = "Connect eBay for this operator before importing or publishing."
+
+    if connected:
+        if token_expires_at is None:
+            token_status = "connected"
+            import_ready = True
+            status_note = "eBay is connected for this operator."
+        else:
+            expires_in_seconds = int((token_expires_at - now).total_seconds())
+            if expires_in_seconds <= 0:
+                if has_refresh_token:
+                    token_status = "expired_refreshable"
+                    import_ready = True
+                    status_note = "The saved eBay token has expired, but PosterPro can refresh it on the next import or publish."
+                else:
+                    token_status = "expired"
+                    reconnect_required = True
+                    status_note = "The saved eBay token has expired and does not include a refresh token. Reconnect eBay or import fresh user tokens."
+            elif expires_in_seconds <= 300:
+                if has_refresh_token:
+                    token_status = "expiring_soon"
+                    import_ready = True
+                    status_note = "The saved eBay token expires soon, but PosterPro can refresh it automatically."
+                else:
+                    token_status = "expiring_soon_manual"
+                    import_ready = True
+                    status_note = "The saved eBay token expires soon and does not include a refresh token. Reconnect eBay to avoid the next import failing."
+            elif has_refresh_token:
+                token_status = "healthy"
+                import_ready = True
+                status_note = "eBay is connected for this operator."
+            else:
+                token_status = "manual_token_only"
+                import_ready = True
+                status_note = "eBay is connected with a manual access token only. Imports work until the token expires; reconnect eBay for automatic refresh."
+
+    return {
+        "connected": connected,
+        "has_refresh_token": has_refresh_token,
+        "token_status": token_status,
+        "import_ready": import_ready,
+        "reconnect_required": reconnect_required,
+        "status_note": status_note,
+    }
+
+
 async def get_or_refresh_account(user_id: int, db: Session) -> MarketplaceAccount:
     account = db.execute(
         select(MarketplaceAccount).where(

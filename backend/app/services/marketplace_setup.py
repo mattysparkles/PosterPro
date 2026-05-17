@@ -6,6 +6,7 @@ from typing import Any
 from app.core.config import settings
 from app.models.enums import MarketplaceName
 from app.models.models import MarketplaceAccount, User
+from app.services.ebay_service import summarize_ebay_account_health
 
 MANUAL_MARKETPLACES = {
     MarketplaceName.etsy.value,
@@ -211,7 +212,8 @@ def marketplace_status_snapshot(
 
     if name == MarketplaceName.ebay.value:
         oauth_ready = bool(settings.ebay_client_id and settings.ebay_client_secret and (settings.ebay_runame or settings.ebay_redirect_uri))
-        connected = account is not None and bool(account.access_token)
+        health = summarize_ebay_account_health(account)
+        connected = health["connected"]
         return {
             "marketplace": name,
             "supports_oauth": True,
@@ -222,11 +224,15 @@ def marketplace_status_snapshot(
             "enabled_for_sale_detection": False,
             "external_account_id": account.external_account_id if account else None,
             "token_expires_at": account.token_expires_at if account else None,
-            "status_note": "OAuth app is ready. Connect the current operator account."
-            if oauth_ready and not connected
-            else "eBay is connected for this operator."
-            if connected
-            else "Server eBay OAuth credentials are missing.",
+            "has_refresh_token": health["has_refresh_token"],
+            "token_status": health["token_status"],
+            "import_ready": oauth_ready and health["import_ready"],
+            "reconnect_required": health["reconnect_required"],
+            "status_note": "Server eBay OAuth credentials are missing."
+            if not oauth_ready
+            else "OAuth app is ready. Connect the current operator account."
+            if not connected
+            else health["status_note"],
             "display_name": display_name or "eBay account",
             "account_handle": account_handle,
             "notes": notes,
