@@ -201,6 +201,10 @@ export async function cancelMarketplaceImportJob(jobId) {
   });
 }
 
+export function buildBridgeAssetUrl(assetId) {
+  return `${API_BASE}/marketplace-jobs/bridge-assets/${encodeURIComponent(assetId)}`;
+}
+
 export async function runAutomationBridgeSmokeTest() {
   return jsonFetch(`${API_BASE}/marketplace-jobs/bridge-smoke-test`, {
     method: "POST",

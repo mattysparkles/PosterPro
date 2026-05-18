@@ -281,6 +281,18 @@ class MarketplaceBrowserRunner:
         self.config = config
         self.spec = spec
 
+    def _persist_generated_asset(self, file_path: Path, *, source_url: str | None = None) -> dict[str, Any] | str:
+        if not file_path.exists() or not self.config.asset_persistor:
+            return str(file_path)
+        content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+        asset = self.config.asset_persistor(
+            file_path.read_bytes(),
+            content_type,
+            file_path.name,
+            source_url,
+        )
+        return asset if isinstance(asset, dict) else str(file_path)
+
     def run_crosspost(self, *, job_id: str, bridge_account: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         playwright = self._load_playwright()
         listing_payload = payload.get("payload") or {}
@@ -343,8 +355,8 @@ class MarketplaceBrowserRunner:
                     "create_url": self.spec.create_url,
                     "uploaded_image_count": uploaded_count,
                     "screenshots": {
-                        "before_submit": str(before_path),
-                        "after_submit": str(after_path),
+                        "before_submit": self._persist_generated_asset(before_path),
+                        "after_submit": self._persist_generated_asset(after_path),
                     },
                     "session_state": {
                         "session_state": "active",
@@ -400,7 +412,7 @@ class MarketplaceBrowserRunner:
                     "imported_listing_count": len(imported_listings),
                     "imported_listings": imported_listings,
                     "screenshots": {
-                        "selling_overview": str(overview_path),
+                        "selling_overview": self._persist_generated_asset(overview_path),
                     },
                     "session_state": {
                         "session_state": "active",
@@ -474,8 +486,8 @@ class MarketplaceBrowserRunner:
                     "bridge_account": self._bridge_account_summary(bridge_account) if bridge_account else None,
                     "login_handle": (login_handle or "").strip() or None,
                     "screenshots": {
-                        "connect_start": str(before_path),
-                        "connect_complete": str(after_path),
+                        "connect_start": self._persist_generated_asset(before_path),
+                        "connect_complete": self._persist_generated_asset(after_path),
                     },
                     "session_state": {
                         "session_state": "active",

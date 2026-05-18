@@ -157,6 +157,16 @@ def _import_job_is_stale(job: MarketplaceImportJob, *, now: datetime | None = No
     return updated_at <= current_time - STALE_IMPORT_JOB_AFTER
 
 
+def _bridge_job_id_from_submission(payload: dict[str, Any] | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    bridge_response = payload.get("bridge_response")
+    if not isinstance(bridge_response, dict):
+        return None
+    bridge_job_id = str(bridge_response.get("job_id") or "").strip()
+    return bridge_job_id or None
+
+
 def _friendly_import_failure_message(*, source_marketplace: str, error: Exception) -> str:
     message = str(error)
     normalized = message.lower()
@@ -534,6 +544,7 @@ def process_marketplace_crosspost_job_task(self, job_id: int) -> dict:
         db.commit()
 
         results: list[dict] = []
+        failed_markets: list[str] = []
         targets = job.target_marketplaces or []
         for market in targets:
             db.expire_all()
@@ -564,18 +575,74 @@ def process_marketplace_crosspost_job_task(self, job_id: int) -> dict:
                     marketplace=market,
                     execution_mode=execution_mode,
                 )
+                bridge_job_id = _bridge_job_id_from_submission(
+                    response.get("bridge_submission") if isinstance(response, dict) else None
+                )
+                result_status = str((response or {}).get("status") or "planned")
+                listing_status = MarketplaceListingStatus.PENDING
+                error_message = None
+
+                if bridge_job_id:
+                    try:
+                        bridge_completion = wait_for_bridge_job(
+                            job_id=bridge_job_id,
+                            timeout_seconds=180,
+                            poll_interval_seconds=1.0,
+                        )
+                        response = {
+                            **response,
+                            "bridge_completion": bridge_completion,
+                        }
+                        completion_status = str(bridge_completion.get("status") or "").strip().lower()
+                        if completion_status != "completed":
+                            error_message = str(
+                                bridge_completion.get("error")
+                                or f"Bridge cross-post job finished with status '{completion_status}'"
+                            )
+                        else:
+                            bridge_result = bridge_completion.get("result") if isinstance(bridge_completion.get("result"), dict) else {}
+                            result_status = str(bridge_result.get("status") or response.get("status") or "planned")
+                            if str(result_status).strip().lower() in {"submitted_to_marketplace", "published"}:
+                                listing_status = MarketplaceListingStatus.PUBLISHED
+                    except Exception as exc:
+                        error_message = str(exc)
+
+                if error_message:
+                    failed_markets.append(market)
+                    failure_response = {
+                        **(response if isinstance(response, dict) else {}),
+                        "error": error_message,
+                    }
+                    upsert_marketplace_listing(
+                        db,
+                        listing_id=listing.id,
+                        marketplace=market,
+                        status=MarketplaceListingStatus.FAILED,
+                        response=failure_response,
+                    )
+                    results.append(
+                        {
+                            "marketplace": market,
+                            "execution_mode": execution_mode,
+                            "status": "failed",
+                            "error": error_message,
+                            "response": failure_response,
+                        }
+                    )
+                    continue
+
                 upsert_marketplace_listing(
                     db,
                     listing_id=listing.id,
                     marketplace=market,
-                    status=MarketplaceListingStatus.PENDING,
+                    status=listing_status,
                     response=response,
                 )
                 results.append(
                     {
                         "marketplace": market,
                         "execution_mode": execution_mode,
-                        "status": "planned",
+                        "status": result_status,
                         "response": response,
                     }
                 )
@@ -583,11 +650,12 @@ def process_marketplace_crosspost_job_task(self, job_id: int) -> dict:
         db.expire_all()
         if _crosspost_job_canceled(db, job_id):
             return {"job_id": job_id, "status": "canceled", "results": results}
-        job.status = "completed"
+        job.status = "failed" if failed_markets else "completed"
+        job.last_error = f"Cross-post execution failed for: {', '.join(failed_markets)}" if failed_markets else None
         job.result_summary = {"results": results}
         db.add(job)
         db.commit()
-        return {"job_id": job_id, "results": results}
+        return {"job_id": job_id, "status": job.status, "results": results}
 
 
 @celery_app.task(

@@ -282,6 +282,40 @@ const DEFAULT_THEME_IMPORT_TEMPLATE = JSON.stringify(
   2,
 );
 
+function formatDateTimeValue(value) {
+  if (!value) return 'Not reported';
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(new Date(value));
+}
+
+function bridgeSessionTone(sessionState) {
+  return ['ready', 'active', 'valid'].includes(String(sessionState || '').toLowerCase()) ? 'success' : 'warning';
+}
+
+function bridgeNextStep({ bridgeAccount, browserConnectInProgress, supportsBrowserImport }) {
+  if (browserConnectInProgress) {
+    return 'Resume the live bridge workspace and complete the login or MFA step there before returning to Settings.';
+  }
+  if (!bridgeAccount) {
+    return 'Save a bridge account key first so PosterPro has a runner-side identity for this marketplace.';
+  }
+  if (!bridgeAccount.credential_configured && !bridgeAccount.session_payload) {
+    return 'Add bridge credentials or capture a browser session so assisted jobs have something usable to run against.';
+  }
+  if (!['ready', 'active', 'valid'].includes(String(bridgeAccount.session_state || '').toLowerCase())) {
+    return 'Reconnect this marketplace in the bridge workspace or save a fresh storage-state payload before relying on assisted jobs.';
+  }
+  if (supportsBrowserImport) {
+    return 'This bridge session looks usable. You can run assisted posting now, and Facebook import should also be available.';
+  }
+  return 'This bridge session looks usable. Assisted posting should have the browser context it needs.';
+}
+
 function GuideCard({ title, description, tooltip, prerequisites = [], steps = [], tone = 'blue' }) {
   const toneClass =
     tone === 'amber'
@@ -1154,6 +1188,10 @@ export default function SettingsPage() {
                         <p className="text-sm font-semibold text-[#101828]">Channel onboarding</p>
                         <p className="mt-1 text-sm text-[#667085]">Manual and connected marketplace readiness for this workspace.</p>
                       </button>
+                      <Link href="/jobs" className="rounded-[12px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#bfd2ff] hover:bg-[#f8fbff]">
+                        <p className="text-sm font-semibold text-[#101828]">Jobs console</p>
+                        <p className="mt-1 text-sm text-[#667085]">Inspect assisted imports, bridge outcomes, retries, and operator follow-up in one place.</p>
+                      </Link>
                     </div>
                   </SectionPanel>
 
@@ -2185,13 +2223,42 @@ export default function SettingsPage() {
                         <div className="mt-3 rounded-[10px] border border-[#dbe7ff] bg-[#f7faff] px-3 py-3 text-sm text-[#475467]">
                           <div className="flex flex-wrap items-center justify-between gap-2">
                             <p className="font-medium text-[#101828]">{`${MARKETPLACE_LABELS[marketplace.marketplace] || marketplace.marketplace} browser session`}</p>
-                            <StatusPill status={browserSessionReady ? 'success' : 'warning'} label={bridgeAccount?.session_state || 'Not connected'} />
+                            <StatusPill status={bridgeSessionTone(bridgeAccount?.session_state)} label={bridgeAccount?.session_state || 'Not connected'} />
                           </div>
                           <p className="mt-2">
                             {`Use `}
                             <span className="font-medium text-[#101828]">{`Connect ${MARKETPLACE_LABELS[marketplace.marketplace] || marketplace.marketplace} account`}</span>
                             {` to capture the cookies and browser storage state required for browser-assist posting.`}
                           </p>
+                          <div className="mt-3 grid gap-2 md:grid-cols-2">
+                            <div className="rounded-[10px] border border-white/80 bg-white/90 px-3 py-2">
+                              <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Bridge account key</p>
+                              <p className="mt-1 text-sm text-[#101828]">{marketplace.bridge_account_key || 'Missing'}</p>
+                            </div>
+                            <div className="rounded-[10px] border border-white/80 bg-white/90 px-3 py-2">
+                              <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Credential + session</p>
+                              <p className="mt-1 text-sm text-[#101828]">
+                                {bridgeAccount
+                                  ? `${bridgeAccount.credential_configured ? 'Credential saved' : 'No credential'} · ${bridgeAccount.session_state || 'draft'}`
+                                  : 'No bridge account saved'}
+                              </p>
+                            </div>
+                            <div className="rounded-[10px] border border-white/80 bg-white/90 px-3 py-2">
+                              <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Last tested</p>
+                              <p className="mt-1 text-sm text-[#101828]">{formatDateTimeValue(bridgeAccount?.last_tested_at)}</p>
+                            </div>
+                            <div className="rounded-[10px] border border-white/80 bg-white/90 px-3 py-2">
+                              <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Next action</p>
+                              <p className="mt-1 text-sm text-[#101828]">
+                                {bridgeNextStep({
+                                  bridgeAccount,
+                                  browserConnectInProgress:
+                                    activeBridgeConnectMarketplace === String(marketplace.marketplace || '').toLowerCase(),
+                                  supportsBrowserImport,
+                                })}
+                              </p>
+                            </div>
+                          </div>
                           <div className="mt-3 flex flex-wrap gap-2">
                             <Button
                               size="sm"
@@ -2226,6 +2293,11 @@ export default function SettingsPage() {
                             >
                               {`Open ${MARKETPLACE_LABELS[marketplace.marketplace] || marketplace.marketplace} setup`}
                             </Button>
+                            <Link href={`/jobs?tab=${supportsBrowserImport ? 'imports' : 'crosspost'}`}>
+                              <Button variant="outline" size="sm" type="button">
+                                Open jobs console
+                              </Button>
+                            </Link>
                           </div>
                         </div>
                       ) : null}
@@ -3021,9 +3093,33 @@ export default function SettingsPage() {
                     </p>
                   </div>
                   <StatusPill
-                    status={selectedBridgeAccount && ['ready', 'active', 'valid'].includes(String(selectedBridgeAccount.session_state || '').toLowerCase()) ? 'success' : 'warning'}
+                    status={bridgeSessionTone(selectedBridgeAccount?.session_state)}
                     label={selectedBridgeAccount ? selectedBridgeAccount.session_state || 'draft' : 'No session'}
                   />
+                </div>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="rounded-[12px] border border-white/80 bg-white p-3">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Bridge account key</p>
+                    <p className="mt-1 text-sm font-medium text-[#101828]">{marketplaceForm.bridge_account_key || 'Missing'}</p>
+                  </div>
+                  <div className="rounded-[12px] border border-white/80 bg-white p-3">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Credential state</p>
+                    <p className="mt-1 text-sm font-medium text-[#101828]">
+                      {selectedBridgeAccount
+                        ? selectedBridgeAccount.credential_configured
+                          ? 'Credential saved on bridge'
+                          : 'No bridge credential saved'
+                        : 'No bridge account linked'}
+                    </p>
+                  </div>
+                  <div className="rounded-[12px] border border-white/80 bg-white p-3">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Session last tested</p>
+                    <p className="mt-1 text-sm font-medium text-[#101828]">{formatDateTimeValue(selectedBridgeAccount?.last_tested_at)}</p>
+                  </div>
+                  <div className="rounded-[12px] border border-white/80 bg-white p-3">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Session expiry</p>
+                    <p className="mt-1 text-sm font-medium text-[#101828]">{formatDateTimeValue(selectedBridgeAccount?.expires_at)}</p>
+                  </div>
                 </div>
                 <div className="grid gap-3 md:grid-cols-2">
                   <div className="space-y-2">
@@ -3072,6 +3168,26 @@ export default function SettingsPage() {
                 </div>
                 <div className="rounded-[12px] border border-white/80 bg-white p-3 text-sm text-[#475467]">
                   {`PosterPro cannot rely on a native ${MARKETPLACE_LABELS[configuredMarketplace.marketplace] || configuredMarketplace.marketplace} API here. The bridge must capture a real authenticated browser session. Use the connect action when the bridge is running on a machine where you can complete the login flow, or paste a Playwright storage-state export as a fallback.`}
+                </div>
+                <div className="rounded-[12px] border border-[#d0d5dd] bg-white p-3 text-sm text-[#475467]">
+                  <p className="font-semibold text-[#101828]">Current operator guidance</p>
+                  <p className="mt-2">
+                    {bridgeNextStep({
+                      bridgeAccount: selectedBridgeAccount,
+                      browserConnectInProgress,
+                      supportsBrowserImport: BROWSER_IMPORT_MARKETPLACES.includes(configuredMarketplace.marketplace),
+                    })}
+                  </p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <Link href={`/jobs?tab=${BROWSER_IMPORT_MARKETPLACES.includes(configuredMarketplace.marketplace) ? 'imports' : 'crosspost'}`}>
+                      <Button type="button" variant="outline">Open jobs console</Button>
+                    </Link>
+                    {configuredMarketplace.support_url ? (
+                      <a href={configuredMarketplace.support_url} target="_blank" rel="noreferrer">
+                        <Button type="button" variant="outline">Open runbook</Button>
+                      </a>
+                    ) : null}
+                  </div>
                 </div>
                 <div className="rounded-[12px] border border-[#dbe7ff] bg-[#eff6ff] p-3 text-sm text-[#1d4ed8]">
                   {`Click `}
