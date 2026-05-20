@@ -51,6 +51,7 @@ from app.services.site_content_service import (
     save_draft_pages,
     save_site_content,
 )
+from app.services.automation_bridge import bridge_browser_submit_policy
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -206,6 +207,7 @@ def _build_settings_panel_response(current_user: User, *, ebay_account: Marketpl
     page_urls = build_public_page_urls(settings.app_base_url)
     runame = settings.ebay_runame or settings.ebay_redirect_uri or ""
     ebay_health = summarize_ebay_account_health(ebay_account)
+    bridge_submit_policy = bridge_browser_submit_policy()
     return {
         "profile": {
             "full_name": current_user.full_name,
@@ -247,6 +249,9 @@ def _build_settings_panel_response(current_user: User, *, ebay_account: Marketpl
             "automation_bridge_url": settings.automation_bridge_url or "",
             "automation_bridge_timeout_seconds": settings.automation_bridge_timeout_seconds,
             "automation_bridge_configured": bool(settings.automation_bridge_enabled and settings.automation_bridge_url and settings.automation_bridge_api_key),
+            "bridge_browser_submit_enabled": bridge_submit_policy["browser_submit_enabled"],
+            "bridge_browser_submit_policy_label": bridge_submit_policy["policy_label"],
+            "bridge_browser_submit_policy_note": bridge_submit_policy["policy_note"],
             "sale_detection_enabled": settings.sale_detection_enabled,
             "sale_detection_dry_run": settings.sale_detection_dry_run,
             "sale_detection_poll_minutes": settings.sale_detection_poll_minutes,

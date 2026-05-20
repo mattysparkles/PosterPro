@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from app.api import marketplace_jobs
+from app.services import automation_bridge
 from app.services.bridge_desktop import parse_bridge_desktop_token
 
 
@@ -70,3 +71,33 @@ def test_terminal_bridge_connect_session_omits_desktop_access(monkeypatch):
 
     assert payload["status"] == "completed"
     assert "desktop_access" not in payload
+
+
+def test_bridge_browser_submit_policy_defaults_to_review_when_unreachable(monkeypatch):
+    monkeypatch.setattr(automation_bridge, "automation_bridge_ready", lambda: True)
+    monkeypatch.setattr(
+        automation_bridge,
+        "get_automation_bridge_health",
+        lambda: (_ for _ in ()).throw(automation_bridge.AutomationBridgeError("bridge down")),
+    )
+
+    policy = automation_bridge.bridge_browser_submit_policy()
+
+    assert policy["configured"] is True
+    assert policy["browser_submit_enabled"] is False
+    assert policy["policy_label"] == "Bridge policy unavailable"
+
+
+def test_bridge_browser_submit_policy_reports_final_submit_enabled(monkeypatch):
+    monkeypatch.setattr(automation_bridge, "automation_bridge_ready", lambda: True)
+    monkeypatch.setattr(
+        automation_bridge,
+        "get_automation_bridge_health",
+        lambda: {"browser_submit_enabled": True},
+    )
+
+    policy = automation_bridge.bridge_browser_submit_policy()
+
+    assert policy["configured"] is True
+    assert policy["browser_submit_enabled"] is True
+    assert policy["policy_label"] == "Final submit enabled"

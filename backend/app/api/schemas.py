@@ -379,6 +379,15 @@ class MarketplaceConnectionStatusResponse(BaseModel):
     import_ready: bool = False
     reconnect_required: bool = False
     status_note: str | None = None
+    publish_support_level: str | None = None
+    publish_support_label: str | None = None
+    publish_support_note: str | None = None
+    import_support_level: str | None = None
+    import_support_label: str | None = None
+    import_support_note: str | None = None
+    sales_sync_support_level: str | None = None
+    sales_sync_support_label: str | None = None
+    sales_sync_support_note: str | None = None
     display_name: str | None = None
     account_handle: str | None = None
     notes: str | None = None

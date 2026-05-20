@@ -20,6 +20,27 @@ MANUAL_MARKETPLACES = {
 
 MANUAL_WORKFLOW_READY = "ready"
 
+PUBLISH_SUPPORT_LABELS = {
+    "direct_api": "Direct API publish",
+    "browser_assist": "Browser-assisted publish",
+    "provider_assist": "Provider-assisted publish",
+    "manual_review": "Manual review publish",
+    "draft_only": "Draft-only assisted publish",
+}
+
+IMPORT_SUPPORT_LABELS = {
+    "direct_api": "Direct import",
+    "browser_assist": "Browser-assisted import",
+    "provider_assist": "Provider-assisted import",
+    "csv_assist": "CSV-assisted import",
+    "manual": "Manual import",
+}
+
+SALES_SYNC_SUPPORT_LABELS = {
+    "direct_api": "Live sales sync",
+    "unsupported": "Sales sync unavailable",
+}
+
 MARKETPLACE_SETUP_PROFILES: dict[str, dict[str, Any]] = {
     MarketplaceName.etsy.value: {
         "status_label": "shop details",
@@ -93,6 +114,88 @@ def _normalize_import_listing_limit(value: Any) -> int:
     except (TypeError, ValueError):
         parsed = 10
     return max(1, min(50, parsed))
+
+
+def _publish_support_contract(*, marketplace: str, publish_mode: str) -> tuple[str, str, str]:
+    if marketplace == MarketplaceName.ebay.value:
+        return (
+            "direct_api",
+            PUBLISH_SUPPORT_LABELS["direct_api"],
+            "PosterPro can publish directly to eBay through the native API path for connected operator accounts.",
+        )
+
+    normalized_mode = publish_mode if publish_mode in {"browser_assist", "provider_assist", "draft_only", "manual_review"} else "manual_review"
+    if normalized_mode == "browser_assist":
+        return (
+            "browser_assist",
+            PUBLISH_SUPPORT_LABELS["browser_assist"],
+            "PosterPro prepares and runs an assisted browser workflow for this marketplace. Final submission may still require operator review depending on the bridge policy and live marketplace flow.",
+        )
+    if normalized_mode == "provider_assist":
+        return (
+            "provider_assist",
+            PUBLISH_SUPPORT_LABELS["provider_assist"],
+            "PosterPro prepares a provider-assisted packet for this marketplace instead of a native direct publish call.",
+        )
+    if normalized_mode == "draft_only":
+        return (
+            "draft_only",
+            PUBLISH_SUPPORT_LABELS["draft_only"],
+            "PosterPro can prepare a draft or assisted handoff, but the operator should expect to complete the final marketplace submission manually.",
+        )
+    return (
+        "manual_review",
+        PUBLISH_SUPPORT_LABELS["manual_review"],
+        "PosterPro stores workflow state and operator guidance for this marketplace, but listing completion still depends on manual review or assisted handoff.",
+    )
+
+
+def _import_support_contract(*, marketplace: str, import_mode: str) -> tuple[str, str, str]:
+    if marketplace == MarketplaceName.ebay.value:
+        return (
+            "direct_api",
+            IMPORT_SUPPORT_LABELS["direct_api"],
+            "PosterPro can import supported eBay listings through the connected operator account when the saved credentials are still usable.",
+        )
+
+    normalized_mode = import_mode if import_mode in {"browser_assist", "provider_assist", "csv_assist", "manual"} else "manual"
+    if normalized_mode == "browser_assist":
+        return (
+            "browser_assist",
+            IMPORT_SUPPORT_LABELS["browser_assist"],
+            "PosterPro relies on an authenticated bridge browser session to pull listing data from this marketplace.",
+        )
+    if normalized_mode == "provider_assist":
+        return (
+            "provider_assist",
+            IMPORT_SUPPORT_LABELS["provider_assist"],
+            "PosterPro expects a provider-assisted or externally prepared import path for this marketplace rather than a native direct import.",
+        )
+    if normalized_mode == "csv_assist":
+        return (
+            "csv_assist",
+            IMPORT_SUPPORT_LABELS["csv_assist"],
+            "PosterPro expects operator-prepared CSV or catalog data for this marketplace instead of a native direct import.",
+        )
+    return (
+        "manual",
+        IMPORT_SUPPORT_LABELS["manual"],
+        "PosterPro does not provide a native automated import path for this marketplace in the current deployment.",
+    )
+
+
+def _sales_sync_support_contract(*, marketplace: str) -> tuple[str, str, str]:
+    if marketplace == MarketplaceName.ebay.value:
+        return (
+            "direct_api",
+            SALES_SYNC_SUPPORT_LABELS["direct_api"],
+            "PosterPro can poll eBay sold-order activity for connected operator accounts.",
+        )
+    return (
+        "unsupported",
+        SALES_SYNC_SUPPORT_LABELS["unsupported"],
+        "PosterPro does not currently provide real sold-order detection for this marketplace in this deployment.",
+    )
 
 
 def load_manual_marketplace_settings(user: User | None) -> dict[str, dict[str, Any]]:
@@ -214,6 +317,9 @@ def marketplace_status_snapshot(
         oauth_ready = bool(settings.ebay_client_id and settings.ebay_client_secret and (settings.ebay_runame or settings.ebay_redirect_uri))
         health = summarize_ebay_account_health(account)
         connected = health["connected"]
+        publish_support_level, publish_support_label, publish_support_note = _publish_support_contract(marketplace=name, publish_mode="direct_api")
+        import_support_level, import_support_label, import_support_note = _import_support_contract(marketplace=name, import_mode="direct_api")
+        sales_sync_support_level, sales_sync_support_label, sales_sync_support_note = _sales_sync_support_contract(marketplace=name)
         return {
             "marketplace": name,
             "supports_oauth": True,
@@ -228,6 +334,15 @@ def marketplace_status_snapshot(
             "token_status": health["token_status"],
             "import_ready": oauth_ready and health["import_ready"],
             "reconnect_required": health["reconnect_required"],
+            "publish_support_level": publish_support_level,
+            "publish_support_label": publish_support_label,
+            "publish_support_note": publish_support_note,
+            "import_support_level": import_support_level,
+            "import_support_label": import_support_label,
+            "import_support_note": import_support_note,
+            "sales_sync_support_level": sales_sync_support_level,
+            "sales_sync_support_label": sales_sync_support_label,
+            "sales_sync_support_note": sales_sync_support_note,
             "status_note": "Server eBay OAuth credentials are missing."
             if not oauth_ready
             else "OAuth app is ready. Connect the current operator account."
@@ -244,6 +359,9 @@ def marketplace_status_snapshot(
     is_manual = name in MANUAL_MARKETPLACES
     has_profile = bool(display_name or account_handle or bridge_account_key)
     connected = is_manual and workflow_state == MANUAL_WORKFLOW_READY and has_profile
+    publish_support_level, publish_support_label, publish_support_note = _publish_support_contract(marketplace=name, publish_mode=publish_mode)
+    import_support_level, import_support_label, import_support_note = _import_support_contract(marketplace=name, import_mode=import_mode)
+    sales_sync_support_level, sales_sync_support_label, sales_sync_support_note = _sales_sync_support_contract(marketplace=name)
     return {
         "marketplace": name,
         "supports_oauth": False,
@@ -254,6 +372,15 @@ def marketplace_status_snapshot(
         "enabled_for_sale_detection": False,
         "external_account_id": account_handle or display_name or None,
         "token_expires_at": None,
+        "publish_support_level": publish_support_level,
+        "publish_support_label": publish_support_label,
+        "publish_support_note": publish_support_note,
+        "import_support_level": import_support_level,
+        "import_support_label": import_support_label,
+        "import_support_note": import_support_note,
+        "sales_sync_support_level": sales_sync_support_level,
+        "sales_sync_support_label": sales_sync_support_label,
+        "sales_sync_support_note": sales_sync_support_note,
         "status_note": str(profile.get("ready_note") or "Manual operator workflow is saved for this marketplace.")
         if connected
         else str(profile.get("saved_note") or "Setup details are saved, but this marketplace is not marked ready yet.")

@@ -316,6 +316,12 @@ function bridgeNextStep({ bridgeAccount, browserConnectInProgress, supportsBrows
   return 'This bridge session looks usable. Assisted posting should have the browser context it needs.';
 }
 
+function supportTone(level) {
+  if (level === 'direct_api') return 'success';
+  if (level === 'browser_assist' || level === 'provider_assist' || level === 'csv_assist') return 'info';
+  return 'default';
+}
+
 function GuideCard({ title, description, tooltip, prerequisites = [], steps = [], tone = 'blue' }) {
   const toneClass =
     tone === 'amber'
@@ -2219,6 +2225,35 @@ export default function SettingsPage() {
                           {marketplace.display_name || marketplace.account_handle || marketplace.external_account_id}
                         </div>
                       ) : null}
+                      <div className="mt-3 grid gap-2 md:grid-cols-3">
+                        <div className="rounded-[10px] border border-[#e5e7eb] bg-[#fcfcfd] px-3 py-3">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Publish contract</p>
+                            {marketplace.publish_support_label ? (
+                              <StatusPill status={supportTone(marketplace.publish_support_level)} label={marketplace.publish_support_label} />
+                            ) : null}
+                          </div>
+                          {marketplace.publish_support_note ? <p className="mt-2 text-sm text-[#475467]">{marketplace.publish_support_note}</p> : null}
+                        </div>
+                        <div className="rounded-[10px] border border-[#e5e7eb] bg-[#fcfcfd] px-3 py-3">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Import contract</p>
+                            {marketplace.import_support_label ? (
+                              <StatusPill status={supportTone(marketplace.import_support_level)} label={marketplace.import_support_label} />
+                            ) : null}
+                          </div>
+                          {marketplace.import_support_note ? <p className="mt-2 text-sm text-[#475467]">{marketplace.import_support_note}</p> : null}
+                        </div>
+                        <div className="rounded-[10px] border border-[#e5e7eb] bg-[#fcfcfd] px-3 py-3">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Sales sync contract</p>
+                            {marketplace.sales_sync_support_label ? (
+                              <StatusPill status={supportTone(marketplace.sales_sync_support_level)} label={marketplace.sales_sync_support_label} />
+                            ) : null}
+                          </div>
+                          {marketplace.sales_sync_support_note ? <p className="mt-2 text-sm text-[#475467]">{marketplace.sales_sync_support_note}</p> : null}
+                        </div>
+                      </div>
                       {supportsBrowserConnect ? (
                         <div className="mt-3 rounded-[10px] border border-[#dbe7ff] bg-[#f7faff] px-3 py-3 text-sm text-[#475467]">
                           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -2560,6 +2595,19 @@ export default function SettingsPage() {
                       ) : null}
                     </div>
                   ) : null}
+                  <div className="mt-4 rounded-[10px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-sm font-semibold text-[#101828]">Browser submit policy</p>
+                      <StatusPill
+                        status={settingsPanels?.automation?.bridge_browser_submit_enabled ? 'success' : 'warning'}
+                        label={settingsPanels?.automation?.bridge_browser_submit_policy_label || 'Policy unavailable'}
+                      />
+                    </div>
+                    <p className="mt-2 text-sm text-[#475467]">
+                      {settingsPanels?.automation?.bridge_browser_submit_policy_note ||
+                        'PosterPro has not confirmed the live bridge submit policy yet.'}
+                    </p>
+                  </div>
                 </div>
                 <div className="rounded-[14px] border border-[#e5e7eb] bg-white p-4">
                   <div className="flex items-start justify-between gap-3">
@@ -3083,6 +3131,35 @@ export default function SettingsPage() {
                 tone="slate"
               />
             ) : null}
+            <div className="grid gap-3 md:grid-cols-3">
+              <div className="rounded-[12px] border border-[#e5e7eb] bg-white p-4">
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Publish contract</p>
+                  {configuredMarketplace.publish_support_label ? (
+                    <StatusPill status={supportTone(configuredMarketplace.publish_support_level)} label={configuredMarketplace.publish_support_label} />
+                  ) : null}
+                </div>
+                {configuredMarketplace.publish_support_note ? <p className="mt-2 text-sm text-[#475467]">{configuredMarketplace.publish_support_note}</p> : null}
+              </div>
+              <div className="rounded-[12px] border border-[#e5e7eb] bg-white p-4">
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Import contract</p>
+                  {configuredMarketplace.import_support_label ? (
+                    <StatusPill status={supportTone(configuredMarketplace.import_support_level)} label={configuredMarketplace.import_support_label} />
+                  ) : null}
+                </div>
+                {configuredMarketplace.import_support_note ? <p className="mt-2 text-sm text-[#475467]">{configuredMarketplace.import_support_note}</p> : null}
+              </div>
+              <div className="rounded-[12px] border border-[#e5e7eb] bg-white p-4">
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Sales sync contract</p>
+                  {configuredMarketplace.sales_sync_support_label ? (
+                    <StatusPill status={supportTone(configuredMarketplace.sales_sync_support_level)} label={configuredMarketplace.sales_sync_support_label} />
+                  ) : null}
+                </div>
+                {configuredMarketplace.sales_sync_support_note ? <p className="mt-2 text-sm text-[#475467]">{configuredMarketplace.sales_sync_support_note}</p> : null}
+              </div>
+            </div>
             {BROWSER_CONNECT_MARKETPLACES.includes(configuredMarketplace.marketplace) ? (
               <div className="space-y-4 rounded-[14px] border border-[#dbe7ff] bg-[#f7faff] p-4">
                 <div className="flex items-start justify-between gap-3">

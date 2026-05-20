@@ -28,6 +28,7 @@ from app.models.models import Listing, MarketplaceCrosspostJob, MarketplaceImpor
 from app.services.marketplace_execution import resolve_execution_mode
 from app.services.marketplace_field_mapper import build_marketplace_payload
 from app.services.automation_bridge import (
+    bridge_browser_submit_policy,
     connect_bridge_account,
     get_bridge_asset,
     get_bridge_connect_desktop_frame,
@@ -256,6 +257,9 @@ def _build_preview_for_marketplace(*, listing: Listing, user: User, marketplace:
         )
     if marketplace == MarketplaceName.facebook.value:
         notes.append("Facebook Marketplace remains modeled as a manual/provider/browser-assisted channel in this deployment.")
+    if execution_mode == "browser_assist":
+        submit_policy = bridge_browser_submit_policy()
+        notes.append(str(submit_policy["policy_note"]))
     return CrosspostPreviewEntry(
         marketplace=marketplace,
         execution_mode=execution_mode,

@@ -810,6 +810,11 @@ export default function ListingWorkspacePage() {
                         ))}
                       </div>
                     ) : null}
+                    {entry.execution_mode === "browser_assist" ? (
+                      <div className="mt-3 rounded-[10px] border border-[#dbe7ff] bg-[#f7faff] p-3 text-sm text-[#1d4ed8]">
+                        Queueing this target does not by itself guarantee final marketplace submission. Check Settings for the current bridge submit policy if you need to confirm whether this deployment stops at draft-fill or is allowed to click the final marketplace submit step.
+                      </div>
+                    ) : null}
                   </div>
                 ))
               ) : (

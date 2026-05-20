@@ -20,6 +20,37 @@ def automation_bridge_ready() -> bool:
     )
 
 
+def bridge_browser_submit_policy() -> dict[str, Any]:
+    if not automation_bridge_ready():
+        return {
+            "configured": False,
+            "browser_submit_enabled": False,
+            "policy_label": "Bridge not configured",
+            "policy_note": "PosterPro cannot verify bridge submit behavior until the automation bridge is fully configured.",
+        }
+    try:
+        health = get_automation_bridge_health()
+    except AutomationBridgeError:
+        return {
+            "configured": True,
+            "browser_submit_enabled": False,
+            "policy_label": "Bridge policy unavailable",
+            "policy_note": "PosterPro could not confirm the live bridge submit policy. Assisted browser runs should be treated as review-first until the bridge health check succeeds.",
+        }
+
+    submit_enabled = bool(health.get("browser_submit_enabled"))
+    return {
+        "configured": True,
+        "browser_submit_enabled": submit_enabled,
+        "policy_label": "Final submit enabled" if submit_enabled else "Draft and review",
+        "policy_note": (
+            "The live bridge is allowed to click the final marketplace action when the browser flow reaches a supported submit step."
+            if submit_enabled
+            else "The live bridge currently stops at draft-fill or assisted handoff. Operators should expect to review and complete final marketplace submission themselves."
+        ),
+    }
+
+
 def _headers() -> dict[str, str]:
     return {
         "Authorization": f"Bearer {settings.automation_bridge_api_key}",
