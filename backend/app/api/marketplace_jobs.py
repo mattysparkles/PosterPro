@@ -58,6 +58,19 @@ def _crosspost_operator_note(*, failed_target_count: int, review_required_count:
     return None
 
 
+def _crosspost_operator_action(*, status_value: str, failed_target_count: int, review_required_count: int, submitted_count: int) -> str | None:
+    status_value = str(status_value or "").lower()
+    if status_value in {"queued", "running"}:
+        return "Monitor progress; open Details for per-target execution state."
+    if failed_target_count:
+        return "Open Details to review failing targets, fix the channel, then Retry."
+    if review_required_count:
+        return "Open Details and complete the marketplace handoff/review steps for pending targets."
+    if submitted_count:
+        return "Verify the marketplace listing is live, then follow up any remaining targets."
+    return None
+
+
 def _build_crosspost_target_outcomes(job: MarketplaceCrosspostJob) -> list[dict]:
     execution_targets = ((job.execution_plan or {}).get("targets") if isinstance(job.execution_plan, dict) else None) or []
     execution_targets = [item for item in execution_targets if isinstance(item, dict)]
@@ -140,6 +153,12 @@ def _serialize_crosspost_job(job: MarketplaceCrosspostJob) -> dict:
         review_required_count=review_required_count,
         submitted_count=submitted_count,
     )
+    operator_action = _crosspost_operator_action(
+        status_value=status_value,
+        failed_target_count=failed_target_count,
+        review_required_count=review_required_count,
+        submitted_count=submitted_count,
+    )
     return {
         "id": job.id,
         "user_id": job.user_id,
@@ -155,6 +174,7 @@ def _serialize_crosspost_job(job: MarketplaceCrosspostJob) -> dict:
         "can_retry": can_retry,
         "can_cancel": can_cancel,
         "operator_note": operator_note,
+        "operator_action": operator_action,
         "review_required_count": review_required_count,
         "submitted_count": submitted_count,
         "failed_target_count": failed_target_count,
@@ -171,15 +191,18 @@ def _serialize_import_job(job: MarketplaceImportJob, *, db: Session) -> dict:
     can_retry = status_value in {"completed", "failed", "canceled"} or is_stale
 
     operator_note = None
+    operator_action = None
     if is_stale:
         operator_note = (
             f"This import job has not updated in over {int(STALE_IMPORT_JOB_AFTER.total_seconds() // 60)} minutes. "
             "Use Recover to reset the stuck worker record and queue a fresh attempt."
         )
+        operator_action = "Recover this stuck import job."
     elif job.source_marketplace == MarketplaceName.ebay.value and job.last_error:
         lowered = str(job.last_error).lower()
         if "reconnect ebay" in lowered or "connect ebay" in lowered:
             operator_note = "Reconnect eBay from Settings, then recover or retry this import job."
+            operator_action = "Reconnect eBay from Settings, then retry or recover this import."
 
     normalized_preview = job.normalized_preview if isinstance(job.normalized_preview, dict) else {}
     review_listing_ids: list[int] = []
@@ -214,6 +237,15 @@ def _serialize_import_job(job: MarketplaceImportJob, *, db: Session) -> dict:
             )
 
     review_required_count = sum(1 for item in review_items if item.get("needs_review"))
+    if operator_action is None:
+        if status_value in {"queued", "running"}:
+            operator_action = "Monitor progress; open Details to review preview and errors."
+        elif status_value == "failed":
+            operator_action = "Open Details to review the error, then Retry after fixing the issue."
+        elif review_required_count:
+            operator_action = "Open the imported listings and complete the required review steps."
+        elif status_value == "completed" and review_items:
+            operator_action = "Review the imported listings."
 
     return {
         "id": job.id,
@@ -231,6 +263,7 @@ def _serialize_import_job(job: MarketplaceImportJob, *, db: Session) -> dict:
         "can_retry": can_retry,
         "can_cancel": can_cancel,
         "operator_note": operator_note,
+        "operator_action": operator_action,
         "review_required_count": review_required_count,
         "review_items": review_items,
         "created_at": job.created_at,

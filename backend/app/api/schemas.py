@@ -444,6 +444,7 @@ class CrosspostJobResponse(BaseModel):
     can_retry: bool = True
     can_cancel: bool = False
     operator_note: str | None = None
+    operator_action: str | None = None
     review_required_count: int = 0
     submitted_count: int = 0
     failed_target_count: int = 0
@@ -478,6 +479,7 @@ class MarketplaceImportJobResponse(BaseModel):
     can_retry: bool = True
     can_cancel: bool = False
     operator_note: str | None = None
+    operator_action: str | None = None
     review_required_count: int = 0
     review_items: list[dict] = Field(default_factory=list)
     created_at: datetime | None = None

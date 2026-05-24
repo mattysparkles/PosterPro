@@ -337,6 +337,14 @@ export default function JobsPage() {
         </div>
       ),
     },
+    {
+      key: "next",
+      label: "Next step",
+      cellClassName: "min-w-[260px]",
+      render: (row) => (
+        <p className="text-sm text-[#475467]">{row.operator_action || row.operator_note || "Open Details for per-target status."}</p>
+      ),
+    },
     { key: "mode", label: "Requested mode", render: (row) => row.requested_mode || "auto" },
     { key: "updated", label: "Updated", render: (row) => formatTime(row.updated_at || row.created_at) },
     {
@@ -367,6 +375,12 @@ export default function JobsPage() {
     { key: "source_marketplace", label: "Source", render: (row) => row.source_marketplace },
     { key: "source_listing_reference", label: "Reference", cellClassName: "min-w-[220px]", render: (row) => row.source_listing_reference || "None" },
     { key: "status", label: "Status", render: (row) => <StatusPill status={row.status} label={row.status} /> },
+    {
+      key: "next",
+      label: "Next step",
+      cellClassName: "min-w-[260px]",
+      render: (row) => <p className="text-sm text-[#475467]">{row.operator_action || row.operator_note || "Open Details for the current import state."}</p>,
+    },
     { key: "listing", label: "Created listing", render: (row) => row.created_listing_id ? <Link href={`/listings/${row.created_listing_id}`} className="font-medium text-[#2563eb]">#{row.created_listing_id}</Link> : "Pending" },
     { key: "updated", label: "Updated", render: (row) => formatTime(row.updated_at || row.created_at) },
     {
@@ -558,6 +572,13 @@ export default function JobsPage() {
                 <p className="mt-2 break-all text-sm font-semibold text-[#101828]">{activeJob.job.task_id || "Not recorded"}</p>
               </div>
             </div>
+
+            {activeJob.job.operator_action ? (
+              <div className="rounded-[12px] border border-[#c7d7fe] bg-[#eff4ff] p-4">
+                <p className="text-sm font-semibold text-[#101828]">Next step</p>
+                <p className="mt-2 text-sm text-[#344054]">{activeJob.job.operator_action}</p>
+              </div>
+            ) : null}
 
             {activeJob.job.operator_note ? (
               <div className="rounded-[12px] border border-[#d0d5dd] bg-[#f8fafc] p-4">
