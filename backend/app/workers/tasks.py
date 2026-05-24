@@ -73,6 +73,14 @@ def _normalize_title_for_match(value: str | None) -> str:
     normalized = re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
     return re.sub(r"\s+", " ", normalized)
 
+def _normalize_image_key(value: str | None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    raw = raw.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+    name = raw.rsplit("/", 1)[-1]
+    return name.lower()
+
 
 def _coerce_price_number(value: Any) -> float | None:
     try:
@@ -107,6 +115,11 @@ def _find_duplicate_import_candidate(
     incoming_ebay_listing_id = incoming_identifiers.get("ebay_listing_id")
     incoming_title = _normalize_title_for_match(normalized.get("title"))
     incoming_price = _coerce_price_number(normalized.get("listing_price"))
+    incoming_images = {
+        key
+        for key in (_normalize_image_key(url) for url in (normalized.get("image_urls") or []))
+        if key
+    }
     if not incoming_title and not incoming_ebay_listing_id:
         return None
 
@@ -114,6 +127,8 @@ def _find_duplicate_import_candidate(
     for candidate in candidates:
         if str(candidate.status).lower() in {"published", "sold"}:
             continue
+        candidate_images = {key for key in (_normalize_image_key(url) for url in (candidate.image_urls or [])) if key}
+        candidate_placeholder = _is_placeholder_import_title(candidate.title)
         candidate_metadata = candidate.source_metadata if isinstance(candidate.source_metadata, dict) else {}
         candidate_identifiers = _extract_source_identifiers(candidate_metadata)
 
@@ -132,6 +147,12 @@ def _find_duplicate_import_candidate(
         candidate_price = _coerce_price_number(candidate.listing_price or candidate.suggested_price or candidate.buy_it_now_price)
         if incoming_title and candidate_title == incoming_title:
             if incoming_price is None or candidate_price is None or abs(candidate_price - incoming_price) <= 1.0:
+                return candidate
+
+        if incoming_images and candidate_images and incoming_images.intersection(candidate_images):
+            if incoming_price is None or candidate_price is None or abs(candidate_price - incoming_price) <= 1.0:
+                return candidate
+            if candidate_placeholder:
                 return candidate
     return None
 
@@ -330,6 +351,19 @@ def _create_imported_listing(
         }
     )
     if existing_listing:
+        existing_source_metadata = existing_listing.source_metadata if isinstance(existing_listing.source_metadata, dict) else {}
+        import_sources = existing_source_metadata.get("import_sources")
+        if not isinstance(import_sources, list):
+            import_sources = []
+        import_sources = [item for item in import_sources if isinstance(item, dict)]
+        import_sources.append(
+            {
+                "source_marketplace": source_marketplace,
+                "source_listing_reference": normalized_reference,
+                "import_job_id": import_job_id,
+                "import_mode": import_mode,
+            }
+        )
         incoming_title = normalized.get("title") or None
         if (not existing_listing.title or _is_placeholder_import_title(existing_listing.title)) and incoming_title:
             existing_listing.title = incoming_title
@@ -349,8 +383,18 @@ def _create_imported_listing(
             existing_listing.tags = normalized.get("tags") or []
         if not existing_listing.quantity:
             existing_listing.quantity = int(normalized.get("quantity") or 1)
-        existing_listing.source_metadata = source_metadata
+        existing_listing.source_metadata = {**existing_source_metadata, **source_metadata, "import_sources": import_sources}
         existing_listing.marketplace_data = existing_listing.marketplace_data or marketplace_data
+        if isinstance(existing_listing.marketplace_data, dict):
+            existing_listing.marketplace_data = normalize_marketplace_data(
+                {
+                    **existing_listing.marketplace_data,
+                    "source_marketplace": existing_listing.marketplace_data.get("source_marketplace") or source_marketplace,
+                    "import_sources": sorted(
+                        {*(existing_listing.marketplace_data.get("import_sources") or []), source_marketplace}
+                    ),
+                }
+            )
         existing_listing.needs_review = True
         db.add(existing_listing)
         db.flush()
@@ -702,7 +746,7 @@ def process_marketplace_import_job_task(self, job_id: int) -> dict:
                         get_active_ebay_listings(
                             user.id,
                             db,
-                            limit=int((job.payload or {}).get("max_listings") or 25),
+                            limit=int((job.payload or {}).get("max_listings") or 50),
                         )
                     )
                 except EbayIntegrationError as exc:

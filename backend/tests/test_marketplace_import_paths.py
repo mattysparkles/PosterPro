@@ -134,6 +134,8 @@ def test_ebay_import_job_reuses_duplicate_listing_by_title_and_price(db_session,
     assert result["reused_listing_ids"] == [existing.id]
     reused = db_session.get(Listing, existing.id)
     assert reused.source_metadata["raw_payload"]["source_identifiers"]["ebay_listing_id"] == "12345"
+    assert any(item.get("source_marketplace") == "ebay" for item in (reused.source_metadata.get("import_sources") or []))
+    assert "ebay" in ((reused.marketplace_data or {}).get("import_sources") or [])
 
 
 def test_ebay_import_job_reuses_duplicate_listing_by_exact_identifier(db_session, monkeypatch):
@@ -205,6 +207,72 @@ def test_ebay_import_job_reuses_duplicate_listing_by_exact_identifier(db_session
     assert result["reused_listing_ids"] == [existing.id]
     reused = db_session.get(Listing, existing.id)
     assert reused.title == "Old Placeholder"
+    assert any(item.get("source_marketplace") == "ebay" for item in (reused.source_metadata.get("import_sources") or []))
+
+
+def test_import_job_reuses_duplicate_listing_by_image_overlap_and_repairs_placeholder_title(db_session, monkeypatch):
+    user = User(email="image-dedupe@example.com")
+    db_session.add(user)
+    db_session.flush()
+
+    account = MarketplaceAccount(
+        user_id=user.id,
+        marketplace="ebay",
+        external_account_id="ebay-user",
+        access_token="token",
+    )
+    db_session.add(account)
+    db_session.flush()
+
+    existing = Listing(
+        user_id=user.id,
+        status=ListingStatus.draft,
+        title="Chats",
+        description="Imported from Facebook earlier",
+        listing_price=10.00,
+        image_urls=["./storage/marketplace_imports/camera.jpg"],
+        source_type="facebook_import",
+        source_metadata={"source_listing_reference": "https://www.facebook.com/marketplace/item/abc"},
+        needs_review=True,
+    )
+    db_session.add(existing)
+    db_session.flush()
+
+    job = MarketplaceImportJob(
+        user_id=user.id,
+        source_marketplace="ebay",
+        import_mode="direct_api",
+        status="queued",
+        payload={"max_listings": 5},
+    )
+    db_session.add(job)
+    db_session.commit()
+
+    async def fake_get_active_ebay_listings(_user_id, _db, *, limit=50):
+        return [
+            {
+                "source_listing_reference": "https://www.ebay.com/itm/12345",
+                "source_url": "https://www.ebay.com/itm/12345",
+                "title": "Vintage Camera Body",
+                "description": "Same item from eBay",
+                "listing_price": 149.99,
+                "price": 149.99,
+                "quantity": 1,
+                "image_urls": ["https://example.com/camera.jpg"],
+                "source_identifiers": {
+                    "ebay_listing_id": "12345",
+                },
+            }
+        ]
+
+    monkeypatch.setattr(tasks, "get_active_ebay_listings", fake_get_active_ebay_listings)
+
+    result = tasks.process_marketplace_import_job_task.run(job.id)
+
+    assert result["new_listing_ids"] == []
+    assert result["reused_listing_ids"] == [existing.id]
+    reused = db_session.get(Listing, existing.id)
+    assert reused.title == "Vintage Camera Body"
 
 
 def test_import_job_stale_helper_marks_old_running_jobs(db_session):
