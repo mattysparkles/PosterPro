@@ -699,6 +699,15 @@
     - `cd /opt/apps/posterpro/repo/frontend && npm run build`
   - Re-validated Task 24 runtime health:
     - restarted `posterpro-frontend.service`
+- Completed Task 25:
+  - Marketplace preview UX pass 1 (human-readable execution previews)
+  - implemented:
+    - listing workspace execution previews now show a structured per-marketplace summary (title, price, condition, shipping, image counts) with JSON payload moved behind a collapsible `Payload JSON` section
+    - improves operator confidence before queueing cross-post jobs and reduces reliance on raw JSON inspection
+  - Re-validated Task 25 build health:
+    - `cd /opt/apps/posterpro/repo/frontend && npm run build`
+  - Re-validated Task 25 runtime health:
+    - restarted `posterpro-frontend.service`
 
 ## 2026-05-15 - Browser-Based Facebook Connect Workspace Pass
 
