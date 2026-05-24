@@ -675,6 +675,16 @@
   - re-run Facebook import to repair existing `Chats`/placeholder drafts in-place
   - run eBay import for the full batch (28 listings) and confirm it creates/reuses drafts as expected
   - verify cross-post preview payloads for Facebook + eBay on the unified drafts, then queue a test cross-post between those two channels
+- Completed Task 23:
+  - Dashboard/auth UX hardening (prevent infinite "Checking your workspace" hang)
+  - implemented:
+    - added client-side API timeouts so calls like `/auth/me` cannot hang the app indefinitely (`NEXT_PUBLIC_API_TIMEOUT_MS`, default 15s)
+    - auth gate now shows an explicit error with `Retry` + `Go to login` actions when session bootstrap fails instead of spinning forever
+  - Re-validated Task 23 build health:
+    - `cd /opt/apps/posterpro/repo && bash scripts/validate.sh`
+    - result: passed
+  - Re-validated Task 23 runtime health:
+    - restarted `posterpro-frontend.service`
 
 ## 2026-05-15 - Browser-Based Facebook Connect Workspace Pass
 
