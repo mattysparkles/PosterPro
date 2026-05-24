@@ -6,6 +6,7 @@ from app.core.database import SessionLocal
 from app.models.models import Cluster, Listing, User
 from app.workers import tasks
 
+
 pytestmark = pytest.mark.skip(reason="Route-level marketplace API tests hang in this sandboxed environment (TestClient/ASGI transport limitations).")
 
 

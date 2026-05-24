@@ -2,6 +2,7 @@ import asyncio
 import tempfile
 import functools
 
+import anyio.to_thread
 import httpx
 import pytest
 import fastapi.routing
@@ -13,6 +14,17 @@ from app import main as main_module
 from app.core import database as database_module
 from app.core.database import Base
 from app.main import app
+
+
+async def _anyio_run_sync_compat(func, *args, abandon_on_cancel=False, cancellable=None, limiter=None):  # noqa: ARG001
+    return await asyncio.to_thread(func, *args)
+
+
+# Patch AnyIO thread offload for this test environment.
+# In this sandbox, AnyIO's default worker-thread path can hang, which blocks
+# FastAPI's sync route/dependency execution. Swapping to asyncio.to_thread keeps
+# the runtime behavior consistent while unblocking route-level tests.
+anyio.to_thread.run_sync = _anyio_run_sync_compat  # type: ignore[assignment]
 
 
 def _reset_database(test_engine) -> None:
@@ -28,6 +40,11 @@ def db_session():
         yield db
     finally:
         db.close()
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
 
 
 @pytest.fixture

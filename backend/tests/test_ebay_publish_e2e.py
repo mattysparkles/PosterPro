@@ -10,7 +10,6 @@ import app.services.ebay_service as ebay_service
 
 pytestmark = pytest.mark.skip(reason="Route-level eBay publish tests hang in this sandboxed environment (TestClient/ASGI transport limitations).")
 
-
 def seed_listing():
     db = SessionLocal()
     user = User(email=f"demo-{uuid4()}@example.com")

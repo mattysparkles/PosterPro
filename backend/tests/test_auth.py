@@ -1,7 +1,7 @@
 import pytest
 
 
-pytestmark = pytest.mark.skip(reason="Route-level auth tests hang in this sandboxed environment (network/socket + TestClient limitations).")
+pytestmark = pytest.mark.skip(reason="Route-level auth tests hang in this sandboxed environment (TestClient/ASGI transport limitations).")
 
 
 @pytest.mark.anyio
