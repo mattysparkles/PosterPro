@@ -77,6 +77,9 @@ const BRIDGE_MARKETPLACE_OPTIONS = ['facebook', 'etsy', 'mercari', 'poshmark', '
 const BROWSER_CONNECT_MARKETPLACES = ['facebook', 'mercari', 'poshmark', 'etsy', 'depop', 'whatnot', 'vinted'];
 const BROWSER_IMPORT_MARKETPLACES = ['facebook'];
 
+const RESELLER_PRIORITY_MARKETPLACES = ['mercari', 'poshmark', 'whatnot'];
+const MARKETPLACE_CARD_PRIORITY = ['ebay', 'facebook', ...RESELLER_PRIORITY_MARKETPLACES, 'etsy', 'depop', 'vinted'];
+
 const MARKETPLACE_GUIDES = {
   ebay: {
     summary: 'Use the eBay app credentials plus the RuName-backed hosted pages to connect each operator account cleanly.',
@@ -99,13 +102,14 @@ const MARKETPLACE_GUIDES = {
     ],
   },
   mercari: {
-    summary: 'Mercari currently uses an operator-managed workflow. PosterPro stores the account details and readiness state for the team.',
-    tooltip: 'This is a guided manual setup today, not a direct OAuth connector.',
-    prerequisites: ['Store or closet name', 'Mercari handle', 'Internal posting notes for the operator'],
+    summary: 'Mercari uses an assisted workflow. PosterPro tracks the account identity, bridge session, and readiness for cross-post drafting and handoff.',
+    tooltip: 'Mercari is not a native OAuth/direct-API connector here. Use the bridge desktop to capture a real authenticated browser session.',
+    prerequisites: ['Bridge account key (mercari-main)', 'Store or closet name + handle', 'Operator posting notes (shipping, pricing, required fields)'],
     steps: [
-      'Save the storefront name and account handle for the operator.',
-      'Document any posting or shipping rules in Workflow notes.',
-      'Mark the workflow Ready only when the human posting process is actually ready to use.',
+      'Save a bridge account key and store the operator identity details.',
+      'Use Connect Mercari account to capture a valid browser session in Bridge Desktop.',
+      'Mark the channel Ready only after the session is valid and the workflow is confirmed.',
+      'Use listing previews + cross-post jobs to generate a structured handoff plan for Mercari.',
     ],
   },
   etsy: {
@@ -119,13 +123,14 @@ const MARKETPLACE_GUIDES = {
     ],
   },
   poshmark: {
-    summary: 'Poshmark is modeled as a guided manual channel so the workspace can still control readiness and workflow quality.',
-    tooltip: 'Operators can prepare the account metadata and process notes before enabling the channel.',
-    prerequisites: ['Closet name', 'Poshmark username', 'Sharing, pricing, or closet-maintenance notes'],
+    summary: 'Poshmark uses an assisted workflow. PosterPro tracks the closet identity, bridge session health, and readiness for drafting/handoff.',
+    tooltip: 'Poshmark is supported through the automation bridge/browser workflow rather than a direct API integration in this deployment.',
+    prerequisites: ['Bridge account key (poshmark-main)', 'Closet name + @username', 'Operator notes (sharing, bundles, offers, shipping defaults)'],
     steps: [
-      'Add the closet display name and the account handle.',
-      'Capture the exact manual process the team should follow for listing and maintenance.',
-      'Move the channel to Ready after the operator workflow has been reviewed.',
+      'Save the bridge account key and operator identity fields.',
+      'Connect Poshmark in Bridge Desktop and confirm the session state is Ready/Valid.',
+      'Mark Ready after you’ve verified the listing workflow and required fields.',
+      'Use listing previews to review how the listing will map into Poshmark draft fields before handoff.',
     ],
   },
   facebook: {
@@ -149,13 +154,14 @@ const MARKETPLACE_GUIDES = {
     ],
   },
   whatnot: {
-    summary: 'Whatnot setup helps operators capture live-selling workflow details inside the account record.',
-    tooltip: 'This is useful for team onboarding even before direct automation is introduced.',
-    prerequisites: ['Seller handle', 'Show format or cadence notes', 'Internal prep checklist'],
+    summary: 'Whatnot is modeled as a live-sale channel. PosterPro tracks the operator identity, bridge session, and readiness for drafting and follow-up.',
+    tooltip: 'Whatnot posting is not a direct API publish path here. Use assisted workflows and operator policy for final submission.',
+    prerequisites: ['Bridge account key (whatnot-main)', 'Seller handle', 'Operator notes (show schedule, shipping, category rules)'],
     steps: [
-      'Save the seller handle and show-facing account name.',
-      'Document the prep, promo, and post-show workflow in notes.',
-      'Mark the workflow Ready once the team can run it consistently.',
+      'Save the bridge account key and seller identity details.',
+      'Connect Whatnot in Bridge Desktop and confirm the session state is Ready/Valid.',
+      'Mark Ready once the operator workflow for live-sale preparation is confirmed.',
+      'Use listing previews to prepare consistent titles, prices, and item specifics before handoff.',
     ],
   },
   vinted: {
@@ -770,6 +776,14 @@ export default function SettingsPage() {
     setActiveCmsPreview(CMS_PAGE_KEYS[0]);
   };
 
+  const isResellerMarketplace = (name) => RESELLER_PRIORITY_MARKETPLACES.includes(String(name || '').toLowerCase());
+  const defaultShippingScopeForMarketplace = (name) => {
+    const normalized = String(name || '').toLowerCase();
+    if (normalized === 'facebook') return 'local_only';
+    if (BROWSER_CONNECT_MARKETPLACES.includes(normalized)) return 'shipping_only';
+    return 'local_only';
+  };
+
   const openMarketplaceDrawer = (marketplace) => {
     if (!marketplace) return;
     const usesBrowserAssistDefaults = BROWSER_CONNECT_MARKETPLACES.includes(marketplace.marketplace);
@@ -781,7 +795,7 @@ export default function SettingsPage() {
       workflow_state: marketplace.workflow_state || 'draft',
       import_mode: marketplace.import_mode || (usesBrowserAssistDefaults && BROWSER_IMPORT_MARKETPLACES.includes(marketplace.marketplace) ? 'browser_assist' : 'manual'),
       publish_mode: marketplace.publish_mode || (usesBrowserAssistDefaults ? 'browser_assist' : 'manual_review'),
-      shipping_scope: marketplace.shipping_scope || 'local_only',
+      shipping_scope: marketplace.shipping_scope || defaultShippingScopeForMarketplace(marketplace.marketplace),
       renewal_mode: marketplace.renewal_mode || 'manual',
       support_url: marketplace.support_url || '',
       bridge_account_key: marketplace.bridge_account_key || '',
@@ -2181,6 +2195,21 @@ export default function SettingsPage() {
             <SectionPanel title="Marketplaces" description="Control which channels are active for publishing and sales sync.">
               <div className="space-y-4">
                 <GuideCard
+                  title="Reseller marketplaces (priority)"
+                  description="Mercari, Poshmark, and Whatnot are treated as assisted channels. The goal is one clean operator workflow: save identity → connect bridge session → validate mapping → handoff or submit with policy."
+                  tooltip="These channels tend to fail when onboarding is ambiguous. This card keeps the steps explicit and repeatable."
+                  prerequisites={[
+                    'Bridge account key saved for the marketplace (ex: mercari-main)',
+                    'Operator can complete login/MFA inside Bridge Desktop',
+                    'Posting policy decided (draft-fill/handoff vs final submit)',
+                  ]}
+                  steps={[
+                    'Open the marketplace setup drawer and save the account identity + notes.',
+                    'Click Connect now and complete login in Bridge Desktop until the session state is Ready/Valid.',
+                    'Run a small import/cross-post test and confirm previews map correctly before scaling.',
+                  ]}
+                />
+                <GuideCard
                   title="Channel onboarding flow"
                   description="Every marketplace should move through the same sequence: confirm prerequisites, save account details, mark the workflow ready, then enable publishing or sales sync."
                   tooltip="This is meant to make marketplace onboarding feel structured rather than improvised."
@@ -2191,7 +2220,20 @@ export default function SettingsPage() {
                     'Enable sales sync only on channels where PosterPro can truly monitor post-sale activity.',
                   ]}
                 />
-                {(setupSummary?.marketplace_connections || []).map((marketplace) => {
+                {[...(setupSummary?.marketplace_connections || [])]
+                  .sort((a, b) => {
+                    const aName = String(a.marketplace || '').toLowerCase();
+                    const bName = String(b.marketplace || '').toLowerCase();
+                    const aRank = MARKETPLACE_CARD_PRIORITY.indexOf(aName);
+                    const bRank = MARKETPLACE_CARD_PRIORITY.indexOf(bName);
+                    if (aRank !== -1 || bRank !== -1) {
+                      if (aRank === -1) return 1;
+                      if (bRank === -1) return -1;
+                      return aRank - bRank;
+                    }
+                    return aName.localeCompare(bName);
+                  })
+                  .map((marketplace) => {
                   const publishingEnabled = publishingPlatforms.includes(marketplace.marketplace);
                   const salesEnabled = salePlatforms.includes(marketplace.marketplace);
                   const manualMode = marketplace.connection_mode === 'manual';
@@ -2203,8 +2245,15 @@ export default function SettingsPage() {
                     supportsBrowserConnect &&
                     bridgeAccount &&
                     ['ready', 'active', 'valid'].includes(String(bridgeAccount.session_state || '').toLowerCase());
+                  const resellerPriority = isResellerMarketplace(marketplace.marketplace);
                   return (
-                    <div key={marketplace.marketplace} className="rounded-[10px] border border-[#e5e7eb] bg-white p-4">
+                    <div
+                      key={marketplace.marketplace}
+                      className={[
+                        'rounded-[10px] border bg-white p-4',
+                        resellerPriority ? 'border-[#bfd4ff] bg-[#fbfdff]' : 'border-[#e5e7eb]',
+                      ].join(' ')}
+                    >
                       <div className="flex items-center justify-between gap-4">
                         <div>
                           <div className="flex items-center gap-2">
@@ -2215,7 +2264,11 @@ export default function SettingsPage() {
                           {guide?.summary ? <p className="mt-2 text-sm text-[#475467]">{guide.summary}</p> : null}
                         </div>
                         <div className="flex flex-wrap items-center gap-2">
-                          <StatusPill status={marketplace.available ? 'info' : 'warning'} label={marketplace.connection_mode === 'oauth' ? 'OAuth' : 'Manual'} />
+                          {resellerPriority ? <StatusPill status="info" label="Reseller priority" /> : null}
+                          <StatusPill
+                            status={marketplace.available ? 'info' : 'warning'}
+                            label={marketplace.connection_mode === 'oauth' ? 'OAuth' : supportsBrowserConnect ? 'Browser assist' : 'Manual'}
+                          />
                           <StatusPill status={marketplace.connected ? 'success' : 'default'} label={marketplace.connected ? 'Ready' : 'Not ready'} />
                         </div>
                       </div>
@@ -3131,6 +3184,32 @@ export default function SettingsPage() {
                 tone="slate"
               />
             ) : null}
+            {isResellerMarketplace(configuredMarketplace.marketplace) ? (
+              <div className="rounded-[14px] border border-[#dbe7ff] bg-[#f7faff] p-4 text-sm text-[#475467]">
+                <p className="font-semibold text-[#101828]">Recommended defaults</p>
+                <p className="mt-2">
+                  For reseller marketplaces, start with browser-assisted publish mode and shipping-only scope. You can tune these later after the first successful import/cross-post test.
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      setMarketplaceForm((current) => ({
+                        ...current,
+                        import_mode: current.import_mode || 'manual',
+                        publish_mode: 'browser_assist',
+                        shipping_scope: 'shipping_only',
+                        renewal_mode: current.renewal_mode || 'manual',
+                      }))
+                    }
+                  >
+                    Apply recommended defaults
+                  </Button>
+                </div>
+              </div>
+            ) : null}
             <div className="grid gap-3 md:grid-cols-3">
               <div className="rounded-[12px] border border-[#e5e7eb] bg-white p-4">
                 <div className="flex flex-wrap items-center gap-2">
@@ -3428,7 +3507,7 @@ export default function SettingsPage() {
                     workflow_state: 'draft',
                     import_mode: BROWSER_IMPORT_MARKETPLACES.includes(configuredMarketplace.marketplace) ? 'browser_assist' : 'manual',
                     publish_mode: BROWSER_CONNECT_MARKETPLACES.includes(configuredMarketplace.marketplace) ? 'browser_assist' : 'manual_review',
-                    shipping_scope: 'local_only',
+                    shipping_scope: defaultShippingScopeForMarketplace(configuredMarketplace.marketplace),
                     renewal_mode: 'manual',
                     support_url: '',
                     bridge_account_key: '',
