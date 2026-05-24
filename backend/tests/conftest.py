@@ -1,6 +1,8 @@
 import asyncio
 import tempfile
 import functools
+import os
+import faulthandler
 
 import anyio.to_thread
 import httpx
@@ -17,7 +19,7 @@ from app.main import app
 
 
 async def _anyio_run_sync_compat(func, *args, abandon_on_cancel=False, cancellable=None, limiter=None):  # noqa: ARG001
-    return await asyncio.to_thread(func, *args)
+    return func(*args)
 
 
 # Patch AnyIO thread offload for this test environment.
@@ -49,13 +51,15 @@ def anyio_backend():
 
 @pytest.fixture
 async def async_client():
+    if os.getenv("POSTERPRO_TEST_FAULTHANDLER") == "1":
+        faulthandler.dump_traceback_later(20, repeat=True)
     original_fastapi_run_in_threadpool = fastapi.routing.run_in_threadpool
     original_starlette_run_in_threadpool = starlette.concurrency.run_in_threadpool
 
     async def _run_in_threadpool_compat(func, *args, **kwargs):
         if kwargs:
             func = functools.partial(func, **kwargs)
-        return await asyncio.to_thread(func, *args)
+        return func(*args)
 
     fastapi.routing.run_in_threadpool = _run_in_threadpool_compat  # type: ignore[assignment]
     starlette.concurrency.run_in_threadpool = _run_in_threadpool_compat  # type: ignore[assignment]
@@ -75,13 +79,13 @@ async def async_client():
         database_module.SessionLocal = sessionmaker(bind=test_engine, autoflush=False, autocommit=False)
         main_module.engine = test_engine
 
-        await app.router.startup()
+        await asyncio.wait_for(app.router.startup(), timeout=10)
         _reset_database(test_engine)
 
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             yield client
-        await app.router.shutdown()
+        await asyncio.wait_for(app.router.shutdown(), timeout=10)
     finally:
         main_module.engine = original_engine
         database_module.engine = original_engine

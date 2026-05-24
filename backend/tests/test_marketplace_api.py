@@ -2,25 +2,18 @@ from uuid import uuid4
 
 import pytest
 
-from app.core.database import SessionLocal
-from app.models.models import Cluster, Listing, User
+from app.core import database as database_module
+from app.models.models import Cluster, Listing
 from app.workers import tasks
 
 
-pytestmark = pytest.mark.skip(reason="Route-level marketplace API tests hang in this sandboxed environment (TestClient/ASGI transport limitations).")
-
-
-def seed_listing():
-    db = SessionLocal()
-    user = User(email=f"market-{uuid4()}@example.com")
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-    cluster = Cluster(user_id=user.id, title_hint="Shoes")
+def seed_listing(user_id: int) -> int:
+    db = database_module.SessionLocal()
+    cluster = Cluster(user_id=user_id, title_hint="Shoes")
     db.add(cluster)
     db.commit()
     db.refresh(cluster)
-    listing = Listing(user_id=user.id, cluster_id=cluster.id, title="Shoes", description="Clean")
+    listing = Listing(user_id=user_id, cluster_id=cluster.id, title="Shoes", description="Clean")
     db.add(listing)
     db.commit()
     db.refresh(listing)
@@ -30,7 +23,18 @@ def seed_listing():
 
 @pytest.mark.anyio
 async def test_marketplace_discovery_and_publish_queue(async_client, monkeypatch):
-    listing_id = seed_listing()
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "Marketplace Owner",
+            "email": f"market-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+
+    listing_id = seed_listing(user_id)
 
     class DummyTask:
         id = "task-123"

@@ -12,7 +12,12 @@ PYTHONPATH="$ROOT_DIR/bridge" "$ROOT_DIR/backend/.venv/bin/python" -m compileall
 echo "== Backend: pytest (targeted) =="
 PYTHONPATH="$ROOT_DIR/backend" "$ROOT_DIR/backend/.venv/bin/pytest" \
   "$ROOT_DIR/backend/tests/test_startup_schema_compat.py" \
+  "$ROOT_DIR/backend/tests/test_auth.py" \
+  "$ROOT_DIR/backend/tests/test_marketplace_setup.py" \
   "$ROOT_DIR/backend/tests/test_marketplace_setup_health.py" \
+  "$ROOT_DIR/backend/tests/test_marketplace_api.py" \
+  "$ROOT_DIR/backend/tests/test_storage_unit_batch_e2e.py" \
+  "$ROOT_DIR/backend/tests/test_ebay_publish_e2e.py" \
   "$ROOT_DIR/backend/tests/test_marketplace_bridge_connect_sessions.py" \
   "$ROOT_DIR/backend/tests/test_marketplace_job_summaries.py" \
   "$ROOT_DIR/backend/tests/test_marketplace_publish_paths.py" \
@@ -29,4 +34,3 @@ echo "== Frontend: build =="
 (cd "$ROOT_DIR/frontend" && npm run build)
 
 echo "OK"
-

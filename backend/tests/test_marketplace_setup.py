@@ -1,9 +1,5 @@
 import pytest
 
-
-pytestmark = pytest.mark.skip(reason="Route-level marketplace setup tests hang in this sandboxed environment (TestClient/ASGI transport limitations).")
-
-
 @pytest.mark.anyio
 async def test_manual_marketplace_setup_controls_publish_readiness(async_client):
     register = await async_client.post(

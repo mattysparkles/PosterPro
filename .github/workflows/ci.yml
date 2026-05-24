@@ -33,7 +33,12 @@ jobs:
         run: |
           PYTHONPATH=backend pytest \
             backend/tests/test_startup_schema_compat.py \
+            backend/tests/test_auth.py \
+            backend/tests/test_marketplace_setup.py \
             backend/tests/test_marketplace_setup_health.py \
+            backend/tests/test_marketplace_api.py \
+            backend/tests/test_storage_unit_batch_e2e.py \
+            backend/tests/test_ebay_publish_e2e.py \
             backend/tests/test_marketplace_bridge_connect_sessions.py \
             backend/tests/test_marketplace_job_summaries.py \
             backend/tests/test_marketplace_publish_paths.py \
@@ -63,4 +68,3 @@ jobs:
       - name: Frontend build
         working-directory: frontend
         run: npm run build
-

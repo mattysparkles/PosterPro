@@ -4,23 +4,9 @@ from uuid import uuid4
 
 import pytest
 
-from app.core.database import SessionLocal
-from app.models.models import StorageUnitBatch, User
+from app.core import database as database_module
+from app.models.models import StorageUnitBatch
 import app.api.routes as routes_api
-
-
-pytestmark = pytest.mark.skip(reason="Route-level batch upload tests hang in this sandboxed environment (multipart + TestClient/ASGI limitations).")
-
-
-def seed_user():
-    db = SessionLocal()
-    user = User(email=f"batch-{uuid4()}@example.com")
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-    db.close()
-    return user.id
-
 
 class DummyTask:
     id = "batch-task-1"
@@ -28,7 +14,16 @@ class DummyTask:
 
 @pytest.mark.anyio
 async def test_storage_batch_from_urls(async_client, monkeypatch):
-    user_id = seed_user()
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "Batch Owner",
+            "email": f"batch-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
 
     def fake_save_from_url(self, _url, prefix="batch_uploads"):
         return f"./storage/{prefix}/{uuid4()}.jpg"
@@ -51,7 +46,16 @@ async def test_storage_batch_from_urls(async_client, monkeypatch):
 
 @pytest.mark.anyio
 async def test_storage_batch_zip_queued_and_run(async_client, monkeypatch):
-    user_id = seed_user()
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "Batch Owner",
+            "email": f"batch-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
     monkeypatch.setattr(routes_api, "enqueue_storage_unit_batch_pipeline", lambda batch_id, listing_ids: DummyTask())
 
     archive = io.BytesIO()
@@ -74,7 +78,7 @@ async def test_storage_batch_zip_queued_and_run(async_client, monkeypatch):
     assert run_response.status_code == 200
     assert run_response.json()["status"] == "PROCESSING"
 
-    db = SessionLocal()
+    db = database_module.SessionLocal()
     batch = db.get(StorageUnitBatch, batch_id)
     assert batch is not None
     assert batch.pipeline_task_id == "batch-task-1"

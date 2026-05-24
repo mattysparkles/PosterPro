@@ -1,9 +1,5 @@
 import pytest
 
-
-pytestmark = pytest.mark.skip(reason="Route-level auth tests hang in this sandboxed environment (TestClient/ASGI transport limitations).")
-
-
 @pytest.mark.anyio
 async def test_register_login_password_change_reset_and_view_mode(async_client):
     register_response = await async_client.post(

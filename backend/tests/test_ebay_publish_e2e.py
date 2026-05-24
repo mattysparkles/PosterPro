@@ -2,27 +2,20 @@ from uuid import uuid4
 
 import pytest
 
-from app.core.database import SessionLocal
+from app.core import database as database_module
 from app.models.enums import EbayPublishStatus
-from app.models.models import Cluster, Listing, User
+from app.models.models import Cluster, Listing
 import app.api.ebay as ebay_api
 import app.services.ebay_service as ebay_service
 
-pytestmark = pytest.mark.skip(reason="Route-level eBay publish tests hang in this sandboxed environment (TestClient/ASGI transport limitations).")
-
-def seed_listing():
-    db = SessionLocal()
-    user = User(email=f"demo-{uuid4()}@example.com")
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-
-    cluster = Cluster(user_id=user.id, title_hint="Lamp")
+def seed_listing(user_id: int) -> int:
+    db = database_module.SessionLocal()
+    cluster = Cluster(user_id=user_id, title_hint="Lamp")
     db.add(cluster)
     db.commit()
     db.refresh(cluster)
 
-    listing = Listing(user_id=user.id, cluster_id=cluster.id, title="Lamp", description="Desc")
+    listing = Listing(user_id=user_id, cluster_id=cluster.id, title="Lamp", description="Desc")
     db.add(listing)
     db.commit()
     db.refresh(listing)
@@ -32,7 +25,17 @@ def seed_listing():
 
 @pytest.mark.anyio
 async def test_publish_success(async_client, monkeypatch):
-    listing_id = seed_listing()
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "eBay Owner",
+            "email": f"demo-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    listing_id = seed_listing(user_id)
 
     async def fake_publish(listing, db):
         listing.ebay_publish_status = EbayPublishStatus.POSTED
@@ -52,7 +55,17 @@ async def test_publish_success(async_client, monkeypatch):
 
 @pytest.mark.anyio
 async def test_publish_failure(async_client, monkeypatch):
-    listing_id = seed_listing()
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "eBay Owner",
+            "email": f"demo-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    listing_id = seed_listing(user_id)
 
     async def fake_publish(_listing, _db):
         raise ebay_service.EbayIntegrationError("retry exhausted")
