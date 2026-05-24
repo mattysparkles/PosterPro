@@ -1,6 +1,6 @@
 # PosterPro Completion Roadmap
 
-Last updated: 2026-05-17
+Last updated: 2026-05-24
 
 ## Current verified state
 
@@ -17,6 +17,7 @@ Last updated: 2026-05-17
   - eBay direct publish/import baseline
   - bridge/browser connect-session hardening
   - assisted marketplace job visibility and operator drill-down pass 1
+  - jobs console "next step" guidance surfaced via backend-derived `operator_action`
 
 ## Main remaining risks
 
