@@ -685,6 +685,20 @@
     - result: passed
   - Re-validated Task 23 runtime health:
     - restarted `posterpro-frontend.service`
+- Completed Task 24:
+  - Reseller marketplace onboarding UX pass 1 (Mercari/Poshmark/Whatnot priority)
+  - implemented:
+    - marketplaces tab now prioritizes reseller channels (Mercari/Poshmark/Whatnot) directly under eBay/Facebook and labels them as `Reseller priority`
+    - expanded setup guides for Mercari/Poshmark/Whatnot to reflect the real assisted/bridge workflow (identity + bridge session + validation + handoff policy)
+    - marketplace drawer now applies safer default `shipping_scope` per channel (shipping-first for browser-assist marketplaces, local-only for Facebook)
+    - added an `Apply recommended defaults` action for reseller marketplaces to quickly set:
+      - `publish_mode: browser_assist`
+      - `shipping_scope: shipping_only`
+    - added a dedicated onboarding guide card for reseller marketplaces so operators see the intended flow before enabling publishing
+  - Re-validated Task 24 build health:
+    - `cd /opt/apps/posterpro/repo/frontend && npm run build`
+  - Re-validated Task 24 runtime health:
+    - restarted `posterpro-frontend.service`
 
 ## 2026-05-15 - Browser-Based Facebook Connect Workspace Pass
 
