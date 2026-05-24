@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import os
 import secrets
+import sys
 import time
 from typing import Annotated
 
@@ -17,7 +18,7 @@ from app.models.models import User
 
 SESSION_COOKIE_NAME = "posterpro_session"
 SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 14
-PASSWORD_ITERATIONS = 390_000
+PASSWORD_ITERATIONS = 10_000 if "pytest" in sys.modules else 390_000
 VINE_ALLOWED_ROLES = {"owner", "admin", "employee"}
 PASSWORD_RESET_TTL_SECONDS = 60 * 60
 

@@ -1,7 +1,14 @@
+import sys
+
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.secrets import decrypt_secret_if_needed
+
+
+_RUNNING_PYTEST = "pytest" in sys.modules
+_DEFAULT_DB_URL = "sqlite:///./posterpro_test.db" if _RUNNING_PYTEST else "sqlite:///./posterpro.db"
+_ENV_FILE = None if _RUNNING_PYTEST else ".env"
 
 
 class Settings(BaseSettings):
@@ -10,7 +17,7 @@ class Settings(BaseSettings):
     environment: str = "development"
     cors_allowed_origins: str | None = None
     # Keep local defaults credential-free; production should supply explicit env vars.
-    database_url: str = "sqlite:///./posterpro.db"
+    database_url: str = _DEFAULT_DB_URL
     redis_url: str = "redis://localhost:6379/1"
     storage_root: str = "./storage"
     startup_schema_compat_enabled: bool = True
@@ -62,7 +69,7 @@ class Settings(BaseSettings):
     smtp_from_name: str | None = None
     smtp_use_tls: bool = True
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore")
 
     @property
     def openai_api_key(self) -> str | None:

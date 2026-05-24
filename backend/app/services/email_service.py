@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import smtplib
+import sys
 from email.message import EmailMessage
 from urllib.parse import urlencode
 
@@ -12,6 +13,8 @@ class EmailDeliveryError(RuntimeError):
 
 
 def smtp_configured() -> bool:
+    if "pytest" in sys.modules:
+        return False
     return bool(
         settings.smtp_host
         and settings.smtp_port
