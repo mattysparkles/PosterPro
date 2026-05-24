@@ -16,14 +16,18 @@ const AuthContext = createContext(null);
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [bootError, setBootError] = useState(null);
 
   const refreshUser = async () => {
+    setLoading(true);
+    setBootError(null);
     try {
       const currentUser = await fetchCurrentUser();
       setUser(currentUser);
       return currentUser;
     } catch (error) {
       setUser(null);
+      setBootError(error?.message || 'Unable to load your session.');
       return null;
     } finally {
       setLoading(false);
@@ -38,6 +42,7 @@ export function AuthProvider({ children }) {
     () => ({
       user,
       loading,
+      bootError,
       refreshUser,
       login: async (payload) => {
         const session = await loginUser(payload);
@@ -66,7 +71,7 @@ export function AuthProvider({ children }) {
         return nextUser;
       },
     }),
-    [loading, user],
+    [bootError, loading, user],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

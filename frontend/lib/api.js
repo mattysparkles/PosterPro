@@ -1,10 +1,28 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
 
+const DEFAULT_TIMEOUT_MS = Number(process.env.NEXT_PUBLIC_API_TIMEOUT_MS || 15000);
+
 async function jsonFetch(url, options = {}) {
-  const response = await fetch(url, {
-    credentials: "include",
-    ...options,
-  });
+  const controller = new AbortController();
+  const timeoutMs = Number(options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const timeoutId = Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? setTimeout(() => controller.abort(), timeoutMs)
+    : null;
+  let response;
+  try {
+    response = await fetch(url, {
+      credentials: "include",
+      signal: controller.signal,
+      ...options,
+    });
+  } catch (error) {
+    if (timeoutId) clearTimeout(timeoutId);
+    if (error?.name === "AbortError") {
+      throw new Error("Request timed out. Please retry.");
+    }
+    throw error;
+  }
+  if (timeoutId) clearTimeout(timeoutId);
   const contentType = response.headers.get("content-type") || "";
   const data = contentType.includes("application/json")
     ? await response.json()
