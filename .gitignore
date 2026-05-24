@@ -9,3 +9,7 @@ frontend/.next/
 bridge/app/__pycache__/
 bridge/data/
 .DS_Store
+backups/
+posterpro.db
+posterpro-*.patch
+posterpro-*.txt
