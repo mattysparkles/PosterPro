@@ -654,6 +654,27 @@
     - `cd /opt/apps/posterpro/repo && bash scripts/validate.sh`
     - result: backend `28 passed`, bridge `1 passed`, frontend build passed
 - The next queued roadmap move is Production acceptance pass 1 (repeat live positive-path verification for: auth, marketplace setup, eBay import with fresh tokens, assisted browser crosspost, and reconnect/recovery paths).
+- Completed Task 22:
+  - Import/dedupe pass 3 (merge cross-marketplace drafts and repair placeholder titles)
+  - implemented:
+    - import duplicate detection now considers image filename overlap (in addition to identifiers + title/price), allowing older Facebook imports with placeholder titles like `Chats` to be matched and repaired when re-imported from another source
+    - reused/merged imports now preserve an `import_sources` trail in `source_metadata` so one PosterPro draft can track multiple upstream marketplace sources without losing prior provenance
+    - imported/reused listings now accumulate `marketplace_data.import_sources` so operator UI can see where the draft originated
+    - eBay import default `max_listings` increased from `25` to `50` so operators can pull a full small inventory batch (ex: 28 listings) in one run without changing settings
+    - added regression coverage for image-overlap dedupe + placeholder title repair in:
+      - `/opt/apps/posterpro/repo/backend/tests/test_marketplace_import_paths.py`
+  - Re-validated Task 22 build/test health:
+    - `cd /opt/apps/posterpro/repo && bash scripts/validate.sh`
+    - result: backend `29 passed`, bridge `1 passed`, frontend build passed
+  - Re-validated Task 22 runtime health:
+    - restarted:
+      - `posterpro-backend.service`
+      - `posterpro-worker.service`
+    - confirmed backend `http://127.0.0.1:8030/health` returned `200`
+- The next queued roadmap move is Production acceptance pass 2:
+  - re-run Facebook import to repair existing `Chats`/placeholder drafts in-place
+  - run eBay import for the full batch (28 listings) and confirm it creates/reuses drafts as expected
+  - verify cross-post preview payloads for Facebook + eBay on the unified drafts, then queue a test cross-post between those two channels
 
 ## 2026-05-15 - Browser-Based Facebook Connect Workspace Pass
 
