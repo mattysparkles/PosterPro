@@ -381,6 +381,19 @@ class VineImportItem(Base, TimestampMixin):
     listing_id: Mapped[int | None] = mapped_column(ForeignKey("listings.id"), nullable=True)
     source_confidence: Mapped[str] = mapped_column(String(16), default="high")
     reviewed: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    brand: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    category: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    review_deadline: Mapped[date | None] = mapped_column(Date, nullable=True)
+    item_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    manual_amazon_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    amazon_match_status: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    amazon_match_confidence: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    amazon_match_asin: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    amazon_match_title: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    amazon_source_page_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    image_import_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    image_import_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class ProductMediaCache(Base, TimestampMixin):

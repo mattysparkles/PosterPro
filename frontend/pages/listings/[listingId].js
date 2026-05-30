@@ -249,6 +249,79 @@ export default function ListingWorkspacePage() {
     });
   };
 
+  const formatMoney = (value) => {
+    if (value === null || value === undefined || value === "") return "—";
+    const num = Number(value);
+    if (!Number.isFinite(num)) return String(value);
+    return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(num);
+  };
+
+  const renderPreviewDetails = (entry) => {
+    const payload = entry?.payload || {};
+    const marketplace = String(entry?.marketplace || payload.marketplace || "").toLowerCase();
+    const imageCount = Array.isArray(payload.image_urls) ? payload.image_urls.length : 0;
+    if (marketplace === "ebay") {
+      const policy = payload.shipping_policy || {};
+      return [
+        ["Title", payload.title || "—"],
+        ["Price", formatMoney(payload.price)],
+        ["Quantity", payload.quantity ?? "—"],
+        ["Condition", payload.condition || "—"],
+        ["Category", payload.category_id || "—"],
+        ["Shipping", `${policy.service || "—"} · ${policy.free_shipping ? "Free shipping" : "Buyer pays"} · ${policy.handling_time_days ?? "—"} day handling`],
+        ["Images", `${imageCount} attached`],
+      ];
+    }
+    if (marketplace === "facebook") {
+      return [
+        ["Title", payload.title || "—"],
+        ["Price", formatMoney(payload.price)],
+        ["Condition", payload.condition || "—"],
+        ["Availability", payload.availability || "—"],
+        ["Delivery", payload.delivery_method || "—"],
+        ["Category hint", payload.category_hint || "—"],
+        ["Images", `${imageCount} attached`],
+      ];
+    }
+    if (marketplace === "mercari") {
+      return [
+        ["Title", payload.title || "—"],
+        ["Price", formatMoney(payload.price)],
+        ["Condition", payload.condition || "—"],
+        ["Brand", payload.brand || "—"],
+        ["Category hint", payload.category_hint || "—"],
+        ["Images", `${imageCount} attached`],
+      ];
+    }
+    if (marketplace === "poshmark") {
+      return [
+        ["Title", payload.title || "—"],
+        ["List price", formatMoney(payload.listing_price)],
+        ["Brand", payload.brand || "—"],
+        ["Size", payload.size || "—"],
+        ["Condition", payload.condition || "—"],
+        ["Category hint", payload.category_hint || "—"],
+        ["Images", `${imageCount} attached`],
+      ];
+    }
+    if (marketplace === "whatnot") {
+      return [
+        ["Title", payload.title || "—"],
+        ["Starting bid", formatMoney(payload.starting_bid)],
+        ["Quantity", payload.quantity ?? "—"],
+        ["Condition", payload.condition || "—"],
+        ["Category hint", payload.category_hint || "—"],
+        ["Images", `${imageCount} attached`],
+      ];
+    }
+    return [
+      ["Title", payload.title || payload.headline || "—"],
+      ["Price", formatMoney(payload.price || payload.listing_price || payload.starting_bid)],
+      ["Condition", payload.condition || "—"],
+      ["Images", `${imageCount} attached`],
+    ];
+  };
+
   const buildPayload = (nextStatus) => {
     const itemSpecifics = parseJsonField(form.item_specifics_json, "Item specifics");
     const sourceMetadata = parseJsonField(form.source_metadata_json, "Source metadata");
@@ -800,14 +873,35 @@ export default function ListingWorkspacePage() {
                       <p className="text-sm font-semibold text-[#101828]">{CHANNEL_LABELS[entry.marketplace] || entry.marketplace}</p>
                       <StatusPill status={entry.execution_mode === "direct_api" ? "success" : "warning"} label={entry.execution_mode} />
                     </div>
-                    <div className="mt-3 rounded-[10px] bg-[#f8fafc] p-3 font-mono text-xs text-[#344054]">
-                      {JSON.stringify(entry.payload, null, 2)}
+                    <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                      <div className="rounded-[10px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+                        <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[#667085]">Preview summary</p>
+                        <dl className="mt-3 grid gap-2">
+                          {renderPreviewDetails(entry).map(([label, value]) => (
+                            <div key={label} className="flex items-start justify-between gap-3 text-sm">
+                              <dt className="text-[#667085]">{label}</dt>
+                              <dd className="text-right font-medium text-[#101828]">{value}</dd>
+                            </div>
+                          ))}
+                        </dl>
+                      </div>
+                      <details className="rounded-[10px] border border-[#e5e7eb] bg-[#f8fafc] p-3">
+                        <summary className="cursor-pointer text-sm font-medium text-[#101828]">Payload JSON</summary>
+                        <pre className="mt-3 overflow-auto whitespace-pre-wrap break-words font-mono text-xs text-[#344054]">
+                          {JSON.stringify(entry.payload, null, 2)}
+                        </pre>
+                      </details>
                     </div>
                     {entry.notes?.length ? (
                       <div className="mt-3 space-y-1 text-sm text-[#475467]">
                         {entry.notes.map((note) => (
                           <p key={note}>{note}</p>
                         ))}
+                      </div>
+                    ) : null}
+                    {entry.execution_mode === "browser_assist" ? (
+                      <div className="mt-3 rounded-[10px] border border-[#dbe7ff] bg-[#f7faff] p-3 text-sm text-[#1d4ed8]">
+                        Queueing this target does not by itself guarantee final marketplace submission. Check Settings for the current bridge submit policy if you need to confirm whether this deployment stops at draft-fill or is allowed to click the final marketplace submit step.
                       </div>
                     ) : null}
                   </div>

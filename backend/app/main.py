@@ -26,15 +26,43 @@ from app.core.auth import SESSION_COOKIE_NAME, parse_session_token
 from app.core.config import settings
 from app.core.database import Base, SessionLocal, engine
 from app.models.models import User
+from app.services.automation_bridge import AutomationBridgeError, get_bridge_connect_session
 from app.services.bridge_desktop import BridgeDesktopTokenError, bridge_desktop_target, parse_bridge_desktop_token
 
 logger = logging.getLogger(__name__)
 
-def _add_column_if_missing(connection, table_name: str, column_name: str, ddl: str) -> None:
+# Keep startup-time schema mutation intentionally narrow.
+# Most schema evolution is already represented in repo migrations and should not
+# continue to drift through application startup side effects.
+_LEGACY_STARTUP_COLUMNS: dict[str, list[tuple[str, str]]] = {
+    "users": [
+        ("full_name", "full_name VARCHAR(255)"),
+        ("settings_json", "settings_json JSON"),
+    ],
+    "vine_import_items": [
+        ("brand", "brand VARCHAR(255)"),
+        ("category", "category VARCHAR(255)"),
+        ("source_status", "source_status VARCHAR(64)"),
+        ("review_deadline", "review_deadline DATE"),
+        ("item_url", "item_url TEXT"),
+        ("manual_amazon_url", "manual_amazon_url TEXT"),
+        ("amazon_match_status", "amazon_match_status VARCHAR(64)"),
+        ("amazon_match_confidence", "amazon_match_confidence VARCHAR(32)"),
+        ("amazon_match_asin", "amazon_match_asin VARCHAR(16)"),
+        ("amazon_match_title", "amazon_match_title VARCHAR(512)"),
+        ("amazon_source_page_url", "amazon_source_page_url TEXT"),
+        ("image_import_status", "image_import_status VARCHAR(64)"),
+        ("image_import_error", "image_import_error TEXT"),
+    ],
+}
+
+def _add_column_if_missing(connection, table_name: str, column_name: str, ddl: str) -> bool:
     inspector = inspect(connection)
     existing = {column["name"] for column in inspector.get_columns(table_name)}
     if column_name not in existing:
         connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {ddl}"))
+        return True
+    return False
 
 
 def _cors_origins() -> list[str]:
@@ -57,44 +85,26 @@ def _cors_origins() -> list[str]:
     return origins
 
 
-def _bootstrap_database() -> None:
+def _bootstrap_database() -> dict[str, object]:
     Base.metadata.create_all(bind=engine)
+    applied_legacy_columns: list[str] = []
     with engine.begin() as connection:
-        _add_column_if_missing(connection, "users", "password_hash", "password_hash TEXT")
-        _add_column_if_missing(connection, "users", "is_admin", "is_admin BOOLEAN NOT NULL DEFAULT FALSE")
-        _add_column_if_missing(connection, "users", "role", "role VARCHAR(32) NOT NULL DEFAULT 'public'")
-        _add_column_if_missing(connection, "users", "settings_json", "settings_json JSON")
-        _add_column_if_missing(connection, "users", "enabled_platforms", "enabled_platforms JSON")
-        _add_column_if_missing(connection, "users", "sale_detection_platforms", "sale_detection_platforms JSON")
-        _add_column_if_missing(connection, "listings", "image_urls", "image_urls JSON")
-        _add_column_if_missing(connection, "listings", "raw_photo_path", "raw_photo_path TEXT")
-        _add_column_if_missing(connection, "listings", "storage_unit_name", "storage_unit_name VARCHAR(255)")
-        _add_column_if_missing(connection, "listings", "category_id", "category_id VARCHAR(255)")
-        _add_column_if_missing(connection, "listings", "item_specifics", "item_specifics JSON")
-        _add_column_if_missing(connection, "listings", "estimated_value", "estimated_value DOUBLE PRECISION")
-        _add_column_if_missing(connection, "listings", "listing_price", "listing_price DOUBLE PRECISION")
-        _add_column_if_missing(connection, "listings", "purchase_cost", "purchase_cost DOUBLE PRECISION")
-        _add_column_if_missing(connection, "listings", "fees_estimated", "fees_estimated DOUBLE PRECISION")
-        _add_column_if_missing(connection, "listings", "fees_actual", "fees_actual DOUBLE PRECISION")
-        _add_column_if_missing(connection, "listings", "shipping_cost", "shipping_cost DOUBLE PRECISION")
-        _add_column_if_missing(connection, "listings", "sale_price", "sale_price DOUBLE PRECISION")
-        _add_column_if_missing(connection, "listings", "profit", "profit DOUBLE PRECISION")
-        _add_column_if_missing(connection, "listings", "roi_percentage", "roi_percentage DOUBLE PRECISION")
-        _add_column_if_missing(connection, "listings", "sold_at", "sold_at TIMESTAMP WITHOUT TIME ZONE")
-        _add_column_if_missing(connection, "listings", "photo_quality_score", "photo_quality_score DOUBLE PRECISION")
-        _add_column_if_missing(connection, "listings", "condition", "condition VARCHAR(64)")
-        _add_column_if_missing(connection, "listings", "quantity", "quantity INTEGER NOT NULL DEFAULT 1")
-        _add_column_if_missing(connection, "listings", "platform_quantities", "platform_quantities JSON")
-        _add_column_if_missing(connection, "listings", "custom_labels", "custom_labels JSON")
-        _add_column_if_missing(connection, "listings", "last_refreshed", "last_refreshed TIMESTAMP WITHOUT TIME ZONE")
-        _add_column_if_missing(connection, "listings", "stale_flag", "stale_flag BOOLEAN NOT NULL DEFAULT FALSE")
-        _add_column_if_missing(connection, "listings", "source_type", "source_type VARCHAR(64)")
-        _add_column_if_missing(connection, "listings", "source_metadata", "source_metadata JSON")
-        _add_column_if_missing(connection, "listings", "needs_review", "needs_review BOOLEAN NOT NULL DEFAULT FALSE")
-        _add_column_if_missing(connection, "listings", "restricted_review_required", "restricted_review_required BOOLEAN NOT NULL DEFAULT FALSE")
-        _add_column_if_missing(connection, "listings", "restricted_reasons", "restricted_reasons JSON")
-        _add_column_if_missing(connection, "listings", "detected_category_guess", "detected_category_guess VARCHAR(255)")
-        _add_column_if_missing(connection, "listings", "marketplace_allowed_status", "marketplace_allowed_status VARCHAR(64)")
+        if settings.startup_schema_compat_enabled:
+            for table_name, columns in _LEGACY_STARTUP_COLUMNS.items():
+                for column_name, ddl in columns:
+                    if _add_column_if_missing(connection, table_name, column_name, ddl):
+                        applied_legacy_columns.append(f"{table_name}.{column_name}")
+        elif _LEGACY_STARTUP_COLUMNS:
+            logger.info("Startup schema compatibility shim is disabled.")
+    if applied_legacy_columns:
+        logger.warning(
+            "Startup schema compatibility applied legacy columns at runtime: %s",
+            ", ".join(applied_legacy_columns),
+        )
+    return {
+        "startup_schema_compat_enabled": bool(settings.startup_schema_compat_enabled),
+        "legacy_schema_columns_applied": applied_legacy_columns,
+    }
 
 app = FastAPI(title="PosterPro API")
 app.add_middleware(
@@ -120,22 +130,30 @@ app.mount("/media", StaticFiles(directory=Path(settings.storage_root)), name="me
 @app.on_event("startup")
 def startup() -> None:
     try:
-        _bootstrap_database()
+        bootstrap_summary = _bootstrap_database()
         app.state.database_ready = True
         app.state.database_error = None
+        app.state.bootstrap_summary = bootstrap_summary
     except SQLAlchemyError as exc:
         logger.exception("PosterPro database bootstrap failed")
         app.state.database_ready = False
         app.state.database_error = exc.__class__.__name__
+        app.state.bootstrap_summary = {
+            "startup_schema_compat_enabled": bool(settings.startup_schema_compat_enabled),
+            "legacy_schema_columns_applied": [],
+        }
 
 
 @app.get("/health")
 def health():
     database_ready = bool(getattr(app.state, "database_ready", False))
+    bootstrap_summary = getattr(app.state, "bootstrap_summary", {}) or {}
     payload = {
         "ok": database_ready,
         "database_ready": database_ready,
         "database_error": getattr(app.state, "database_error", None),
+        "startup_schema_compat_enabled": bool(bootstrap_summary.get("startup_schema_compat_enabled", settings.startup_schema_compat_enabled)),
+        "legacy_schema_columns_applied": bootstrap_summary.get("legacy_schema_columns_applied", []),
     }
     if database_ready:
         return payload
@@ -157,6 +175,15 @@ def _websocket_user_id(websocket: WebSocket) -> int:
         db.close()
 
 
+def _bridge_desktop_session_is_active(connect_session_id: str) -> bool:
+    try:
+        session = get_bridge_connect_session(connect_session_id)
+    except AutomationBridgeError:
+        return False
+    status_value = str(session.get("status") or "").strip().lower()
+    return status_value in {"queued", "launching_browser", "opening_marketplace", "waiting_for_login", "validating_session"}
+
+
 @app.websocket("/marketplace-jobs/bridge-desktop/ws")
 async def bridge_desktop_websocket(websocket: WebSocket) -> None:
     token = websocket.query_params.get("token") or ""
@@ -165,6 +192,9 @@ async def bridge_desktop_websocket(websocket: WebSocket) -> None:
         current_user_id = _websocket_user_id(websocket)
         if int(claims["user_id"]) != current_user_id:
             raise PermissionError("Bridge desktop token does not match the current user")
+        connect_session_id = str(claims["connect_session_id"])
+        if not _bridge_desktop_session_is_active(connect_session_id):
+            raise PermissionError("Bridge desktop session is no longer active")
     except (BridgeDesktopTokenError, PermissionError, Exception):
         await websocket.close(code=1008)
         return
@@ -206,9 +236,23 @@ async def bridge_desktop_websocket(websocket: WebSocket) -> None:
         finally:
             await websocket.close()
 
+    async def _watch_session_status() -> None:
+        try:
+            while True:
+                await asyncio.sleep(2)
+                still_active = await asyncio.to_thread(_bridge_desktop_session_is_active, connect_session_id)
+                if still_active:
+                    continue
+                await websocket.close(code=1008, reason="Bridge desktop session is no longer active")
+                break
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
     client_task = asyncio.create_task(_client_to_vnc())
     vnc_task = asyncio.create_task(_vnc_to_client())
-    done, pending = await asyncio.wait({client_task, vnc_task}, return_when=asyncio.FIRST_COMPLETED)
+    watch_task = asyncio.create_task(_watch_session_status())
+    done, pending = await asyncio.wait({client_task, vnc_task, watch_task}, return_when=asyncio.FIRST_COMPLETED)
     for task in pending:
         task.cancel()
     for task in done:

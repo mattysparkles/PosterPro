@@ -51,7 +51,7 @@ export default function LoginPage() {
 
         <div className="pp-field">
           <label htmlFor="login-password">Password</label>
-          <Input id="login-password" name="password" type="password" required minLength={8} placeholder="Enter your password" />
+          <Input id="login-password" name="password" type="password" required placeholder="Enter your password" />
         </div>
 
         {error ? <p className="text-sm font-medium text-rose-600">{error}</p> : null}

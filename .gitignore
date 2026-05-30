@@ -4,6 +4,10 @@ __pycache__/
 .venv/
 backend/storage/
 backend/celerybeat-schedule*
+backend/posterpro_test*.db
+posterpro.db
+posterpro_test*.db
+storage/
 frontend/node_modules/
 frontend/.next/
 bridge/app/__pycache__/

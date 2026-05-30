@@ -1,35 +1,21 @@
-import os
 from uuid import uuid4
 
-os.environ["DATABASE_URL"] = "sqlite:///./test_e2e.db"
+import pytest
 
-from fastapi.testclient import TestClient
-
-from app.core.database import Base, SessionLocal, engine
-from app.main import app
+from app.core import database as database_module
 from app.models.enums import EbayPublishStatus
-from app.models.models import Cluster, Listing, User
+from app.models.models import Cluster, Listing
 import app.api.ebay as ebay_api
 import app.services.ebay_service as ebay_service
 
-
-Base.metadata.drop_all(bind=engine)
-Base.metadata.create_all(bind=engine)
-
-
-def seed_listing():
-    db = SessionLocal()
-    user = User(email=f"demo-{uuid4()}@example.com")
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-
-    cluster = Cluster(user_id=user.id, title_hint="Lamp")
+def seed_listing(user_id: int) -> int:
+    db = database_module.SessionLocal()
+    cluster = Cluster(user_id=user_id, title_hint="Lamp")
     db.add(cluster)
     db.commit()
     db.refresh(cluster)
 
-    listing = Listing(user_id=user.id, cluster_id=cluster.id, title="Lamp", description="Desc")
+    listing = Listing(user_id=user_id, cluster_id=cluster.id, title="Lamp", description="Desc")
     db.add(listing)
     db.commit()
     db.refresh(listing)
@@ -37,8 +23,19 @@ def seed_listing():
     return listing.id
 
 
-def test_publish_success(monkeypatch):
-    listing_id = seed_listing()
+@pytest.mark.anyio
+async def test_publish_success(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "eBay Owner",
+            "email": f"demo-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    listing_id = seed_listing(user_id)
 
     async def fake_publish(listing, db):
         listing.ebay_publish_status = EbayPublishStatus.POSTED
@@ -51,14 +48,24 @@ def test_publish_success(monkeypatch):
     monkeypatch.setattr(ebay_service, "publish_listing_to_ebay", fake_publish)
     monkeypatch.setattr(ebay_api, "publish_listing_to_ebay", fake_publish)
 
-    client = TestClient(app)
-    response = client.post(f"/listings/{listing_id}/publish/ebay")
+    response = await async_client.post(f"/listings/{listing_id}/publish/ebay")
     assert response.status_code == 200
     assert response.json()["status"] == "POSTED"
 
 
-def test_publish_failure(monkeypatch):
-    listing_id = seed_listing()
+@pytest.mark.anyio
+async def test_publish_failure(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "eBay Owner",
+            "email": f"demo-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    listing_id = seed_listing(user_id)
 
     async def fake_publish(_listing, _db):
         raise ebay_service.EbayIntegrationError("retry exhausted")
@@ -66,7 +73,6 @@ def test_publish_failure(monkeypatch):
     monkeypatch.setattr(ebay_service, "publish_listing_to_ebay", fake_publish)
     monkeypatch.setattr(ebay_api, "publish_listing_to_ebay", fake_publish)
 
-    client = TestClient(app)
-    response = client.post(f"/listings/{listing_id}/publish/ebay")
+    response = await async_client.post(f"/listings/{listing_id}/publish/ebay")
     assert response.status_code == 400
     assert "retry exhausted" in response.json()["detail"]

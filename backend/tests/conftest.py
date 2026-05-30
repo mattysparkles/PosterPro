@@ -1,36 +1,94 @@
-from __future__ import annotations
-
-import os
+import asyncio
 import tempfile
-from pathlib import Path
+import functools
+import os
+import faulthandler
 
-
-_TEST_DIR = Path(tempfile.mkdtemp(prefix="posterpro-vine-tests-"))
-os.environ["DATABASE_URL"] = f"sqlite:///{_TEST_DIR / 'posterpro_test.db'}"
-os.environ["STORAGE_ROOT"] = str(_TEST_DIR / "storage")
-
+import anyio.to_thread
+import httpx
 import pytest
+import fastapi.routing
+import starlette.concurrency
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
-from app.core.config import settings
-from app.core.database import Base, SessionLocal, engine
+from app import main as main_module
+from app.core import database as database_module
+from app.core.database import Base
+from app.main import app
 
 
-@pytest.fixture(autouse=True)
-def reset_database():
-    Base.metadata.drop_all(bind=engine)
-    Base.metadata.create_all(bind=engine)
-    settings.amazon_vine_import_enabled = False
-    settings.amazon_vine_import_premium_only = False
-    settings.amazon_media_lookup_enabled = False
-    settings.amazon_media_page_fallback_enabled = False
-    yield
-    Base.metadata.drop_all(bind=engine)
+async def _anyio_run_sync_compat(func, *args, abandon_on_cancel=False, cancellable=None, limiter=None):  # noqa: ARG001
+    return func(*args)
+
+
+# Patch AnyIO thread offload for this test environment.
+# In this sandbox, AnyIO's default worker-thread path can hang, which blocks
+# FastAPI's sync route/dependency execution. Swapping to asyncio.to_thread keeps
+# the runtime behavior consistent while unblocking route-level tests.
+anyio.to_thread.run_sync = _anyio_run_sync_compat  # type: ignore[assignment]
+
+
+def _reset_database(test_engine) -> None:
+    Base.metadata.drop_all(bind=test_engine)
+    Base.metadata.create_all(bind=test_engine)
 
 
 @pytest.fixture
 def db_session():
-    session = SessionLocal()
+    _reset_database(database_module.engine)
+    db = database_module.SessionLocal()
     try:
-        yield session
+        yield db
     finally:
-        session.close()
+        db.close()
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
+@pytest.fixture
+async def async_client():
+    if os.getenv("POSTERPRO_TEST_FAULTHANDLER") == "1":
+        faulthandler.dump_traceback_later(20, repeat=True)
+    original_fastapi_run_in_threadpool = fastapi.routing.run_in_threadpool
+    original_starlette_run_in_threadpool = starlette.concurrency.run_in_threadpool
+
+    async def _run_in_threadpool_compat(func, *args, **kwargs):
+        if kwargs:
+            func = functools.partial(func, **kwargs)
+        return func(*args)
+
+    fastapi.routing.run_in_threadpool = _run_in_threadpool_compat  # type: ignore[assignment]
+    starlette.concurrency.run_in_threadpool = _run_in_threadpool_compat  # type: ignore[assignment]
+
+    original_engine = database_module.engine
+    original_session_local = database_module.SessionLocal
+    try:
+        tmp = tempfile.NamedTemporaryFile(prefix="posterpro-test-", suffix=".db", dir="/tmp", delete=False)
+        tmp.close()
+
+        test_engine = create_engine(
+            f"sqlite:///{tmp.name}",
+            pool_pre_ping=True,
+            connect_args={"check_same_thread": False, "timeout": 3},
+        )
+        database_module.engine = test_engine
+        database_module.SessionLocal = sessionmaker(bind=test_engine, autoflush=False, autocommit=False)
+        main_module.engine = test_engine
+
+        await asyncio.wait_for(app.router.startup(), timeout=10)
+        _reset_database(test_engine)
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            yield client
+        await asyncio.wait_for(app.router.shutdown(), timeout=10)
+    finally:
+        main_module.engine = original_engine
+        database_module.engine = original_engine
+        database_module.SessionLocal = original_session_local
+        fastapi.routing.run_in_threadpool = original_fastapi_run_in_threadpool  # type: ignore[assignment]
+        starlette.concurrency.run_in_threadpool = original_starlette_run_in_threadpool  # type: ignore[assignment]

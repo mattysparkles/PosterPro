@@ -22,11 +22,14 @@ import useDashboardData from '../hooks/useDashboardData';
 import {
   applyListingTemplate,
   createListingTemplate,
+  fetchCrosspostPreview,
   fetchPricingRecommendation,
   fetchListingIntelligence,
   fetchSettingsPanels,
   generateListing,
   processListingPhoto,
+  approveListing as approveListingApi,
+  approveListingsBulk,
   toggleAutonomousMode,
   updateListing,
 } from '../lib/api';
@@ -101,6 +104,8 @@ export default function ListingsPage() {
   const [viewMode, setViewMode] = useState('table');
   const [pricingRecommendation, setPricingRecommendation] = useState(null);
   const [listingIntelligence, setListingIntelligence] = useState(null);
+  const [crosspostPreview, setCrosspostPreview] = useState([]);
+  const [crosspostPreviewLoading, setCrosspostPreviewLoading] = useState(false);
   const [workflowPreferences, setWorkflowPreferences] = useState({
     review_before_publish: true,
     auto_publish_after_approval: false,
@@ -159,13 +164,18 @@ export default function ListingsPage() {
   useEffect(() => {
     if (!selectedListingId) return;
     refreshStatus(selectedListingId).catch(() => undefined);
+    setCrosspostPreviewLoading(true);
+    fetchCrosspostPreview(selectedListingId, enabledPlatforms || [])
+      .then((rows) => setCrosspostPreview(Array.isArray(rows) ? rows : []))
+      .catch(() => setCrosspostPreview([]))
+      .finally(() => setCrosspostPreviewLoading(false));
     fetchPricingRecommendation(selectedListingId)
       .then(setPricingRecommendation)
       .catch(() => setPricingRecommendation(null));
     fetchListingIntelligence(selectedListingId)
       .then(setListingIntelligence)
       .catch(() => setListingIntelligence(null));
-  }, [refreshStatus, selectedListingId]);
+  }, [enabledPlatforms, refreshStatus, selectedListingId]);
 
   const listingsSubnav = useMemo(
     () => ({
@@ -194,6 +204,26 @@ export default function ListingsPage() {
           })),
         },
         {
+          label: 'Listing actions',
+          items: [
+            { key: 'all-listings', label: 'All listings', active: false, description: 'Open the full listings table.', onClick: () => router.push('/listings') },
+            { key: 'new-listing', label: 'Create new listing', active: false, description: 'Start a blank listing draft.', onClick: () => router.push('/listings/new') },
+            { key: 'import-listings', label: 'Import marketplace listings', active: false, description: 'Import existing marketplace listings.', onClick: () => router.push('/settings?tab=marketplaces') },
+            { key: 'intake-photos', label: 'Intake photos', active: false, description: 'Upload photos and create new draft rows.', onClick: () => router.push('/intake') },
+            ...(user?.can_access_vine_import
+              ? [
+                  {
+                    key: 'vine-import',
+                    label: 'Import Vine data',
+                    active: false,
+                    description: 'Create listing drafts from Vine files.',
+                    onClick: () => router.push('/imports/vine'),
+                  },
+                ]
+              : []),
+          ],
+        },
+        {
           label: 'Sections',
           items: [
             { key: 'listing-toolbar', label: 'Filters', active: false, description: 'Search and filter controls', onClick: () => document.getElementById('listing-toolbar')?.scrollIntoView({ behavior: 'smooth', block: 'start' }) },
@@ -203,11 +233,11 @@ export default function ListingsPage() {
         },
       ],
     }),
-    [activeTab, tabCounts],
+    [activeTab, router, tabCounts, user?.can_access_vine_import],
   );
 
   const approveListing = async (listingId) => {
-    await updateListing(listingId, { status: 'ready', needs_review: false });
+    await approveListingApi(listingId);
     await reload();
   };
 
@@ -249,7 +279,8 @@ export default function ListingsPage() {
       toast.error('Select one or more review-queue listings first.');
       return;
     }
-    await Promise.all(reviewRows.map((listing) => approveListing(listing.id)));
+    await approveListingsBulk(reviewRows.map((listing) => listing.id));
+    await reload();
     toast.success(`Approved ${reviewRows.length} listing${reviewRows.length === 1 ? '' : 's'}.`);
     setSelectedIds([]);
   };
@@ -267,15 +298,23 @@ export default function ListingsPage() {
     >
       <PageHeader
         title="Listings"
-        description="Edit, review, and publish marketplace listing drafts."
+        description="Manage all listing drafts in one workspace: create, import, intake photos, preview per marketplace, approve, and publish."
         actions={
           <div className="flex flex-wrap gap-2">
             <Link href="/listings/new">
               <Button variant="outline">New item</Button>
             </Link>
+            <Link href="/settings?tab=marketplaces">
+              <Button variant="outline">Import listings</Button>
+            </Link>
             <Link href="/intake">
               <Button>Import photos</Button>
             </Link>
+            {user?.can_access_vine_import ? (
+              <Link href="/imports/vine">
+                <Button variant="outline">Import Vine data</Button>
+              </Link>
+            ) : null}
           </div>
         }
       />
@@ -670,6 +709,8 @@ export default function ListingsPage() {
               workflowPreferences={workflowPreferences}
               templates={listingTemplates.filter((tpl) => !tpl.category_id || tpl.category_id === selectedListing.category_id)}
               statuses={statusByListing[selectedListing.id] || []}
+              crosspostPreview={crosspostPreview}
+              crosspostPreviewLoading={crosspostPreviewLoading}
               publishState={{
                 loading: !!publishing[selectedListing.id],
                 error: errors[selectedListing.id] || '',

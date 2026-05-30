@@ -1,16 +1,40 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "/api";
+
+const DEFAULT_TIMEOUT_MS = Number(process.env.NEXT_PUBLIC_API_TIMEOUT_MS || 15000);
 
 async function jsonFetch(url, options = {}) {
-  const response = await fetch(url, {
-    credentials: "include",
-    ...options,
-  });
+  const controller = new AbortController();
+  const timeoutMs = Number(options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const timeoutId = Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? setTimeout(() => controller.abort(), timeoutMs)
+    : null;
+  let response;
+  try {
+    response = await fetch(url, {
+      credentials: "include",
+      signal: controller.signal,
+      ...options,
+    });
+  } catch (error) {
+    if (timeoutId) clearTimeout(timeoutId);
+    if (error?.name === "AbortError") {
+      throw new Error("Request timed out. Please retry.");
+    }
+    throw error;
+  }
+  if (timeoutId) clearTimeout(timeoutId);
   const contentType = response.headers.get("content-type") || "";
   const data = contentType.includes("application/json")
     ? await response.json()
     : null;
+  const text = data ? "" : await response.text();
   if (!response.ok) {
-    throw new Error(data?.detail || data?.message || "Request failed");
+    throw new Error(
+      data?.detail
+        || data?.message
+        || text
+        || `Request failed (${response.status} ${response.statusText})`
+    );
   }
   return data;
 }
@@ -161,6 +185,14 @@ export async function createMarketplaceImportJob(body) {
   });
 }
 
+export async function bulkImportMarketplaces(body = {}) {
+  return jsonFetch(`${API_BASE}/imports/marketplaces/bulk`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 export async function fetchMarketplaceImportJobs() {
   return jsonFetch(`${API_BASE}/imports/marketplaces/jobs`);
 }
@@ -199,6 +231,10 @@ export async function cancelMarketplaceImportJob(jobId) {
   return jsonFetch(`${API_BASE}/marketplace-import-jobs/${jobId}/cancel`, {
     method: "POST",
   });
+}
+
+export function buildBridgeAssetUrl(assetId) {
+  return `${API_BASE}/marketplace-jobs/bridge-assets/${encodeURIComponent(assetId)}`;
 }
 
 export async function runAutomationBridgeSmokeTest() {
@@ -282,6 +318,20 @@ export async function updateListing(id, body) {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+  });
+}
+
+export async function approveListing(id) {
+  return jsonFetch(`${API_BASE}/listings/${id}/approve`, {
+    method: "POST",
+  });
+}
+
+export async function approveListingsBulk(listingIds = []) {
+  return jsonFetch(`${API_BASE}/listings/approve-bulk`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ listing_ids: listingIds }),
   });
 }
 
@@ -544,11 +594,21 @@ export async function createVineInventory(batchId, itemIds, includeLocked = true
   });
 }
 
-export async function createVineDrafts(batchId, itemIds) {
+export async function createVineDrafts(batchId, itemIds, options = {}) {
+  const {
+    fetchMediaFirst = false,
+    requireMediaForAsin = false,
+    allowDraftsWithoutMedia = false,
+  } = options || {};
   return jsonFetch(`${API_BASE}/imports/vine/batches/${batchId}/create-drafts`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ item_ids: itemIds }),
+    body: JSON.stringify({
+      item_ids: itemIds,
+      fetch_media_first: !!fetchMediaFirst,
+      require_media_for_asin: !!requireMediaForAsin,
+      allow_drafts_without_media: !!allowDraftsWithoutMedia,
+    }),
   });
 }
 
@@ -557,6 +617,12 @@ export async function updateVineItem(itemId, body) {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+  });
+}
+
+export async function retryVineItemDiscovery(itemId) {
+  return jsonFetch(`${API_BASE}/imports/vine/items/${itemId}/retry-discovery`, {
+    method: "POST",
   });
 }
 

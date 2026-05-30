@@ -42,6 +42,7 @@ from app.core.secrets import encrypt_secret, mask_secret
 from app.models.enums import MarketplaceName
 from app.models.models import MarketplaceAccount, User
 from app.services.email_service import EmailDeliveryError, send_password_reset_email, smtp_configured
+from app.services.ebay_service import summarize_ebay_account_health
 from app.services.site_content_service import (
     build_public_page_urls,
     import_theme_pack,
@@ -50,6 +51,7 @@ from app.services.site_content_service import (
     save_draft_pages,
     save_site_content,
 )
+from app.services.automation_bridge import bridge_browser_submit_policy
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -200,10 +202,12 @@ def _write_env_overrides(updates: dict[str, str | None]) -> None:
     _BACKEND_ENV_PATH.write_text("\n".join(next_lines).rstrip() + "\n", encoding="utf-8")
 
 
-def _build_settings_panel_response(current_user: User, *, ebay_connected: bool) -> dict:
+def _build_settings_panel_response(current_user: User, *, ebay_account: MarketplaceAccount | None) -> dict:
     site_content = load_site_content()
     page_urls = build_public_page_urls(settings.app_base_url)
     runame = settings.ebay_runame or settings.ebay_redirect_uri or ""
+    ebay_health = summarize_ebay_account_health(ebay_account)
+    bridge_submit_policy = bridge_browser_submit_policy()
     return {
         "profile": {
             "full_name": current_user.full_name,
@@ -221,7 +225,14 @@ def _build_settings_panel_response(current_user: User, *, ebay_connected: bool) 
             "runame": runame,
             "redirect_uri": settings.ebay_redirect_uri or "",
             "oauth_ready": bool(settings.ebay_client_id and settings.ebay_client_secret and runame),
-            "connected": ebay_connected,
+            "connected": ebay_health["connected"],
+            "external_account_id": ebay_account.external_account_id if ebay_account else None,
+            "token_expires_at": ebay_account.token_expires_at.isoformat() if ebay_account and ebay_account.token_expires_at else None,
+            "has_refresh_token": ebay_health["has_refresh_token"],
+            "token_status": ebay_health["token_status"],
+            "import_ready": ebay_health["import_ready"],
+            "reconnect_required": ebay_health["reconnect_required"],
+            "status_note": ebay_health["status_note"],
             "privacy_policy_url": page_urls["privacy_policy_url"],
             "auth_accepted_url": page_urls["auth_accepted_url"],
             "auth_declined_url": page_urls["auth_declined_url"],
@@ -238,9 +249,13 @@ def _build_settings_panel_response(current_user: User, *, ebay_connected: bool) 
             "automation_bridge_url": settings.automation_bridge_url or "",
             "automation_bridge_timeout_seconds": settings.automation_bridge_timeout_seconds,
             "automation_bridge_configured": bool(settings.automation_bridge_enabled and settings.automation_bridge_url and settings.automation_bridge_api_key),
+            "bridge_browser_submit_enabled": bridge_submit_policy["browser_submit_enabled"],
+            "bridge_browser_submit_policy_label": bridge_submit_policy["policy_label"],
+            "bridge_browser_submit_policy_note": bridge_submit_policy["policy_note"],
             "sale_detection_enabled": settings.sale_detection_enabled,
             "sale_detection_dry_run": settings.sale_detection_dry_run,
             "sale_detection_poll_minutes": settings.sale_detection_poll_minutes,
+            "sold_sync_enabled": settings.sold_sync_enabled,
         },
         "server": {
             "app_base_url": settings.app_base_url or "",
@@ -348,7 +363,7 @@ def get_settings_panels(
             MarketplaceAccount.marketplace == MarketplaceName.ebay,
         )
     ).scalar_one_or_none()
-    return _build_settings_panel_response(current_user, ebay_connected=ebay_account is not None)
+    return _build_settings_panel_response(current_user, ebay_account=ebay_account)
 
 
 @router.put("/settings/server")
@@ -410,7 +425,7 @@ def update_server_settings(
             MarketplaceAccount.marketplace == MarketplaceName.ebay,
         )
     ).scalar_one_or_none()
-    return _build_settings_panel_response(current_user, ebay_connected=ebay_account is not None)
+    return _build_settings_panel_response(current_user, ebay_account=ebay_account)
 
 
 @router.put("/settings/hosted-pages")
@@ -474,7 +489,7 @@ def update_hosted_pages(
             MarketplaceAccount.marketplace == MarketplaceName.ebay,
         )
     ).scalar_one_or_none()
-    return _build_settings_panel_response(current_user, ebay_connected=ebay_account is not None)
+    return _build_settings_panel_response(current_user, ebay_account=ebay_account)
 
 
 @router.post("/settings/hosted-pages/publish")
@@ -496,7 +511,7 @@ def publish_hosted_pages(
             MarketplaceAccount.marketplace == MarketplaceName.ebay,
         )
     ).scalar_one_or_none()
-    return _build_settings_panel_response(current_user, ebay_connected=ebay_account is not None)
+    return _build_settings_panel_response(current_user, ebay_account=ebay_account)
 
 
 @router.post("/settings/hosted-pages/import-theme")
@@ -527,7 +542,7 @@ def import_hosted_page_theme(
             MarketplaceAccount.marketplace == MarketplaceName.ebay,
         )
     ).scalar_one_or_none()
-    return _build_settings_panel_response(current_user, ebay_connected=ebay_account is not None)
+    return _build_settings_panel_response(current_user, ebay_account=ebay_account)
 
 
 @router.get("/public/site-pages/{slug}")

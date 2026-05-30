@@ -12,7 +12,7 @@ from app.models.enums import MarketplaceListingStatus, MarketplaceName
 from app.models.models import Listing, MarketplaceListing, User
 from app.services.ebay_service import publish_listing_to_ebay
 
-TODO_MESSAGE = "TODO – API keys coming"
+ASSISTED_WORKFLOW_MESSAGE = "Direct API publishing is not available for this marketplace in this deployment. Use the assisted marketplace workflow instead."
 
 
 @dataclass(slots=True)
@@ -50,7 +50,7 @@ class StubPlatformPublisher(PlatformPublisher):
         return PublishResult(
             marketplace=self.marketplace,
             status=MarketplaceListingStatus.FAILED,
-            response={"error": TODO_MESSAGE, "status": "TODO"},
+            response={"error": ASSISTED_WORKFLOW_MESSAGE, "status": "ASSISTED_WORKFLOW_REQUIRED"},
         )
 
 

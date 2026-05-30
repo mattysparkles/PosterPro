@@ -209,6 +209,70 @@ MARKETPLACE_BROWSER_SPECS: dict[str, MarketplaceBrowserSpec] = {
         auth_required_text=("listings", "seller hub", "create listing"),
         auth_forbidden_text=("404: page not found", "page not found", "sorry, the page you were trying to view does not exist"),
     ),
+    "depop": MarketplaceBrowserSpec(
+        marketplace="depop",
+        label="Depop",
+        home_url="https://www.depop.com/",
+        create_url="https://www.depop.com/sell/",
+        auth_check_url="https://www.depop.com/sell/",
+        connect_start_url="https://www.depop.com/login/",
+        title_selectors=(
+            'input[name*="title" i]',
+            'input[placeholder*="Title" i]',
+            'input[maxlength="100"]',
+        ),
+        price_selectors=(
+            'input[name*="price" i]',
+            'input[placeholder*="Price" i]',
+            'input[inputmode="decimal"]',
+            'input[inputmode="numeric"]',
+        ),
+        description_selectors=(
+            'textarea[name*="description" i]',
+            'textarea[placeholder*="Describe" i]',
+            "textarea",
+        ),
+        submit_selectors=(
+            'button:has-text("List item")',
+            'button:has-text("Publish")',
+            'button:has-text("Next")',
+            'button:has-text("Save")',
+        ),
+        auth_url_tokens=("/sell", "/mydepop"),
+        auth_required_text=("sell", "my depop", "list an item"),
+    ),
+    "vinted": MarketplaceBrowserSpec(
+        marketplace="vinted",
+        label="Vinted",
+        home_url="https://www.vinted.com/",
+        create_url="https://www.vinted.com/items/new",
+        auth_check_url="https://www.vinted.com/items/new",
+        connect_start_url="https://www.vinted.com/member/login",
+        title_selectors=(
+            'input[name*="title" i]',
+            'input[placeholder*="Title" i]',
+            'input[maxlength="100"]',
+        ),
+        price_selectors=(
+            'input[name*="price" i]',
+            'input[placeholder*="Price" i]',
+            'input[inputmode="decimal"]',
+            'input[inputmode="numeric"]',
+        ),
+        description_selectors=(
+            'textarea[name*="description" i]',
+            'textarea[placeholder*="Describe" i]',
+            "textarea",
+        ),
+        submit_selectors=(
+            'button:has-text("Upload")',
+            'button:has-text("List item")',
+            'button:has-text("Next")',
+            'button:has-text("Save")',
+        ),
+        auth_url_tokens=("/items/new", "/member/"),
+        auth_required_text=("sell now", "upload item", "list your item"),
+    ),
 }
 
 
@@ -216,6 +280,18 @@ class MarketplaceBrowserRunner:
     def __init__(self, config: BrowserRunnerConfig, spec: MarketplaceBrowserSpec) -> None:
         self.config = config
         self.spec = spec
+
+    def _persist_generated_asset(self, file_path: Path, *, source_url: str | None = None) -> dict[str, Any] | str:
+        if not file_path.exists() or not self.config.asset_persistor:
+            return str(file_path)
+        content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+        asset = self.config.asset_persistor(
+            file_path.read_bytes(),
+            content_type,
+            file_path.name,
+            source_url,
+        )
+        return asset if isinstance(asset, dict) else str(file_path)
 
     def run_crosspost(self, *, job_id: str, bridge_account: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         playwright = self._load_playwright()
@@ -279,8 +355,8 @@ class MarketplaceBrowserRunner:
                     "create_url": self.spec.create_url,
                     "uploaded_image_count": uploaded_count,
                     "screenshots": {
-                        "before_submit": str(before_path),
-                        "after_submit": str(after_path),
+                        "before_submit": self._persist_generated_asset(before_path),
+                        "after_submit": self._persist_generated_asset(after_path),
                     },
                     "session_state": {
                         "session_state": "active",
@@ -336,7 +412,7 @@ class MarketplaceBrowserRunner:
                     "imported_listing_count": len(imported_listings),
                     "imported_listings": imported_listings,
                     "screenshots": {
-                        "selling_overview": str(overview_path),
+                        "selling_overview": self._persist_generated_asset(overview_path),
                     },
                     "session_state": {
                         "session_state": "active",
@@ -410,8 +486,8 @@ class MarketplaceBrowserRunner:
                     "bridge_account": self._bridge_account_summary(bridge_account) if bridge_account else None,
                     "login_handle": (login_handle or "").strip() or None,
                     "screenshots": {
-                        "connect_start": str(before_path),
-                        "connect_complete": str(after_path),
+                        "connect_start": self._persist_generated_asset(before_path),
+                        "connect_complete": self._persist_generated_asset(after_path),
                     },
                     "session_state": {
                         "session_state": "active",
@@ -783,10 +859,11 @@ class MarketplaceBrowserRunner:
         meta_title = self._read_meta(page, 'meta[property="og:title"]')
         meta_description = self._read_meta(page, 'meta[property="og:description"]')
         meta_image = self._read_meta(page, 'meta[property="og:image"]')
+        page_heading = self._first_text(page, ["h1", '[role="main"] h1'])
         title = (
             ld_product.get("name")
-            or meta_title
-            or self._first_text(page, ["h1", '[role="main"] h1'])
+            or page_heading
+            or (meta_title if not self._looks_like_generic_listing_title(meta_title) else "")
         )
         description = (
             ld_product.get("description")
@@ -826,6 +903,19 @@ class MarketplaceBrowserRunner:
             },
             "tags": ["facebook", "imported"],
         }
+
+    def _looks_like_generic_listing_title(self, value: str | None) -> bool:
+        normalized = str(value or "").strip().lower()
+        if not normalized:
+            return True
+        generic_titles = {
+            "chat",
+            "chats",
+            "marketplace",
+            "facebook marketplace",
+            "facebook",
+        }
+        return normalized in generic_titles or normalized.startswith("chat |") or normalized.startswith("marketplace |")
 
     def _extract_ld_product(self, page: Any) -> dict[str, Any]:
         for script_text in page.locator('script[type="application/ld+json"]').all_text_contents():
@@ -1092,6 +1182,16 @@ class WhatnotMarketplaceBrowserRunner(MarketplaceBrowserRunner):
             return False
 
 
+class DepopMarketplaceBrowserRunner(MarketplaceBrowserRunner):
+    def __init__(self, config: BrowserRunnerConfig) -> None:
+        super().__init__(config, MARKETPLACE_BROWSER_SPECS["depop"])
+
+
+class VintedMarketplaceBrowserRunner(MarketplaceBrowserRunner):
+    def __init__(self, config: BrowserRunnerConfig) -> None:
+        super().__init__(config, MARKETPLACE_BROWSER_SPECS["vinted"])
+
+
 def create_marketplace_browser_runner(marketplace: str, config: BrowserRunnerConfig) -> MarketplaceBrowserRunner:
     normalized = str(marketplace or "").strip().lower()
     runners: dict[str, type[MarketplaceBrowserRunner]] = {
@@ -1099,7 +1199,9 @@ def create_marketplace_browser_runner(marketplace: str, config: BrowserRunnerCon
         "mercari": MercariMarketplaceBrowserRunner,
         "poshmark": PoshmarkMarketplaceBrowserRunner,
         "etsy": EtsyMarketplaceBrowserRunner,
+        "depop": DepopMarketplaceBrowserRunner,
         "whatnot": WhatnotMarketplaceBrowserRunner,
+        "vinted": VintedMarketplaceBrowserRunner,
     }
     runner_class = runners.get(normalized)
     if not runner_class:

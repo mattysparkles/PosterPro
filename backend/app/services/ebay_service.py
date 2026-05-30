@@ -234,6 +234,61 @@ async def refresh_ebay_token(user_id: int, db: Session) -> MarketplaceAccount:
     return account
 
 
+def summarize_ebay_account_health(account: MarketplaceAccount | None) -> dict[str, Any]:
+    now = datetime.utcnow()
+    connected = bool(account and account.access_token)
+    has_refresh_token = bool(account and account.refresh_token)
+    token_expires_at = account.token_expires_at if account else None
+
+    token_status = "disconnected"
+    import_ready = False
+    reconnect_required = False
+    status_note = "Connect eBay for this operator before importing or publishing."
+
+    if connected:
+        if token_expires_at is None:
+            token_status = "connected"
+            import_ready = True
+            status_note = "eBay is connected for this operator."
+        else:
+            expires_in_seconds = int((token_expires_at - now).total_seconds())
+            if expires_in_seconds <= 0:
+                if has_refresh_token:
+                    token_status = "expired_refreshable"
+                    import_ready = True
+                    status_note = "The saved eBay token has expired, but PosterPro can refresh it on the next import or publish."
+                else:
+                    token_status = "expired"
+                    reconnect_required = True
+                    status_note = "The saved eBay token has expired and does not include a refresh token. Reconnect eBay or import fresh user tokens."
+            elif expires_in_seconds <= 300:
+                if has_refresh_token:
+                    token_status = "expiring_soon"
+                    import_ready = True
+                    status_note = "The saved eBay token expires soon, but PosterPro can refresh it automatically."
+                else:
+                    token_status = "expiring_soon_manual"
+                    import_ready = True
+                    status_note = "The saved eBay token expires soon and does not include a refresh token. Reconnect eBay to avoid the next import failing."
+            elif has_refresh_token:
+                token_status = "healthy"
+                import_ready = True
+                status_note = "eBay is connected for this operator."
+            else:
+                token_status = "manual_token_only"
+                import_ready = True
+                status_note = "eBay is connected with a manual access token only. Imports work until the token expires; reconnect eBay for automatic refresh."
+
+    return {
+        "connected": connected,
+        "has_refresh_token": has_refresh_token,
+        "token_status": token_status,
+        "import_ready": import_ready,
+        "reconnect_required": reconnect_required,
+        "status_note": status_note,
+    }
+
+
 async def get_or_refresh_account(user_id: int, db: Session) -> MarketplaceAccount:
     account = db.execute(
         select(MarketplaceAccount).where(
@@ -244,6 +299,10 @@ async def get_or_refresh_account(user_id: int, db: Session) -> MarketplaceAccoun
     if not account:
         raise EbayIntegrationError("No connected eBay account for user")
     if account.token_expires_at and account.token_expires_at <= datetime.utcnow() + timedelta(minutes=5):
+        if not account.refresh_token and account.access_token:
+            # Older/manual eBay connections in this deployment can have an access token without a refresh token.
+            # Fall back to the stored token so read-only/import paths can still attempt the API call.
+            return account
         return await refresh_ebay_token(user_id, db)
     return account
 
@@ -395,6 +454,71 @@ async def get_fulfillment_orders(
     response = await client.request("GET", "/sell/fulfillment/v1/order", params=params)
     orders = response.get("orders") or []
     return [order for order in orders if isinstance(order, dict)]
+
+
+async def get_active_ebay_listings(
+    user_id: int,
+    db: Session,
+    *,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    account = await get_or_refresh_account(user_id, db)
+    client = EbayAPIClient(account.access_token)
+    offers_response = await client.request("GET", "/sell/inventory/v1/offer", params={"limit": limit, "offset": 0})
+    offers = [offer for offer in (offers_response.get("offers") or []) if isinstance(offer, dict)]
+
+    imported: list[dict[str, Any]] = []
+    for offer in offers:
+        sku = str(offer.get("sku") or "").strip()
+        if not sku:
+            continue
+        offer_status = str(offer.get("listingStatus") or offer.get("status") or "").strip().upper()
+        if offer_status and offer_status not in {"ACTIVE", "PUBLISHED", "LISTED"}:
+            continue
+
+        inventory_item = await client.request("GET", f"/sell/inventory/v1/inventory_item/{sku}")
+        product = inventory_item.get("product") or {}
+        availability = (inventory_item.get("availability") or {}).get("shipToLocationAvailability") or {}
+        pricing_summary = offer.get("pricingSummary") or {}
+        price_payload = pricing_summary.get("price") or {}
+        listing_id = str(offer.get("listingId") or "").strip()
+        source_url = f"https://www.ebay.com/itm/{listing_id}" if listing_id else ""
+        aspects = product.get("aspects") or {}
+        normalized_aspects = {
+            str(key): values[0] if isinstance(values, list) and values else values
+            for key, values in aspects.items()
+            if str(key).strip()
+        }
+        image_urls = [
+            str(url).strip()
+            for url in (product.get("imageUrls") or [])
+            if str(url).strip()
+        ]
+        imported.append(
+            {
+                "source_listing_reference": source_url or listing_id or sku,
+                "source_url": source_url or None,
+                "title": str(product.get("title") or "").strip(),
+                "description": str(product.get("description") or "").strip(),
+                "price": price_payload.get("value"),
+                "listing_price": price_payload.get("value"),
+                "quantity": availability.get("quantity") or offer.get("availableQuantity") or 1,
+                "image_urls": image_urls,
+                "item_specifics": normalized_aspects,
+                "attributes": normalized_aspects,
+                "category_id": offer.get("categoryId"),
+                "condition": inventory_item.get("condition") or "",
+                "tags": ["ebay", "imported"],
+                "source_identifiers": {
+                    "ebay_listing_id": listing_id or None,
+                    "offer_id": str(offer.get("offerId") or "").strip() or None,
+                    "sku": sku,
+                },
+                "raw_offer": offer,
+                "raw_inventory_item": inventory_item,
+            }
+        )
+    return imported
 
 
 async def accept_best_offer(account: MarketplaceAccount, offer_id: str) -> dict[str, Any]:

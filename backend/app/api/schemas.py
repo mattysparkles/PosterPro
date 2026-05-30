@@ -110,6 +110,20 @@ class MarketplacePublishResult(BaseModel):
     status: str
 
 
+class ListingApprovalResponse(BaseModel):
+    listing: ListingResponse
+    auto_publish_after_approval: bool = False
+    results: list[MarketplacePublishResult] = Field(default_factory=list)
+
+
+class BulkListingApproveRequest(BaseModel):
+    listing_ids: list[int] = Field(default_factory=list)
+
+
+class BulkListingApproveResponse(BaseModel):
+    approvals: list[ListingApprovalResponse] = Field(default_factory=list)
+
+
 class ConnectMarketplaceResponse(BaseModel):
     marketplace: str
     auth: dict
@@ -374,7 +388,20 @@ class MarketplaceConnectionStatusResponse(BaseModel):
     enabled_for_sale_detection: bool = False
     external_account_id: str | None = None
     token_expires_at: datetime | None = None
+    has_refresh_token: bool = False
+    token_status: str | None = None
+    import_ready: bool = False
+    reconnect_required: bool = False
     status_note: str | None = None
+    publish_support_level: str | None = None
+    publish_support_label: str | None = None
+    publish_support_note: str | None = None
+    import_support_level: str | None = None
+    import_support_label: str | None = None
+    import_support_note: str | None = None
+    sales_sync_support_level: str | None = None
+    sales_sync_support_label: str | None = None
+    sales_sync_support_note: str | None = None
     display_name: str | None = None
     account_handle: str | None = None
     notes: str | None = None
@@ -428,6 +455,14 @@ class CrosspostJobResponse(BaseModel):
     result_summary: dict | None = None
     task_id: str | None = None
     last_error: str | None = None
+    can_retry: bool = True
+    can_cancel: bool = False
+    operator_note: str | None = None
+    operator_action: str | None = None
+    review_required_count: int = 0
+    submitted_count: int = 0
+    failed_target_count: int = 0
+    target_outcomes: list[dict] = Field(default_factory=list)
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -454,11 +489,33 @@ class MarketplaceImportJobResponse(BaseModel):
     created_listing_id: int | None = None
     task_id: str | None = None
     last_error: str | None = None
+    is_stale: bool = False
+    can_retry: bool = True
+    can_cancel: bool = False
+    operator_note: str | None = None
+    operator_action: str | None = None
+    review_required_count: int = 0
+    review_items: list[dict] = Field(default_factory=list)
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
     class Config:
         from_attributes = True
+
+
+class BulkMarketplaceImportSkip(BaseModel):
+    marketplace: str
+    reason: str
+
+
+class BulkMarketplaceImportRequest(BaseModel):
+    marketplaces: list[str] | None = None
+    max_listings: int | None = None
+
+
+class BulkMarketplaceImportResponse(BaseModel):
+    jobs: list[MarketplaceImportJobResponse] = Field(default_factory=list)
+    skipped: list[BulkMarketplaceImportSkip] = Field(default_factory=list)
 
 
 class MarketplaceJobsOverviewResponse(BaseModel):
@@ -607,6 +664,19 @@ class VineImportItemResponse(BaseModel):
     listing_id: int | None = None
     source_confidence: str = "high"
     reviewed: bool = False
+    brand: str | None = None
+    category: str | None = None
+    source_status: str | None = None
+    review_deadline: date | None = None
+    item_url: str | None = None
+    manual_amazon_url: str | None = None
+    amazon_match_status: str | None = None
+    amazon_match_confidence: str | None = None
+    amazon_match_asin: str | None = None
+    amazon_match_title: str | None = None
+    amazon_source_page_url: str | None = None
+    image_import_status: str | None = None
+    image_import_error: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -639,6 +709,9 @@ class VineImportBatchResponse(BaseModel):
 class VineImportActionRequest(BaseModel):
     item_ids: list[int] = Field(default_factory=list)
     include_locked: bool = True
+    fetch_media_first: bool = False
+    require_media_for_asin: bool = False
+    allow_drafts_without_media: bool = False
 
 
 class VineImportItemUpdateRequest(BaseModel):
@@ -646,6 +719,7 @@ class VineImportItemUpdateRequest(BaseModel):
     marketplace_allowed_status: str | None = None
     restricted_review_required: bool | None = None
     restricted_reasons: list[str] | None = None
+    manual_amazon_url: str | None = None
 
 
 class AccountSetupSummaryResponse(BaseModel):

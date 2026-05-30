@@ -182,7 +182,13 @@ async def ebay_offer_dashboard(
             "active_offers": [],
             "decision_log": [],
         }
-    active_offers = await get_incoming_best_offers(account, limit=50)
+    try:
+        active_offers = await get_incoming_best_offers(account, limit=50)
+        offer_error = None
+    except EbayIntegrationError as exc:
+        # Do not block authenticated workspace load when eBay offers are unavailable.
+        active_offers = []
+        offer_error = str(exc)
     decisions = db.execute(
         select(EbayOfferHistory)
         .where(EbayOfferHistory.user_id == scoped_user_id)
@@ -192,6 +198,7 @@ async def ebay_offer_dashboard(
     return {
         "connected": True,
         "active_offers": active_offers,
+        "offer_error": offer_error,
         "decision_log": [
             {
                 "id": row.id,

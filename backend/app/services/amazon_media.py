@@ -67,7 +67,7 @@ class AmazonProductMediaProvider:
             gallery_image_urls=[],
             local_asset_ids=[],
             primary_image_url=None,
-            fetch_status="blocked",
+            fetch_status="manual_only",
             fetch_error="manual_only",
             source_provider="manual",
         )

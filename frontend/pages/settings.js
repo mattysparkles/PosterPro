@@ -21,6 +21,7 @@ import { useEbayAuth } from '../hooks/useEbayAuth';
 import useDashboardData from '../hooks/useDashboardData';
 import {
   createMarketplaceImportJob,
+  bulkImportMarketplaces,
   fetchMarketplaceImportJob,
   fetchAccountSetupSummary,
   fetchBridgeAccounts,
@@ -74,8 +75,11 @@ const MARKETPLACE_LABELS = {
 };
 
 const BRIDGE_MARKETPLACE_OPTIONS = ['facebook', 'etsy', 'mercari', 'poshmark', 'depop', 'whatnot', 'vinted'];
-const BROWSER_CONNECT_MARKETPLACES = ['facebook', 'mercari', 'poshmark', 'etsy', 'whatnot'];
+const BROWSER_CONNECT_MARKETPLACES = ['facebook', 'mercari', 'poshmark', 'etsy', 'depop', 'whatnot', 'vinted'];
 const BROWSER_IMPORT_MARKETPLACES = ['facebook'];
+
+const RESELLER_PRIORITY_MARKETPLACES = ['mercari', 'poshmark', 'whatnot'];
+const MARKETPLACE_CARD_PRIORITY = ['ebay', 'facebook', ...RESELLER_PRIORITY_MARKETPLACES, 'etsy', 'depop', 'vinted'];
 
 const MARKETPLACE_GUIDES = {
   ebay: {
@@ -99,13 +103,14 @@ const MARKETPLACE_GUIDES = {
     ],
   },
   mercari: {
-    summary: 'Mercari currently uses an operator-managed workflow. PosterPro stores the account details and readiness state for the team.',
-    tooltip: 'This is a guided manual setup today, not a direct OAuth connector.',
-    prerequisites: ['Store or closet name', 'Mercari handle', 'Internal posting notes for the operator'],
+    summary: 'Mercari uses an assisted workflow. PosterPro tracks the account identity, bridge session, and readiness for cross-post drafting and handoff.',
+    tooltip: 'Mercari is not a native OAuth/direct-API connector here. Use the bridge desktop to capture a real authenticated browser session.',
+    prerequisites: ['Bridge account key (mercari-main)', 'Store or closet name + handle', 'Operator posting notes (shipping, pricing, required fields)'],
     steps: [
-      'Save the storefront name and account handle for the operator.',
-      'Document any posting or shipping rules in Workflow notes.',
-      'Mark the workflow Ready only when the human posting process is actually ready to use.',
+      'Save a bridge account key and store the operator identity details.',
+      'Use Connect Mercari account to capture a valid browser session in Bridge Desktop.',
+      'Mark the channel Ready only after the session is valid and the workflow is confirmed.',
+      'Use listing previews + cross-post jobs to generate a structured handoff plan for Mercari.',
     ],
   },
   etsy: {
@@ -119,13 +124,14 @@ const MARKETPLACE_GUIDES = {
     ],
   },
   poshmark: {
-    summary: 'Poshmark is modeled as a guided manual channel so the workspace can still control readiness and workflow quality.',
-    tooltip: 'Operators can prepare the account metadata and process notes before enabling the channel.',
-    prerequisites: ['Closet name', 'Poshmark username', 'Sharing, pricing, or closet-maintenance notes'],
+    summary: 'Poshmark uses an assisted workflow. PosterPro tracks the closet identity, bridge session health, and readiness for drafting/handoff.',
+    tooltip: 'Poshmark is supported through the automation bridge/browser workflow rather than a direct API integration in this deployment.',
+    prerequisites: ['Bridge account key (poshmark-main)', 'Closet name + @username', 'Operator notes (sharing, bundles, offers, shipping defaults)'],
     steps: [
-      'Add the closet display name and the account handle.',
-      'Capture the exact manual process the team should follow for listing and maintenance.',
-      'Move the channel to Ready after the operator workflow has been reviewed.',
+      'Save the bridge account key and operator identity fields.',
+      'Connect Poshmark in Bridge Desktop and confirm the session state is Ready/Valid.',
+      'Mark Ready after you’ve verified the listing workflow and required fields.',
+      'Use listing previews to review how the listing will map into Poshmark draft fields before handoff.',
     ],
   },
   facebook: {
@@ -149,13 +155,14 @@ const MARKETPLACE_GUIDES = {
     ],
   },
   whatnot: {
-    summary: 'Whatnot setup helps operators capture live-selling workflow details inside the account record.',
-    tooltip: 'This is useful for team onboarding even before direct automation is introduced.',
-    prerequisites: ['Seller handle', 'Show format or cadence notes', 'Internal prep checklist'],
+    summary: 'Whatnot is modeled as a live-sale channel. PosterPro tracks the operator identity, bridge session, and readiness for drafting and follow-up.',
+    tooltip: 'Whatnot posting is not a direct API publish path here. Use assisted workflows and operator policy for final submission.',
+    prerequisites: ['Bridge account key (whatnot-main)', 'Seller handle', 'Operator notes (show schedule, shipping, category rules)'],
     steps: [
-      'Save the seller handle and show-facing account name.',
-      'Document the prep, promo, and post-show workflow in notes.',
-      'Mark the workflow Ready once the team can run it consistently.',
+      'Save the bridge account key and seller identity details.',
+      'Connect Whatnot in Bridge Desktop and confirm the session state is Ready/Valid.',
+      'Mark Ready once the operator workflow for live-sale preparation is confirmed.',
+      'Use listing previews to prepare consistent titles, prices, and item specifics before handoff.',
     ],
   },
   vinted: {
@@ -282,6 +289,46 @@ const DEFAULT_THEME_IMPORT_TEMPLATE = JSON.stringify(
   2,
 );
 
+function formatDateTimeValue(value) {
+  if (!value) return 'Not reported';
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(new Date(value));
+}
+
+function bridgeSessionTone(sessionState) {
+  return ['ready', 'active', 'valid'].includes(String(sessionState || '').toLowerCase()) ? 'success' : 'warning';
+}
+
+function bridgeNextStep({ bridgeAccount, browserConnectInProgress, supportsBrowserImport }) {
+  if (browserConnectInProgress) {
+    return 'Resume the live bridge workspace and complete the login or MFA step there before returning to Settings.';
+  }
+  if (!bridgeAccount) {
+    return 'Save a bridge account key first so PosterPro has a runner-side identity for this marketplace.';
+  }
+  if (!bridgeAccount.credential_configured && !bridgeAccount.session_payload) {
+    return 'Add bridge credentials or capture a browser session so assisted jobs have something usable to run against.';
+  }
+  if (!['ready', 'active', 'valid'].includes(String(bridgeAccount.session_state || '').toLowerCase())) {
+    return 'Reconnect this marketplace in the bridge workspace or save a fresh storage-state payload before relying on assisted jobs.';
+  }
+  if (supportsBrowserImport) {
+    return 'This bridge session looks usable. You can run assisted posting now, and Facebook import should also be available.';
+  }
+  return 'This bridge session looks usable. Assisted posting should have the browser context it needs.';
+}
+
+function supportTone(level) {
+  if (level === 'direct_api') return 'success';
+  if (level === 'browser_assist' || level === 'provider_assist' || level === 'csv_assist') return 'info';
+  return 'default';
+}
+
 function GuideCard({ title, description, tooltip, prerequisites = [], steps = [], tone = 'blue' }) {
   const toneClass =
     tone === 'amber'
@@ -397,6 +444,7 @@ export default function SettingsPage() {
   const [savingBrowserSession, setSavingBrowserSession] = useState(false);
   const [launchingBrowserWorkspace, setLaunchingBrowserWorkspace] = useState(false);
   const [runningMarketplaceImport, setRunningMarketplaceImport] = useState(false);
+  const [runningBulkMarketplaceImport, setRunningBulkMarketplaceImport] = useState(false);
   const [selectedMarketplace, setSelectedMarketplace] = useState('');
   const [marketplaceForm, setMarketplaceForm] = useState({
     display_name: '',
@@ -415,6 +463,10 @@ export default function SettingsPage() {
   });
   const activeBridgeConnectSession = setupSummary?.active_bridge_connect_session || null;
   const activeBridgeConnectMarketplace = String(activeBridgeConnectSession?.marketplace || '').toLowerCase();
+  const ebayConnection = settingsPanels?.ebay || {};
+  const ebaySetupStatus = (setupSummary?.marketplace_connections || []).find((item) => item.marketplace === 'ebay') || null;
+  const ebayImportReady = Boolean(ebayConnection.connected && ebayConnection.import_ready);
+  const ebayReconnectRequired = Boolean(ebayConnection.reconnect_required);
   const [ebayForm, setEbayForm] = useState({ ebay_client_id: '', ebay_client_secret: '', ebay_redirect_uri: '' });
   const [hostedPagesForm, setHostedPagesForm] = useState({
     brand_name: 'PosterPro',
@@ -726,6 +778,14 @@ export default function SettingsPage() {
     setActiveCmsPreview(CMS_PAGE_KEYS[0]);
   };
 
+  const isResellerMarketplace = (name) => RESELLER_PRIORITY_MARKETPLACES.includes(String(name || '').toLowerCase());
+  const defaultShippingScopeForMarketplace = (name) => {
+    const normalized = String(name || '').toLowerCase();
+    if (normalized === 'facebook') return 'local_only';
+    if (BROWSER_CONNECT_MARKETPLACES.includes(normalized)) return 'shipping_only';
+    return 'local_only';
+  };
+
   const openMarketplaceDrawer = (marketplace) => {
     if (!marketplace) return;
     const usesBrowserAssistDefaults = BROWSER_CONNECT_MARKETPLACES.includes(marketplace.marketplace);
@@ -737,7 +797,7 @@ export default function SettingsPage() {
       workflow_state: marketplace.workflow_state || 'draft',
       import_mode: marketplace.import_mode || (usesBrowserAssistDefaults && BROWSER_IMPORT_MARKETPLACES.includes(marketplace.marketplace) ? 'browser_assist' : 'manual'),
       publish_mode: marketplace.publish_mode || (usesBrowserAssistDefaults ? 'browser_assist' : 'manual_review'),
-      shipping_scope: marketplace.shipping_scope || 'local_only',
+      shipping_scope: marketplace.shipping_scope || defaultShippingScopeForMarketplace(marketplace.marketplace),
       renewal_mode: marketplace.renewal_mode || 'manual',
       support_url: marketplace.support_url || '',
       bridge_account_key: marketplace.bridge_account_key || '',
@@ -930,12 +990,12 @@ export default function SettingsPage() {
     });
   };
 
-  const waitForMarketplaceImportJob = async (jobId, { timeoutMs = 180000, pollMs = 1500 } = {}) => {
+  const waitForMarketplaceImportJob = async (jobId, { label = 'Marketplace', timeoutMs = 180000, pollMs = 1500 } = {}) => {
     const deadline = Date.now() + timeoutMs;
     let latestJob = await fetchMarketplaceImportJob(jobId);
     while (!['completed', 'failed', 'canceled'].includes(String(latestJob?.status || '').toLowerCase())) {
       if (Date.now() >= deadline) {
-        throw new Error(`Facebook import job ${jobId} did not finish within ${Math.round(timeoutMs / 1000)} seconds.`);
+        throw new Error(`${label} import job ${jobId} did not finish within ${Math.round(timeoutMs / 1000)} seconds.`);
       }
       await new Promise((resolve) => setTimeout(resolve, pollMs));
       latestJob = await fetchMarketplaceImportJob(jobId);
@@ -966,7 +1026,7 @@ export default function SettingsPage() {
           seller_label: displayName || '',
         },
       });
-      const finalJob = await waitForMarketplaceImportJob(job.id);
+      const finalJob = await waitForMarketplaceImportJob(job.id, { label: 'Facebook' });
       const status = String(finalJob?.status || '').toLowerCase();
       if (status === 'failed') {
         throw new Error(finalJob?.last_error || `Facebook import job ${job.id} failed.`);
@@ -1003,6 +1063,40 @@ export default function SettingsPage() {
     }
   };
 
+  const runEbayImport = async ({ maxListings = 25 } = {}) => {
+    if (!ebayImportReady) {
+      throw new Error(ebayReconnectRequired
+        ? 'Reconnect eBay in Settings before importing listings.'
+        : 'Connect eBay in Settings before importing listings.');
+    }
+    setRunningMarketplaceImport(true);
+    try {
+      const job = await createMarketplaceImportJob({
+        source_marketplace: 'ebay',
+        source_listing_reference: 'ebay-active-listings',
+        import_mode: 'direct_api',
+        payload: {
+          max_listings: Number(maxListings || 25),
+        },
+      });
+      const finalJob = await waitForMarketplaceImportJob(job.id, { label: 'eBay' });
+      const status = String(finalJob?.status || '').toLowerCase();
+      if (status === 'failed') {
+        throw new Error(finalJob?.last_error || `eBay import job ${job.id} failed.`);
+      }
+      if (status === 'canceled') {
+        throw new Error(`eBay import job ${job.id} was canceled.`);
+      }
+      const newListingIds = finalJob?.normalized_preview?.new_listing_ids || [];
+      const reusedListingIds = finalJob?.normalized_preview?.reused_listing_ids || [];
+      toast.success(`eBay import finished. ${newListingIds.length} new draft${newListingIds.length === 1 ? '' : 's'}, ${reusedListingIds.length} reused.`);
+      await reload();
+      await router.push('/jobs');
+    } finally {
+      setRunningMarketplaceImport(false);
+    }
+  };
+
   const importFacebookFromMarketplaceCard = async (marketplace) => {
     if (!marketplace || marketplace.marketplace !== 'facebook') {
       return;
@@ -1031,6 +1125,61 @@ export default function SettingsPage() {
       importMode: marketplace.import_mode || 'browser_assist',
       maxListings: Number(marketplace.import_listing_limit || 10),
     });
+  };
+
+  const eligibleMarketplaceBulkImports = useMemo(() => {
+    const connections = setupSummary?.marketplace_connections || [];
+    const eligible = [];
+    for (const marketplace of connections) {
+      const name = String(marketplace.marketplace || '').toLowerCase();
+      if (!marketplace.connected) {
+        continue;
+      }
+      if (name === 'ebay') {
+        if (marketplace.import_ready) {
+          eligible.push('ebay');
+        }
+        continue;
+      }
+      const importSupportLevel = String(marketplace.import_support_level || '').toLowerCase();
+      const importMode = String(marketplace.import_mode || 'manual').toLowerCase();
+      if (importSupportLevel !== 'browser_assist' || importMode !== 'browser_assist') {
+        continue;
+      }
+      const bridgeAccount = getBridgeAccountForMarketplace(marketplace);
+      const accountKey = String(marketplace.bridge_account_key || '').trim();
+      if (!accountKey || !isBridgeSessionReady(bridgeAccount)) {
+        continue;
+      }
+      eligible.push(name);
+    }
+    return eligible;
+  }, [setupSummary?.marketplace_connections, bridgeAccounts]);
+
+  const importAndSyncAllMarketplaces = async () => {
+    if (!eligibleMarketplaceBulkImports.length) {
+      toast.error('No connected marketplaces are ready for import yet.');
+      return;
+    }
+    setRunningBulkMarketplaceImport(true);
+    try {
+      const result = await bulkImportMarketplaces({
+        marketplaces: eligibleMarketplaceBulkImports,
+      });
+      const createdCount = result?.jobs?.length || 0;
+      const skippedCount = result?.skipped?.length || 0;
+      if (!createdCount) {
+        toast.error(`No import jobs were created. ${skippedCount ? `${skippedCount} marketplace${skippedCount === 1 ? '' : 's'} skipped.` : ''}`.trim());
+        return;
+      }
+      toast.success(`Queued ${createdCount} marketplace import job${createdCount === 1 ? '' : 's'}${skippedCount ? ` (${skippedCount} skipped)` : ''}.`);
+      await reload();
+      await router.push('/jobs?tab=imports');
+    } catch (error) {
+      toast.error(error.message);
+    } finally {
+      setRunningBulkMarketplaceImport(false);
+    }
   };
 
   const importExistingFacebookListings = async () => {
@@ -1116,6 +1265,10 @@ export default function SettingsPage() {
                         <p className="text-sm font-semibold text-[#101828]">Channel onboarding</p>
                         <p className="mt-1 text-sm text-[#667085]">Manual and connected marketplace readiness for this workspace.</p>
                       </button>
+                      <Link href="/jobs" className="rounded-[12px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#bfd2ff] hover:bg-[#f8fbff]">
+                        <p className="text-sm font-semibold text-[#101828]">Jobs console</p>
+                        <p className="mt-1 text-sm text-[#667085]">Inspect assisted imports, bridge outcomes, retries, and operator follow-up in one place.</p>
+                      </Link>
                     </div>
                   </SectionPanel>
 
@@ -1566,8 +1719,41 @@ export default function SettingsPage() {
                         <StatusPill status={settingsPanels?.ebay?.connected ? 'success' : 'default'} label={settingsPanels?.ebay?.connected ? 'Connected' : 'Not connected'} />
                       </div>
                       <div className="mt-4 flex flex-wrap gap-2">
+                        <StatusPill
+                          status={ebayImportReady ? 'success' : ebayReconnectRequired ? 'warning' : 'default'}
+                          label={ebayImportReady ? 'Import ready' : ebayReconnectRequired ? 'Reconnect required' : 'Import blocked'}
+                        />
+                        <StatusPill
+                          status={ebayConnection?.has_refresh_token ? 'success' : 'warning'}
+                          label={ebayConnection?.has_refresh_token ? 'Refresh token saved' : 'Manual token only'}
+                        />
+                      </div>
+                      <div className="mt-4 rounded-[14px] border border-[#e5e7eb] bg-[#f8fafc] p-4">
+                        <p className="text-sm font-medium text-[#101828]">{ebayConnection?.status_note || ebaySetupStatus?.status_note || 'Connect eBay for this operator.'}</p>
+                        {(ebayConnection?.external_account_id || ebaySetupStatus?.external_account_id || ebayConnection?.token_expires_at) ? (
+                          <div className="mt-2 space-y-1 text-sm text-[#667085]">
+                            <p>Account: {ebayConnection?.external_account_id || ebaySetupStatus?.external_account_id || 'Unknown'}</p>
+                            <p>Token expiry: {ebayConnection?.token_expires_at ? new Date(ebayConnection.token_expires_at).toLocaleString() : 'Not reported'}</p>
+                          </div>
+                        ) : null}
+                      </div>
+                      <div className="mt-4 flex flex-wrap gap-2">
                         <Button type="button" onClick={connectEbay} disabled={connectingEbay || !settingsPanels?.ebay?.oauth_ready}>
-                          {connectingEbay ? 'Opening OAuth...' : 'Connect eBay'}
+                          {connectingEbay ? 'Opening OAuth...' : ebayReconnectRequired ? 'Reconnect eBay' : 'Connect eBay'}
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          disabled={runningMarketplaceImport || !ebayImportReady}
+                          onClick={async () => {
+                            try {
+                              await runEbayImport({ maxListings: 50 });
+                            } catch (error) {
+                              toast.error(error.message);
+                            }
+                          }}
+                        >
+                          {runningMarketplaceImport ? 'Importing listings...' : 'Import existing eBay listings'}
                         </Button>
                       </div>
                       {ebayConnectError ? <p className="mt-3 text-sm text-[#b42318]">{ebayConnectError}</p> : null}
@@ -2065,6 +2251,53 @@ export default function SettingsPage() {
           {activeTab === 'marketplaces' ? (
             <SectionPanel title="Marketplaces" description="Control which channels are active for publishing and sales sync.">
               <div className="space-y-4">
+                <div className="rounded-[18px] border border-[#e5e7eb] bg-white p-5">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-[#101828]">Import + sync drafts</p>
+                      <p className="mt-1 text-sm text-[#667085]">Queue import jobs for every connected marketplace that can pull listings into PosterPro drafts.</p>
+                      {eligibleMarketplaceBulkImports.length ? (
+                        <p className="mt-2 text-xs text-[#667085]">
+                          Ready now: <span className="font-medium text-[#101828]">{eligibleMarketplaceBulkImports.map((name) => MARKETPLACE_LABELS[name] || name).join(', ')}</span>
+                        </p>
+                      ) : (
+                        <p className="mt-2 text-xs text-[#667085]">No connected marketplaces are import-ready yet (connect eBay / bridge sessions first).</p>
+                      )}
+                    </div>
+                    <Button
+                      type="button"
+                      onClick={() => {
+                        void importAndSyncAllMarketplaces();
+                      }}
+                      disabled={runningBulkMarketplaceImport || runningMarketplaceImport || !eligibleMarketplaceBulkImports.length}
+                    >
+                      {runningBulkMarketplaceImport ? 'Queueing imports...' : 'Import + sync all marketplaces'}
+                    </Button>
+                  </div>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <Link href="/jobs?tab=imports">
+                      <Button type="button" variant="outline">Open import jobs</Button>
+                    </Link>
+                    <Link href="/listings?tab=drafts">
+                      <Button type="button" variant="outline">Open drafts</Button>
+                    </Link>
+                  </div>
+                </div>
+                <GuideCard
+                  title="Reseller marketplaces (priority)"
+                  description="Mercari, Poshmark, and Whatnot are treated as assisted channels. The goal is one clean operator workflow: save identity → connect bridge session → validate mapping → handoff or submit with policy."
+                  tooltip="These channels tend to fail when onboarding is ambiguous. This card keeps the steps explicit and repeatable."
+                  prerequisites={[
+                    'Bridge account key saved for the marketplace (ex: mercari-main)',
+                    'Operator can complete login/MFA inside Bridge Desktop',
+                    'Posting policy decided (draft-fill/handoff vs final submit)',
+                  ]}
+                  steps={[
+                    'Open the marketplace setup drawer and save the account identity + notes.',
+                    'Click Connect now and complete login in Bridge Desktop until the session state is Ready/Valid.',
+                    'Run a small import/cross-post test and confirm previews map correctly before scaling.',
+                  ]}
+                />
                 <GuideCard
                   title="Channel onboarding flow"
                   description="Every marketplace should move through the same sequence: confirm prerequisites, save account details, mark the workflow ready, then enable publishing or sales sync."
@@ -2076,7 +2309,20 @@ export default function SettingsPage() {
                     'Enable sales sync only on channels where PosterPro can truly monitor post-sale activity.',
                   ]}
                 />
-                {(setupSummary?.marketplace_connections || []).map((marketplace) => {
+                {[...(setupSummary?.marketplace_connections || [])]
+                  .sort((a, b) => {
+                    const aName = String(a.marketplace || '').toLowerCase();
+                    const bName = String(b.marketplace || '').toLowerCase();
+                    const aRank = MARKETPLACE_CARD_PRIORITY.indexOf(aName);
+                    const bRank = MARKETPLACE_CARD_PRIORITY.indexOf(bName);
+                    if (aRank !== -1 || bRank !== -1) {
+                      if (aRank === -1) return 1;
+                      if (bRank === -1) return -1;
+                      return aRank - bRank;
+                    }
+                    return aName.localeCompare(bName);
+                  })
+                  .map((marketplace) => {
                   const publishingEnabled = publishingPlatforms.includes(marketplace.marketplace);
                   const salesEnabled = salePlatforms.includes(marketplace.marketplace);
                   const manualMode = marketplace.connection_mode === 'manual';
@@ -2088,8 +2334,15 @@ export default function SettingsPage() {
                     supportsBrowserConnect &&
                     bridgeAccount &&
                     ['ready', 'active', 'valid'].includes(String(bridgeAccount.session_state || '').toLowerCase());
+                  const resellerPriority = isResellerMarketplace(marketplace.marketplace);
                   return (
-                    <div key={marketplace.marketplace} className="rounded-[10px] border border-[#e5e7eb] bg-white p-4">
+                    <div
+                      key={marketplace.marketplace}
+                      className={[
+                        'rounded-[10px] border bg-white p-4',
+                        resellerPriority ? 'border-[#bfd4ff] bg-[#fbfdff]' : 'border-[#e5e7eb]',
+                      ].join(' ')}
+                    >
                       <div className="flex items-center justify-between gap-4">
                         <div>
                           <div className="flex items-center gap-2">
@@ -2100,7 +2353,11 @@ export default function SettingsPage() {
                           {guide?.summary ? <p className="mt-2 text-sm text-[#475467]">{guide.summary}</p> : null}
                         </div>
                         <div className="flex flex-wrap items-center gap-2">
-                          <StatusPill status={marketplace.available ? 'info' : 'warning'} label={marketplace.connection_mode === 'oauth' ? 'OAuth' : 'Manual'} />
+                          {resellerPriority ? <StatusPill status="info" label="Reseller priority" /> : null}
+                          <StatusPill
+                            status={marketplace.available ? 'info' : 'warning'}
+                            label={marketplace.connection_mode === 'oauth' ? 'OAuth' : supportsBrowserConnect ? 'Browser assist' : 'Manual'}
+                          />
                           <StatusPill status={marketplace.connected ? 'success' : 'default'} label={marketplace.connected ? 'Ready' : 'Not ready'} />
                         </div>
                       </div>
@@ -2110,17 +2367,75 @@ export default function SettingsPage() {
                           {marketplace.display_name || marketplace.account_handle || marketplace.external_account_id}
                         </div>
                       ) : null}
+                      <div className="mt-3 grid gap-2 md:grid-cols-3">
+                        <div className="rounded-[10px] border border-[#e5e7eb] bg-[#fcfcfd] px-3 py-3">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Publish contract</p>
+                            {marketplace.publish_support_label ? (
+                              <StatusPill status={supportTone(marketplace.publish_support_level)} label={marketplace.publish_support_label} />
+                            ) : null}
+                          </div>
+                          {marketplace.publish_support_note ? <p className="mt-2 text-sm text-[#475467]">{marketplace.publish_support_note}</p> : null}
+                        </div>
+                        <div className="rounded-[10px] border border-[#e5e7eb] bg-[#fcfcfd] px-3 py-3">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Import contract</p>
+                            {marketplace.import_support_label ? (
+                              <StatusPill status={supportTone(marketplace.import_support_level)} label={marketplace.import_support_label} />
+                            ) : null}
+                          </div>
+                          {marketplace.import_support_note ? <p className="mt-2 text-sm text-[#475467]">{marketplace.import_support_note}</p> : null}
+                        </div>
+                        <div className="rounded-[10px] border border-[#e5e7eb] bg-[#fcfcfd] px-3 py-3">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Sales sync contract</p>
+                            {marketplace.sales_sync_support_label ? (
+                              <StatusPill status={supportTone(marketplace.sales_sync_support_level)} label={marketplace.sales_sync_support_label} />
+                            ) : null}
+                          </div>
+                          {marketplace.sales_sync_support_note ? <p className="mt-2 text-sm text-[#475467]">{marketplace.sales_sync_support_note}</p> : null}
+                        </div>
+                      </div>
                       {supportsBrowserConnect ? (
                         <div className="mt-3 rounded-[10px] border border-[#dbe7ff] bg-[#f7faff] px-3 py-3 text-sm text-[#475467]">
                           <div className="flex flex-wrap items-center justify-between gap-2">
                             <p className="font-medium text-[#101828]">{`${MARKETPLACE_LABELS[marketplace.marketplace] || marketplace.marketplace} browser session`}</p>
-                            <StatusPill status={browserSessionReady ? 'success' : 'warning'} label={bridgeAccount?.session_state || 'Not connected'} />
+                            <StatusPill status={bridgeSessionTone(bridgeAccount?.session_state)} label={bridgeAccount?.session_state || 'Not connected'} />
                           </div>
                           <p className="mt-2">
                             {`Use `}
                             <span className="font-medium text-[#101828]">{`Connect ${MARKETPLACE_LABELS[marketplace.marketplace] || marketplace.marketplace} account`}</span>
                             {` to capture the cookies and browser storage state required for browser-assist posting.`}
                           </p>
+                          <div className="mt-3 grid gap-2 md:grid-cols-2">
+                            <div className="rounded-[10px] border border-white/80 bg-white/90 px-3 py-2">
+                              <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Bridge account key</p>
+                              <p className="mt-1 text-sm text-[#101828]">{marketplace.bridge_account_key || 'Missing'}</p>
+                            </div>
+                            <div className="rounded-[10px] border border-white/80 bg-white/90 px-3 py-2">
+                              <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Credential + session</p>
+                              <p className="mt-1 text-sm text-[#101828]">
+                                {bridgeAccount
+                                  ? `${bridgeAccount.credential_configured ? 'Credential saved' : 'No credential'} · ${bridgeAccount.session_state || 'draft'}`
+                                  : 'No bridge account saved'}
+                              </p>
+                            </div>
+                            <div className="rounded-[10px] border border-white/80 bg-white/90 px-3 py-2">
+                              <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Last tested</p>
+                              <p className="mt-1 text-sm text-[#101828]">{formatDateTimeValue(bridgeAccount?.last_tested_at)}</p>
+                            </div>
+                            <div className="rounded-[10px] border border-white/80 bg-white/90 px-3 py-2">
+                              <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Next action</p>
+                              <p className="mt-1 text-sm text-[#101828]">
+                                {bridgeNextStep({
+                                  bridgeAccount,
+                                  browserConnectInProgress:
+                                    activeBridgeConnectMarketplace === String(marketplace.marketplace || '').toLowerCase(),
+                                  supportsBrowserImport,
+                                })}
+                              </p>
+                            </div>
+                          </div>
                           <div className="mt-3 flex flex-wrap gap-2">
                             <Button
                               size="sm"
@@ -2131,6 +2446,18 @@ export default function SettingsPage() {
                             >
                               {launchingBrowserWorkspace ? 'Opening workspace...' : 'Connect now'}
                             </Button>
+                            {marketplace.marketplace === 'ebay' ? (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => {
+                                  void runEbayImport({ maxListings: 50 });
+                                }}
+                                disabled={runningMarketplaceImport || !marketplace.import_ready}
+                              >
+                                {runningMarketplaceImport ? 'Importing listings...' : 'Import listings'}
+                              </Button>
+                            ) : null}
                             {supportsBrowserImport ? (
                               <Button
                                 variant="outline"
@@ -2148,6 +2475,22 @@ export default function SettingsPage() {
                                 {runningMarketplaceImport ? 'Importing listings...' : 'Import listings'}
                               </Button>
                             ) : null}
+                            {!supportsBrowserImport && marketplace.marketplace !== 'ebay' ? (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                type="button"
+                                onClick={() => {
+                                  openMarketplaceDrawer(marketplace);
+                                  toast.error(
+                                    `Import is not available yet for ${MARKETPLACE_LABELS[marketplace.marketplace] || marketplace.marketplace} in this deployment.`
+                                  );
+                                }}
+                                disabled={runningMarketplaceImport}
+                              >
+                                Import listings
+                              </Button>
+                            ) : null}
                             <Button
                               variant="outline"
                               size="sm"
@@ -2155,6 +2498,11 @@ export default function SettingsPage() {
                             >
                               {`Open ${MARKETPLACE_LABELS[marketplace.marketplace] || marketplace.marketplace} setup`}
                             </Button>
+                            <Link href={`/jobs?tab=${supportsBrowserImport ? 'imports' : 'crosspost'}`}>
+                              <Button variant="outline" size="sm" type="button">
+                                Open jobs console
+                              </Button>
+                            </Link>
                           </div>
                         </div>
                       ) : null}
@@ -2417,6 +2765,19 @@ export default function SettingsPage() {
                       ) : null}
                     </div>
                   ) : null}
+                  <div className="mt-4 rounded-[10px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-sm font-semibold text-[#101828]">Browser submit policy</p>
+                      <StatusPill
+                        status={settingsPanels?.automation?.bridge_browser_submit_enabled ? 'success' : 'warning'}
+                        label={settingsPanels?.automation?.bridge_browser_submit_policy_label || 'Policy unavailable'}
+                      />
+                    </div>
+                    <p className="mt-2 text-sm text-[#475467]">
+                      {settingsPanels?.automation?.bridge_browser_submit_policy_note ||
+                        'PosterPro has not confirmed the live bridge submit policy yet.'}
+                    </p>
+                  </div>
                 </div>
                 <div className="rounded-[14px] border border-[#e5e7eb] bg-white p-4">
                   <div className="flex items-start justify-between gap-3">
@@ -2940,6 +3301,61 @@ export default function SettingsPage() {
                 tone="slate"
               />
             ) : null}
+            {isResellerMarketplace(configuredMarketplace.marketplace) ? (
+              <div className="rounded-[14px] border border-[#dbe7ff] bg-[#f7faff] p-4 text-sm text-[#475467]">
+                <p className="font-semibold text-[#101828]">Recommended defaults</p>
+                <p className="mt-2">
+                  For reseller marketplaces, start with browser-assisted publish mode and shipping-only scope. You can tune these later after the first successful import/cross-post test.
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      setMarketplaceForm((current) => ({
+                        ...current,
+                        import_mode: current.import_mode || 'manual',
+                        publish_mode: 'browser_assist',
+                        shipping_scope: 'shipping_only',
+                        renewal_mode: current.renewal_mode || 'manual',
+                      }))
+                    }
+                  >
+                    Apply recommended defaults
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+            <div className="grid gap-3 md:grid-cols-3">
+              <div className="rounded-[12px] border border-[#e5e7eb] bg-white p-4">
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Publish contract</p>
+                  {configuredMarketplace.publish_support_label ? (
+                    <StatusPill status={supportTone(configuredMarketplace.publish_support_level)} label={configuredMarketplace.publish_support_label} />
+                  ) : null}
+                </div>
+                {configuredMarketplace.publish_support_note ? <p className="mt-2 text-sm text-[#475467]">{configuredMarketplace.publish_support_note}</p> : null}
+              </div>
+              <div className="rounded-[12px] border border-[#e5e7eb] bg-white p-4">
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Import contract</p>
+                  {configuredMarketplace.import_support_label ? (
+                    <StatusPill status={supportTone(configuredMarketplace.import_support_level)} label={configuredMarketplace.import_support_label} />
+                  ) : null}
+                </div>
+                {configuredMarketplace.import_support_note ? <p className="mt-2 text-sm text-[#475467]">{configuredMarketplace.import_support_note}</p> : null}
+              </div>
+              <div className="rounded-[12px] border border-[#e5e7eb] bg-white p-4">
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Sales sync contract</p>
+                  {configuredMarketplace.sales_sync_support_label ? (
+                    <StatusPill status={supportTone(configuredMarketplace.sales_sync_support_level)} label={configuredMarketplace.sales_sync_support_label} />
+                  ) : null}
+                </div>
+                {configuredMarketplace.sales_sync_support_note ? <p className="mt-2 text-sm text-[#475467]">{configuredMarketplace.sales_sync_support_note}</p> : null}
+              </div>
+            </div>
             {BROWSER_CONNECT_MARKETPLACES.includes(configuredMarketplace.marketplace) ? (
               <div className="space-y-4 rounded-[14px] border border-[#dbe7ff] bg-[#f7faff] p-4">
                 <div className="flex items-start justify-between gap-3">
@@ -2950,9 +3366,33 @@ export default function SettingsPage() {
                     </p>
                   </div>
                   <StatusPill
-                    status={selectedBridgeAccount && ['ready', 'active', 'valid'].includes(String(selectedBridgeAccount.session_state || '').toLowerCase()) ? 'success' : 'warning'}
+                    status={bridgeSessionTone(selectedBridgeAccount?.session_state)}
                     label={selectedBridgeAccount ? selectedBridgeAccount.session_state || 'draft' : 'No session'}
                   />
+                </div>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="rounded-[12px] border border-white/80 bg-white p-3">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Bridge account key</p>
+                    <p className="mt-1 text-sm font-medium text-[#101828]">{marketplaceForm.bridge_account_key || 'Missing'}</p>
+                  </div>
+                  <div className="rounded-[12px] border border-white/80 bg-white p-3">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Credential state</p>
+                    <p className="mt-1 text-sm font-medium text-[#101828]">
+                      {selectedBridgeAccount
+                        ? selectedBridgeAccount.credential_configured
+                          ? 'Credential saved on bridge'
+                          : 'No bridge credential saved'
+                        : 'No bridge account linked'}
+                    </p>
+                  </div>
+                  <div className="rounded-[12px] border border-white/80 bg-white p-3">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Session last tested</p>
+                    <p className="mt-1 text-sm font-medium text-[#101828]">{formatDateTimeValue(selectedBridgeAccount?.last_tested_at)}</p>
+                  </div>
+                  <div className="rounded-[12px] border border-white/80 bg-white p-3">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Session expiry</p>
+                    <p className="mt-1 text-sm font-medium text-[#101828]">{formatDateTimeValue(selectedBridgeAccount?.expires_at)}</p>
+                  </div>
                 </div>
                 <div className="grid gap-3 md:grid-cols-2">
                   <div className="space-y-2">
@@ -3001,6 +3441,26 @@ export default function SettingsPage() {
                 </div>
                 <div className="rounded-[12px] border border-white/80 bg-white p-3 text-sm text-[#475467]">
                   {`PosterPro cannot rely on a native ${MARKETPLACE_LABELS[configuredMarketplace.marketplace] || configuredMarketplace.marketplace} API here. The bridge must capture a real authenticated browser session. Use the connect action when the bridge is running on a machine where you can complete the login flow, or paste a Playwright storage-state export as a fallback.`}
+                </div>
+                <div className="rounded-[12px] border border-[#d0d5dd] bg-white p-3 text-sm text-[#475467]">
+                  <p className="font-semibold text-[#101828]">Current operator guidance</p>
+                  <p className="mt-2">
+                    {bridgeNextStep({
+                      bridgeAccount: selectedBridgeAccount,
+                      browserConnectInProgress,
+                      supportsBrowserImport: BROWSER_IMPORT_MARKETPLACES.includes(configuredMarketplace.marketplace),
+                    })}
+                  </p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <Link href={`/jobs?tab=${BROWSER_IMPORT_MARKETPLACES.includes(configuredMarketplace.marketplace) ? 'imports' : 'crosspost'}`}>
+                      <Button type="button" variant="outline">Open jobs console</Button>
+                    </Link>
+                    {configuredMarketplace.support_url ? (
+                      <a href={configuredMarketplace.support_url} target="_blank" rel="noreferrer">
+                        <Button type="button" variant="outline">Open runbook</Button>
+                      </a>
+                    ) : null}
+                  </div>
                 </div>
                 <div className="rounded-[12px] border border-[#dbe7ff] bg-[#eff6ff] p-3 text-sm text-[#1d4ed8]">
                   {`Click `}
@@ -3164,7 +3624,7 @@ export default function SettingsPage() {
                     workflow_state: 'draft',
                     import_mode: BROWSER_IMPORT_MARKETPLACES.includes(configuredMarketplace.marketplace) ? 'browser_assist' : 'manual',
                     publish_mode: BROWSER_CONNECT_MARKETPLACES.includes(configuredMarketplace.marketplace) ? 'browser_assist' : 'manual_review',
-                    shipping_scope: 'local_only',
+                    shipping_scope: defaultShippingScopeForMarketplace(configuredMarketplace.marketplace),
                     renewal_mode: 'manual',
                     support_url: '',
                     bridge_account_key: '',

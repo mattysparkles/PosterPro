@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import os
 import secrets
+import sys
 import time
 from typing import Annotated
 
@@ -17,7 +18,7 @@ from app.models.models import User
 
 SESSION_COOKIE_NAME = "posterpro_session"
 SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 14
-PASSWORD_ITERATIONS = 390_000
+PASSWORD_ITERATIONS = 10_000 if "pytest" in sys.modules else 390_000
 VINE_ALLOWED_ROLES = {"owner", "admin", "employee"}
 PASSWORD_RESET_TTL_SECONDS = 60 * 60
 
@@ -69,9 +70,16 @@ def issue_session_token(user_id: int, *, view_as_regular: bool = False) -> str:
     return base64.urlsafe_b64encode(raw).decode("utf-8")
 
 
+def _urlsafe_b64decode_text(value: str) -> str:
+    # Some clients/proxies can drop trailing "=" padding in cookie values.
+    # Accept both padded and unpadded forms so valid sessions stay readable.
+    padded = value + ("=" * (-len(value) % 4))
+    return base64.urlsafe_b64decode(padded.encode("utf-8")).decode("utf-8")
+
+
 def parse_session_token(token: str) -> tuple[int, bool]:
     try:
-        raw = base64.urlsafe_b64decode(token.encode("utf-8")).decode("utf-8")
+        raw = _urlsafe_b64decode_text(token)
         parts = raw.split(":")
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session") from exc
@@ -147,7 +155,14 @@ def get_user_role(user: User | None) -> str:
 
 
 def user_has_vine_access(user: User | None) -> bool:
-    return get_user_role(user) in VINE_ALLOWED_ROLES
+    if not user:
+        return False
+    # Keep Vine operator access available for owners/admins even when using
+    # "view as regular" mode for storefront/testing flows.
+    if user.is_admin:
+        return True
+    role = (user.role or "").strip().lower()
+    return role in VINE_ALLOWED_ROLES
 
 
 def user_has_premium_access(user: User | None) -> bool:

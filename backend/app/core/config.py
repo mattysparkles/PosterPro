@@ -1,7 +1,14 @@
+import sys
+
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.secrets import decrypt_secret_if_needed
+
+
+_RUNNING_PYTEST = "pytest" in sys.modules
+_DEFAULT_DB_URL = "sqlite:///./posterpro_test.db" if _RUNNING_PYTEST else "sqlite:///./posterpro.db"
+_ENV_FILE = None if _RUNNING_PYTEST else ".env"
 
 
 class Settings(BaseSettings):
@@ -10,9 +17,10 @@ class Settings(BaseSettings):
     environment: str = "development"
     cors_allowed_origins: str | None = None
     # Keep local defaults credential-free; production should supply explicit env vars.
-    database_url: str = "sqlite:///./posterpro.db"
+    database_url: str = _DEFAULT_DB_URL
     redis_url: str = "redis://localhost:6379/1"
     storage_root: str = "./storage"
+    startup_schema_compat_enabled: bool = True
     session_secret: str | None = None
     openai_api_key_plain: str | None = Field(default=None, validation_alias=AliasChoices("OPENAI_API_KEY"))
     openai_api_key_enc: str | None = Field(default=None, validation_alias=AliasChoices("OPENAI_API_KEY_ENC"))
@@ -40,6 +48,7 @@ class Settings(BaseSettings):
     sale_detection_enabled: bool = True
     sale_detection_dry_run: bool = True
     sale_detection_poll_minutes: int = 15
+    sold_sync_enabled: bool = False
     max_concurrent_bulk_tasks: int = 50
     bulk_chunk_size: int = 0
     amazon_vine_import_enabled: bool = False
@@ -61,7 +70,7 @@ class Settings(BaseSettings):
     smtp_from_name: str | None = None
     smtp_use_tls: bool = True
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore")
 
     @property
     def openai_api_key(self) -> str | None:

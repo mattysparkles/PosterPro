@@ -11,9 +11,12 @@ class Base(DeclarativeBase):
 
 engine_kwargs = {"pool_pre_ping": True}
 if settings.database_url.startswith("sqlite"):
-    engine_kwargs["connect_args"] = {"check_same_thread": False}
+    engine_kwargs["connect_args"] = {"check_same_thread": False, "timeout": 3}
     if settings.database_url in {"sqlite://", "sqlite:///:memory:", "sqlite+pysqlite:///:memory:"}:
         engine_kwargs["poolclass"] = StaticPool
+elif settings.database_url.startswith("postgresql"):
+    # Avoid indefinite hangs on unreachable Postgres during startup/tests.
+    engine_kwargs["connect_args"] = {"connect_timeout": 3}
 
 engine = create_engine(settings.database_url, **engine_kwargs)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
