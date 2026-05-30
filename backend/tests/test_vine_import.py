@@ -318,8 +318,8 @@ def test_listing_draft_hides_order_number_from_public_text(db_session):
     assert listing.source_metadata["order_number"] == "777-8888888-9999999"
 
 
-def test_unauthorized_users_cannot_access_vine_endpoints(db_session):
-    settings.amazon_vine_import_enabled = True
+def test_unauthorized_users_cannot_access_vine_endpoints(monkeypatch, db_session):
+    monkeypatch.setattr(settings, "amazon_vine_import_enabled", True)
 
     public_user = User(
         email=f"public-{uuid4()}@example.com",
@@ -335,8 +335,8 @@ def test_unauthorized_users_cannot_access_vine_endpoints(db_session):
     assert exc_info.value.status_code == 403
 
 
-def test_authorized_user_can_upload_xlsx_and_create_inventory_and_drafts(db_session):
-    settings.amazon_vine_import_enabled = True
+def test_authorized_user_can_upload_xlsx_and_create_inventory_and_drafts(monkeypatch, db_session):
+    monkeypatch.setattr(settings, "amazon_vine_import_enabled", True)
 
     owner = User(
         email=f"owner2-{uuid4()}@example.com",
@@ -407,4 +407,156 @@ def test_created_vine_records_keep_source_metadata_and_needs_photos(db_session):
     created = db_session.query(Listing).filter(Listing.user_id == user.id, Listing.source_type == "amazon_vine").all()
     assert created
     assert all(listing.source_metadata.get("order_number") for listing in created)
+    assert all(set((listing.marketplace_data or {}).get("targets") or []) >= {"ebay", "amazon"} for listing in created)
     assert any("needs_photos" in (listing.custom_labels or []) for listing in created)
+
+
+def test_fetch_media_with_lookup_disabled_sets_manual_only_and_drafts_mark_needs_photos(monkeypatch, db_session):
+    monkeypatch.setattr(settings, "amazon_media_lookup_enabled", False)
+    monkeypatch.setattr(settings, "amazon_media_page_fallback_enabled", False)
+
+    user = User(email=f"vine-manual-{uuid4()}@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    service = VineImportService()
+    batch = service.create_batch_from_upload(
+        db_session,
+        current_user=user,
+        filename="vine.xlsx",
+        file_bytes=build_sample_xlsx(),
+        reference_date=date(2026, 5, 5),
+    )
+    eligible_items = (
+        db_session.query(VineImportItem)
+        .filter(VineImportItem.batch_id == batch.id, VineImportItem.eligibility_status == "eligible", VineImportItem.asin.is_not(None))
+        .all()
+    )
+    assert eligible_items
+
+    service.fetch_media(db_session, batch=batch, item_ids=[item.id for item in eligible_items])
+    refreshed = db_session.query(VineImportItem).filter(VineImportItem.id == eligible_items[0].id).one()
+    assert refreshed.media_status == "manual_only"
+
+    drafts = service.create_listing_drafts(
+        db_session,
+        batch=batch,
+        item_ids=[item.id for item in eligible_items],
+        fetch_media_first=False,
+        require_media_for_asin=True,
+        allow_drafts_without_media=False,
+    )
+    assert drafts["created"] >= 1
+    created_listings = db_session.query(Listing).filter(Listing.user_id == user.id, Listing.source_type == "amazon_vine").all()
+    assert created_listings
+    assert any("needs_photos" in (listing.custom_labels or []) for listing in created_listings)
+
+
+def test_create_listing_drafts_attaches_cached_amazon_images_and_is_idempotent(monkeypatch, db_session):
+    monkeypatch.setattr(settings, "amazon_media_lookup_enabled", True)
+    monkeypatch.setattr(settings, "amazon_media_page_fallback_enabled", True)
+
+    user = User(email=f"vine-cached-{uuid4()}@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    service = VineImportService()
+    batch = service.create_batch_from_upload(
+        db_session,
+        current_user=user,
+        filename="vine.xlsx",
+        file_bytes=build_sample_xlsx(),
+        reference_date=date(2026, 5, 5),
+    )
+    eligible_items = (
+        db_session.query(VineImportItem)
+        .filter(VineImportItem.batch_id == batch.id, VineImportItem.eligibility_status == "eligible", VineImportItem.asin.is_not(None))
+        .all()
+    )
+    assert eligible_items
+
+    asin = eligible_items[0].asin
+    assert asin
+    db_session.add(
+        ProductMediaCache(
+            asin=asin,
+            marketplace_region=settings.amazon_marketplace_region.upper(),
+            fetch_status="fetched",
+            primary_image_url="/media/amazon-vine/primary.jpg",
+            gallery_image_urls_json=["/media/amazon-vine/primary.jpg", "/media/amazon-vine/alt.jpg"],
+            local_asset_ids_json=[1, 2],
+        )
+    )
+    db_session.commit()
+
+    first = service.create_listing_drafts(
+        db_session,
+        batch=batch,
+        item_ids=[item.id for item in eligible_items],
+        fetch_media_first=False,
+        require_media_for_asin=True,
+        allow_drafts_without_media=False,
+    )
+    assert first["created"] >= 1
+    assert first["listing_ids"]
+    assert all(isinstance(listing_id, int) for listing_id in first["listing_ids"])
+    created_listings = db_session.query(Listing).filter(Listing.user_id == user.id, Listing.source_type == "amazon_vine").all()
+    assert created_listings
+    assert all((listing.image_urls or []) for listing in created_listings)
+    assert all("needs_photos" not in (listing.custom_labels or []) for listing in created_listings)
+    stored_items = (
+        db_session.query(VineImportItem)
+        .filter(VineImportItem.batch_id == batch.id, VineImportItem.id.in_([item.id for item in eligible_items]))
+        .all()
+    )
+    assert stored_items
+    assert all(item.listing_id is not None for item in stored_items)
+    db_session.refresh(batch)
+    assert batch.drafts_created_count >= len(stored_items)
+
+    second = service.create_listing_drafts(
+        db_session,
+        batch=batch,
+        item_ids=[item.id for item in eligible_items],
+        fetch_media_first=False,
+        require_media_for_asin=True,
+        allow_drafts_without_media=False,
+    )
+    assert second["created"] == 0
+    assert set(second.get("listing_ids") or []) == set(first.get("listing_ids") or [])
+
+
+def test_fetch_media_handles_missing_asin_gracefully(db_session):
+    user = User(email=f"vine-missing-asin-{uuid4()}@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    service = VineImportService()
+    batch = service.create_batch_from_upload(
+        db_session,
+        current_user=user,
+        filename="vine.xlsx",
+        file_bytes=build_sample_xlsx(),
+        reference_date=date(2026, 5, 5),
+    )
+    item = VineImportItem(
+        batch_id=batch.id,
+        user_id=user.id,
+        order_number="111-2222222-3333333",
+        asin=None,
+        product_name="No ASIN Item",
+        order_type="ORDER",
+        eligibility_status="eligible",
+        media_status="pending",
+    )
+    db_session.add(item)
+    db_session.commit()
+    db_session.refresh(item)
+
+    result = service.fetch_media(db_session, batch=batch, item_ids=[item.id])
+    assert result["blocked"] == 0
+    refreshed = db_session.query(VineImportItem).filter(VineImportItem.id == item.id).one()
+    assert refreshed.media_status == "missing_asin"

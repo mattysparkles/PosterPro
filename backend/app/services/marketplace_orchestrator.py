@@ -12,6 +12,7 @@ from app.workers.tasks import publish_listing_to_marketplace_task, sync_sold_eve
 def list_marketplaces() -> list[dict]:
     return [
         {"name": MarketplaceName.ebay.value, "supports_oauth": True},
+        {"name": MarketplaceName.amazon.value, "supports_oauth": False},
         {"name": MarketplaceName.etsy.value, "supports_oauth": False},
         {"name": MarketplaceName.mercari.value, "supports_oauth": False},
         {"name": MarketplaceName.facebook.value, "supports_oauth": False},

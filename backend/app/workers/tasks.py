@@ -195,11 +195,14 @@ def _create_imported_listing(
         or (raw_payload.get("source_listing_reference") if isinstance(raw_payload, dict) else None)
         or (raw_payload.get("source_url") if isinstance(raw_payload, dict) else None),
     )
+    default_targets = [MarketplaceName.ebay.value]
+    if source_marketplace.strip().lower() == MarketplaceName.amazon.value:
+        default_targets.append(MarketplaceName.amazon.value)
     marketplace_data = normalize_marketplace_data(
         {
             "source_marketplace": source_marketplace,
             "manual_entry": False,
-            "targets": [MarketplaceName.ebay.value],
+            "targets": default_targets,
         }
     )
     if existing_listing:
@@ -325,19 +328,45 @@ def publish_listing_to_marketplace_task(self, listing_id: int, marketplace: str)
         listing = db.get(Listing, listing_id)
         if not listing:
             raise ValueError("Listing not found")
+        user = db.get(User, listing.user_id)
+        if not user:
+            raise ValueError("User not found")
 
         try:
             rate_limiter.acquire(marketplace)
-            result = multi_platform_publisher.publish(db, listing, marketplace)
-            upsert_marketplace_listing(
-                db,
-                listing_id=listing_id,
-                marketplace=marketplace,
-                status=result.status,
-                response=result.response,
-            )
+            execution_mode = resolve_execution_mode(listing=listing, user=user, marketplace=marketplace)
+            if execution_mode == "direct_api":
+                result = multi_platform_publisher.publish(db, listing, marketplace)
+                upsert_marketplace_listing(
+                    db,
+                    listing_id=listing_id,
+                    marketplace=marketplace,
+                    status=result.status,
+                    response=result.response,
+                )
+                response_status = result.status.value
+                response_payload = result.response
+            else:
+                response_payload = execute_secondary_marketplace_path(
+                    listing=listing,
+                    marketplace=marketplace,
+                    execution_mode=execution_mode,
+                )
+                upsert_marketplace_listing(
+                    db,
+                    listing_id=listing_id,
+                    marketplace=marketplace,
+                    status=MarketplaceListingStatus.PENDING,
+                    response=response_payload,
+                )
+                response_status = MarketplaceListingStatus.PENDING.value
             db.commit()
-            return {"marketplace": marketplace, "status": result.status.value, "response": result.response}
+            return {
+                "marketplace": marketplace,
+                "execution_mode": execution_mode,
+                "status": response_status,
+                "response": response_payload,
+            }
         except Exception as exc:
             upsert_marketplace_listing(
                 db,

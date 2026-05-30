@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session
 from app.connectors.registry import get_connector
 from app.core.config import settings
 from app.models.enums import MarketplaceListingStatus, MarketplaceName
-from app.models.models import Listing, MarketplaceListing, Sale, User
+from app.models.models import Listing, MarketplaceAccount, MarketplaceListing, Sale, User
+from app.services.marketplace_setup import marketplace_status_snapshot
 from app.services.rate_limiter import rate_limiter
 
 logger = logging.getLogger(__name__)
@@ -19,11 +20,6 @@ logger = logging.getLogger(__name__)
 class SaleDetectionService:
     DEFAULT_MARKETPLACES = [
         MarketplaceName.ebay.value,
-        MarketplaceName.poshmark.value,
-        MarketplaceName.mercari.value,
-        MarketplaceName.depop.value,
-        MarketplaceName.whatnot.value,
-        MarketplaceName.vinted.value,
     ]
 
     def get_enabled_marketplaces(self, user: User) -> list[str]:
@@ -135,11 +131,33 @@ class SaleDetectionService:
 
     def poll_user_sales(self, db: Session, user: User, *, dry_run: bool = True, lookback_minutes: int = 30) -> dict:
         since = (datetime.now(UTC) - timedelta(minutes=lookback_minutes)).isoformat()
-        enabled = self.get_enabled_marketplaces(user)
-        logger.info("Starting sale polling", extra={"user_id": user.id, "marketplaces": enabled, "dry_run": dry_run})
+        requested = self.get_enabled_marketplaces(user)
+        accounts = {
+            account.marketplace.value: account
+            for account in db.execute(select(MarketplaceAccount).where(MarketplaceAccount.user_id == user.id)).scalars().all()
+        }
+        eligible: list[str] = []
+        skipped: list[str] = []
+        for marketplace in requested:
+            snapshot = marketplace_status_snapshot(marketplace=marketplace, account=accounts.get(marketplace), user=user)
+            if snapshot.get("can_sync_sales"):
+                eligible.append(marketplace)
+            else:
+                skipped.append(marketplace)
+
+        logger.info(
+            "Starting sale polling",
+            extra={
+                "user_id": user.id,
+                "marketplaces_requested": requested,
+                "marketplaces_polled": eligible,
+                "marketplaces_skipped": skipped,
+                "dry_run": dry_run,
+            },
+        )
 
         events: list[dict] = []
-        for marketplace in enabled:
+        for marketplace in eligible:
             connector = get_connector(marketplace)
             try:
                 rate_limiter.acquire(marketplace)
@@ -206,7 +224,9 @@ class SaleDetectionService:
         return {
             "user_id": user.id,
             "dry_run": dry_run,
-            "marketplaces_polled": enabled,
+            "marketplaces_requested": requested,
+            "marketplaces_polled": eligible,
+            "marketplaces_skipped": skipped,
             "events_seen": len(events),
             "sales_detected": detected,
             "adjustments_triggered": adjusted,

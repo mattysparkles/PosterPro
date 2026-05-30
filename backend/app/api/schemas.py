@@ -639,6 +639,9 @@ class VineImportBatchResponse(BaseModel):
 class VineImportActionRequest(BaseModel):
     item_ids: list[int] = Field(default_factory=list)
     include_locked: bool = True
+    fetch_media_first: bool = False
+    require_media_for_asin: bool = False
+    allow_drafts_without_media: bool = False
 
 
 class VineImportItemUpdateRequest(BaseModel):

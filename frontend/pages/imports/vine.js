@@ -54,6 +54,8 @@ export default function VineImportPage() {
   const [batches, setBatches] = useState([]);
   const [activeBatch, setActiveBatch] = useState(null);
   const [selectedIds, setSelectedIds] = useState([]);
+  const [allowDraftsWithoutMedia, setAllowDraftsWithoutMedia] = useState(false);
+  const [lastCreatedListingIds, setLastCreatedListingIds] = useState([]);
 
   const canAccess = !!user?.can_access_vine_import;
 
@@ -77,6 +79,13 @@ export default function VineImportPage() {
 
   const items = activeBatch?.items || [];
   const selectedItems = useMemo(() => items.filter((item) => selectedIds.includes(item.id)), [items, selectedIds]);
+  const selectedHasAsinWithoutMedia = useMemo(
+    () =>
+      selectedItems.some(
+        (item) => item.asin && !['cached', 'fetched'].includes(String(item.media_status || '').toLowerCase()),
+      ),
+    [selectedItems],
+  );
 
   const toggleRow = (id) => {
     setSelectedIds((current) => (current.includes(id) ? current.filter((value) => value !== id) : [...current, id]));
@@ -202,6 +211,14 @@ export default function VineImportPage() {
             {selectedIds.length ? (
               <div className="mb-4 flex flex-wrap items-center gap-2 rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-3">
                 <span className="text-sm font-medium text-[#101828]">{selectedIds.length} selected</span>
+                <label className="flex items-center gap-2 text-sm text-[#475467]">
+                  <input
+                    type="checkbox"
+                    checked={allowDraftsWithoutMedia}
+                    onChange={(event) => setAllowDraftsWithoutMedia(event.target.checked)}
+                  />
+                  Allow drafts without photos
+                </label>
                 <Button
                   size="sm"
                   variant="outline"
@@ -242,12 +259,18 @@ export default function VineImportPage() {
                 </Button>
                 <Button
                   size="sm"
+                  variant="secondary"
                   disabled={!!busyAction}
                   onClick={async () => {
                     setBusyAction('drafts');
                     try {
-                      await createVineDrafts(activeBatch.id, selectedIds);
+                      const result = await createVineDrafts(activeBatch.id, selectedIds, {
+                        fetchMediaFirst: true,
+                        requireMediaForAsin: true,
+                        allowDraftsWithoutMedia,
+                      });
                       await loadBatches(activeBatch.id);
+                      setLastCreatedListingIds(result?.created_listing_ids || []);
                       toast.success('Listing drafts created.');
                     } catch (error) {
                       toast.error(error.message);
@@ -256,7 +279,31 @@ export default function VineImportPage() {
                     }
                   }}
                 >
-                  Generate listing drafts
+                  Fetch images + generate drafts
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!!busyAction || (selectedHasAsinWithoutMedia && !allowDraftsWithoutMedia)}
+                  onClick={async () => {
+                    setBusyAction('drafts-no-media');
+                    try {
+                      const result = await createVineDrafts(activeBatch.id, selectedIds, {
+                        fetchMediaFirst: false,
+                        requireMediaForAsin: false,
+                        allowDraftsWithoutMedia: true,
+                      });
+                      await loadBatches(activeBatch.id);
+                      setLastCreatedListingIds(result?.created_listing_ids || []);
+                      toast.success('Listing drafts created (no image fetch).');
+                    } catch (error) {
+                      toast.error(error.message);
+                    } finally {
+                      setBusyAction('');
+                    }
+                  }}
+                >
+                  Generate drafts (no image fetch)
                 </Button>
                 <Button size="sm" variant="outline" onClick={exportSkippedRows}>
                   Export skipped/error rows
@@ -283,6 +330,20 @@ export default function VineImportPage() {
                 <Link href="/listings">
                   <Button size="sm" variant="outline">Open created drafts</Button>
                 </Link>
+                {lastCreatedListingIds.length ? (
+                  <div className="w-full text-sm text-[#475467]">
+                    Created drafts:{' '}
+                    {lastCreatedListingIds.slice(0, 6).map((id, index) => (
+                      <span key={id}>
+                        {index ? ', ' : ''}
+                        <Link href={`/listings/${id}`} className="text-[#2563eb] underline">
+                          #{id}
+                        </Link>
+                      </span>
+                    ))}
+                    {lastCreatedListingIds.length > 6 ? ` (+${lastCreatedListingIds.length - 6} more)` : null}
+                  </div>
+                ) : null}
               </div>
             ) : null}
 
@@ -299,7 +360,23 @@ export default function VineImportPage() {
                 { key: 'estimated_tax_value', label: 'Estimated Tax Value', render: (item) => item.estimated_tax_value == null ? '—' : `$${Number(item.estimated_tax_value).toFixed(2)}` },
                 { key: 'eligible_after', label: 'Eligible After', render: (item) => formatDate(item.eligible_after) },
                 { key: 'image_status', label: 'Image Status', render: (item) => <StatusPill status={item.media_status || 'default'} label={item.media_status || 'pending'} /> },
-                { key: 'draft_status', label: 'Draft Status', render: (item) => item.listing_id ? <StatusPill status="success" label="Created" /> : <StatusPill status="default" label="Not created" /> },
+                {
+                  key: 'draft_status',
+                  label: 'Draft',
+                  render: (item) =>
+                    item.listing_id ? (
+                      <div className="flex items-center gap-2">
+                        <StatusPill status="success" label="Created" />
+                        <Link href={`/listings/${item.listing_id}`}>
+                          <Button size="sm" variant="outline">
+                            Open
+                          </Button>
+                        </Link>
+                      </div>
+                    ) : (
+                      <StatusPill status="default" label="Not created" />
+                    ),
+                },
               ]}
               rows={items}
               rowKey={(row) => row.id}

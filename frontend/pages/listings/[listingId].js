@@ -160,6 +160,32 @@ export default function ListingWorkspacePage() {
     payload_json: '{\n  "title": "",\n  "description": "",\n  "price": 0,\n  "image_urls": []\n}',
   });
 
+  const photoCount = useMemo(() => {
+    const urls = (form.image_urls || "")
+      .split("\n")
+      .map((value) => value.trim())
+      .filter(Boolean);
+    return urls.length;
+  }, [form.image_urls]);
+
+  const priceValue = useMemo(() => {
+    const raw = form.listing_price !== "" ? form.listing_price : form.suggested_price;
+    const num = Number(raw);
+    return Number.isFinite(num) && num > 0 ? num : null;
+  }, [form.listing_price, form.suggested_price]);
+
+  const coreFieldsReady = useMemo(() => {
+    return Boolean(form.title.trim() && form.description.trim() && priceValue);
+  }, [form.title, form.description, priceValue]);
+
+  const previewByMarketplace = useMemo(() => {
+    const map = {};
+    (crosspostPreview || []).forEach((entry) => {
+      map[String(entry.marketplace || "").toLowerCase()] = entry;
+    });
+    return map;
+  }, [crosspostPreview]);
+
   useEffect(() => {
     if (!router.isReady || !user?.id || !listingId) return;
     let cancelled = false;
@@ -769,10 +795,36 @@ export default function ListingWorkspacePage() {
               <div className="flex flex-wrap items-center gap-2">
                 <StatusPill status={listing?.status || "draft"} label={listing?.status || (isNew ? "new draft" : "draft")} />
                 <StatusPill status={workflow.review_before_publish ? "info" : "warning"} label={workflow.review_before_publish ? "Approval required" : "Direct publish allowed"} />
+                <StatusPill status={photoCount ? "success" : "warning"} label={photoCount ? `${photoCount} photo${photoCount === 1 ? "" : "s"}` : "Needs photos"} />
+                <StatusPill status={coreFieldsReady ? "success" : "warning"} label={coreFieldsReady ? "Core fields ready" : "Needs fields"} />
               </div>
               <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-4 text-sm text-[#475467]">
                 Save here first, then let AI enrich the record, then approve for publish. The same page works for manual products, imported marketplace listings, and photo-ingested drafts.
               </div>
+              {previewByMarketplace.ebay?.payload && (form.marketplace_data.targets || []).includes("ebay") ? (
+                <div className="flex flex-wrap items-center gap-2 text-sm">
+                  <StatusPill
+                    status={
+                      (previewByMarketplace.ebay.payload.image_urls || []).length && previewByMarketplace.ebay.payload.title && previewByMarketplace.ebay.payload.price
+                        ? "success"
+                        : "warning"
+                    }
+                    label="eBay draft check"
+                  />
+                </div>
+              ) : null}
+              {previewByMarketplace.facebook?.payload && (form.marketplace_data.targets || []).includes("facebook") ? (
+                <div className="flex flex-wrap items-center gap-2 text-sm">
+                  <StatusPill
+                    status={
+                      (previewByMarketplace.facebook.payload.image_urls || []).length && previewByMarketplace.facebook.payload.title && previewByMarketplace.facebook.payload.price
+                        ? "success"
+                        : "warning"
+                    }
+                    label="Facebook draft check"
+                  />
+                </div>
+              ) : null}
             </div>
           </SectionPanel>
 

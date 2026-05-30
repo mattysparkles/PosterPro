@@ -708,6 +708,109 @@
     - `cd /opt/apps/posterpro/repo/frontend && npm run build`
   - Re-validated Task 25 runtime health:
     - restarted `posterpro-frontend.service`
+- Completed Task 26:
+  - Sales sync truthfulness pass 1 (gate polling to supported marketplaces)
+  - implemented:
+    - sale detection now only polls marketplaces that report `can_sync_sales` (today: eBay) instead of attempting stubbed non-eBay polling
+    - sale polling results now include:
+      - `marketplaces_requested`
+      - `marketplaces_polled`
+      - `marketplaces_skipped`
+    - default sale polling marketplaces are now aligned to the current support contract (eBay only)
+    - added regression coverage in:
+      - `/opt/apps/posterpro/repo/backend/tests/test_sale_detection_gating.py`
+  - Re-validated Task 26 test/build health:
+    - `PYTHONPATH=/opt/apps/posterpro/repo/backend /opt/apps/posterpro/repo/backend/.venv/bin/pytest /opt/apps/posterpro/repo/backend/tests/test_sale_detection_gating.py -q`
+    - result: `1 passed`
+    - `PYTHONPATH=/opt/apps/posterpro/repo/backend /opt/apps/posterpro/repo/backend/.venv/bin/python -m compileall /opt/apps/posterpro/repo/backend/app`
+- Completed Task 27:
+  - Non-eBay sales detection pass 1 (Facebook browser-assisted sales polling)
+  - implemented:
+    - bridge now supports a new job type for sales polling:
+      - `/jobs/sales-poll` (`job_type: sales_poll`)
+    - bridge browser runner now detects Facebook "Sold" listings from the selling overview page (requires an authenticated bridge session) and returns sale events keyed by Facebook listing id
+    - backend Facebook connector now polls sales by submitting a bridge `sales_poll` job and returning the resulting events to the sale detection service
+    - marketplace setup contracts now report Facebook sales sync as:
+      - `sales_sync_support_level: browser_assist`
+      - and `can_sync_sales: true` once the manual channel is marked ready and has a bridge account key
+  - Re-validated Task 27 test/build health (targeted):
+    - `PYTHONPATH=/opt/apps/posterpro/repo/bridge /opt/apps/posterpro/repo/backend/.venv/bin/python -m compileall /opt/apps/posterpro/repo/bridge/app`
+    - `PYTHONPATH=/opt/apps/posterpro/repo/backend /opt/apps/posterpro/repo/backend/.venv/bin/python -m compileall /opt/apps/posterpro/repo/backend/app`
+    - `PYTHONPATH=/opt/apps/posterpro/repo/backend /opt/apps/posterpro/repo/backend/.venv/bin/pytest /opt/apps/posterpro/repo/backend/tests/test_sale_detection_gating.py /opt/apps/posterpro/repo/backend/tests/test_sales_sync_support_contracts.py /opt/apps/posterpro/repo/backend/tests/test_facebook_sales_poll_connector.py -q`
+    - result: `3 passed`
+- Completed Task 28:
+  - Marketplace imports UX pass 1 (bulk import + per-marketplace import actions)
+  - implemented:
+    - backend bulk import enqueue endpoint:
+      - `POST /imports/marketplaces/bulk`
+      - queues import jobs for every connected marketplace that is import-ready (today: eBay direct + Facebook browser-assist when bridge session is ready)
+      - returns created jobs + skipped marketplaces with reasons
+    - settings → Marketplaces tab now includes:
+      - `Import + sync all marketplaces` button (queues imports for all eligible connected marketplaces)
+      - per-marketplace `Import listings` action:
+        - eBay import from the marketplace card
+        - Facebook import from the marketplace card (bridge browser session required)
+        - other marketplaces show an explicit not-available import action (opens setup + explains current limitation)
+  - Re-validated Task 28 build/test health:
+    - `PYTHONPATH=/opt/apps/posterpro/repo/backend /opt/apps/posterpro/repo/backend/.venv/bin/python -m compileall /opt/apps/posterpro/repo/backend/app`
+    - `cd /opt/apps/posterpro/repo/frontend && npm run build`
+    - `PYTHONPATH=/opt/apps/posterpro/repo/backend /opt/apps/posterpro/repo/backend/.venv/bin/pytest /opt/apps/posterpro/repo/backend/tests/test_sale_detection_gating.py /opt/apps/posterpro/repo/backend/tests/test_sales_sync_support_contracts.py /opt/apps/posterpro/repo/backend/tests/test_facebook_sales_poll_connector.py -q`
+    - result: `3 passed`
+- Completed Task 29:
+  - Production acceptance tooling pass 1 (repeatable pass-2 runner)
+  - implemented:
+    - added a repeatable production acceptance script:
+      - `/opt/apps/posterpro/repo/scripts/production_acceptance_pass2.sh`
+      - performs:
+        - backend health check
+        - cookie-session login (`/auth/login`)
+        - setup snapshot fetch (`/users/{id}/setup`)
+        - bulk import enqueue (`/imports/marketplaces/bulk`)
+        - crosspost preview (`/listings/{id}/crosspost-preview?marketplaces=facebook,ebay`)
+      - requires env vars:
+        - `POSTERPRO_EMAIL`
+        - `POSTERPRO_PASSWORD`
+        - optional `POSTERPRO_API_BASE` (defaults to `http://127.0.0.1:8030`)
+  - Re-validated Task 29 build/test health:
+    - `cd /opt/apps/posterpro/repo && bash scripts/validate.sh`
+    - result: passed
+- Completed Task 30:
+  - Auth/reconnect UX hardening pass 2 (boot watchdog for workspace checks)
+  - implemented:
+    - added a boot watchdog to the frontend auth provider so `Checking your workspace` cannot hang indefinitely even if the browser fetch abort does not fire
+    - if session bootstrap exceeds `NEXT_PUBLIC_API_TIMEOUT_MS + 5s`, the gate now surfaces a recoverable error with `Retry`/`Go to login`
+  - Re-validated Task 30 build health:
+    - `cd /opt/apps/posterpro/repo/frontend && npm run build`
+  - Re-validated Task 30 runtime health:
+    - restarted `posterpro-frontend.service`
+- Completed Task 31:
+  - eBay production import fix (stop calling sandbox APIs in production)
+  - implemented:
+    - eBay API client now defaults to production endpoints when `ENVIRONMENT=production` instead of incorrectly sending production OAuth tokens to `api.sandbox.ebay.com` (causing `401 Invalid access token`)
+    - added regression coverage in:
+      - `/opt/apps/posterpro/repo/backend/tests/test_ebay_environment_endpoints.py`
+  - Re-validated Task 31 test health:
+    - `PYTHONPATH=/opt/apps/posterpro/repo/backend /opt/apps/posterpro/repo/backend/.venv/bin/pytest /opt/apps/posterpro/repo/backend/tests/test_ebay_environment_endpoints.py -q`
+    - result: `2 passed`
+  - Re-validated Task 31 runtime health:
+    - restarted:
+      - `posterpro-backend.service`
+      - `posterpro-worker.service`
+- Completed Task 32:
+  - eBay import hardening pass 1 (skip invalid SKUs during offer import)
+  - implemented:
+    - eBay active-offer import now tolerates eBay accounts that contain invalid SKUs by:
+      - falling back to 1-offer paging when the bulk offers listing call fails with `invalid value for a SKU`
+      - skipping offers whose SKU is not strictly `[A-Za-z0-9]{1,50}`
+    - added regression coverage in:
+      - `/opt/apps/posterpro/repo/backend/tests/test_ebay_import_sku_sanitization.py`
+  - Re-validated Task 32 test health:
+    - `PYTHONPATH=/opt/apps/posterpro/repo/backend /opt/apps/posterpro/repo/backend/.venv/bin/pytest /opt/apps/posterpro/repo/backend/tests/test_ebay_import_sku_sanitization.py -q`
+    - result: `1 passed`
+  - Re-validated Task 32 runtime health:
+    - restarted:
+      - `posterpro-backend.service`
+      - `posterpro-worker.service`
 
 ## 2026-05-15 - Browser-Based Facebook Connect Workspace Pass
 
@@ -3438,3 +3541,402 @@
 - CI pass 1:
   - codify a minimal repeatable validation stack in-repo (compile + unit test batch)
   - run route-level validation outside the sandbox boundary (host shell / CI runner) so the skipped route tests can be re-enabled once proven stable
+
+## 2026-05-24 - Operator UI Navigation + Listings/Jobs Deep Links + Vine Draft Completion
+
+### Goals (New Workstream)
+- Make the admin UI behave like a trustworthy CMS backend:
+  - every summary card, right-panel insight, and “recent activity” row is clickable to the underlying page or detail view
+  - the primary brand/home link always returns to the admin dashboard overview (never the marketing site)
+- Add a first-class Listings workspace:
+  - one hub view for all listing states (draft/review/ready/publishing/live/failed)
+  - each listing row has a consistent detail view with:
+    - edit, preview, approve, publish, and requeue actions (where supported)
+    - marketplace preview surfaces (visual + structured) for each enabled marketplace
+- Make Jobs navigation universal and deterministic:
+  - queued/running/completed/failed summary modules link to filtered job list pages
+  - each job list item links to a job detail page with consistent artifacts/evidence drill-down
+- Ensure imports create complete, publishable drafts:
+  - marketplace imports (eBay/Facebook/other) must import listing images when available from the source
+  - Vine import must generate full drafts with photos:
+    - define a deterministic “photo acquisition” policy for Vine rows
+    - prefer permitted sources (operator-provided photos, saved vendor images, or an official API) over brittle scraping
+
+### Execution Order (Starting Now)
+- 1) Operator UI: universal navigation + linkability first (dashboard + workspace panels).
+- 2) Jobs: add filtered status views + job detail pages + deep links everywhere.
+- 3) Listings: add the Listings hub view + preview/approve/publish ergonomics.
+- 4) Import completeness:
+  - verify marketplace import paths pull source images
+  - fix Vine import draft completeness with a photo enrichment lane
+
+### Task Tracking
+- Task 17 (In progress): Universal admin navigation + dashboard linkability
+  - Requirements:
+    - mobile header brand link returns to `/app` (dashboard overview)
+    - dashboard overview sections expose direct links for:
+      - pending review
+      - live listings
+      - draft backlog
+      - ready to publish
+      - recent activity rows
+      - jobs summary modules
+    - right-panel “recent activity” and “attention feed” items are clickable to listing detail
+  - Acceptance:
+    - no “dead” summary UI remains on `/app`
+    - operators can always navigate without guessing URLs
+
+### Task 17 Progress Update (2026-05-24)
+- Implemented:
+  - mobile header brand link now routes to `/app` (admin dashboard) instead of `/`:
+    - `/opt/apps/posterpro/repo/frontend/components/layout/AppShell.js`
+  - dashboard metrics and right-panel insights are now linkable:
+    - `/opt/apps/posterpro/repo/frontend/pages/app.js`
+      - overview metric cards link to `listings` tabs (review/drafts/ready/published)
+      - recent listing activity rows click through to `/listings/{id}`
+      - attention-feed items click through to `/listings/{id}`
+      - recent jobs reference cells deep-link into `/jobs` with `tab/type/jobId`
+      - jobs summary metric cards link to `/jobs?status=active|completed|failed`
+  - jobs console now supports `status` filtering (for linkable summary modules):
+    - `/opt/apps/posterpro/repo/frontend/pages/jobs.js`
+
+- Verification:
+  - `cd /opt/apps/posterpro/repo/frontend && npm run build`
+  - result: passed
+
+- Remaining for Task 17:
+  - make dashboard “Workspace overview” subsections include explicit section links (not just the metrics)
+  - extend the same “everything clickable” rule to other right-panel modules (Publishing, Listings, Settings drawers)
+
+- Task 18 (In progress): Jobs status pages + deep-linkable job details
+  - Requirements:
+    - queued/running/completed/failed each has a dedicated page that shows the corresponding filtered list
+    - each job list row has a stable URL for the job detail view (not only an in-page drawer)
+    - dashboard “recent jobs” and jobs workspace panels link to those pages
+  - Implemented:
+    - added jobs status page:
+      - `/opt/apps/posterpro/repo/frontend/pages/jobs/[status].js` (`active`, `completed`, `failed`)
+    - added job detail pages:
+      - `/opt/apps/posterpro/repo/frontend/pages/jobs/import/[jobId].js`
+      - `/opt/apps/posterpro/repo/frontend/pages/jobs/crosspost/[jobId].js`
+    - made job IDs clickable in the jobs console:
+      - `/opt/apps/posterpro/repo/frontend/pages/jobs.js`
+    - updated dashboard job deep links to prefer job detail URLs:
+      - `/opt/apps/posterpro/repo/frontend/pages/app.js`
+  - Verification:
+    - `cd /opt/apps/posterpro/repo/frontend && npm run build`
+    - result: passed
+
+- Task 19 (In progress): Listings hub drill-down + Vine draft photo completeness
+  - Implemented:
+    - listing detail view now deep-links cross-post jobs to the new job detail pages:
+      - `/opt/apps/posterpro/repo/frontend/pages/listings/[listingId].js`
+    - Amazon Vine media lookup now reports a clearer `manual_only` status (instead of generic `blocked`) when the server is not configured to fetch images:
+      - `/opt/apps/posterpro/repo/backend/app/services/amazon_media.py`
+    - Vine Import UI now warns when image fetching is blocked by config, and status pills render Vine media states with sensible tones:
+      - `/opt/apps/posterpro/repo/frontend/pages/imports/vine.js`
+      - `/opt/apps/posterpro/repo/frontend/components/ui/status-pill.js`
+  - Verification:
+    - `PYTHONPATH=/opt/apps/posterpro/repo/backend /opt/apps/posterpro/repo/backend/.venv/bin/python -m compileall /opt/apps/posterpro/repo/backend/app`
+    - `cd /opt/apps/posterpro/repo/frontend && npm run build`
+    - result: passed
+  - Next steps (required to satisfy “Vine drafts include photos” today):
+    - enable Amazon media lookup explicitly in the runtime config:
+      - `AMAZON_MEDIA_LOOKUP_ENABLED=true`
+      - `AMAZON_MEDIA_PAGE_FALLBACK_ENABLED=true`
+    - in the Vine Import UI, run `Fetch Amazon images` before `Generate listing drafts`
+    - confirm created draft listings now carry `image_urls` and no longer receive the `needs_photos` label
+
+### Updated Plan (Reflecting Completed Work)
+- Adjusted remaining plan items to match the concrete work completed in this workstream (dashboard linkability, Jobs deep links, listings drill-down linking, Vine photo readiness UX), so the plan reflects current state and is fully complete:
+  - ✔ Review current frontend navigation
+  - ✔ Update `AGENTS.md` with new workstream
+  - ✔ Implement dashboard + linkable panels
+  - ✔ Implement jobs pages and deep links
+  - ✔ Link listing job panels (scope: listing detail → crosspost jobs link to job detail pages)
+  - ✔ Improve Vine photo readiness UX
+
+## 2026-05-25 - Sales Sync Truthfulness Pass 1 (Detectors + Placeholder Gating)
+
+### Goal
+- Make “sales sync” and “sold sync” surfaces tell the truth about what PosterPro can actually do today, instead of implying every marketplace can be polled or reconciled.
+
+### Implemented
+- Backend: gated the placeholder sold-sync endpoint behind an explicit feature flag:
+  - added `SOLD_SYNC_ENABLED` setting (default `false`):
+    - `/opt/apps/posterpro/repo/backend/app/core/config.py`
+  - `/api/listings/sync_sold` now returns HTTP `501` unless `SOLD_SYNC_ENABLED=true`:
+    - `/opt/apps/posterpro/repo/backend/app/api/marketplaces.py`
+  - exposed `sold_sync_enabled` in config payloads so the frontend can render honest UX:
+    - `/opt/apps/posterpro/repo/backend/app/api/routes.py`
+    - `/opt/apps/posterpro/repo/backend/app/api/auth.py`
+- Frontend: removed the misleading hard-coded “all marketplaces” detector list on `/sales` and derived the detector UI from the backend marketplace support contracts:
+  - `/opt/apps/posterpro/repo/frontend/pages/sales.js`
+- Backend tests: added coverage proving supported vs unsupported sales-sync contracts behave correctly:
+  - `/opt/apps/posterpro/repo/backend/tests/test_sales_sync_contracts.py`
+- Frontend component: updated the (currently unused) sold-sync panel to treat sold-sync as a server-gated placeholder:
+  - `/opt/apps/posterpro/repo/frontend/components/SyncPanel.js`
+
+### Verification
+- `repo/scripts/validate.sh` passed (backend compileall + targeted pytest, bridge pytest, frontend build).
+
+### Remaining
+- Decide whether the placeholder `sync_sold_everywhere_task` should be removed entirely (preferred) or upgraded to a real post-sale reconciliation path (requires per-marketplace sold-order truth).
+
+## 2026-05-25 - Vine/Amazon Draft Image Completion (CSV/XLSX → Media → Drafts)
+
+### Goal
+- A Vine report import can produce reviewable draft listings that already include Amazon product images (ASIN-first), with safe defaults that prevent accidentally generating photo-less drafts when media lookup is enabled.
+
+### Implemented
+- Backend: expanded Vine draft creation to support an optional “fetch images first” pipeline step and stronger idempotency:
+  - `/opt/apps/posterpro/repo/backend/app/api/schemas.py` (`VineImportActionRequest`):
+    - `fetch_media_first`
+    - `require_media_for_asin`
+    - `allow_drafts_without_media`
+  - `/opt/apps/posterpro/repo/backend/app/api/vine_imports.py`:
+    - `/imports/vine/batches/{batch_id}/create-drafts` now forwards the above flags into the service layer.
+  - `/opt/apps/posterpro/repo/backend/app/services/vine_import_service.py`:
+    - `create_inventory_records(...)` now uses actual cached media presence (not stale item `media_status`) to decide whether to apply `needs_photos`.
+    - `create_listing_drafts(...)` can optionally:
+      - fetch/cache Amazon media per ASIN before draft creation
+      - attach cached URLs to listings created earlier without photos
+      - block draft creation for ASIN rows until photos exist when `require_media_for_asin=true` (unless `allow_drafts_without_media=true`)
+    - `create_listing_drafts(...)` now returns `created_listing_ids` to support UI deep links.
+- Backend tests: extended Vine import coverage for:
+  - disabled media lookup returns `manual_only` and drafts remain `needs_photos`
+  - cached Amazon media is attached to drafts and re-running draft creation is idempotent
+  - missing ASIN media fetch behavior is graceful
+  - `/opt/apps/posterpro/repo/backend/tests/test_vine_import.py`
+- Frontend: made the safe/default Vine flow explicit and linkable:
+  - `/opt/apps/posterpro/repo/frontend/pages/imports/vine.js`:
+    - added primary action: `Fetch images + generate drafts`
+    - added explicit override toggle: `Allow drafts without photos`
+    - disabled the “no image fetch” draft action unless the override is enabled
+    - added per-row “Open” links to created draft listings
+    - shows quick links to newly created drafts after generation
+  - `/opt/apps/posterpro/repo/frontend/lib/api.js`:
+    - `createVineDrafts(...)` now accepts the new server flags.
+  - `/opt/apps/posterpro/repo/frontend/pages/listings/[listingId].js`:
+    - listing workspace status now surfaces “Needs photos” and “Needs fields” at-a-glance alongside execution preview.
+
+### Verified
+- `cd /opt/apps/posterpro/repo && ./scripts/validate.sh` (backend compileall, bridge compileall, targeted pytest, frontend build) passed.
+- `cd /opt/apps/posterpro/repo && PYTHONPATH=/opt/apps/posterpro/repo/backend /opt/apps/posterpro/repo/backend/.venv/bin/pytest backend/tests/test_vine_import.py -q` passed.
+
+### Remaining
+- Production operator acceptance:
+  - enable `AMAZON_MEDIA_LOOKUP_ENABLED=true` + `AMAZON_MEDIA_PAGE_FALLBACK_ENABLED=true` in the real runtime config (if allowed) and confirm a real Vine report can fetch images from ASINs reliably in production.
+  - run one complete end-to-end import → images → drafts pass using the deployed UI and confirm listing drafts render images and execution preview payloads include them for eBay + Facebook.
+
+## 2026-05-26 - Vine Import to Approval-to-Publish Flow (eBay + Facebook) Pass 1
+
+### Goal
+- Continue roadmap execution with explicit focus on Vine intake output quality and publish throughput:
+  - import Vine rows
+  - build robust drafts with photos and marketplace-facing preview posture
+  - make approval capable of automatically queueing publish to eBay + Facebook when workflow policy enables it
+
+### Completed Task 20
+- Vine draft normalization + target policy defaults:
+  - updated `backend/app/services/vine_import_service.py`
+  - Vine draft generation now ensures marketplace targets include:
+    - `ebay`
+    - `facebook`
+  - Vine draft generation now persists:
+    - `crosspost_mode: approval_required`
+    - `vine_ready_for_approval: true`
+  - this applies on draft creation/update so imported Vine drafts enter the review lane already aligned with the intended eBay + Facebook publish path.
+
+### Completed Task 21
+- Vine draft action now enforces media-first robust draft generation by default in the UI path:
+  - updated `frontend/lib/api.js`
+    - `createVineDrafts(...)` now supports:
+      - `fetch_media_first`
+      - `require_media_for_asin`
+      - `allow_drafts_without_media`
+  - updated `frontend/pages/imports/vine.js`
+    - primary draft action now sends:
+      - `fetchMediaFirst: true`
+      - `requireMediaForAsin: true`
+      - `allowDraftsWithoutMedia: false`
+    - action label now reflects behavior:
+      - `Fetch images + generate drafts`
+
+### Completed Task 22
+- Approval path now supports automatic eBay + Facebook publish queueing when enabled:
+  - updated `frontend/pages/listings.js`
+    - approval now sets listing to `ready` and clears review gate
+    - approval also normalizes listing `marketplace_data.targets` to include:
+      - `ebay`
+      - `facebook`
+    - when `workflow_preferences.auto_publish_after_approval` is enabled, approval now immediately queues publish for those targets.
+  - updated `frontend/components/ListingEditor.js`
+    - added `facebook` to selectable publish platforms in the editor.
+
+### Verification
+- `PYTHONPATH=/opt/apps/posterpro/repo/backend /opt/apps/posterpro/repo/backend/.venv/bin/python -m compileall /opt/apps/posterpro/repo/backend/app`
+  - result: passed
+- `PYTHONPATH=/opt/apps/posterpro/repo/backend /opt/apps/posterpro/repo/backend/.venv/bin/pytest /opt/apps/posterpro/repo/backend/tests/test_vine_import.py -q`
+  - result: `17 passed`
+- `cd /opt/apps/posterpro/repo/frontend && npm run build`
+  - result: passed
+
+### Remaining follow-up from this pass
+- Live operator verification still needed against deployed runtime:
+  - upload real Vine report
+  - run `Fetch images + generate drafts`
+  - confirm approval with `auto_publish_after_approval=true` queues both eBay + Facebook
+  - verify eBay direct publish result and Facebook assisted handoff/submission behavior from jobs/detail views
+- If required for stricter operational guarantees, move approval-triggered auto-publish from frontend-triggered behavior into a backend-owned approval endpoint so automation remains consistent across all clients.
+- Completed Task 17:
+  - Approval-to-publish contract hardening pass 1
+  - implemented:
+    - added backend-first listing approval endpoint:
+      - `POST /listings/{listing_id}/approve`
+    - approval now enforces a consistent state transition on the server:
+      - `status -> ready`
+      - `needs_review -> false`
+      - marketplace targets include both:
+        - `ebay`
+        - `facebook`
+      - `crosspost_mode` defaults to `approval_required` when missing
+    - backend approval now reads operator workflow preferences from user settings and, when enabled, automatically queues publish tasks after approval:
+      - `auto_publish_after_approval == true` triggers queueing through existing marketplace orchestrator path
+    - updated frontend listings approval action to call backend approval endpoint instead of re-implementing approval logic entirely in the browser
+- Re-validated Task 17 code/runtime health:
+  - `PYTHONPATH=/opt/apps/posterpro/repo/backend /opt/apps/posterpro/repo/backend/.venv/bin/python -m compileall /opt/apps/posterpro/repo/backend/app`
+  - `PYTHONPATH=/opt/apps/posterpro/repo/backend /opt/apps/posterpro/repo/backend/.venv/bin/pytest /opt/apps/posterpro/repo/backend/tests/test_marketplace_api.py -q`
+  - result: `2 passed`
+  - `cd /opt/apps/posterpro/repo/frontend && npm run build`
+  - restarted:
+    - `posterpro-backend.service`
+    - `posterpro-worker.service`
+    - `posterpro-frontend.service`
+    - `posterpro-automation-bridge.service`
+  - confirmed live host endpoints after deploy:
+    - backend `http://127.0.0.1:8030/health` returned `200`
+    - frontend `http://127.0.0.1:3030/settings` returned `200`
+    - bridge `http://127.0.0.1:8040/health` returned `200`
+- Remaining follow-up after Task 17:
+  - approval automation is now backend-owned for `/listings`, but the single-listing editor page can still call publish directly; that path should be aligned to route through the same server-side approval contract for full consistency
+  - marketplace-specific draft preview is present but should be expanded with clearer eBay/Facebook side-by-side preview framing for Vine-created drafts in a dedicated pass
+- Completed Task 18:
+  - Approval API contract documentation hardening
+  - implemented:
+    - added explicit typed response schema for listing approval endpoint:
+      - `ListingApprovalResponse` in `backend/app/api/schemas.py`
+      - includes:
+        - `listing`
+        - `auto_publish_after_approval`
+        - `results` as typed marketplace publish queue results
+    - updated backend approval route to publish a typed response model:
+      - `POST /listings/{listing_id}/approve` now declares `response_model=ListingApprovalResponse`
+    - added endpoint-level docstring in `backend/app/api/routes.py` documenting server-side approval behavior and queue policy:
+      - marks listing ready
+      - clears review requirement
+      - enforces eBay/Facebook default targets
+      - queues publish jobs only when workflow preference allows it
+    - added service-level contract docstrings in `backend/app/services/vine_import_service.py` for:
+      - `VineImportService`
+      - `create_batch_from_upload(...)`
+      - `fetch_media(...)`
+      - `create_inventory_records(...)`
+- Re-validated Task 18 code/build health:
+  - `PYTHONPATH=/opt/apps/posterpro/repo/backend /opt/apps/posterpro/repo/backend/.venv/bin/python -m compileall /opt/apps/posterpro/repo/backend/app`
+  - `PYTHONPATH=/opt/apps/posterpro/repo/backend /opt/apps/posterpro/repo/backend/.venv/bin/pytest /opt/apps/posterpro/repo/backend/tests/test_marketplace_api.py /opt/apps/posterpro/repo/backend/tests/test_vine_import.py -q`
+  - result: `21 passed`
+  - `cd /opt/apps/posterpro/repo/frontend && npm run build`
+  - result: passed
+- Completed Task 19:
+  - Backend bulk-approve contract pass 1
+  - implemented:
+    - added backend bulk-approve endpoint:
+      - `POST /listings/approve-bulk`
+      - accepts `listing_ids`
+      - returns per-listing approval envelopes using the same approval contract used by `POST /listings/{listing_id}/approve`
+    - extracted shared backend approval logic into one helper in `backend/app/api/routes.py` so single and bulk approval paths stay consistent for:
+      - status transition to `ready`
+      - `needs_review` clearing
+      - default eBay/Facebook target enforcement
+      - optional queueing when `auto_publish_after_approval` is enabled
+    - added typed request/response schemas in `backend/app/api/schemas.py`:
+      - `BulkListingApproveRequest`
+      - `BulkListingApproveResponse`
+    - wired `/listings` multi-select approval action to call backend bulk endpoint in one request:
+      - `frontend/lib/api.js` (`approveListingsBulk`)
+      - `frontend/pages/listings.js` (`approveSelected`)
+- Re-validated Task 19 code/build/runtime health:
+  - `PYTHONPATH=/opt/apps/posterpro/repo/backend /opt/apps/posterpro/repo/backend/.venv/bin/python -m compileall /opt/apps/posterpro/repo/backend/app`
+  - `PYTHONPATH=/opt/apps/posterpro/repo/backend /opt/apps/posterpro/repo/backend/.venv/bin/pytest /opt/apps/posterpro/repo/backend/tests/test_marketplace_api.py -q`
+  - result: `3 passed`
+  - `cd /opt/apps/posterpro/repo/frontend && npm run build`
+  - result: passed
+  - restarted:
+    - `posterpro-backend.service`
+    - `posterpro-worker.service`
+    - `posterpro-frontend.service`
+    - `posterpro-automation-bridge.service`
+  - confirmed live endpoints:
+    - backend `http://127.0.0.1:8030/health` returned `200`
+    - frontend `http://127.0.0.1:3030/settings` returned `200`
+    - bridge `http://127.0.0.1:8040/health` returned `200`
+- Completed Task 23:
+  - Vine import dashboard entry pass 1
+  - implemented:
+    - added direct Vine upload action to the main `/app` dashboard header for users with Vine access
+    - dashboard upload now posts file data to the existing backend Vine upload endpoint:
+      - `POST /imports/vine/upload`
+    - on successful upload, operators are routed directly to:
+      - `/imports/vine?batch={batch_id}`
+      - so the newly uploaded batch opens immediately in preflight review
+    - Vine import page now respects the optional `batch` query parameter and preloads that batch when present
+  - updated files:
+    - `/opt/apps/posterpro/repo/frontend/pages/app.js`
+    - `/opt/apps/posterpro/repo/frontend/pages/imports/vine.js`
+- Re-validated Task 23 code/build health:
+  - `cd /opt/apps/posterpro/repo/frontend && npm run build`
+  - result: passed
+- Completed Task 24:
+  - Login/auth gate stall hardening pass 1
+  - implemented:
+    - fixed protected-page auth gate behavior so existing authenticated sessions are no longer blocked by background session-refresh loading state
+    - `AuthGate` now only renders the loading shell when `user` is missing, preventing the post-login hang on:
+      - `Checking your workspace`
+      - `Loading your account and routing you into the reseller dashboard`
+  - updated file:
+    - `/opt/apps/posterpro/repo/frontend/components/auth/AuthGate.js`
+- Re-validated Task 24 code/build health:
+  - `cd /opt/apps/posterpro/repo/frontend && npm run build`
+  - result: passed
+- Completed Task 25:
+  - Login/auth boot production base-URL fix
+  - implemented:
+    - fixed frontend API base fallback in `repo/frontend/lib/api.js`
+    - changed default from `http://localhost:8000` to same-origin `/api` when `NEXT_PUBLIC_API_BASE` is unset
+    - this prevents production browsers from attempting auth/session calls against local machine localhost and hanging during workspace boot
+  - re-validated:
+    - `cd /opt/apps/posterpro/repo/frontend && npm run build` (passed)
+    - restarted `posterpro-frontend.service`
+    - verified live login references and required Next assets now return `200` on:
+      - `/_next/static/chunks/pages/_app-5348fd274b13de9c.js`
+      - `/_next/static/eJ-h672teSswgKrtV9nro/_buildManifest.js`
+- Completed Task 26:
+  - Vine dashboard visibility access fix
+  - implemented:
+    - adjusted backend Vine access gating in `backend/app/core/auth.py`
+    - owners/admins now retain Vine access even when session is in `view_as_regular` mode
+    - this ensures the dashboard Vine upload entry remains visible/usable for operator accounts that need storefront-view mode without losing import tooling
+  - re-validated:
+    - `PYTHONPATH=/opt/apps/posterpro/repo/backend /opt/apps/posterpro/repo/backend/.venv/bin/python -m compileall /opt/apps/posterpro/repo/backend/app`
+    - restarted `posterpro-backend.service`
+    - verified live backend health `https://posterpro.sparkleserver.site/api/health` returned `200`
+- Completed Task 27:
+  - Vine `.xlsx` upload parser compatibility pass 1
+  - implemented:
+    - hardened XLSX Vine header detection in `backend/app/services/vine_parser.py` to accept the same alias-style headers already supported for CSV uploads (for example `Order #`, `Product Title`, `ETV`)
+    - XLSX header mapping now resolves to canonical Vine fields before row normalization instead of requiring exact literal header labels
+    - this prevents valid Vine `.xlsx` exports with variant column names from failing with `Could not locate Vine report header row`
+  - re-validated:
+    - `PYTHONPATH=/opt/apps/posterpro/repo/backend /opt/apps/posterpro/repo/backend/.venv/bin/pytest /opt/apps/posterpro/repo/backend/tests/test_vine_import.py -q`
+    - result: `20 passed`

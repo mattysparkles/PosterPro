@@ -544,11 +544,16 @@ export async function createVineInventory(batchId, itemIds, includeLocked = true
   });
 }
 
-export async function createVineDrafts(batchId, itemIds) {
+export async function createVineDrafts(batchId, itemIds, options = {}) {
   return jsonFetch(`${API_BASE}/imports/vine/batches/${batchId}/create-drafts`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ item_ids: itemIds }),
+    body: JSON.stringify({
+      item_ids: itemIds,
+      fetch_media_first: !!options.fetchMediaFirst,
+      require_media_for_asin: !!options.requireMediaForAsin,
+      allow_drafts_without_media: !!options.allowDraftsWithoutMedia,
+    }),
   });
 }
 

@@ -13,6 +13,14 @@ _DEFAULT_CHANNEL_SETTINGS = {
         "fulfillment": "shipping",
         "shipping_available": True,
     },
+    MarketplaceName.amazon.value: {
+        "enabled": False,
+        "publish_mode": "manual_or_provider",
+        "status": "manual_setup",
+        "fulfillment": "shipping",
+        "shipping_available": True,
+        "renewal_mode": "manual",
+    },
     MarketplaceName.facebook.value: {
         "enabled": False,
         "publish_mode": "manual_or_provider",

@@ -8,6 +8,7 @@ from app.models.enums import MarketplaceName
 from app.models.models import MarketplaceAccount, User
 
 MANUAL_MARKETPLACES = {
+    MarketplaceName.amazon.value,
     MarketplaceName.etsy.value,
     MarketplaceName.facebook.value,
     MarketplaceName.mercari.value,
@@ -20,6 +21,15 @@ MANUAL_MARKETPLACES = {
 MANUAL_WORKFLOW_READY = "ready"
 
 MARKETPLACE_SETUP_PROFILES: dict[str, dict[str, Any]] = {
+    MarketplaceName.amazon.value: {
+        "status_label": "seller account details",
+        "draft_note": "Add Amazon seller workflow notes and account details before enabling the channel.",
+        "saved_note": "Amazon setup details are saved, but the channel is not marked ready yet.",
+        "ready_note": "Amazon manual/browser-assisted workflow is saved for this marketplace.",
+        "default_import_mode": "manual",
+        "default_publish_mode": "manual_review",
+        "default_shipping_scope": "shipping_only",
+    },
     MarketplaceName.etsy.value: {
         "status_label": "shop details",
         "draft_note": "Add Etsy shop details, fulfillment expectations, and bridge/provider notes before enabling the channel.",

@@ -15,6 +15,7 @@ import StatusPill from "../components/ui/status-pill";
 import { Tabs } from "../components/ui/tabs";
 import { useAuth } from "../contexts/AuthContext";
 import useDashboardData from "../hooks/useDashboardData";
+import { useRouter } from "next/router";
 import {
   cancelCrosspostJob,
   cancelMarketplaceImportJob,
@@ -42,6 +43,7 @@ function formatTime(value) {
 
 export default function JobsPage() {
   const { user } = useAuth();
+  const router = useRouter();
   const { autonomousConfig, reload: reloadDashboard } = useDashboardData(user?.id);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("crosspost");
@@ -70,13 +72,40 @@ export default function JobsPage() {
   }, []);
 
   useEffect(() => {
+    const requestedTab = typeof router.query.tab === "string" ? router.query.tab : "";
+    if (requestedTab && JOB_TABS.some((tab) => tab.value === requestedTab)) {
+      setActiveTab(requestedTab);
+    }
+  }, [router.query.tab]);
+
+  useEffect(() => {
+    const requestedJobId = typeof router.query.job === "string" ? Number(router.query.job) : null;
+    if (!requestedJobId || activeJob) return;
+    const requestedTab = typeof router.query.tab === "string" ? router.query.tab : activeTab;
+    const list = requestedTab === "imports" ? (jobsOverview.import_jobs || []) : (jobsOverview.crosspost_jobs || []);
+    const job = list.find((item) => Number(item.id) === requestedJobId);
+    if (job) {
+      setActiveJob({ type: requestedTab === "imports" ? "import" : "crosspost", job });
+    }
+  }, [activeJob, activeTab, jobsOverview, router.query.job, router.query.tab]);
+
+  useEffect(() => {
     if (!autoRefresh) return undefined;
     const interval = setInterval(load, 10000);
     return () => clearInterval(interval);
   }, [autoRefresh]);
 
-  const importJobs = jobsOverview.import_jobs || [];
-  const crosspostJobs = jobsOverview.crosspost_jobs || [];
+  const statusFilter = typeof router.query.status === "string" ? router.query.status : "";
+  const shouldKeepStatus = (job) => {
+    const status = String(job.status || "").toLowerCase();
+    if (statusFilter === "active") return ["queued", "running"].includes(status);
+    if (statusFilter === "completed") return status === "completed";
+    if (statusFilter === "failed") return status === "failed";
+    return true;
+  };
+
+  const importJobs = (jobsOverview.import_jobs || []).filter(shouldKeepStatus);
+  const crosspostJobs = (jobsOverview.crosspost_jobs || []).filter(shouldKeepStatus);
 
   const summary = useMemo(() => {
     const queued = [...importJobs, ...crosspostJobs].filter((job) => ["queued", "running"].includes(String(job.status).toLowerCase())).length;

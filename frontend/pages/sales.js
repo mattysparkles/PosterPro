@@ -20,7 +20,7 @@ import {
   updateSaleDetectionSettings,
 } from '../lib/api';
 
-const MARKETPLACES = ['ebay', 'etsy', 'poshmark', 'mercari', 'depop', 'whatnot', 'vinted'];
+const MARKETPLACES = ['ebay', 'amazon', 'etsy', 'poshmark', 'mercari', 'depop', 'whatnot', 'vinted'];
 
 function formatTime(value) {
   if (!value) return 'Pending';
