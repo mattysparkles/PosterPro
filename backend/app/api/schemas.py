@@ -110,6 +110,20 @@ class MarketplacePublishResult(BaseModel):
     status: str
 
 
+class ListingApprovalResponse(BaseModel):
+    listing: ListingResponse
+    auto_publish_after_approval: bool = False
+    results: list[MarketplacePublishResult] = Field(default_factory=list)
+
+
+class BulkListingApproveRequest(BaseModel):
+    listing_ids: list[int] = Field(default_factory=list)
+
+
+class BulkListingApproveResponse(BaseModel):
+    approvals: list[ListingApprovalResponse] = Field(default_factory=list)
+
+
 class ConnectMarketplaceResponse(BaseModel):
     marketplace: str
     auth: dict
@@ -489,6 +503,21 @@ class MarketplaceImportJobResponse(BaseModel):
         from_attributes = True
 
 
+class BulkMarketplaceImportSkip(BaseModel):
+    marketplace: str
+    reason: str
+
+
+class BulkMarketplaceImportRequest(BaseModel):
+    marketplaces: list[str] | None = None
+    max_listings: int | None = None
+
+
+class BulkMarketplaceImportResponse(BaseModel):
+    jobs: list[MarketplaceImportJobResponse] = Field(default_factory=list)
+    skipped: list[BulkMarketplaceImportSkip] = Field(default_factory=list)
+
+
 class MarketplaceJobsOverviewResponse(BaseModel):
     import_jobs: list[MarketplaceImportJobResponse] = Field(default_factory=list)
     crosspost_jobs: list[CrosspostJobResponse] = Field(default_factory=list)
@@ -635,6 +664,19 @@ class VineImportItemResponse(BaseModel):
     listing_id: int | None = None
     source_confidence: str = "high"
     reviewed: bool = False
+    brand: str | None = None
+    category: str | None = None
+    source_status: str | None = None
+    review_deadline: date | None = None
+    item_url: str | None = None
+    manual_amazon_url: str | None = None
+    amazon_match_status: str | None = None
+    amazon_match_confidence: str | None = None
+    amazon_match_asin: str | None = None
+    amazon_match_title: str | None = None
+    amazon_source_page_url: str | None = None
+    image_import_status: str | None = None
+    image_import_error: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -667,6 +709,9 @@ class VineImportBatchResponse(BaseModel):
 class VineImportActionRequest(BaseModel):
     item_ids: list[int] = Field(default_factory=list)
     include_locked: bool = True
+    fetch_media_first: bool = False
+    require_media_for_asin: bool = False
+    allow_drafts_without_media: bool = False
 
 
 class VineImportItemUpdateRequest(BaseModel):
@@ -674,6 +719,7 @@ class VineImportItemUpdateRequest(BaseModel):
     marketplace_allowed_status: str | None = None
     restricted_review_required: bool | None = None
     restricted_reasons: list[str] | None = None
+    manual_amazon_url: str | None = None
 
 
 class AccountSetupSummaryResponse(BaseModel):

@@ -39,6 +39,21 @@ _LEGACY_STARTUP_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("full_name", "full_name VARCHAR(255)"),
         ("settings_json", "settings_json JSON"),
     ],
+    "vine_import_items": [
+        ("brand", "brand VARCHAR(255)"),
+        ("category", "category VARCHAR(255)"),
+        ("source_status", "source_status VARCHAR(64)"),
+        ("review_deadline", "review_deadline DATE"),
+        ("item_url", "item_url TEXT"),
+        ("manual_amazon_url", "manual_amazon_url TEXT"),
+        ("amazon_match_status", "amazon_match_status VARCHAR(64)"),
+        ("amazon_match_confidence", "amazon_match_confidence VARCHAR(32)"),
+        ("amazon_match_asin", "amazon_match_asin VARCHAR(16)"),
+        ("amazon_match_title", "amazon_match_title VARCHAR(512)"),
+        ("amazon_source_page_url", "amazon_source_page_url TEXT"),
+        ("image_import_status", "image_import_status VARCHAR(64)"),
+        ("image_import_error", "image_import_error TEXT"),
+    ],
 }
 
 def _add_column_if_missing(connection, table_name: str, column_name: str, ddl: str) -> bool:

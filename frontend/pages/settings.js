@@ -21,6 +21,7 @@ import { useEbayAuth } from '../hooks/useEbayAuth';
 import useDashboardData from '../hooks/useDashboardData';
 import {
   createMarketplaceImportJob,
+  bulkImportMarketplaces,
   fetchMarketplaceImportJob,
   fetchAccountSetupSummary,
   fetchBridgeAccounts,
@@ -443,6 +444,7 @@ export default function SettingsPage() {
   const [savingBrowserSession, setSavingBrowserSession] = useState(false);
   const [launchingBrowserWorkspace, setLaunchingBrowserWorkspace] = useState(false);
   const [runningMarketplaceImport, setRunningMarketplaceImport] = useState(false);
+  const [runningBulkMarketplaceImport, setRunningBulkMarketplaceImport] = useState(false);
   const [selectedMarketplace, setSelectedMarketplace] = useState('');
   const [marketplaceForm, setMarketplaceForm] = useState({
     display_name: '',
@@ -1123,6 +1125,61 @@ export default function SettingsPage() {
       importMode: marketplace.import_mode || 'browser_assist',
       maxListings: Number(marketplace.import_listing_limit || 10),
     });
+  };
+
+  const eligibleMarketplaceBulkImports = useMemo(() => {
+    const connections = setupSummary?.marketplace_connections || [];
+    const eligible = [];
+    for (const marketplace of connections) {
+      const name = String(marketplace.marketplace || '').toLowerCase();
+      if (!marketplace.connected) {
+        continue;
+      }
+      if (name === 'ebay') {
+        if (marketplace.import_ready) {
+          eligible.push('ebay');
+        }
+        continue;
+      }
+      const importSupportLevel = String(marketplace.import_support_level || '').toLowerCase();
+      const importMode = String(marketplace.import_mode || 'manual').toLowerCase();
+      if (importSupportLevel !== 'browser_assist' || importMode !== 'browser_assist') {
+        continue;
+      }
+      const bridgeAccount = getBridgeAccountForMarketplace(marketplace);
+      const accountKey = String(marketplace.bridge_account_key || '').trim();
+      if (!accountKey || !isBridgeSessionReady(bridgeAccount)) {
+        continue;
+      }
+      eligible.push(name);
+    }
+    return eligible;
+  }, [setupSummary?.marketplace_connections, bridgeAccounts]);
+
+  const importAndSyncAllMarketplaces = async () => {
+    if (!eligibleMarketplaceBulkImports.length) {
+      toast.error('No connected marketplaces are ready for import yet.');
+      return;
+    }
+    setRunningBulkMarketplaceImport(true);
+    try {
+      const result = await bulkImportMarketplaces({
+        marketplaces: eligibleMarketplaceBulkImports,
+      });
+      const createdCount = result?.jobs?.length || 0;
+      const skippedCount = result?.skipped?.length || 0;
+      if (!createdCount) {
+        toast.error(`No import jobs were created. ${skippedCount ? `${skippedCount} marketplace${skippedCount === 1 ? '' : 's'} skipped.` : ''}`.trim());
+        return;
+      }
+      toast.success(`Queued ${createdCount} marketplace import job${createdCount === 1 ? '' : 's'}${skippedCount ? ` (${skippedCount} skipped)` : ''}.`);
+      await reload();
+      await router.push('/jobs?tab=imports');
+    } catch (error) {
+      toast.error(error.message);
+    } finally {
+      setRunningBulkMarketplaceImport(false);
+    }
   };
 
   const importExistingFacebookListings = async () => {
@@ -2194,6 +2251,38 @@ export default function SettingsPage() {
           {activeTab === 'marketplaces' ? (
             <SectionPanel title="Marketplaces" description="Control which channels are active for publishing and sales sync.">
               <div className="space-y-4">
+                <div className="rounded-[18px] border border-[#e5e7eb] bg-white p-5">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-[#101828]">Import + sync drafts</p>
+                      <p className="mt-1 text-sm text-[#667085]">Queue import jobs for every connected marketplace that can pull listings into PosterPro drafts.</p>
+                      {eligibleMarketplaceBulkImports.length ? (
+                        <p className="mt-2 text-xs text-[#667085]">
+                          Ready now: <span className="font-medium text-[#101828]">{eligibleMarketplaceBulkImports.map((name) => MARKETPLACE_LABELS[name] || name).join(', ')}</span>
+                        </p>
+                      ) : (
+                        <p className="mt-2 text-xs text-[#667085]">No connected marketplaces are import-ready yet (connect eBay / bridge sessions first).</p>
+                      )}
+                    </div>
+                    <Button
+                      type="button"
+                      onClick={() => {
+                        void importAndSyncAllMarketplaces();
+                      }}
+                      disabled={runningBulkMarketplaceImport || runningMarketplaceImport || !eligibleMarketplaceBulkImports.length}
+                    >
+                      {runningBulkMarketplaceImport ? 'Queueing imports...' : 'Import + sync all marketplaces'}
+                    </Button>
+                  </div>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <Link href="/jobs?tab=imports">
+                      <Button type="button" variant="outline">Open import jobs</Button>
+                    </Link>
+                    <Link href="/listings?tab=drafts">
+                      <Button type="button" variant="outline">Open drafts</Button>
+                    </Link>
+                  </div>
+                </div>
                 <GuideCard
                   title="Reseller marketplaces (priority)"
                   description="Mercari, Poshmark, and Whatnot are treated as assisted channels. The goal is one clean operator workflow: save identity → connect bridge session → validate mapping → handoff or submit with policy."
@@ -2357,6 +2446,18 @@ export default function SettingsPage() {
                             >
                               {launchingBrowserWorkspace ? 'Opening workspace...' : 'Connect now'}
                             </Button>
+                            {marketplace.marketplace === 'ebay' ? (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => {
+                                  void runEbayImport({ maxListings: 50 });
+                                }}
+                                disabled={runningMarketplaceImport || !marketplace.import_ready}
+                              >
+                                {runningMarketplaceImport ? 'Importing listings...' : 'Import listings'}
+                              </Button>
+                            ) : null}
                             {supportsBrowserImport ? (
                               <Button
                                 variant="outline"
@@ -2372,6 +2473,22 @@ export default function SettingsPage() {
                                 }
                               >
                                 {runningMarketplaceImport ? 'Importing listings...' : 'Import listings'}
+                              </Button>
+                            ) : null}
+                            {!supportsBrowserImport && marketplace.marketplace !== 'ebay' ? (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                type="button"
+                                onClick={() => {
+                                  openMarketplaceDrawer(marketplace);
+                                  toast.error(
+                                    `Import is not available yet for ${MARKETPLACE_LABELS[marketplace.marketplace] || marketplace.marketplace} in this deployment.`
+                                  );
+                                }}
+                                disabled={runningMarketplaceImport}
+                              >
+                                Import listings
                               </Button>
                             ) : null}
                             <Button

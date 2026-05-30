@@ -255,6 +255,7 @@ def _build_settings_panel_response(current_user: User, *, ebay_account: Marketpl
             "sale_detection_enabled": settings.sale_detection_enabled,
             "sale_detection_dry_run": settings.sale_detection_dry_run,
             "sale_detection_poll_minutes": settings.sale_detection_poll_minutes,
+            "sold_sync_enabled": settings.sold_sync_enabled,
         },
         "server": {
             "app_base_url": settings.app_base_url or "",

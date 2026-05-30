@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import csv
 import re
 import subprocess
 import tempfile
@@ -22,6 +23,31 @@ EXPECTED_HEADERS = [
     "cancelled date",
     "estimated tax value",
 ]
+CSV_HEADER_ALIASES = {
+    "asin": "ASIN",
+    "product name": "Product Name",
+    "product title": "Product Name",
+    "title": "Product Name",
+    "item name": "Product Name",
+    "order number": "Order Number",
+    "order #": "Order Number",
+    "order date": "Order Date",
+    "ordered date": "Order Date",
+    "ship date": "Shipped Date",
+    "shipped date": "Shipped Date",
+    "cancelled date": "Cancelled Date",
+    "canceled date": "Cancelled Date",
+    "estimated tax value": "Estimated Tax Value",
+    "etv": "Estimated Tax Value",
+    "order type": "Order Type",
+    "brand": "Brand",
+    "category": "Category",
+    "status": "Status",
+    "review deadline": "Review Deadline",
+    "item url": "Item URL",
+    "product url": "Item URL",
+    "url": "Item URL",
+}
 ORDER_NUMBER_RE = re.compile(r"\d[\d\s-]{8,}\d")
 ASIN_RE = re.compile(r"^[A-Z0-9]{10}$")
 DATE_RE = re.compile(r"\b\d{1,2}/\d{1,2}/\d{4}\b")
@@ -57,6 +83,11 @@ class ParsedVineRow:
     eligibility_status: str
     parse_warnings: list[str]
     raw_row_json: dict
+    brand: str | None = None
+    category: str | None = None
+    status: str | None = None
+    review_deadline: date | None = None
+    item_url: str | None = None
     source_confidence: str = "high"
 
 
@@ -66,7 +97,13 @@ def normalize_whitespace(value: str | None) -> str:
 
 def normalize_order_number(value: str | None) -> str | None:
     normalized = re.sub(r"\s+", "", value or "")
-    return normalized or None
+    if not normalized:
+        return None
+    if len(normalized) > 64:
+        return None
+    if not any(character.isdigit() for character in normalized):
+        return None
+    return normalized
 
 
 def parse_order_type(value: str | None) -> str | None:
@@ -146,6 +183,11 @@ def normalize_vine_row(row: dict, *, reference_date: date | None = None, source_
         "shipped_date": parse_date_value(row.get("Shipped Date"), allow_excel_serial=True),
         "cancelled_date": parse_date_value(row.get("Cancelled Date"), allow_excel_serial=True),
         "estimated_tax_value": parse_decimal_value(row.get("Estimated Tax Value")),
+        "brand": normalize_whitespace(row.get("Brand")) or None,
+        "category": normalize_whitespace(row.get("Category")) or None,
+        "status": normalize_whitespace(row.get("Status")) or None,
+        "review_deadline": parse_date_value(row.get("Review Deadline")),
+        "item_url": normalize_whitespace(row.get("Item URL")) or None,
     }
     eligible_after, eligibility_status = calculate_vine_eligibility(parsed, reference_date=reference_date)
     if not order_number:
@@ -161,6 +203,19 @@ def normalize_vine_row(row: dict, *, reference_date: date | None = None, source_
         parse_warnings=warnings,
         raw_row_json=row,
         source_confidence=source_confidence,
+    )
+
+
+def should_skip_vine_row(row: ParsedVineRow) -> bool:
+    """Drop obvious non-data/footer rows that show up after report tables."""
+    return (
+        not row.asin
+        and not row.product_name
+        and not row.order_type
+        and not row.order_date
+        and not row.shipped_date
+        and not row.cancelled_date
+        and row.estimated_tax_value is None
     )
 
 
@@ -239,11 +294,25 @@ def _parse_sheet_rows(workbook: zipfile.ZipFile, target: str, shared_strings: li
 
 
 def _detect_header_row(rows: list[dict[int, object]]) -> tuple[int, dict[int, str]]:
+    required_headers = {
+        "Order Number",
+        "ASIN",
+        "Product Name",
+        "Order Date",
+        "Estimated Tax Value",
+    }
     for row_index, row in enumerate(rows):
         normalized = {index: normalize_whitespace(str(value)).lower() for index, value in row.items()}
-        values = set(normalized.values())
-        if len(values.intersection(EXPECTED_HEADERS)) >= 6:
-            return row_index, {index: header for index, header in normalized.items() if header in EXPECTED_HEADERS}
+        canonical_by_index: dict[int, str] = {}
+        for index, header in normalized.items():
+            if header in CANONICAL_HEADER_NAMES:
+                canonical_by_index[index] = CANONICAL_HEADER_NAMES[header]
+                continue
+            mapped = CSV_HEADER_ALIASES.get(header)
+            if mapped:
+                canonical_by_index[index] = mapped
+        if required_headers.issubset(set(canonical_by_index.values())):
+            return row_index, canonical_by_index
     raise ValueError("Could not locate Vine report header row")
 
 
@@ -257,12 +326,49 @@ def parse_vine_xlsx(file_bytes: bytes, *, reference_date: date | None = None) ->
                 continue
             header_index, header_map = _detect_header_row(sheet_rows)
             for row in sheet_rows[header_index + 1 :]:
-                normalized = {CANONICAL_HEADER_NAMES[header_map[index]]: value for index, value in row.items() if index in header_map}
+                normalized = {header_map[index]: value for index, value in row.items() if index in header_map}
                 if not any(normalize_whitespace(str(value)) for value in normalized.values()):
                     continue
-                rows.append(normalize_vine_row(normalized, reference_date=reference_date))
+                parsed = normalize_vine_row(normalized, reference_date=reference_date)
+                if should_skip_vine_row(parsed):
+                    continue
+                rows.append(parsed)
     if not rows:
         raise ValueError("No Vine rows found in XLSX report")
+    return detect_cancelled_items(dedupe_vine_items(rows))
+
+
+def _normalize_csv_headers(headers: list[str]) -> dict[str, str]:
+    normalized: dict[str, str] = {}
+    for header in headers:
+        key = normalize_whitespace(header).lower()
+        mapped = CSV_HEADER_ALIASES.get(key)
+        if mapped:
+            normalized[header] = mapped
+    return normalized
+
+
+def parse_vine_csv(file_bytes: bytes, *, reference_date: date | None = None) -> list[ParsedVineRow]:
+    text = file_bytes.decode("utf-8-sig", errors="replace")
+    reader = list(csv.DictReader(io.StringIO(text)))
+    if not reader:
+        raise ValueError("No Vine rows found in CSV report")
+    mapped_headers = _normalize_csv_headers(list(reader[0].keys() or []))
+    if not mapped_headers:
+        raise ValueError("Could not map CSV headers to Vine fields")
+    rows: list[ParsedVineRow] = []
+    for row in reader:
+        normalized: dict[str, object] = {}
+        for raw_header, canonical_header in mapped_headers.items():
+            normalized[canonical_header] = row.get(raw_header)
+        if not any(normalize_whitespace(str(value)) for value in normalized.values() if value is not None):
+            continue
+        parsed = normalize_vine_row(normalized, reference_date=reference_date, source_confidence="high")
+        if should_skip_vine_row(parsed):
+            continue
+        rows.append(parsed)
+    if not rows:
+        raise ValueError("No Vine rows found in CSV report")
     return detect_cancelled_items(dedupe_vine_items(rows))
 
 

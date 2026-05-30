@@ -14,7 +14,10 @@ from sqlalchemy.orm import Session
 
 from app.api.schemas import (
     BatchStorageUnitUrlRequest,
+    BulkListingApproveRequest,
+    BulkListingApproveResponse,
     GooglePhotosImportRequest,
+    ListingApprovalResponse,
     ListingCreateRequest,
     ListingGenerateRequest,
     ListingResponse,
@@ -37,6 +40,7 @@ from app.services.image_pipeline import ImagePipelineService
 from app.services.inventory_service import InventorySafetyError, InventoryService
 from app.services.listing_ai import ListingAIService
 from app.services.listing_workspace import normalize_marketplace_data
+from app.services.marketplace_orchestrator import queue_publish
 from app.services.profit_service import ProfitService
 from app.services.storage import LocalStorage
 from app.services.pricing_service import PricingService
@@ -55,6 +59,60 @@ router = APIRouter()
 inventory_service = InventoryService()
 photo_editor_service = PhotoEditorService()
 
+_DEFAULT_WORKFLOW_PREFERENCES = {
+    "review_before_publish": True,
+    "auto_publish_after_approval": False,
+    "bulk_approval_enabled": True,
+    "listing_preview_mode": "marketplace",
+}
+
+
+def _workflow_preferences(user: User | None) -> dict:
+    if not user:
+        return dict(_DEFAULT_WORKFLOW_PREFERENCES)
+    settings_json = user.settings_json or {}
+    raw = settings_json.get("workflow_preferences")
+    stored = raw if isinstance(raw, dict) else {}
+    return {
+        "review_before_publish": bool(stored.get("review_before_publish", _DEFAULT_WORKFLOW_PREFERENCES["review_before_publish"])),
+        "auto_publish_after_approval": bool(stored.get("auto_publish_after_approval", _DEFAULT_WORKFLOW_PREFERENCES["auto_publish_after_approval"])),
+        "bulk_approval_enabled": bool(stored.get("bulk_approval_enabled", _DEFAULT_WORKFLOW_PREFERENCES["bulk_approval_enabled"])),
+        "listing_preview_mode": str(stored.get("listing_preview_mode") or _DEFAULT_WORKFLOW_PREFERENCES["listing_preview_mode"]),
+    }
+
+
+
+def _approve_listing_for_user(db: Session, *, listing: Listing, current_user: User) -> dict:
+    marketplace_data = dict(listing.marketplace_data or {})
+    current_targets = marketplace_data.get("targets")
+    targets = [str(value).strip().lower() for value in (current_targets or []) if str(value).strip()]
+    for target in ("ebay", "facebook"):
+        if target not in targets:
+            targets.append(target)
+
+    listing.status = ListingStatus.ready
+    listing.needs_review = False
+    listing.marketplace_data = normalize_marketplace_data(
+        {
+            **marketplace_data,
+            "targets": targets,
+            "crosspost_mode": str(marketplace_data.get("crosspost_mode") or "approval_required"),
+        }
+    )
+    db.add(listing)
+    db.commit()
+    db.refresh(listing)
+
+    preferences = _workflow_preferences(current_user)
+    results: list[dict] = []
+    if preferences.get("auto_publish_after_approval"):
+        results = queue_publish(db, listing.id, targets)
+        db.refresh(listing)
+    return {
+        "listing": listing,
+        "auto_publish_after_approval": bool(preferences.get("auto_publish_after_approval")),
+        "results": results,
+    }
 
 
 def _to_public_image_url(path: str) -> str:
@@ -296,6 +354,42 @@ def update_listing(
     db.commit()
     db.refresh(listing)
     return listing
+
+
+@router.post("/listings/{listing_id}/approve", response_model=ListingApprovalResponse)
+def approve_listing(
+    listing_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Approve a listing and optionally queue marketplace publish jobs.
+
+    This endpoint is the server-side source of truth for approval transitions.
+    It normalizes targets to include the priority channels (`ebay`, `facebook`),
+    marks the listing as ready, clears review-required state, and then queues
+    publish jobs when the operator workflow preference allows auto publish.
+    """
+    listing = db.get(Listing, listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    ensure_user_owns_resource(current_user, listing.user_id)
+    return _approve_listing_for_user(db, listing=listing, current_user=current_user)
+
+
+@router.post("/listings/approve-bulk", response_model=BulkListingApproveResponse)
+def approve_listings_bulk(
+    payload: BulkListingApproveRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    approvals: list[dict] = []
+    for listing_id in payload.listing_ids:
+        listing = db.get(Listing, listing_id)
+        if not listing:
+            continue
+        ensure_user_owns_resource(current_user, listing.user_id)
+        approvals.append(_approve_listing_for_user(db, listing=listing, current_user=current_user))
+    return {"approvals": approvals}
 
 
 @router.post("/listings/{listing_id}/photo-tools", response_model=PhotoEditResponse)

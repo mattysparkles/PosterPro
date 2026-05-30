@@ -1,5 +1,6 @@
 import Link from 'next/link';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import toast from 'react-hot-toast';
 import {
   AlertTriangle,
   ArrowRight,
@@ -33,6 +34,7 @@ import {
   fetchMarketplaceJobsOverview,
   fetchSalesDashboard,
   toggleAutonomousMode,
+  uploadVineReport,
 } from '../lib/api';
 
 function formatTime(value) {
@@ -58,11 +60,13 @@ function toStatusTone(connected, warning = false) {
 export default function Dashboard() {
   const router = useRouter();
   const { user } = useAuth();
+  const vineFileInputRef = useRef(null);
   const { listings, alerts, autonomousConfig, readyCount, reload } = useDashboardData(user?.id);
   const [setupSummary, setSetupSummary] = useState(null);
   const [jobsOverview, setJobsOverview] = useState({ import_jobs: [], crosspost_jobs: [] });
   const [salesDashboard, setSalesDashboard] = useState({ summary: {} });
   const [activeSection, setActiveSection] = useState('overview');
+  const [vineUploading, setVineUploading] = useState(false);
 
   const draftCount = useMemo(
     () => listings.filter((listing) => listing.status !== 'ready' && listing.ebay_publish_status !== 'POSTED' && !listing.ebay_listing_id).length,
@@ -129,10 +133,10 @@ export default function Dashboard() {
 
   const marketplaceWidgets = (setupSummary?.marketplace_connections || []).slice(0, 6);
   const topMetrics = [
-    { label: 'Ready to publish', value: readyCount, detail: 'Listings that can move straight into marketplace publishing.' },
-    { label: 'Pending review', value: reviewCount, detail: 'Drafts still waiting for operator approval.' },
-    { label: 'Live listings', value: liveCount, detail: 'Listings already posted or actively synced.' },
-    { label: 'Draft backlog', value: draftCount, detail: 'Items still moving through enrichment and manual edits.' },
+    { label: 'Ready to publish', value: readyCount, detail: 'Listings that can move straight into marketplace publishing.', href: '/listings?tab=ready' },
+    { label: 'Pending review', value: reviewCount, detail: 'Drafts still waiting for operator approval.', href: '/listings?tab=review' },
+    { label: 'Live listings', value: liveCount, detail: 'Listings already posted or actively synced.', href: '/listings?tab=published' },
+    { label: 'Draft backlog', value: draftCount, detail: 'Items still moving through enrichment and manual edits.', href: '/listings?tab=drafts' },
   ];
   const workspaceStats = [
     { label: 'Batch jobs', value: jobsSummary.queued, note: 'Queued or running' },
@@ -154,6 +158,8 @@ export default function Dashboard() {
     .map((job) => ({
       id: `${job.job_type || 'job'}-${job.id}`,
       job_id: job.id,
+      job_kind: job.source_marketplace ? 'imports' : 'crosspost',
+      listing_id: job.listing_id || job.created_listing_id || null,
       job_type: job.job_type || (job.source_marketplace ? 'Import' : 'Cross-post'),
       reference: job.listing_id ? `Listing #${job.listing_id}` : job.source_listing_reference || job.source_marketplace || 'Pending',
       status: job.status || 'queued',
@@ -219,7 +225,7 @@ export default function Dashboard() {
           </div>
           <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-4">
             {topMetrics.map((card) => (
-              <MetricCard key={card.label} label={card.label} value={card.value} detail={card.detail} />
+              <MetricCard key={card.label} label={card.label} value={card.value} detail={card.detail} href={card.href} />
             ))}
           </div>
         </div>
@@ -233,6 +239,7 @@ export default function Dashboard() {
         title="Recent listing activity"
         description="Latest changes across drafts, review queue, and live marketplace rows."
         action={<Link href="/listings" className="text-sm font-medium text-[#2563eb]">View all listings</Link>}
+        onRowClick={(listing) => router.push(`/listings/${listing.id}`)}
         columns={[
           {
             key: 'title',
@@ -264,7 +271,11 @@ export default function Dashboard() {
         <div className="space-y-3">
           {attentionItems.length ? (
             attentionItems.map((listing) => (
-              <div key={listing.id} className="rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-3">
+              <Link
+                key={listing.id}
+                href={`/listings/${listing.id}`}
+                className="block rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-3 transition hover:bg-[#f9fafb] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#2563eb]"
+              >
                 <div className="flex items-start gap-3">
                   <AlertTriangle size={16} className="mt-0.5 shrink-0 text-[#b42318]" />
                   <div className="min-w-0">
@@ -272,7 +283,7 @@ export default function Dashboard() {
                     <p className="mt-1 text-sm text-[#667085]">Review publish or sync status before requeueing marketplace work.</p>
                   </div>
                 </div>
-              </div>
+              </Link>
             ))
           ) : alerts?.length ? (
             alerts.slice(0, 5).map((alert, index) => (
@@ -301,7 +312,27 @@ export default function Dashboard() {
         action={<Link href="/jobs" className="text-sm font-medium text-[#2563eb]">Open jobs console</Link>}
         columns={[
           { key: 'job_type', label: 'Job type' },
-          { key: 'reference', label: 'Reference' },
+          {
+            key: 'reference',
+            label: 'Reference',
+            render: (row) => {
+              if (row.listing_id) {
+                return (
+                  <Link href={`/listings/${row.listing_id}`} className="font-medium text-[#2563eb]">
+                    {row.reference}
+                  </Link>
+                );
+              }
+              return (
+                <Link
+                  href={`/jobs/${row.job_kind === 'imports' ? 'import' : 'crosspost'}/${row.job_id}`}
+                  className="font-medium text-[#2563eb]"
+                >
+                  {row.reference}
+                </Link>
+              );
+            },
+          },
           { key: 'status', label: 'Status', render: (row) => <StatusPill status={row.status} label={row.status} /> },
           { key: 'updated_at', label: 'Updated', render: (row) => formatTime(row.updated_at) },
         ]}
@@ -310,9 +341,9 @@ export default function Dashboard() {
         emptyState={<EmptyState title="No jobs yet" description="Import and cross-post jobs will appear here once work starts moving through the marketplace execution layer." className="border-0 p-0 py-6" />}
       />
       <div className="grid gap-3 md:grid-cols-3">
-        <MetricCard label="Queued or running" value={jobsSummary.queued} detail="Current job execution load." />
-        <MetricCard label="Completed" value={jobsSummary.completed} detail="Jobs that finished successfully." />
-        <MetricCard label="Failed" value={jobsSummary.failed} detail="Jobs that need review or retry." />
+        <MetricCard label="Queued or running" value={jobsSummary.queued} detail="Current job execution load." href="/jobs/active" />
+        <MetricCard label="Completed" value={jobsSummary.completed} detail="Jobs that finished successfully." href="/jobs/completed" />
+        <MetricCard label="Failed" value={jobsSummary.failed} detail="Jobs that need review or retry." href="/jobs/failed" />
       </div>
     </div>
   );
@@ -477,6 +508,12 @@ export default function Dashboard() {
         description="Use one clean operator dashboard for intake, listing production, marketplace publishing, job flow, and account readiness."
         actions={
           <>
+            {user?.can_access_vine_import ? (
+              <Button variant="outline" onClick={() => vineFileInputRef.current?.click()} disabled={vineUploading}>
+                <Upload size={16} />
+                {vineUploading ? 'Uploading Vine report...' : 'Upload Vine report'}
+              </Button>
+            ) : null}
             <Link href="/intake">
               <Button variant="outline">
                 <Upload size={16} />
@@ -492,6 +529,29 @@ export default function Dashboard() {
           </>
         }
       />
+      {user?.can_access_vine_import ? (
+        <input
+          ref={vineFileInputRef}
+          type="file"
+          accept=".xlsx,.csv,.pdf"
+          className="hidden"
+          onChange={async (event) => {
+            const file = event.target.files?.[0];
+            if (!file) return;
+            setVineUploading(true);
+            try {
+              const batch = await uploadVineReport(file);
+              toast.success('Vine report uploaded. Opening import workspace.');
+              router.push(`/imports/vine?batch=${encodeURIComponent(batch.id)}`);
+            } catch (error) {
+              toast.error(error.message);
+            } finally {
+              setVineUploading(false);
+              event.target.value = '';
+            }
+          }}
+        />
+      ) : null}
 
       <div className="pp-section-workspace pp-dashboard-theme">
         <aside className="pp-section-workspace__menu space-y-4">

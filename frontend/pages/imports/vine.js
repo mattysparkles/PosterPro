@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import { useRouter } from 'next/router';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
 
@@ -20,6 +21,7 @@ import {
   toggleAutonomousMode,
   updateVineItem,
   uploadVineReport,
+  retryVineItemDiscovery,
 } from '../../lib/api';
 
 function formatDate(value) {
@@ -46,6 +48,7 @@ function buildSkippedCsv(items) {
 }
 
 export default function VineImportPage() {
+  const router = useRouter();
   const { user } = useAuth();
   const { autonomousConfig, reload } = useDashboardData(user?.id);
   const fileInputRef = useRef(null);
@@ -54,6 +57,7 @@ export default function VineImportPage() {
   const [batches, setBatches] = useState([]);
   const [activeBatch, setActiveBatch] = useState(null);
   const [selectedIds, setSelectedIds] = useState([]);
+  const [lastDraftListingIds, setLastDraftListingIds] = useState([]);
 
   const canAccess = !!user?.can_access_vine_import;
 
@@ -72,11 +76,14 @@ export default function VineImportPage() {
   };
 
   useEffect(() => {
-    loadBatches().catch(() => undefined);
-  }, [canAccess]);
+    if (!router.isReady) return;
+    const requestedBatchId = Number.parseInt(String(router.query.batch || ''), 10);
+    loadBatches(Number.isFinite(requestedBatchId) ? requestedBatchId : null).catch(() => undefined);
+  }, [canAccess, router.isReady, router.query.batch]);
 
   const items = activeBatch?.items || [];
   const selectedItems = useMemo(() => items.filter((item) => selectedIds.includes(item.id)), [items, selectedIds]);
+  const hasSelection = selectedIds.length > 0;
 
   const toggleRow = (id) => {
     setSelectedIds((current) => (current.includes(id) ? current.filter((value) => value !== id) : [...current, id]));
@@ -129,12 +136,12 @@ export default function VineImportPage() {
         }
       />
 
-      <SectionPanel title="Upload" description="Accepted formats: .xlsx preferred, .pdf supported with required preflight review.">
+      <SectionPanel title="Upload" description="Accepted formats: .xlsx and .csv preferred, .pdf supported with required preflight review.">
         <div className="flex flex-wrap items-center gap-3 rounded-[12px] border border-dashed border-[#d0d5dd] bg-white px-4 py-5">
           <input
             ref={fileInputRef}
             type="file"
-            accept=".xlsx,.pdf"
+            accept=".xlsx,.csv,.pdf"
             className="hidden"
             onChange={async (event) => {
               const file = event.target.files?.[0];
@@ -156,7 +163,7 @@ export default function VineImportPage() {
           />
           <div>
             <p className="text-sm font-medium text-[#101828]">Upload Amazon Vine itemized report</p>
-            <p className="mt-1 text-sm text-[#667085]">Use XLSX when possible. PDF imports stay in manual-review mode until you verify the parse.</p>
+            <p className="mt-1 text-sm text-[#667085]">Use XLSX or CSV when possible. PDF imports stay in manual-review mode until you verify the parse.</p>
           </div>
         </div>
       </SectionPanel>
@@ -199,19 +206,36 @@ export default function VineImportPage() {
               {activeBatch.source_type === 'pdf' ? <StatusPill status="warning" label="PDF requires review" /> : null}
             </div>
 
-            {selectedIds.length ? (
-              <div className="mb-4 flex flex-wrap items-center gap-2 rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-3">
+            <div className="mb-4 flex flex-wrap items-center gap-2 rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-3">
                 <span className="text-sm font-medium text-[#101828]">{selectedIds.length} selected</span>
+                <Button size="sm" variant="outline" onClick={() => setSelectedIds(items.map((item) => item.id))} disabled={!items.length}>
+                  Select all
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => setSelectedIds([])} disabled={!hasSelection}>
+                  Clear
+                </Button>
                 <Button
                   size="sm"
                   variant="outline"
-                  disabled={!!busyAction}
+                  disabled={!!busyAction || !hasSelection}
                   onClick={async () => {
                     setBusyAction('media');
                     try {
-                      await fetchVineMedia(activeBatch.id, selectedIds);
+                      const result = await fetchVineMedia(activeBatch.id, selectedIds);
                       await loadBatches(activeBatch.id);
-                      toast.success('Image lookup finished.');
+                      const fetched = Number(result?.fetched || 0);
+                      const blocked = Number(result?.blocked || 0);
+                      if (fetched && !blocked) {
+                        toast.success(`Image lookup finished (${fetched} fetched).`);
+                      } else if (fetched && blocked) {
+                        toast.success(`Image lookup finished (${fetched} fetched, ${blocked} blocked).`);
+                      } else if (blocked) {
+                        toast.error(
+                          `Image lookup blocked for ${blocked} item(s). Enable AMAZON_MEDIA_LOOKUP_ENABLED and AMAZON_MEDIA_PAGE_FALLBACK_ENABLED, then retry.`,
+                        );
+                      } else {
+                        toast.success('Image lookup finished.');
+                      }
                     } catch (error) {
                       toast.error(error.message);
                     } finally {
@@ -224,7 +248,51 @@ export default function VineImportPage() {
                 <Button
                   size="sm"
                   variant="outline"
-                  disabled={!!busyAction}
+                  disabled={!!busyAction || !hasSelection}
+                  onClick={async () => {
+                    const manualUrl = window.prompt('Paste Amazon product URL to use for selected rows');
+                    if (!manualUrl) return;
+                    setBusyAction('manual-url');
+                    try {
+                      await Promise.all(
+                        selectedItems.map((item) =>
+                          updateVineItem(item.id, { manual_amazon_url: manualUrl.trim() }).then(() => retryVineItemDiscovery(item.id)),
+                        ),
+                      );
+                      await loadBatches(activeBatch.id);
+                      toast.success('Manual Amazon URL saved and discovery retried.');
+                    } catch (error) {
+                      toast.error(error.message);
+                    } finally {
+                      setBusyAction('');
+                    }
+                  }}
+                >
+                  Set manual Amazon URL + retry
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!!busyAction || !hasSelection}
+                  onClick={async () => {
+                    setBusyAction('retry-discovery');
+                    try {
+                      await Promise.all(selectedItems.map((item) => retryVineItemDiscovery(item.id)));
+                      await loadBatches(activeBatch.id);
+                      toast.success('Discovery retried for selected rows.');
+                    } catch (error) {
+                      toast.error(error.message);
+                    } finally {
+                      setBusyAction('');
+                    }
+                  }}
+                >
+                  Retry match/image discovery
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!!busyAction || !hasSelection}
                   onClick={async () => {
                     setBusyAction('inventory');
                     try {
@@ -242,13 +310,25 @@ export default function VineImportPage() {
                 </Button>
                 <Button
                   size="sm"
-                  disabled={!!busyAction}
+                  disabled={!!busyAction || !hasSelection}
                   onClick={async () => {
                     setBusyAction('drafts');
                     try {
-                      await createVineDrafts(activeBatch.id, selectedIds);
+                      const result = await createVineDrafts(activeBatch.id, selectedIds, {
+                        fetchMediaFirst: true,
+                        requireMediaForAsin: true,
+                        allowDraftsWithoutMedia: false,
+                      });
+                      const listingIds = result?.listing_ids || result?.created_listing_ids || [];
+                      setLastDraftListingIds(Array.isArray(listingIds) ? listingIds : []);
                       await loadBatches(activeBatch.id);
-                      toast.success('Listing drafts created.');
+                      const created = Number(result?.created || 0);
+                      const updated = Number(result?.updated || 0);
+                      if (created || updated) {
+                        toast.success(`Listing drafts ready (${created} created, ${updated} updated).`);
+                      } else {
+                        toast.success('Listing drafts ready.');
+                      }
                     } catch (error) {
                       toast.error(error.message);
                     } finally {
@@ -256,7 +336,7 @@ export default function VineImportPage() {
                     }
                   }}
                 >
-                  Generate listing drafts
+                  Fetch images + generate drafts
                 </Button>
                 <Button size="sm" variant="outline" onClick={exportSkippedRows}>
                   Export skipped/error rows
@@ -264,7 +344,7 @@ export default function VineImportPage() {
                 <Button
                   size="sm"
                   variant="outline"
-                  disabled={!!busyAction}
+                  disabled={!!busyAction || !hasSelection}
                   onClick={async () => {
                     setBusyAction('reviewed');
                     try {
@@ -280,17 +360,31 @@ export default function VineImportPage() {
                 >
                   Mark as reviewed
                 </Button>
-                <Link href="/listings">
-                  <Button size="sm" variant="outline">Open created drafts</Button>
-                </Link>
+                {lastDraftListingIds.length ? (
+                  <>
+                    {lastDraftListingIds.slice(0, 6).map((listingId) => (
+                      <Link key={listingId} href={`/listings/${listingId}`}>
+                        <Button size="sm" variant="outline">Open draft #{listingId}</Button>
+                      </Link>
+                    ))}
+                    <Link href="/listings">
+                      <Button size="sm" variant="outline">Open all listings</Button>
+                    </Link>
+                  </>
+                ) : (
+                  <Link href="/listings">
+                    <Button size="sm" variant="outline">Open listings</Button>
+                  </Link>
+                )}
               </div>
-            ) : null}
 
             <DataTable
               columns={[
                 { key: 'status', label: 'Status', render: (item) => <StatusPill status={item.eligibility_status.includes('locked') ? 'warning' : item.eligibility_status} label={item.eligibility_status.replace('locked_until_', 'Locked until ')} /> },
                 { key: 'product_name', label: 'Product Name', cellClassName: 'min-w-[240px]', render: (item) => <div><p className="font-medium text-[#101828]">{item.product_name || 'Untitled item'}</p>{item.restricted_review_required ? <p className="mt-1 text-xs text-[#b42318]">{(item.restricted_reasons || []).join(', ')}</p> : null}</div> },
                 { key: 'asin', label: 'ASIN' },
+                { key: 'brand', label: 'Brand' },
+                { key: 'category', label: 'Category' },
                 { key: 'order_number', label: 'Order Number' },
                 { key: 'order_type', label: 'Order Type' },
                 { key: 'order_date', label: 'Order Date', render: (item) => formatDate(item.order_date) },
@@ -298,8 +392,10 @@ export default function VineImportPage() {
                 { key: 'cancelled_date', label: 'Cancelled Date', render: (item) => formatDate(item.cancelled_date) },
                 { key: 'estimated_tax_value', label: 'Estimated Tax Value', render: (item) => item.estimated_tax_value == null ? '—' : `$${Number(item.estimated_tax_value).toFixed(2)}` },
                 { key: 'eligible_after', label: 'Eligible After', render: (item) => formatDate(item.eligible_after) },
+                { key: 'match_status', label: 'Amazon Match', render: (item) => <StatusPill status={item.amazon_match_status || 'default'} label={item.amazon_match_status || 'pending'} /> },
                 { key: 'image_status', label: 'Image Status', render: (item) => <StatusPill status={item.media_status || 'default'} label={item.media_status || 'pending'} /> },
                 { key: 'draft_status', label: 'Draft Status', render: (item) => item.listing_id ? <StatusPill status="success" label="Created" /> : <StatusPill status="default" label="Not created" /> },
+                { key: 'manual_amazon_url', label: 'Manual URL', render: (item) => item.manual_amazon_url ? 'Set' : '—' },
               ]}
               rows={items}
               rowKey={(row) => row.id}

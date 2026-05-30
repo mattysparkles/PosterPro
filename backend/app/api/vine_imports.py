@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -17,6 +19,7 @@ from app.services.vine_import_service import VineImportService
 
 router = APIRouter(prefix="/imports/vine", tags=["vine-imports"])
 service = VineImportService()
+logger = logging.getLogger(__name__)
 
 
 @router.post("/upload", response_model=VineImportBatchResponse)
@@ -27,6 +30,7 @@ async def upload_vine_report(
 ):
     ensure_vine_access(current_user)
     payload = await file.read()
+    user_id = getattr(current_user, "id", None)
     try:
         batch = service.create_batch_from_upload(
             db,
@@ -35,7 +39,12 @@ async def upload_vine_report(
             file_bytes=payload,
         )
     except ValueError as exc:
+        db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Vine report upload parse failed", extra={"upload_filename": file.filename, "user_id": user_id})
+        raise HTTPException(status_code=400, detail=f"Vine report upload failed: {exc}") from exc
     items = db.execute(select(VineImportItem).where(VineImportItem.batch_id == batch.id).order_by(VineImportItem.id.asc())).scalars().all()
     return VineImportBatchResponse.model_validate({**batch.__dict__, "items": items})
 
@@ -109,7 +118,14 @@ def create_vine_drafts(
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
     ensure_user_owns_resource(current_user, batch.user_id)
-    return service.create_listing_drafts(db, batch=batch, item_ids=payload.item_ids)
+    return service.create_listing_drafts(
+        db,
+        batch=batch,
+        item_ids=payload.item_ids,
+        fetch_media_first=payload.fetch_media_first,
+        require_media_for_asin=payload.require_media_for_asin,
+        allow_drafts_without_media=payload.allow_drafts_without_media,
+    )
 
 
 @router.patch("/items/{item_id}", response_model=VineImportItemResponse)
@@ -128,5 +144,21 @@ def update_vine_item(
         setattr(item, key, value)
     db.add(item)
     db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.post("/items/{item_id}/retry-discovery", response_model=VineImportItemResponse)
+def retry_vine_item_discovery(
+    item_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ensure_vine_access(current_user)
+    item = db.get(VineImportItem, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+    ensure_user_owns_resource(current_user, item.user_id)
+    service.retry_item_discovery(db, item=item)
     db.refresh(item)
     return item

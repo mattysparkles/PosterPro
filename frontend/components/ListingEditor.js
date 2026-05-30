@@ -9,6 +9,7 @@ import Input from "./ui/input";
 
 const PLATFORM_OPTIONS = [
   "ebay",
+  "facebook",
   "etsy",
   "poshmark",
   "mercari",
@@ -31,10 +32,13 @@ export default function ListingEditor({
   onPhotoUpdated,
   publishState,
   statuses,
+  crosspostPreview = [],
+  crosspostPreviewLoading = false,
 }) {
   const [openEditor, setOpenEditor] = useState(false);
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
   const [selectedPlatforms, setSelectedPlatforms] = useState(["ebay"]);
+  const [activePreviewMarket, setActivePreviewMarket] = useState("ebay");
   const requiresApproval = workflowPreferences?.review_before_publish ?? true;
   const intelligence = listingIntelligence?.intelligence || {};
   const draftMeta = listingIntelligence?.draft_meta || {};
@@ -48,6 +52,14 @@ export default function ListingEditor({
     });
     return map;
   }, [statuses]);
+  const previewMap = useMemo(() => {
+    const map = {};
+    (crosspostPreview || []).forEach((entry) => {
+      if (!entry?.marketplace) return;
+      map[entry.marketplace] = entry;
+    });
+    return map;
+  }, [crosspostPreview]);
 
   const togglePlatform = (platform) => {
     setSelectedPlatforms((prev) =>
@@ -285,7 +297,29 @@ export default function ListingEditor({
 
       {workflowPreferences?.listing_preview_mode === 'marketplace' ? (
         <div className="mt-4 rounded-[14px] border border-[#e5e7eb] bg-white p-4">
-          <p className="text-sm font-semibold text-[#101828]">Marketplace preview</p>
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm font-semibold text-[#101828]">Marketplace preview</p>
+            <span className="text-xs text-[#667085]">Preview each target before approval/publish.</span>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {PLATFORM_OPTIONS.map((market) => {
+              const selected = activePreviewMarket === market;
+              const mode = previewMap[market]?.execution_mode || null;
+              return (
+                <button
+                  key={`preview-${market}`}
+                  type="button"
+                  onClick={() => setActivePreviewMarket(market)}
+                  className={`rounded-full border px-3 py-1 text-xs font-semibold capitalize transition ${
+                    selected ? 'border-[#2563eb] bg-[#eef4ff] text-[#2563eb]' : 'border-[#e5e7eb] bg-white text-[#475467]'
+                  }`}
+                >
+                  {market}
+                  {mode ? ` · ${String(mode).replace('_', ' ')}` : ''}
+                </button>
+              );
+            })}
+          </div>
           <div className="mt-4 rounded-[16px] border border-[#d0d5dd] bg-[#fcfcfd] p-4">
             <div className="grid gap-4 md:grid-cols-[132px_minmax(0,1fr)]">
               <div className="overflow-hidden rounded-[14px] border border-[#e5e7eb] bg-white">
@@ -302,6 +336,33 @@ export default function ListingEditor({
                 <div className="mt-4 rounded-[12px] bg-white p-3 shadow-sm">
                   <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Description preview</p>
                   <p className="mt-2 whitespace-pre-wrap text-sm text-[#475467]">{listing.description || 'Description not generated yet.'}</p>
+                </div>
+                <div className="mt-3 rounded-[12px] border border-[#e5e7eb] bg-white p-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">
+                    {activePreviewMarket} execution contract
+                  </p>
+                  {crosspostPreviewLoading ? (
+                    <p className="mt-2 text-sm text-[#667085]">Loading marketplace preview details…</p>
+                  ) : previewMap[activePreviewMarket] ? (
+                    <div className="mt-2 space-y-2">
+                      <p className="text-sm text-[#101828]">
+                        Mode: <span className="font-semibold">{String(previewMap[activePreviewMarket].execution_mode || 'unknown').replace('_', ' ')}</span>
+                      </p>
+                      {(previewMap[activePreviewMarket].notes || []).length ? (
+                        <div className="space-y-1">
+                          {(previewMap[activePreviewMarket].notes || []).map((note) => (
+                            <p key={note} className="text-sm text-[#475467]">{note}</p>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-sm text-[#667085]">No additional marketplace notes.</p>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="mt-2 text-sm text-[#667085]">
+                      No preview payload yet for this marketplace target.
+                    </p>
+                  )}
                 </div>
               </div>
             </div>

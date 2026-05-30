@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     sale_detection_enabled: bool = True
     sale_detection_dry_run: bool = True
     sale_detection_poll_minutes: int = 15
+    sold_sync_enabled: bool = False
     max_concurrent_bulk_tasks: int = 50
     bulk_chunk_size: int = 0
     amazon_vine_import_enabled: bool = False
