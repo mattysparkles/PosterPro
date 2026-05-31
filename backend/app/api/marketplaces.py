@@ -54,7 +54,13 @@ def _build_marketplace_connections(*, user: User, accounts: list[MarketplaceAcco
         snapshot["enabled_for_publishing"] = marketplace.value in enabled_platforms
         snapshot["enabled_for_sale_detection"] = marketplace.value in sale_detection_platforms
         responses.append(MarketplaceConnectionStatusResponse(**snapshot))
-    return responses
+    return sorted(
+        responses,
+        key=lambda item: (
+            int(getattr(item, "ui_priority", 99)),
+            str(getattr(item, "marketplace", "")),
+        ),
+    )
 
 
 def _require_publishable_marketplaces(user: User, requested: list[str], accounts: list[MarketplaceAccount]) -> None:

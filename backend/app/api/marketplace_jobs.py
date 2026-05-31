@@ -159,6 +159,31 @@ def _serialize_crosspost_job(job: MarketplaceCrosspostJob) -> dict:
         review_required_count=review_required_count,
         submitted_count=submitted_count,
     )
+    ui_state_tone = "default"
+    if status_value in {"queued", "running"}:
+        ui_state_tone = "info"
+    elif failed_target_count or status_value == "failed":
+        ui_state_tone = "danger"
+    elif review_required_count:
+        ui_state_tone = "warning"
+    elif submitted_count or status_value == "completed":
+        ui_state_tone = "success"
+
+    ui_primary_action = "View details"
+    if status_value in {"queued", "running"}:
+        ui_primary_action = "Monitor"
+    elif failed_target_count or status_value == "failed":
+        ui_primary_action = "Retry"
+    elif review_required_count:
+        ui_primary_action = "Complete handoff"
+    elif submitted_count:
+        ui_primary_action = "Verify listing"
+
+    ui_secondary_actions: list[str] = []
+    if can_retry:
+        ui_secondary_actions.append("Retry")
+    if can_cancel:
+        ui_secondary_actions.append("Cancel")
     return {
         "id": job.id,
         "user_id": job.user_id,
@@ -179,6 +204,9 @@ def _serialize_crosspost_job(job: MarketplaceCrosspostJob) -> dict:
         "submitted_count": submitted_count,
         "failed_target_count": failed_target_count,
         "target_outcomes": target_outcomes,
+        "ui_state_tone": ui_state_tone,
+        "ui_primary_action": ui_primary_action,
+        "ui_secondary_actions": ui_secondary_actions,
         "created_at": job.created_at,
         "updated_at": job.updated_at,
     }
@@ -247,6 +275,33 @@ def _serialize_import_job(job: MarketplaceImportJob, *, db: Session) -> dict:
         elif status_value == "completed" and review_items:
             operator_action = "Review the imported listings."
 
+    ui_state_tone = "default"
+    if status_value in {"queued", "running"} and not is_stale:
+        ui_state_tone = "info"
+    elif status_value == "failed":
+        ui_state_tone = "danger"
+    elif is_stale or review_required_count:
+        ui_state_tone = "warning"
+    elif status_value == "completed":
+        ui_state_tone = "success"
+
+    if is_stale:
+        ui_primary_action = "Recover"
+    elif status_value in {"queued", "running"}:
+        ui_primary_action = "Monitor"
+    elif status_value == "failed":
+        ui_primary_action = "Retry"
+    elif review_required_count:
+        ui_primary_action = "Review imports"
+    else:
+        ui_primary_action = "View details"
+
+    ui_secondary_actions: list[str] = []
+    if can_retry:
+        ui_secondary_actions.append("Retry")
+    if can_cancel:
+        ui_secondary_actions.append("Cancel")
+
     return {
         "id": job.id,
         "user_id": job.user_id,
@@ -266,6 +321,9 @@ def _serialize_import_job(job: MarketplaceImportJob, *, db: Session) -> dict:
         "operator_action": operator_action,
         "review_required_count": review_required_count,
         "review_items": review_items,
+        "ui_state_tone": ui_state_tone,
+        "ui_primary_action": ui_primary_action,
+        "ui_secondary_actions": ui_secondary_actions,
         "created_at": job.created_at,
         "updated_at": job.updated_at,
     }

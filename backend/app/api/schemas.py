@@ -415,6 +415,10 @@ class MarketplaceConnectionStatusResponse(BaseModel):
     import_listing_limit: int | None = None
     can_publish: bool = False
     can_sync_sales: bool = False
+    ui_priority: int = 99
+    ui_state_tone: str = "default"
+    ui_primary_action: str | None = None
+    ui_secondary_actions: list[str] = Field(default_factory=list)
 
 
 class MarketplaceConnectionUpdateRequest(BaseModel):
@@ -463,6 +467,9 @@ class CrosspostJobResponse(BaseModel):
     submitted_count: int = 0
     failed_target_count: int = 0
     target_outcomes: list[dict] = Field(default_factory=list)
+    ui_state_tone: str = "default"
+    ui_primary_action: str | None = None
+    ui_secondary_actions: list[str] = Field(default_factory=list)
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -496,6 +503,9 @@ class MarketplaceImportJobResponse(BaseModel):
     operator_action: str | None = None
     review_required_count: int = 0
     review_items: list[dict] = Field(default_factory=list)
+    ui_state_tone: str = "default"
+    ui_primary_action: str | None = None
+    ui_secondary_actions: list[str] = Field(default_factory=list)
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

@@ -30,6 +30,9 @@ def test_ebay_setup_health_marks_expired_manual_token_for_reconnect():
     assert snapshot["publish_support_level"] == "direct_api"
     assert snapshot["import_support_level"] == "direct_api"
     assert snapshot["sales_sync_support_level"] == "direct_api"
+    assert snapshot["ui_primary_action"] == "Reconnect eBay"
+    assert snapshot["ui_state_tone"] in {"warning", "success"}
+    assert isinstance(snapshot["ui_secondary_actions"], list)
 
 
 def test_manual_marketplace_support_contracts_are_explicit():
@@ -70,3 +73,6 @@ def test_manual_marketplace_support_contracts_are_explicit():
     assert depop_snapshot["publish_support_level"] == "provider_assist"
     assert depop_snapshot["import_support_level"] == "provider_assist"
     assert depop_snapshot["sales_sync_support_level"] == "unsupported"
+    assert etsy_snapshot["ui_primary_action"] == "Run assisted workflow"
+    assert depop_snapshot["ui_primary_action"] == "Run assisted workflow"
+    assert etsy_snapshot["ui_priority"] < depop_snapshot["ui_priority"]

@@ -29,7 +29,7 @@ import StatusPill from '../ui/status-pill';
 function buildNavGroups(user) {
   return [
     {
-      label: 'Command Center',
+      label: 'Workspace',
       items: [
         {
           href: '/app',
@@ -37,21 +37,18 @@ function buildNavGroups(user) {
           icon: LayoutDashboard,
           children: [
             { href: '/app', label: 'Overview' },
-            { href: '/app#jobs', label: 'Jobs' },
             { href: '/app#operations', label: 'Operations' },
             { href: '/app#activity', label: 'Activity' },
-            { href: '/app#channels', label: 'Channels' },
           ],
         },
         {
           href: '/intake',
-          label: 'Intake & Uploads',
+          label: 'Intake',
           icon: FolderOpen,
           children: [
             { href: '/intake', label: 'Upload Workspace' },
             { href: '/intake?tab=batches', label: 'Batch Queue' },
             { href: '/intake?tab=grouped', label: 'Grouped Items' },
-            { href: '/intake#workflow', label: 'Workflow Guide' },
           ],
         },
         {
@@ -71,25 +68,32 @@ function buildNavGroups(user) {
           children: [
             { href: '/inventory', label: 'Catalog' },
             { href: '/inventory?tab=batches', label: 'Batches' },
-            { href: '/inventory#bulk-actions', label: 'Bulk Actions' },
           ],
         },
         ...(user?.can_access_vine_import ? [{ href: '/imports/vine', label: 'Vine Import', icon: Upload }] : []),
       ],
     },
     {
-      label: 'Commerce',
+      label: 'Operations',
       items: [
         {
+          href: '/jobs',
+          label: 'Jobs',
+          icon: Layers3,
+          children: [
+            { href: '/jobs', label: 'Jobs Console' },
+            { href: '/jobs/running', label: 'Running' },
+            { href: '/jobs/failed', label: 'Failed' },
+          ],
+        },
+        {
           href: '/publishing',
-          label: 'Marketplace Publishing',
+          label: 'Publishing',
           icon: Store,
           children: [
             { href: '/publishing?tab=queue', label: 'Queue' },
             { href: '/publishing?tab=approvals', label: 'Approvals' },
             { href: '/publishing?tab=live', label: 'Live Listings' },
-            { href: '/publishing?tab=sync', label: 'Sync Status' },
-            { href: '/jobs', label: 'Jobs Console' },
           ],
         },
         {
@@ -104,7 +108,7 @@ function buildNavGroups(user) {
         },
         {
           href: '/offers',
-          label: 'Automation & Offers',
+          label: 'Offers',
           icon: Tag,
           children: [
             { href: '/offers', label: 'Offer Rules' },
@@ -128,8 +132,8 @@ function buildNavGroups(user) {
         },
         {
           href: '/settings?tab=ebay',
-          label: 'Integrations',
-          icon: Layers3,
+          label: 'Marketplaces',
+          icon: Store,
           children: [
             { href: '/settings?tab=ebay', label: 'eBay OAuth' },
             { href: '/settings?tab=marketplaces', label: 'Marketplaces' },
@@ -172,9 +176,9 @@ export default function AppShell({
   const activeHref = router.asPath || activePath;
   const mobilePrimaryItems = [
     { href: '/app', label: 'Dashboard', icon: LayoutDashboard },
-    { href: '/intake', label: 'Intake', icon: FolderOpen },
     { href: '/listings', label: 'Listings', icon: FileText },
-    { href: '/publishing', label: 'Publish', icon: Store },
+    { href: '/jobs', label: 'Jobs', icon: Layers3 },
+    { href: '/sales', label: 'Sales', icon: ShoppingCart },
   ];
 
   const normalizeHref = (href) => (href || '').replace(/#.*$/, '');
@@ -264,7 +268,7 @@ export default function AppShell({
                               </span>
                               <span className="min-w-0">
                                 <span className="pp-app-nav-item__title block truncate text-sm">{item.label}</span>
-                                {item.children?.length ? <span className="pp-app-nav-item__meta mt-0.5 block text-xs">{item.children.length} related views</span> : null}
+                                {item.children?.length ? <span className="pp-app-nav-item__meta mt-0.5 block text-xs">Open {item.children.length} shortcuts</span> : null}
                               </span>
                             </Link>
                             {item.children?.length ? (
@@ -471,7 +475,7 @@ export default function AppShell({
         open={mobileMenuOpen}
         onClose={() => setMobileMenuOpen(false)}
         title="Workspace navigation"
-        description="Move between setup, operations, and marketplace workflow."
+        description="Move between workspace, operations, and admin surfaces."
         widthClassName="max-w-[420px]"
       >
         <div className="space-y-5">

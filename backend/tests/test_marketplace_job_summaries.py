@@ -82,6 +82,9 @@ def test_crosspost_job_waits_for_bridge_completion_and_exposes_review_summary(db
     assert serialized["submitted_count"] == 0
     assert serialized["failed_target_count"] == 0
     assert serialized["target_outcomes"][0]["requires_review"] is True
+    assert serialized["ui_primary_action"] == "Complete handoff"
+    assert serialized["ui_state_tone"] == "warning"
+    assert "Retry" in serialized["ui_secondary_actions"]
 
     marketplace_listing = (
         db_session.query(MarketplaceListing)
@@ -131,6 +134,8 @@ def test_import_job_serialization_includes_review_items(db_session):
             "needs_review": True,
         }
     ]
+    assert serialized["ui_primary_action"] == "Review imports"
+    assert serialized["ui_state_tone"] == "warning"
 
 
 def test_crosspost_job_marks_failed_target_when_bridge_completion_fails(db_session, monkeypatch):
@@ -212,6 +217,8 @@ def test_crosspost_job_marks_failed_target_when_bridge_completion_fails(db_sessi
     assert serialized["review_required_count"] == 0
     assert serialized["submitted_count"] == 0
     assert "mercari" in (serialized["last_error"] or "").lower()
+    assert serialized["ui_primary_action"] == "Retry"
+    assert serialized["ui_state_tone"] == "danger"
 
     marketplace_listing = (
         db_session.query(MarketplaceListing)

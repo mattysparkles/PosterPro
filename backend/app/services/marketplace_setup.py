@@ -107,6 +107,17 @@ MARKETPLACE_SETUP_PROFILES: dict[str, dict[str, Any]] = {
     },
 }
 
+MARKETPLACE_UI_PRIORITY = {
+    MarketplaceName.ebay.value: 1,
+    MarketplaceName.facebook.value: 2,
+    MarketplaceName.mercari.value: 3,
+    MarketplaceName.poshmark.value: 4,
+    MarketplaceName.whatnot.value: 5,
+    MarketplaceName.etsy.value: 6,
+    MarketplaceName.depop.value: 7,
+    MarketplaceName.vinted.value: 8,
+}
+
 
 def _normalize_import_listing_limit(value: Any) -> int:
     try:
@@ -312,6 +323,7 @@ def marketplace_status_snapshot(
     support_url = str(manual_settings.get("support_url") or "").strip()
     bridge_account_key = str(manual_settings.get("bridge_account_key") or "").strip().lower()
     import_listing_limit = _normalize_import_listing_limit(manual_settings.get("import_listing_limit"))
+    ui_priority = MARKETPLACE_UI_PRIORITY.get(name, 99)
 
     if name == MarketplaceName.ebay.value:
         oauth_ready = bool(settings.ebay_client_id and settings.ebay_client_secret and (settings.ebay_runame or settings.ebay_redirect_uri))
@@ -354,6 +366,10 @@ def marketplace_status_snapshot(
             "workflow_state": "ready" if connected else "draft",
             "can_publish": connected,
             "can_sync_sales": connected,
+            "ui_priority": ui_priority,
+            "ui_state_tone": "success" if connected and health["import_ready"] else "warning" if connected else "default",
+            "ui_primary_action": "Import listings" if connected and health["import_ready"] else "Reconnect eBay" if connected else "Connect eBay",
+            "ui_secondary_actions": ["Review credentials", "Open Settings"],
         }
 
     is_manual = name in MANUAL_MARKETPLACES
@@ -399,4 +415,8 @@ def marketplace_status_snapshot(
         "import_listing_limit": import_listing_limit,
         "can_publish": connected,
         "can_sync_sales": False,
+        "ui_priority": ui_priority,
+        "ui_state_tone": "success" if connected else "warning" if has_profile else "default",
+        "ui_primary_action": "Run assisted workflow" if connected else "Mark ready" if has_profile else "Complete setup",
+        "ui_secondary_actions": ["Open setup drawer", "Review support contract"],
     }
