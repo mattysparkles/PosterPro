@@ -17,6 +17,8 @@ import {
 
 import AppShell from '../components/layout/AppShell';
 import Button from '../components/ui/button';
+import ErrorState from '../components/ui/error-state';
+import LoadingSkeleton from '../components/ui/loading-skeleton';
 import MetricCard from '../components/ui/metric-card';
 import PageHeader from '../components/ui/page-header';
 import SectionPanel from '../components/ui/section-panel';
@@ -47,15 +49,25 @@ export default function AnalyticsPage() {
   const [periodDays, setPeriodDays] = useState(30);
   const [activeTab, setActiveTab] = useState('revenue');
   const [autonomousConfig, setAutonomousConfig] = useState({ autonomous_mode: true, autonomous_dry_run: true });
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState('');
 
   const reload = async (days = periodDays) => {
     if (!user?.id) return;
-    const [analyticsData, autonomousData] = await Promise.all([
-      fetchAnalyticsDashboard(user.id, days),
-      fetchAutonomousConfig(),
-    ]);
-    setDashboard(analyticsData);
-    setAutonomousConfig(autonomousData);
+    setLoading(true);
+    setLoadError('');
+    try {
+      const [analyticsData, autonomousData] = await Promise.all([
+        fetchAnalyticsDashboard(user.id, days),
+        fetchAutonomousConfig(),
+      ]);
+      setDashboard(analyticsData);
+      setAutonomousConfig(autonomousData);
+    } catch (error) {
+      setLoadError(error.message || 'Failed to load analytics dashboard.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
@@ -181,6 +193,8 @@ export default function AnalyticsPage() {
           <MetricCard key={item.label} label={item.label} value={item.value} detail={item.detail} />
         ))}
       </section>
+      {loadError ? <ErrorState title="Analytics unavailable" description={loadError} action={<Button variant="outline" onClick={() => reload(periodDays)}>Retry</Button>} /> : null}
+      {loading ? <LoadingSkeleton lines={5} className="mb-4" /> : null}
 
       <section id="analytics-guide" className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(320px,0.9fr)]">
         <SectionPanel title="Analytics reading guide" description="Use these sections as operational decision tools, not just charts for their own sake.">

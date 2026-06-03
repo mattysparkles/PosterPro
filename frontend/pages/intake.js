@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import Link from 'next/link';
 import { Camera, ChevronDown, FolderOpen, Upload } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useRouter } from 'next/router';
 
 import AppShell from '../components/layout/AppShell';
+import ActionBar from '../components/ui/action-bar';
+import AppCard from '../components/ui/app-card';
 import Button from '../components/ui/button';
 import DataTable from '../components/ui/data-table';
 import EmptyState from '../components/ui/empty-state';
@@ -16,13 +19,22 @@ import { Tabs } from '../components/ui/tabs';
 import Toolbar from '../components/ui/toolbar';
 import { useAuth } from '../contexts/AuthContext';
 import useDashboardData from '../hooks/useDashboardData';
-import { createStorageUnitBatch, ingestPhotos, toPublicImageUrl, toggleAutonomousMode } from '../lib/api';
+import {
+  createStorageUnitBatch,
+  fetchGooglePhotosWatch,
+  ingestPhotos,
+  runGooglePhotosWatch,
+  toPublicImageUrl,
+  toggleAutonomousMode,
+  updateGooglePhotosWatch,
+} from '../lib/api';
 
 const INTAKE_TABS = [
   { value: 'batches', label: 'Batches' },
   { value: 'ungrouped', label: 'Ungrouped' },
   { value: 'grouped', label: 'Grouped' },
 ];
+const DEFAULT_GOOGLE_ALBUM_URL = 'https://photos.app.goo.gl/cwgHgGRCMvV92tka8';
 
 function formatStatus(value) {
   const label = String(value || 'Pending').replaceAll('_', ' ');
@@ -37,6 +49,16 @@ export default function IntakePage() {
   const [storageUnitName, setStorageUnitName] = useState('');
   const [overnightMode, setOvernightMode] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [googleWatch, setGoogleWatch] = useState({
+    enabled: true,
+    auto_enrich: true,
+    album_url: DEFAULT_GOOGLE_ALBUM_URL,
+    last_synced_at: null,
+    last_imported_count: 0,
+    last_error: null,
+  });
+  const [watchSaving, setWatchSaving] = useState(false);
+  const [watchRunning, setWatchRunning] = useState(false);
   const photoInputRef = useRef(null);
   const zipInputRef = useRef(null);
 
@@ -142,6 +164,82 @@ export default function IntakePage() {
     } finally {
       event.target.value = '';
       setIsUploading(false);
+    }
+  };
+
+  const selectTab = (nextTab) => {
+    setActiveTab(nextTab);
+    if (!router.isReady) return;
+    router.replace({ pathname: router.pathname, query: { ...router.query, tab: nextTab } }, undefined, { shallow: true });
+  };
+
+  useEffect(() => {
+    if (!router.isReady) return;
+    const tab = typeof router.query.tab === 'string' ? router.query.tab : '';
+    if (tab && INTAKE_TABS.some((item) => item.value === tab) && tab !== activeTab) {
+      setActiveTab(tab);
+    }
+  }, [activeTab, router.isReady, router.query.tab]);
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const payload = await fetchGooglePhotosWatch();
+        if (!mounted) return;
+        setGoogleWatch((current) => ({
+          ...current,
+          ...payload,
+          album_url: payload?.album_url || current.album_url,
+        }));
+      } catch (error) {
+        toast.error(error.message);
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const saveGoogleWatch = async () => {
+    if (!googleWatch.album_url?.trim()) {
+      toast.error('Album URL is required.');
+      return;
+    }
+    setWatchSaving(true);
+    try {
+      const payload = await updateGooglePhotosWatch({
+        enabled: Boolean(googleWatch.enabled),
+        auto_enrich: Boolean(googleWatch.auto_enrich),
+        album_url: googleWatch.album_url.trim(),
+      });
+      setGoogleWatch((current) => ({ ...current, ...payload }));
+      toast.success('Google Photos watcher saved.');
+    } catch (error) {
+      toast.error(error.message);
+    } finally {
+      setWatchSaving(false);
+    }
+  };
+
+  const syncGoogleWatchNow = async () => {
+    setWatchRunning(true);
+    try {
+      const payload = await runGooglePhotosWatch();
+      const watch = payload?.watch || {};
+      const result = payload?.result || {};
+      setGoogleWatch((current) => ({ ...current, ...watch }));
+      const created = Number(result.new_items || 0);
+      toast.success(
+        created
+          ? `Imported ${created} new photo${created === 1 ? '' : 's'} and created draft listings.`
+          : 'No new photos found in the monitored album.',
+      );
+      await reload();
+    } catch (error) {
+      toast.error(error.message);
+    } finally {
+      setWatchRunning(false);
     }
   };
 
@@ -326,7 +424,60 @@ export default function IntakePage() {
             </div>
           </div>
         </SectionPanel>
+
+        <SectionPanel title="Google Photos Watch" description="Monitor a shared Google Photos album and auto-create draft listings from new photo submissions.">
+          <div className="grid gap-3">
+            <label className="text-sm font-medium text-[#101828]">Album URL</label>
+            <Input
+              value={googleWatch.album_url}
+              onChange={(event) => setGoogleWatch((current) => ({ ...current, album_url: event.target.value }))}
+              placeholder="https://photos.app.goo.gl/..."
+            />
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant={googleWatch.enabled ? 'default' : 'outline'}
+                onClick={() => setGoogleWatch((current) => ({ ...current, enabled: !current.enabled }))}
+              >
+                {googleWatch.enabled ? 'Watcher enabled' : 'Enable watcher'}
+              </Button>
+              <Button
+                variant={googleWatch.auto_enrich ? 'default' : 'outline'}
+                onClick={() => setGoogleWatch((current) => ({ ...current, auto_enrich: !current.auto_enrich }))}
+              >
+                {googleWatch.auto_enrich ? 'Auto enrich on' : 'Auto enrich off'}
+              </Button>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button onClick={saveGoogleWatch} disabled={watchSaving || watchRunning}>
+                {watchSaving ? 'Saving...' : 'Save watcher'}
+              </Button>
+              <Button variant="outline" onClick={syncGoogleWatchNow} disabled={watchSaving || watchRunning}>
+                {watchRunning ? 'Syncing...' : 'Run sync now'}
+              </Button>
+              <Link href="/listings">
+                <Button variant="ghost">Open listings queue</Button>
+              </Link>
+            </div>
+            <p className="text-xs text-[#667085]">
+              Last sync: {googleWatch.last_synced_at ? new Date(googleWatch.last_synced_at).toLocaleString() : 'Never'} · Last import: {googleWatch.last_imported_count || 0} new item(s)
+            </p>
+            {googleWatch.last_error ? (
+              <p className="text-xs text-[#b42318]">Last sync error: {googleWatch.last_error}</p>
+            ) : null}
+          </div>
+        </SectionPanel>
       </section>
+      <ActionBar
+        className="mt-4"
+        left={<p className="text-sm font-medium text-[#101828]">Next best action</p>}
+        right={
+          <div className="flex flex-wrap gap-2">
+            <Link href="/listings?tab=drafts"><Button variant="outline" size="sm">Review generated drafts</Button></Link>
+            <Link href="/inventory?tab=batches"><Button variant="outline" size="sm">Open batch inventory</Button></Link>
+            <Link href="/listings"><Button size="sm">Go to listings</Button></Link>
+          </div>
+        }
+      />
 
       <Toolbar
         left={
@@ -375,7 +526,7 @@ export default function IntakePage() {
         onChange={selectTab}
       />
 
-      <div id="intake-table">
+      <AppCard id="intake-table" className="mt-4">
       {activeTab === 'batches' ? (
         <DataTable
           columns={[
@@ -403,22 +554,9 @@ export default function IntakePage() {
           emptyState={<EmptyState title="No ungrouped items" description="New single-photo intake items will appear here before they are grouped." className="border-0 p-0 py-6" />}
         />
       )}
-      </div>
+      </AppCard>
     </AppShell>
   );
 }
 
 IntakePage.requireAuth = true;
-  const selectTab = (nextTab) => {
-    setActiveTab(nextTab);
-    if (!router.isReady) return;
-    router.replace({ pathname: router.pathname, query: { ...router.query, tab: nextTab } }, undefined, { shallow: true });
-  };
-
-  useEffect(() => {
-    if (!router.isReady) return;
-    const tab = typeof router.query.tab === 'string' ? router.query.tab : '';
-    if (tab && INTAKE_TABS.some((item) => item.value === tab) && tab !== activeTab) {
-      setActiveTab(tab);
-    }
-  }, [activeTab, router.isReady, router.query.tab]);

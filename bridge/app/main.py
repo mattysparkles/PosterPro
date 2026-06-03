@@ -21,6 +21,7 @@ from app.browser_runner import BrowserRunnerConfig, BrowserRunnerError, create_m
 
 
 class BridgeSettings(BaseSettings):
+    app_base_url: str | None = Field(default=None, validation_alias="APP_BASE_URL")
     bridge_api_key: str = Field(default="", validation_alias="AUTOMATION_BRIDGE_API_KEY")
     data_dir: Path = Field(default=Path("./data"), validation_alias="AUTOMATION_BRIDGE_DATA_DIR")
     runner_mode: str = Field(default="simulated", validation_alias="AUTOMATION_BRIDGE_RUNNER_MODE")
@@ -306,7 +307,8 @@ class JobStore:
         source_marketplace = str(payload.get("source_marketplace") or "unknown").lower()
         execution_mode = job["execution_mode"]
         bridge_account = None
-        if execution_mode in {"provider_assist", "browser_assist"}:
+        requires_account = execution_mode in {"provider_assist", "browser_assist"} and source_marketplace != "amazon"
+        if requires_account:
             bridge_account = account_store.resolve_account(source_marketplace, execution_mode, payload)
         if execution_mode == "browser_assist" and settings.runner_mode in {"playwright", "browser"}:
             runner = create_marketplace_browser_runner(
@@ -316,6 +318,7 @@ class JobStore:
                     timeout_ms=settings.browser_timeout_ms,
                     submit_enabled=settings.browser_submit_enabled,
                     screenshots_dir=settings.browser_screenshots_dir,
+                    app_base_url=settings.app_base_url,
                     asset_persistor=asset_store.create_asset,
                 ),
             )
@@ -385,6 +388,7 @@ class JobStore:
                     timeout_ms=settings.browser_timeout_ms,
                     submit_enabled=settings.browser_submit_enabled,
                     screenshots_dir=settings.browser_screenshots_dir,
+                    app_base_url=settings.app_base_url,
                     asset_persistor=asset_store.create_asset,
                 ),
             )
@@ -774,6 +778,7 @@ class ConnectSessionStore:
                 timeout_ms=settings.browser_timeout_ms,
                 submit_enabled=False,
                 screenshots_dir=settings.browser_screenshots_dir,
+                app_base_url=settings.app_base_url,
             ),
         )
 
@@ -1130,7 +1135,7 @@ def update_account_session(marketplace: str, account_key: str, payload: BridgeAc
 def _prepare_connect_account(marketplace: str, account_key: str, payload: BridgeAccountConnectRequest) -> tuple[str, str, dict[str, Any], dict[str, Any] | None]:
     normalized_marketplace = marketplace.strip().lower()
     normalized_key = account_key.strip().lower()
-    supported_marketplaces = {"facebook", "mercari", "poshmark", "etsy", "depop", "whatnot", "vinted"}
+    supported_marketplaces = {"amazon", "facebook", "mercari", "poshmark", "etsy", "depop", "whatnot", "vinted"}
     if normalized_marketplace not in supported_marketplaces:
         raise HTTPException(
             status_code=400,
@@ -1245,6 +1250,7 @@ def connect_account(marketplace: str, account_key: str, payload: BridgeAccountCo
             timeout_ms=settings.browser_timeout_ms,
             submit_enabled=False,
             screenshots_dir=settings.browser_screenshots_dir,
+            app_base_url=settings.app_base_url,
         )
     )
     try:

@@ -10,6 +10,7 @@ import MetricCard from '../components/ui/metric-card';
 import PageHeader from '../components/ui/page-header';
 import SectionPanel from '../components/ui/section-panel';
 import StatusPill from '../components/ui/status-pill';
+import HealthIndicator from '../components/ui/health-indicator';
 import { useAuth } from '../contexts/AuthContext';
 import {
   fetchAutonomousConfig,
@@ -215,6 +216,9 @@ export default function OffersPage() {
 
         <SectionPanel id="automation-posture" title="Automation posture" description="Offer logic should feel deliberate, not spammy.">
           <div className="space-y-3">
+            <div className="rounded-[14px] border border-[#e5e7eb] bg-white p-4">
+              <HealthIndicator healthy={offerRule.is_enabled} label={offerRule.is_enabled ? 'Automation healthy' : 'Automation paused'} />
+            </div>
             <div className="rounded-[14px] border border-[#e5e7eb] bg-white p-4">
               <div className="flex items-center justify-between gap-3">
                 <p className="text-sm font-semibold text-[#101828]">Rule state</p>

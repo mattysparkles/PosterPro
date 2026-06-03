@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 from app.api.schemas import (
     ActiveBridgeConnectSessionSummaryResponse,
     AccountSetupSummaryResponse,
+    BulkMarketplacePublishRequest,
+    BulkMarketplacePublishResponse,
     ConnectMarketplaceResponse,
     MarketplaceConnectionUpdateRequest,
     MarketplaceConnectionStatusResponse,
@@ -142,6 +144,25 @@ def publish_listing_multi(
         return {"listing_id": listing_id, "results": queue_publish(db, listing_id, payload.marketplaces)}
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/listings/publish-bulk", response_model=BulkMarketplacePublishResponse)
+def publish_listings_bulk(
+    payload: BulkMarketplacePublishRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    results: list[dict] = []
+    for listing_id in payload.listing_ids:
+        listing = db.get(Listing, listing_id)
+        if not listing:
+            continue
+        ensure_user_owns_resource(current_user, listing.user_id)
+        try:
+            results.append({"listing_id": listing_id, "results": queue_publish(db, listing_id, payload.marketplaces)})
+        except ValueError as exc:
+            results.append({"listing_id": listing_id, "results": [], "error": str(exc)})
+    return {"results": results}
 
 
 @router.get("/listings/{listing_id}/marketplace_status")

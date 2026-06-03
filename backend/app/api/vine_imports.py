@@ -103,7 +103,13 @@ def create_vine_inventory(
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
     ensure_user_owns_resource(current_user, batch.user_id)
-    return service.create_inventory_records(db, batch=batch, item_ids=payload.item_ids, include_locked=payload.include_locked)
+    return service.create_inventory_records(
+        db,
+        batch=batch,
+        item_ids=payload.item_ids,
+        include_locked=payload.include_locked,
+        include_cancelled=payload.include_cancelled,
+    )
 
 
 @router.post("/batches/{batch_id}/create-drafts")
@@ -122,6 +128,7 @@ def create_vine_drafts(
         db,
         batch=batch,
         item_ids=payload.item_ids,
+        include_cancelled=payload.include_cancelled,
         fetch_media_first=payload.fetch_media_first,
         require_media_for_asin=payload.require_media_for_asin,
         allow_drafts_without_media=payload.allow_drafts_without_media,

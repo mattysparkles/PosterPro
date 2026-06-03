@@ -93,6 +93,11 @@ def _safe_json(response: httpx.Response) -> dict[str, Any]:
         return {"raw": response.text}
 
 
+def _is_invalid_access_token_error(error: Exception) -> bool:
+    message = str(error).lower()
+    return "invalid access token" in message or "(401)" in message
+
+
 def _oauth_base() -> str:
     return "https://auth.sandbox.ebay.com/oauth2/authorize" if settings.environment != "production" else "https://auth.ebay.com/oauth2/authorize"
 
@@ -539,10 +544,23 @@ async def publish_listing_to_ebay(listing: Listing, db: Session, *, relist: bool
 
     try:
         account = await get_or_refresh_account(listing.user_id, db)
-        location_data = await create_inventory_location(listing.user_id, db)
-        item_data = await create_or_replace_item(listing, account)
-        offer_data = await create_offer_for_item(listing, account, item_data["sku"])
-        publish_data = await publish_offer(listing, account, offer_data["offerId"])
+        location_data = None
+        item_data = None
+        offer_data = None
+        publish_data = None
+
+        for attempt in range(2):
+            try:
+                location_data = await create_inventory_location(listing.user_id, db)
+                item_data = await create_or_replace_item(listing, account)
+                offer_data = await create_offer_for_item(listing, account, item_data["sku"])
+                publish_data = await publish_offer(listing, account, offer_data["offerId"])
+                break
+            except Exception as exc:
+                if attempt == 0 and _is_invalid_access_token_error(exc) and account.refresh_token:
+                    account = await refresh_ebay_token(listing.user_id, db)
+                    continue
+                raise
 
         previous_listing_id = listing.ebay_listing_id
         listing.ebay_listing_id = publish_data["listingId"]

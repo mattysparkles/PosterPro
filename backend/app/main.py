@@ -106,6 +106,51 @@ def _bootstrap_database() -> dict[str, object]:
         "legacy_schema_columns_applied": applied_legacy_columns,
     }
 
+
+def _resolve_media_root() -> Path:
+    configured = Path(settings.storage_root)
+    candidates: list[Path] = []
+    if configured.is_absolute():
+        if configured.exists() and configured.is_dir():
+            return configured
+        candidates.append(configured)
+    else:
+        cwd_configured = (Path.cwd() / configured).resolve()
+        if cwd_configured.exists() and cwd_configured.is_dir():
+            return cwd_configured
+        candidates.append(cwd_configured)
+        candidates.append((Path(__file__).resolve().parents[3] / configured).resolve())
+    candidates.append((Path(__file__).resolve().parents[3] / "storage").resolve())
+    candidates.append((Path(__file__).resolve().parents[2] / "storage").resolve())
+    candidates.append((Path(__file__).resolve().parents[1] / "storage").resolve())
+
+    existing: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        if candidate.exists() and candidate.is_dir():
+            existing.append(candidate)
+    if not existing:
+        return candidates[0]
+
+    def _score(path: Path) -> int:
+        score = 0
+        if (path / "amazon-vine").exists():
+            score += 120
+        if (path / "vine-search").exists():
+            score += 100
+        if (path / "vine-search-fallback").exists():
+            score += 60
+        if (path / "imports").exists():
+            score += 10
+        return score
+
+    best = max(existing, key=_score)
+    return best
+
 app = FastAPI(title="PosterPro API")
 app.add_middleware(
     CORSMiddleware,
@@ -115,7 +160,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(auth_router)
-app.include_router(router)
 app.include_router(ebay_router)
 app.include_router(marketplaces_router)
 app.include_router(marketplace_jobs_router)
@@ -124,7 +168,8 @@ app.include_router(inventory_router)
 app.include_router(bulk_jobs_router)
 app.include_router(sales_router)
 app.include_router(vine_imports_router)
-app.mount("/media", StaticFiles(directory=Path(settings.storage_root)), name="media")
+app.include_router(router)
+app.mount("/media", StaticFiles(directory=_resolve_media_root()), name="media")
 
 
 @app.on_event("startup")

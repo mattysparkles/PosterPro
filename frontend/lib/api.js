@@ -145,6 +145,18 @@ export async function fetchListings() {
   return jsonFetch(`${API_BASE}/listings`);
 }
 
+export async function backfillVineListingImages(options = {}) {
+  const url = new URL(`${API_BASE}/listings/vine/backfill-images`, window.location.origin);
+  if (options.includeArchived != null) url.searchParams.set("include_archived", String(Boolean(options.includeArchived)));
+  if (options.forceRefresh != null) url.searchParams.set("force_refresh", String(Boolean(options.forceRefresh)));
+  if (options.strictMatch != null) url.searchParams.set("strict_match", String(Boolean(options.strictMatch)));
+  if (options.onlyMissingImages != null) url.searchParams.set("only_missing_images", String(Boolean(options.onlyMissingImages)));
+  if (Number.isFinite(Number(options.limit))) url.searchParams.set("limit", String(Number(options.limit)));
+  return jsonFetch(url.toString().replace(window.location.origin, ""), {
+    method: "POST",
+  });
+}
+
 export async function fetchListing(id) {
   return jsonFetch(`${API_BASE}/listings/${id}`);
 }
@@ -335,6 +347,20 @@ export async function approveListingsBulk(listingIds = []) {
   });
 }
 
+export async function deleteListing(id) {
+  return jsonFetch(`${API_BASE}/listings/${id}`, {
+    method: "DELETE",
+  });
+}
+
+export async function deleteListingsBulk(listingIds = []) {
+  return jsonFetch(`${API_BASE}/listings/delete-bulk`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ listing_ids: listingIds }),
+  });
+}
+
 export async function fetchListingTemplates(userId, categoryId) {
   const url = new URL(`${API_BASE}/listing-templates`);
   if (userId) url.searchParams.set("user_id", String(userId));
@@ -371,6 +397,20 @@ export async function publishListing(id, marketplaces) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ marketplaces }),
+  });
+}
+
+export async function publishListingEbay(id) {
+  return jsonFetch(`${API_BASE}/listings/${id}/publish/ebay`, {
+    method: "POST",
+  });
+}
+
+export async function publishListingsBulk(listingIds = [], marketplaces) {
+  return jsonFetch(`${API_BASE}/listings/publish-bulk`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ listing_ids: listingIds, marketplaces }),
   });
 }
 
@@ -513,6 +553,7 @@ export async function ingestPhotos({ files, storageUnitName }) {
   return jsonFetch(`${API_BASE}/ingest/photos`, {
     method: "POST",
     body: form,
+    timeoutMs: 180000,
   });
 }
 
@@ -530,6 +571,7 @@ export async function createStorageUnitBatch({
   return jsonFetch(`${API_BASE}/batch/storage-unit`, {
     method: "POST",
     body: form,
+    timeoutMs: 300000,
   });
 }
 
@@ -581,16 +623,17 @@ export async function fetchVineBatch(batchId) {
 export async function fetchVineMedia(batchId, itemIds) {
   return jsonFetch(`${API_BASE}/imports/vine/batches/${batchId}/fetch-media`, {
     method: "POST",
+    timeoutMs: 0,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ item_ids: itemIds }),
   });
 }
 
-export async function createVineInventory(batchId, itemIds, includeLocked = true) {
+export async function createVineInventory(batchId, itemIds, includeLocked = true, includeCancelled = false) {
   return jsonFetch(`${API_BASE}/imports/vine/batches/${batchId}/create-inventory`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ item_ids: itemIds, include_locked: includeLocked }),
+    body: JSON.stringify({ item_ids: itemIds, include_locked: includeLocked, include_cancelled: includeCancelled }),
   });
 }
 
@@ -599,15 +642,18 @@ export async function createVineDrafts(batchId, itemIds, options = {}) {
     fetchMediaFirst = false,
     requireMediaForAsin = false,
     allowDraftsWithoutMedia = false,
+    includeCancelled = false,
   } = options || {};
   return jsonFetch(`${API_BASE}/imports/vine/batches/${batchId}/create-drafts`, {
     method: "POST",
+    timeoutMs: 0,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       item_ids: itemIds,
       fetch_media_first: !!fetchMediaFirst,
       require_media_for_asin: !!requireMediaForAsin,
       allow_drafts_without_media: !!allowDraftsWithoutMedia,
+      include_cancelled: !!includeCancelled,
     }),
   });
 }
@@ -703,6 +749,24 @@ export async function fetchOfferHistory(userId) {
   return jsonFetch(url.toString());
 }
 
+export async function fetchGooglePhotosWatch() {
+  return jsonFetch(`${API_BASE}/import/google-photos/watch`);
+}
+
+export async function updateGooglePhotosWatch(body) {
+  return jsonFetch(`${API_BASE}/import/google-photos/watch`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function runGooglePhotosWatch() {
+  return jsonFetch(`${API_BASE}/import/google-photos/watch/run`, {
+    method: "POST",
+  });
+}
+
 export function toPublicImageUrl(path) {
   if (!path) return "";
   if (
@@ -713,12 +777,16 @@ export function toPublicImageUrl(path) {
   )
     return path;
   const marker = "/storage/";
+  const mediaBase = API_BASE === "/api" ? "/media" : `${API_BASE}/media`;
   const idx = path.indexOf(marker);
   if (idx >= 0) {
-    return `${API_BASE}/media/${path.slice(idx + marker.length)}`;
+    return `${mediaBase}/${path.slice(idx + marker.length)}`;
+  }
+  if (path.startsWith("storage/")) {
+    return `${mediaBase}/${path.slice("storage/".length)}`;
   }
   if (path.startsWith("./storage/")) {
-    return `${API_BASE}/media/${path.replace("./storage/", "")}`;
+    return `${mediaBase}/${path.replace("./storage/", "")}`;
   }
   return path;
 }

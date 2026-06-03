@@ -205,6 +205,14 @@ export default function ListingWorkspacePage() {
     };
   }, [isNew, listingId, router.isReady, user?.id]);
 
+  const previewMode = router.isReady && (router.query.mode === 'preview' || router.query.preview === '1');
+
+  useEffect(() => {
+    if (!previewMode) return;
+    const previewSection = document.getElementById('listing-execution-preview');
+    previewSection?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [previewMode]);
+
   const title = useMemo(() => {
     if (isNew) return "New Item";
     return listing?.title || `Listing #${listing?.id || listingId}`;
@@ -864,7 +872,7 @@ export default function ListingWorkspacePage() {
             </div>
           </SectionPanel>
 
-          <SectionPanel title="Execution Preview" description="See how PosterPro will treat each selected target before it publishes or hands off.">
+          <SectionPanel id="listing-execution-preview" title="Execution Preview" description="See how PosterPro will treat each selected target before it publishes or hands off.">
             <div className="space-y-3">
               {crosspostPreview.length ? (
                 crosspostPreview.map((entry) => (

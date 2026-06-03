@@ -8,6 +8,12 @@ class GooglePhotosImportRequest(BaseModel):
     album_url: HttpUrl
 
 
+class GooglePhotosWatchRequest(BaseModel):
+    album_url: HttpUrl
+    enabled: bool = True
+    auto_enrich: bool = True
+
+
 class ListingGenerateRequest(BaseModel):
     barcode: str | None = None
 
@@ -104,6 +110,11 @@ class MarketplacePublishRequest(BaseModel):
     marketplaces: list[str] | None = None
 
 
+class BulkMarketplacePublishRequest(BaseModel):
+    listing_ids: list[int] = Field(default_factory=list)
+    marketplaces: list[str] | None = None
+
+
 class MarketplacePublishResult(BaseModel):
     marketplace: str
     task_id: str | None = None
@@ -122,6 +133,10 @@ class BulkListingApproveRequest(BaseModel):
 
 class BulkListingApproveResponse(BaseModel):
     approvals: list[ListingApprovalResponse] = Field(default_factory=list)
+
+
+class BulkMarketplacePublishResponse(BaseModel):
+    results: list[dict] = Field(default_factory=list)
 
 
 class ConnectMarketplaceResponse(BaseModel):
@@ -284,6 +299,8 @@ class UserResponse(BaseModel):
     role: str = "public"
     can_access_vine_import: bool = False
     workflow_preferences: dict = Field(default_factory=dict)
+    vine_enforce_six_month_lock: bool = True
+    sold_sync_preferences: dict = Field(default_factory=dict)
 
     class Config:
         from_attributes = True
@@ -300,6 +317,10 @@ class UserUpdateRequest(BaseModel):
     auto_publish_after_approval: bool | None = None
     bulk_approval_enabled: bool | None = None
     listing_preview_mode: str | None = None
+    vine_enforce_six_month_lock: bool | None = None
+    sold_out_delist_everywhere: bool | None = None
+    out_of_stock_delist_everywhere: bool | None = None
+    remove_media_on_sold_out: bool | None = None
 
 
 class ServerSettingsUpdateRequest(BaseModel):
@@ -719,6 +740,7 @@ class VineImportBatchResponse(BaseModel):
 class VineImportActionRequest(BaseModel):
     item_ids: list[int] = Field(default_factory=list)
     include_locked: bool = True
+    include_cancelled: bool = False
     fetch_media_first: bool = False
     require_media_for_asin: bool = False
     allow_drafts_without_media: bool = False

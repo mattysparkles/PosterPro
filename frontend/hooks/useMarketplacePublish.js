@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 
-import { fetchMarketplaceStatus, publishListing } from '../lib/api';
+import { fetchMarketplaceStatus, publishListing, publishListingEbay } from '../lib/api';
 
 export function useMarketplacePublish() {
   const [publishing, setPublishing] = useState({});
@@ -37,7 +37,14 @@ export function useMarketplacePublish() {
     setPublishing((prev) => ({ ...prev, [listingId]: true }));
     setErrors((prev) => ({ ...prev, [listingId]: '' }));
     try {
-      await publishListing(listingId, marketplaces);
+      const normalizedMarketplaces = Array.isArray(marketplaces)
+        ? marketplaces.map((market) => String(market).toLowerCase()).filter(Boolean)
+        : [];
+      if (normalizedMarketplaces.length === 1 && normalizedMarketplaces[0] === 'ebay') {
+        await publishListingEbay(listingId);
+      } else {
+        await publishListing(listingId, marketplaces);
+      }
       setTracking((prev) => [...new Set([...prev, listingId])]);
       await refreshStatus(listingId);
     } catch (err) {

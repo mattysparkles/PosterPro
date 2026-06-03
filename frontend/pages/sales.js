@@ -10,6 +10,7 @@ import MetricCard from '../components/ui/metric-card';
 import PageHeader from '../components/ui/page-header';
 import SectionPanel from '../components/ui/section-panel';
 import StatusPill from '../components/ui/status-pill';
+import HealthIndicator from '../components/ui/health-indicator';
 import { useAuth } from '../contexts/AuthContext';
 import {
   fetchAutonomousConfig,
@@ -188,6 +189,9 @@ export default function SalesPage() {
 
         <SectionPanel title="Workflow notes" description="Use this sales surface for order hygiene, not just reporting.">
           <div className="space-y-3">
+            <div className="rounded-[12px] border border-[#e5e7eb] bg-white p-4">
+              <HealthIndicator healthy={platformSettings.length > 0} label={platformSettings.length ? `${platformSettings.length} detectors enabled` : 'No detectors enabled'} />
+            </div>
             {[
               'PosterPro refreshes the sales timeline every 20 seconds so order events do not drift too far from reality.',
               'Editing fees and shipping here keeps the analytics layer closer to real margin instead of gross-only reporting.',

@@ -24,6 +24,7 @@ class BrowserRunnerConfig:
     timeout_ms: int = 45000
     submit_enabled: bool = False
     screenshots_dir: Path = Path("./data/screenshots")
+    app_base_url: str | None = None
     asset_persistor: Callable[[bytes, str | None, str | None, str | None], dict[str, Any]] | None = None
 
 
@@ -49,6 +50,22 @@ class MarketplaceBrowserSpec:
 
 
 MARKETPLACE_BROWSER_SPECS: dict[str, MarketplaceBrowserSpec] = {
+    "amazon": MarketplaceBrowserSpec(
+        marketplace="amazon",
+        label="Amazon",
+        home_url="https://www.amazon.com/",
+        create_url="https://www.amazon.com/",
+        auth_check_url="https://www.amazon.com/",
+        connect_start_url="https://www.amazon.com/ap/signin",
+        title_selectors=("input[type='search']",),
+        price_selectors=("input[type='number']",),
+        description_selectors=("textarea",),
+        submit_selectors=("button",),
+        import_overview_url="https://www.amazon.com/",
+        supports_import=True,
+        auth_cookie_names=("session-id", "ubid-main"),
+        auth_url_tokens=("/gp/", "/dp/", "/s?", "amazon.com"),
+    ),
     "facebook": MarketplaceBrowserSpec(
         marketplace="facebook",
         label="Facebook Marketplace",
@@ -328,9 +345,12 @@ class MarketplaceBrowserRunner:
                     temp_files = self._download_images(image_urls)
                     uploaded_count = self._upload_images(page, temp_files)
 
-                self._fill_first(page, list(self.spec.title_selectors), title, "title")
-                self._fill_first(page, list(self.spec.price_selectors), str(price), "price")
-                if description:
+                if self.spec.marketplace == "facebook":
+                    self._fill_facebook_form(page, title=title, price=str(price), description=description)
+                else:
+                    self._fill_first(page, list(self.spec.title_selectors), title, "title")
+                    self._fill_first(page, list(self.spec.price_selectors), str(price), "price")
+                if self.spec.marketplace != "facebook" and description:
                     self._fill_first(page, list(self.spec.description_selectors), description, "description")
 
                 self._apply_marketplace_specific_fields(page, listing_payload)
@@ -531,15 +551,18 @@ class MarketplaceBrowserRunner:
 
         return _PlaywrightWrapper()
 
-    def _bridge_account_summary(self, bridge_account: dict[str, Any]) -> dict[str, Any]:
+    def _bridge_account_summary(self, bridge_account: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not bridge_account:
+            return None
         return {
             "account_id": bridge_account["account_id"],
             "account_key": bridge_account["account_key"],
             "display_name": bridge_account.get("display_name"),
         }
 
-    def _new_context(self, browser: Any, bridge_account: dict[str, Any]) -> Any:
-        context = browser.new_context(storage_state=self._build_storage_state(bridge_account))
+    def _new_context(self, browser: Any, bridge_account: dict[str, Any] | None) -> Any:
+        storage_state = self._optional_storage_state(bridge_account) if bridge_account else None
+        context = browser.new_context(storage_state=storage_state) if storage_state else browser.new_context()
         context.set_default_timeout(self.config.timeout_ms)
         return context
 
@@ -574,13 +597,28 @@ class MarketplaceBrowserRunner:
         saved: list[Path] = []
         with httpx.Client(timeout=30, follow_redirects=True) as client:
             for index, url in enumerate(image_urls):
-                response = client.get(url)
+                resolved_url = self._resolve_media_url(url)
+                try:
+                    response = client.get(resolved_url)
+                except Exception as exc:
+                    raise BrowserRunnerError(f"Failed to download bridge image {resolved_url}: {exc}") from exc
                 response.raise_for_status()
-                suffix = Path(urlparse(url).path).suffix or ".jpg"
+                suffix = Path(urlparse(resolved_url).path).suffix or ".jpg"
                 destination = temp_dir / f"image-{index + 1}{suffix}"
                 destination.write_bytes(response.content)
                 saved.append(destination)
         return saved
+
+    def _resolve_media_url(self, url: str) -> str:
+        cleaned = str(url or "").strip()
+        if cleaned.startswith("http://") or cleaned.startswith("https://"):
+            return cleaned
+        base_url = str(self.config.app_base_url or "").strip().rstrip("/")
+        if not base_url:
+            raise BrowserRunnerError(f"Bridge runner needs an absolute URL for media asset '{cleaned}'")
+        if cleaned.startswith("/"):
+            return f"{base_url}{cleaned}"
+        return f"{base_url}/{cleaned.lstrip('/')}"
 
     def _upload_images(self, page: Any, image_paths: list[Path]) -> int:
         for selector in ['input[type="file"]']:
@@ -599,6 +637,74 @@ class MarketplaceBrowserRunner:
                 locator.fill(value)
                 return
         raise BrowserRunnerError(f"Could not locate a {self.spec.label} {field_name} field")
+
+    def _fill_facebook_form(self, page: Any, *, title: str, price: str, description: str | None) -> None:
+        page.wait_for_timeout(1000)
+        text_inputs = page.locator('input[type="text"]')
+        if text_inputs.count() >= 2:
+            title_input = text_inputs.nth(0)
+            price_input = text_inputs.nth(1)
+            title_input.click()
+            title_input.fill(title)
+            price_input.click()
+            price_input.fill(price)
+        else:
+            self._fill_facebook_labeled_field(page, "Title", title, "input")
+            self._fill_facebook_labeled_field(page, "Price", price, "input")
+
+        if description:
+            textareas = page.locator("textarea")
+            if textareas.count():
+                description_input = textareas.nth(0)
+                description_input.click()
+                description_input.fill(description)
+            else:
+                self._fill_facebook_labeled_field(page, "Description", description, "textarea")
+
+    def _fill_facebook_labeled_field(self, page: Any, label: str, value: str, preferred_tag: str = "input") -> None:
+        normalized_label = str(label or "").strip().lower()
+        normalized_value = str(value or "").strip()
+        if not normalized_value:
+            return
+
+        selectors: list[str] = []
+        if preferred_tag == "textarea":
+            selectors.extend(["textarea", 'div[contenteditable="true"]'])
+        else:
+            selectors.extend(['input[type="text"]', 'input[type="number"]', 'input[role="spinbutton"]', 'div[contenteditable="true"]'])
+        candidates = page.locator(", ".join(selectors))
+        for index in range(candidates.count()):
+            locator = candidates.nth(index)
+            try:
+                if not locator.is_visible():
+                    continue
+                parent_text = locator.evaluate(
+                    """
+                    (el) => {
+                      let node = el;
+                      for (let i = 0; i < 4 && node; i += 1) {
+                        const parent = node.parentElement;
+                        if (!parent) {
+                          break;
+                        }
+                        const text = (parent.innerText || '').replace(/\\s+/g, ' ').trim();
+                        if (text) {
+                          return text;
+                        }
+                        node = parent;
+                      }
+                      return '';
+                    }
+                    """
+                )
+            except Exception:
+                continue
+            if normalized_label not in str(parent_text or "").lower():
+                continue
+            locator.click()
+            locator.fill(normalized_value)
+            return
+        raise BrowserRunnerError(f"Could not locate a Facebook Marketplace {label.lower()} field")
 
     def _try_fill_first(self, page: Any, selectors: list[str], value: str | None) -> bool:
         normalized = str(value or "").strip()
@@ -1192,9 +1298,147 @@ class VintedMarketplaceBrowserRunner(MarketplaceBrowserRunner):
         super().__init__(config, MARKETPLACE_BROWSER_SPECS["vinted"])
 
 
+class AmazonMarketplaceBrowserRunner(MarketplaceBrowserRunner):
+    def __init__(self, config: BrowserRunnerConfig) -> None:
+        super().__init__(config, MARKETPLACE_BROWSER_SPECS["amazon"])
+
+    def run_import(self, *, job_id: str, bridge_account: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        playwright = self._load_playwright()
+        screenshot_dir = self.config.screenshots_dir
+        screenshot_dir.mkdir(parents=True, exist_ok=True)
+        overview_path = screenshot_dir / f"{job_id}-amazon-media-capture.png"
+
+        raw_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+        requested_asins = payload.get("asins") or raw_payload.get("asins") or []
+        single_asin = payload.get("asin") or raw_payload.get("asin")
+        if single_asin:
+            requested_asins = [*requested_asins, single_asin]
+        normalized_asins = []
+        for value in requested_asins:
+            asin = str(value or "").strip().upper()
+            if re.fullmatch(r"[A-Z0-9]{10}", asin) and asin not in normalized_asins:
+                normalized_asins.append(asin)
+        if not normalized_asins:
+            raise BrowserRunnerError("Amazon import requires at least one valid ASIN")
+
+        with playwright as playwright_instance:
+            browser = playwright_instance.chromium.launch(headless=self.config.headless)
+            try:
+                context = self._new_context(browser, bridge_account)
+                page = context.new_page()
+                page.goto("https://www.amazon.com/", wait_until="domcontentloaded")
+                page.screenshot(path=str(overview_path), full_page=True)
+                page.close()
+                imported_listings: list[dict[str, Any]] = []
+                for asin in normalized_asins:
+                    product_url = f"https://www.amazon.com/dp/{asin}"
+                    item_page = context.new_page()
+                    try:
+                        item_page.goto(product_url, wait_until="domcontentloaded")
+                        item_page.wait_for_timeout(1500)
+                        image_urls = self._extract_amazon_product_images(item_page)
+                        title = self._extract_amazon_title(item_page)
+                    except Exception:
+                        image_urls = []
+                        title = None
+                    finally:
+                        item_page.close()
+                    imported_listings.append(
+                        {
+                            "source_listing_reference": asin,
+                            "source_url": product_url,
+                            "asin": asin,
+                            "image_urls": image_urls,
+                            "title": title,
+                        }
+                    )
+
+                final_storage_state = context.storage_state()
+                return {
+                    "job_id": job_id,
+                    "marketplace": self.spec.marketplace,
+                    "status": "import_completed",
+                    "bridge_account": self._bridge_account_summary(bridge_account),
+                    "imported_listing_count": len(imported_listings),
+                    "imported_listings": imported_listings,
+                    "screenshots": {
+                        "capture_overview": self._persist_generated_asset(overview_path),
+                    },
+                    "session_state": {
+                        "session_state": "active",
+                        "session_payload": final_storage_state,
+                    },
+                }
+            except playwright._timeout_error as exc:
+                raise BrowserRunnerError(f"Amazon media capture timed out: {exc}") from exc
+            finally:
+                browser.close()
+
+    def _extract_amazon_title(self, page: Any) -> str | None:
+        selectors = ("#productTitle", "h1.a-size-large", "h1#title")
+        for selector in selectors:
+            try:
+                node = page.query_selector(selector)
+                if not node:
+                    continue
+                value = (node.inner_text() or "").strip()
+                if value:
+                    return value
+            except Exception:
+                continue
+        return None
+
+    def _extract_amazon_product_images(self, page: Any) -> list[str]:
+        urls: list[str] = []
+        try:
+            dom_urls = page.evaluate(
+                """
+                () => {
+                  const out = new Set();
+                  const push = (v) => {
+                    if (!v || typeof v !== 'string') return;
+                    const raw = v.trim();
+                    if (!raw) return;
+                    let cleaned = raw.replace(/\\._[A-Z0-9_,]+_\\./g, '.');
+                    cleaned = cleaned.replace(/\\._AC_[A-Z0-9_,]+_\\./g, '.');
+                    if (/^https?:\\/\\//i.test(cleaned) && /\\.(jpg|jpeg|png|webp)(\\?|$)/i.test(cleaned)) out.add(cleaned);
+                  };
+                  document.querySelectorAll('#imgTagWrapperId img, #landingImage, #altImages img, img[data-old-hires], img[src*="images-amazon.com/images/I/"]').forEach((img) => {
+                    push(img.getAttribute('data-old-hires'));
+                    push(img.getAttribute('data-a-dynamic-image') ? Object.keys(JSON.parse(img.getAttribute('data-a-dynamic-image')) || {})[0] : null);
+                    push(img.getAttribute('src'));
+                  });
+                  return [...out];
+                }
+                """
+            )
+            if isinstance(dom_urls, list):
+                urls.extend(str(item) for item in dom_urls if str(item).strip())
+        except Exception:
+            pass
+
+        try:
+            html = page.content()
+            for match in re.findall(r'"hiRes"\s*:\s*"([^"]+)"', html):
+                urls.append(match)
+            for match in re.findall(r'"large"\s*:\s*"([^"]+)"', html):
+                urls.append(match)
+        except Exception:
+            pass
+
+        deduped: list[str] = []
+        for raw in urls:
+            cleaned = str(raw or "").strip().replace("\\u0026", "&").replace("\\/", "/")
+            cleaned = re.sub(r"\._[A-Z0-9_,]+_\.", ".", cleaned)
+            if cleaned.startswith("http") and cleaned not in deduped:
+                deduped.append(cleaned)
+        return deduped[:12]
+
+
 def create_marketplace_browser_runner(marketplace: str, config: BrowserRunnerConfig) -> MarketplaceBrowserRunner:
     normalized = str(marketplace or "").strip().lower()
     runners: dict[str, type[MarketplaceBrowserRunner]] = {
+        "amazon": AmazonMarketplaceBrowserRunner,
         "facebook": FacebookMarketplaceBrowserRunner,
         "mercari": MercariMarketplaceBrowserRunner,
         "poshmark": PoshmarkMarketplaceBrowserRunner,

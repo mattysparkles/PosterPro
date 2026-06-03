@@ -11,6 +11,7 @@ from app.connectors.registry import get_connector
 from app.core.config import settings
 from app.models.enums import MarketplaceListingStatus, MarketplaceName
 from app.models.models import Listing, MarketplaceListing, Sale, User
+from app.services.media_lifecycle import purge_listing_media
 from app.services.rate_limiter import rate_limiter
 
 logger = logging.getLogger(__name__)
@@ -87,10 +88,21 @@ class SaleDetectionService:
         db.add(sale)
         return sale
 
-    async def _fanout_quantity_adjustment(self, db: Session, listing: Listing, sold_platform: str, quantity_sold: int, dry_run: bool) -> dict:
+    def _sold_sync_preferences(self, user: User) -> dict:
+        raw = (user.settings_json or {}).get("sold_sync_preferences")
+        stored = raw if isinstance(raw, dict) else {}
+        return {
+            "sold_out_delist_everywhere": bool(stored.get("sold_out_delist_everywhere", True)),
+            "out_of_stock_delist_everywhere": bool(stored.get("out_of_stock_delist_everywhere", False)),
+            "remove_media_on_sold_out": bool(stored.get("remove_media_on_sold_out", False)),
+        }
+
+    async def _fanout_quantity_adjustment(self, db: Session, listing: Listing, user: User, sold_platform: str, quantity_sold: int, dry_run: bool) -> dict:
         new_quantity = max(0, int(listing.quantity or 0) - quantity_sold)
         platform_quantities = dict(listing.platform_quantities or {})
         outcomes: dict[str, dict] = {}
+        prefs = self._sold_sync_preferences(user)
+        sold_out = new_quantity <= 0
 
         for row in listing.marketplace_listings:
             market = row.marketplace.value
@@ -99,7 +111,7 @@ class SaleDetectionService:
 
             connector = get_connector(market)
             rate_limiter.acquire(market)
-            if new_quantity <= 0:
+            if sold_out and prefs["sold_out_delist_everywhere"]:
                 action = "delist"
                 row.status = MarketplaceListingStatus.DELETED
                 if dry_run:
@@ -130,6 +142,9 @@ class SaleDetectionService:
 
         listing.quantity = new_quantity
         listing.platform_quantities = platform_quantities
+        if sold_out and not dry_run and prefs["remove_media_on_sold_out"]:
+            cleanup = purge_listing_media(db, listing, clear_references=True)
+            outcomes["media_cleanup"] = cleanup
         db.add(listing)
         return outcomes
 
@@ -189,6 +204,7 @@ class SaleDetectionService:
                     self._fanout_quantity_adjustment(
                         db,
                         listing,
+                        user,
                         sold_platform=platform,
                         quantity_sold=max(1, int(event.get("quantity") or 1)),
                         dry_run=dry_run,

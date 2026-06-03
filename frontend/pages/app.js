@@ -18,6 +18,7 @@ import {
 import { useRouter } from 'next/router';
 
 import AppShell from '../components/layout/AppShell';
+import ActionBar from '../components/ui/action-bar';
 import Button from '../components/ui/button';
 import DataTableCard from '../components/ui/data-table-card';
 import EmptyState from '../components/ui/empty-state';
@@ -26,6 +27,8 @@ import PageHeader from '../components/ui/page-header';
 import QuickActionCard from '../components/ui/quick-action-card';
 import SectionPanel from '../components/ui/section-panel';
 import StatusPill from '../components/ui/status-pill';
+import HealthIndicator from '../components/ui/health-indicator';
+import LoadingSkeleton from '../components/ui/loading-skeleton';
 import SetupChecklistPanel from '../components/SetupChecklistPanel';
 import { useAuth } from '../contexts/AuthContext';
 import useDashboardData from '../hooks/useDashboardData';
@@ -36,6 +39,7 @@ import {
   toggleAutonomousMode,
   uploadVineReport,
 } from '../lib/api';
+import { formatPublishFailureMessage } from '../lib/publish-status';
 
 function formatTime(value) {
   if (!value) return 'Pending';
@@ -67,6 +71,7 @@ export default function Dashboard() {
   const [salesDashboard, setSalesDashboard] = useState({ summary: {} });
   const [activeSection, setActiveSection] = useState('overview');
   const [vineUploading, setVineUploading] = useState(false);
+  const [loadingPanels, setLoadingPanels] = useState(false);
 
   const draftCount = useMemo(
     () => listings.filter((listing) => listing.status !== 'ready' && listing.ebay_publish_status !== 'POSTED' && !listing.ebay_listing_id).length,
@@ -99,6 +104,7 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (!user?.id) return;
+    setLoadingPanels(true);
     Promise.allSettled([
       fetchAccountSetupSummary(user.id),
       fetchMarketplaceJobsOverview(),
@@ -107,6 +113,7 @@ export default function Dashboard() {
       setSetupSummary(setupResult.status === 'fulfilled' ? setupResult.value : null);
       setJobsOverview(jobsResult.status === 'fulfilled' ? jobsResult.value || { import_jobs: [], crosspost_jobs: [] } : { import_jobs: [], crosspost_jobs: [] });
       setSalesDashboard(salesResult.status === 'fulfilled' ? salesResult.value || { summary: {} } : { summary: {} });
+      setLoadingPanels(false);
     });
   }, [user?.id]);
 
@@ -169,6 +176,7 @@ export default function Dashboard() {
   const dashboardSections = useMemo(
     () => [
       { key: 'overview', label: 'Overview', description: 'Primary metrics and dashboard summary' },
+      { key: 'listings', label: 'Listings', description: 'Open the full listings workspace and queues.', href: '/listings' },
       { key: 'activity', label: 'Activity', description: 'Recent listing movement and alerts' },
       { key: 'jobs', label: 'Jobs', description: 'Import and cross-post queue status' },
       { key: 'operations', label: 'Operations', description: 'Workflow posture and quick actions' },
@@ -190,6 +198,11 @@ export default function Dashboard() {
   }, [dashboardSections, router.isReady, router.query.section]);
 
   const selectSection = (key) => {
+    const section = dashboardSections.find((item) => item.key === key);
+    if (section?.href) {
+      router.push(section.href);
+      return;
+    }
     setActiveSection(key);
     router.replace(
       {
@@ -201,10 +214,17 @@ export default function Dashboard() {
     );
   };
 
-  const activeSectionMeta = dashboardSections.find((section) => section.key === activeSection) || dashboardSections[0];
+  const activeSectionMeta =
+    dashboardSections.find((section) => section.key === activeSection && !section.href) ||
+    dashboardSections.find((section) => !section.href) ||
+    dashboardSections[0];
 
   const renderOverview = () => (
     <div className="space-y-5">
+      <ActionBar
+        left={<HealthIndicator healthy={!blockers.length} label={blockers.length ? `${blockers.length} setup blockers` : 'Setup healthy'} />}
+        right={<span>{jobsSummary.queued} jobs running/queued</span>}
+      />
       <SectionPanel
         title="Workspace overview"
         description="Primary throughput, backlog, and publishing posture in one compact operator module."
@@ -230,6 +250,7 @@ export default function Dashboard() {
           </div>
         </div>
       </SectionPanel>
+      {loadingPanels ? <LoadingSkeleton lines={5} /> : null}
     </div>
   );
 
@@ -280,7 +301,11 @@ export default function Dashboard() {
                   <AlertTriangle size={16} className="mt-0.5 shrink-0 text-[#b42318]" />
                   <div className="min-w-0">
                     <p className="truncate text-sm font-medium text-[#101828]">{listing.title || `Listing #${listing.id}`}</p>
-                    <p className="mt-1 text-sm text-[#667085]">Review publish or sync status before requeueing marketplace work.</p>
+                    <p className="mt-1 text-sm text-[#667085]">
+                      {listing.ebay_publish_status === 'FAILED'
+                        ? formatPublishFailureMessage(listing.marketplace_data?.error, 'ebay')
+                        : 'Review publish or sync status before requeueing marketplace work.'}
+                    </p>
                   </div>
                 </div>
               </Link>
@@ -491,6 +516,7 @@ export default function Dashboard() {
     setup: renderSetup(),
     system: renderSystem(),
   };
+  const renderedSectionContent = sectionContent[activeSection] || sectionContent.overview;
 
   return (
     <AppShell
@@ -594,7 +620,7 @@ export default function Dashboard() {
               <h2 className="pp-dashboard-stage__title mt-2">{activeSectionMeta.label}</h2>
               <p className="pp-dashboard-stage-copy mt-2 text-sm leading-6">{activeSectionMeta.description}</p>
             </div>
-            <div className="pt-5">{sectionContent[activeSection]}</div>
+            <div className="pt-5">{renderedSectionContent}</div>
           </div>
         </div>
       </div>

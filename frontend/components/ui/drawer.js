@@ -7,8 +7,8 @@ export default function Drawer({ open, title, description, widthClassName = 'xl:
 
   return (
     <>
-      <div className="fixed inset-0 z-40 bg-[#101828]/20 xl:hidden" onClick={onClose} />
-      <aside className={`fixed inset-y-0 right-0 z-50 w-full max-w-[480px] border-l border-[#e5e7eb] bg-white xl:static xl:inset-auto xl:z-auto xl:max-w-none xl:rounded-[12px] xl:border ${widthClassName}`}>
+      <div className="fixed inset-0 z-40 bg-[#101828]/20" onClick={onClose} />
+      <aside className={`fixed inset-y-0 right-0 z-50 w-full max-w-[480px] border-l border-[#e5e7eb] bg-white shadow-[0_20px_60px_rgba(16,24,40,0.18)] ${widthClassName}`}>
         <div className="flex h-full flex-col">
           <div className="flex items-start justify-between gap-4 border-b border-[#e5e7eb] px-5 py-4">
             <div>

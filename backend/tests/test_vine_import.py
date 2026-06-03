@@ -454,6 +454,69 @@ def test_created_vine_records_keep_source_metadata_and_needs_photos(db_session):
     assert "Model" in (enriched.item_specifics or {})
 
 
+def test_create_listing_drafts_includes_locked_and_restricted_rows_for_review(db_session):
+    user = User(email=f"vine-review-{uuid4()}@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    service = VineImportService()
+    batch = service.create_batch_from_upload(
+        db_session,
+        current_user=user,
+        filename="vine.xlsx",
+        file_bytes=build_sample_xlsx(),
+        reference_date=date(2026, 5, 5),
+    )
+    items = db_session.query(VineImportItem).filter(VineImportItem.batch_id == batch.id).all()
+    target_items = [item for item in items if item.eligibility_status != "cancelled"]
+    assert target_items
+
+    result = service.create_listing_drafts(
+        db_session,
+        batch=batch,
+        item_ids=[item.id for item in target_items],
+    )
+    assert (result["created"] + result["updated"]) >= len(target_items)
+
+    locked_item = next(item for item in target_items if item.eligibility_status.startswith("locked_until_"))
+    restricted_item = next(item for item in target_items if item.restricted_review_required)
+    refreshed_locked = db_session.get(VineImportItem, locked_item.id)
+    refreshed_restricted = db_session.get(VineImportItem, restricted_item.id)
+    assert refreshed_locked is not None and refreshed_locked.listing_id is not None
+    assert refreshed_restricted is not None and refreshed_restricted.listing_id is not None
+
+
+def test_create_listing_drafts_can_include_cancelled_rows_when_requested(db_session):
+    user = User(email=f"vine-cancelled-{uuid4()}@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    service = VineImportService()
+    batch = service.create_batch_from_upload(
+        db_session,
+        current_user=user,
+        filename="vine.xlsx",
+        file_bytes=build_sample_xlsx(),
+        reference_date=date(2026, 5, 5),
+    )
+    items = db_session.query(VineImportItem).filter(VineImportItem.batch_id == batch.id).all()
+    cancelled = next(item for item in items if item.eligibility_status == "cancelled")
+
+    result = service.create_listing_drafts(
+        db_session,
+        batch=batch,
+        item_ids=[cancelled.id],
+        include_cancelled=True,
+        fetch_media_first=False,
+    )
+
+    assert result["skipped"] == 0
+    refreshed = db_session.get(VineImportItem, cancelled.id)
+    assert refreshed is not None and refreshed.listing_id is not None
+
+
 def test_fetch_media_with_lookup_disabled_sets_manual_only_and_drafts_mark_needs_photos(db_session):
     settings.amazon_media_lookup_enabled = False
     settings.amazon_media_page_fallback_enabled = False

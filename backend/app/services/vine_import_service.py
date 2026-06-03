@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import csv
+import html
 import io
+import json
+import re
+import urllib.parse
+import urllib.request
 from datetime import date
 from pathlib import Path
 
@@ -10,11 +15,12 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.enums import ListingStatus, MarketplaceName
-from app.models.models import Listing, ProductMediaCache, VineImportBatch, VineImportItem, User
+from app.models.models import Image, Listing, ProductMediaCache, VineImportBatch, VineImportItem, User
 from app.services.amazon_media import AmazonProductMediaProvider
 from app.services.amazon_product_discovery import AmazonProductDiscoveryService
 from app.services.listing_workspace import normalize_marketplace_data
 from app.services.marketplace_field_mapper import build_marketplace_payload
+from app.services.storage import LocalStorage
 from app.services.vine_parser import ParsedVineRow, parse_vine_csv, parse_vine_pdf, parse_vine_xlsx
 from app.services.vine_policy import review_vine_product
 
@@ -38,15 +44,28 @@ class VineImportService:
         reference_date: date | None = None,
     ) -> VineImportBatch:
         """Parse a Vine report upload and persist normalized row records."""
+        enforce_six_month_lock = self._enforce_six_month_lock_for_user(current_user)
         extension = Path(filename).suffix.lower()
         if extension not in {".xlsx", ".pdf", ".csv"}:
             raise ValueError("Only .xlsx, .csv, and .pdf Vine reports are supported")
         if extension == ".xlsx":
-            parsed_rows = parse_vine_xlsx(file_bytes, reference_date=reference_date)
+            parsed_rows = parse_vine_xlsx(
+                file_bytes,
+                reference_date=reference_date,
+                enforce_six_month_lock=enforce_six_month_lock,
+            )
         elif extension == ".csv":
-            parsed_rows = parse_vine_csv(file_bytes, reference_date=reference_date)
+            parsed_rows = parse_vine_csv(
+                file_bytes,
+                reference_date=reference_date,
+                enforce_six_month_lock=enforce_six_month_lock,
+            )
         else:
-            parsed_rows = parse_vine_pdf(file_bytes, reference_date=reference_date)
+            parsed_rows = parse_vine_pdf(
+                file_bytes,
+                reference_date=reference_date,
+                enforce_six_month_lock=enforce_six_month_lock,
+            )
         batch = VineImportBatch(
             user_id=current_user.id,
             filename=filename,
@@ -61,6 +80,15 @@ class VineImportService:
 
         for parsed in parsed_rows:
             policy = review_vine_product(parsed.product_name)
+            warnings = list(parsed.parse_warnings or [])
+            if (
+                not enforce_six_month_lock
+                and parsed.eligible_after
+                and parsed.eligibility_status == "eligible"
+            ):
+                warnings.append(
+                    f"6-month eligibility date: {parsed.eligible_after.isoformat()} (lock enforcement disabled)"
+                )
             item = VineImportItem(
                 batch_id=batch.id,
                 user_id=current_user.id,
@@ -75,7 +103,7 @@ class VineImportService:
                 eligible_after=parsed.eligible_after,
                 eligibility_status=parsed.eligibility_status,
                 raw_row_json=parsed.raw_row_json,
-                parse_warnings_json=parsed.parse_warnings,
+                parse_warnings_json=warnings,
                 media_status="pending",
                 restricted_review_required=policy.restricted_review_required,
                 restricted_reasons=policy.restricted_reasons,
@@ -97,6 +125,12 @@ class VineImportService:
         db.refresh(batch)
         return batch
 
+    def _enforce_six_month_lock_for_user(self, user: User) -> bool:
+        settings_json = user.settings_json or {}
+        raw = settings_json.get("vine_preferences")
+        vine_preferences = raw if isinstance(raw, dict) else {}
+        return bool(vine_preferences.get("enforce_six_month_lock", True))
+
     def fetch_media(self, db: Session, *, batch: VineImportBatch, item_ids: list[int]) -> dict:
         """Resolve Amazon matches and attach cached/fetched media asset ids per row."""
         provider = AmazonProductMediaProvider(db, owner_user_id=batch.user_id)
@@ -106,7 +140,7 @@ class VineImportService:
         blocked = 0
         manual_review = 0
         for item in items:
-            result = discovery.discover_for_item(asin=item.asin, product_name=item.product_name, manual_url=item.manual_amazon_url)
+            result = discovery.discover_for_vine_item(asin=item.asin, product_name=item.product_name, manual_url=item.manual_amazon_url)
             item.amazon_match_status = result.get("status")
             item.amazon_match_confidence = result.get("confidence")
             item.amazon_match_asin = result.get("asin") or item.asin
@@ -125,7 +159,15 @@ class VineImportService:
         db.commit()
         return {"fetched": fetched, "blocked": blocked, "manual_review_needed": manual_review}
 
-    def create_inventory_records(self, db: Session, *, batch: VineImportBatch, item_ids: list[int], include_locked: bool) -> dict:
+    def create_inventory_records(
+        self,
+        db: Session,
+        *,
+        batch: VineImportBatch,
+        item_ids: list[int],
+        include_locked: bool,
+        include_cancelled: bool = False,
+    ) -> dict:
         """Create draft listings from Vine rows, reusing existing Vine drafts when possible."""
         items = db.execute(select(VineImportItem).where(VineImportItem.batch_id == batch.id, VineImportItem.id.in_(item_ids))).scalars().all()
         created = 0
@@ -135,7 +177,7 @@ class VineImportService:
             if item.inventory_item_id:
                 skipped += 1
                 continue
-            if item.eligibility_status in {"cancelled", "invalid"}:
+            if item.eligibility_status == "cancelled" and not include_cancelled:
                 skipped += 1
                 continue
             if item.eligibility_status.startswith("locked_until_") and not include_locked:
@@ -183,6 +225,7 @@ class VineImportService:
         *,
         batch: VineImportBatch,
         item_ids: list[int],
+        include_cancelled: bool = False,
         fetch_media_first: bool = False,
         require_media_for_asin: bool = False,
         allow_drafts_without_media: bool = False,
@@ -194,12 +237,19 @@ class VineImportService:
         created_listing_ids: list[int] = []
 
         provider = AmazonProductMediaProvider(db, owner_user_id=batch.user_id) if fetch_media_first else None
+        discovery = AmazonProductDiscoveryService(provider) if provider is not None else None
         for item in items:
-            if item.eligibility_status != "eligible" or item.restricted_review_required or item.source_confidence == "low":
+            if item.eligibility_status == "cancelled" and not include_cancelled:
                 skipped += 1
                 continue
             if item.inventory_item_id is None:
-                result = self.create_inventory_records(db, batch=batch, item_ids=[item.id], include_locked=False)
+                result = self.create_inventory_records(
+                    db,
+                    batch=batch,
+                    item_ids=[item.id],
+                    include_locked=True,
+                    include_cancelled=include_cancelled,
+                )
                 if result["created"] == 0 and result.get("reused", 0) == 0:
                     skipped += 1
                     continue
@@ -214,12 +264,23 @@ class VineImportService:
                     item.media_status = "missing_asin"
                     item.parse_warnings_json = [*(item.parse_warnings_json or []), "Cannot fetch images without ASIN"]
                 else:
-                    result = provider.lookup_by_asin(item.asin)
+                    result = discovery.discover_for_vine_item(
+                        asin=item.asin,
+                        product_name=item.product_name,
+                        manual_url=item.manual_amazon_url,
+                    )
                     item.media_status = result.get("status") or item.media_status or "blocked"
                     item.media_asset_ids_json = result.get("local_asset_ids") or item.media_asset_ids_json or []
+                    item.amazon_match_status = result.get("status") or item.amazon_match_status
+                    item.amazon_match_confidence = result.get("confidence") or item.amazon_match_confidence
+                    item.amazon_match_asin = result.get("asin") or item.amazon_match_asin or item.asin
+                    item.amazon_match_title = result.get("title") or item.amazon_match_title or item.product_name
+                    item.amazon_source_page_url = result.get("source_page_url") or item.amazon_source_page_url
                 db.add(item)
 
             cached_urls = self._lookup_cached_media_urls(db, item.asin)
+            if not cached_urls:
+                cached_urls = self._try_web_image_fallback(db, item=item)
             if require_media_for_asin and not allow_drafts_without_media and item.asin:
                 if settings.amazon_media_lookup_enabled and settings.amazon_media_page_fallback_enabled and not cached_urls:
                     item.parse_warnings_json = [*(item.parse_warnings_json or []), "Draft creation blocked until photos are fetched for this ASIN"]
@@ -366,6 +427,84 @@ class VineImportService:
             return [cache.primary_image_url]
 
         return []
+
+    def _try_web_image_fallback(self, db: Session, *, item: VineImportItem, limit: int = 3) -> list[str]:
+        queries = [
+            " ".join(part for part in [item.asin or "", item.product_name or ""] if part).strip(),
+            f"{(item.product_name or '').strip()} product".strip(),
+            f"{(item.asin or '').strip()} amazon".strip(),
+        ]
+        candidates: list[str] = []
+        for query in queries:
+            if not query:
+                continue
+            candidates.extend(self._search_bing_image_urls(query=query, limit=12))
+            if len(candidates) >= 8:
+                break
+        deduped: list[str] = []
+        for candidate in candidates:
+            if candidate not in deduped:
+                deduped.append(candidate)
+
+        storage = LocalStorage()
+        local_urls: list[str] = []
+        for source_url in deduped[:12]:
+            try:
+                local_path = storage.save_from_url(source_url, prefix="vine-search-auto")
+                image = Image(user_id=item.user_id, source_url=source_url, local_path=local_path)
+                db.add(image)
+                db.flush()
+                local_urls.append(self._to_public_media_path(local_path))
+                if len(local_urls) >= limit:
+                    break
+            except Exception:
+                continue
+        if local_urls:
+            item.media_status = "fetched"
+            db.add(item)
+        return local_urls
+
+    def _search_bing_image_urls(self, *, query: str, limit: int = 10) -> list[str]:
+        url = f"https://www.bing.com/images/search?q={urllib.parse.quote_plus(query)}"
+        request = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/125.0.0.0 Safari/537.36"
+                )
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                body = response.read().decode("utf-8", errors="ignore")
+        except Exception:
+            return []
+
+        urls: list[str] = []
+        for match in re.finditer(r'class="iusc"[^>]+\sm="([^"]+)"', body):
+            raw = html.unescape(match.group(1))
+            try:
+                payload = json.loads(raw)
+            except Exception:
+                continue
+            for key in ("murl", "turl"):
+                candidate = str(payload.get(key) or "").strip()
+                if not candidate.startswith("http"):
+                    continue
+                if candidate in urls:
+                    continue
+                urls.append(candidate)
+                if len(urls) >= limit:
+                    return urls
+        return urls
+
+    def _to_public_media_path(self, path: str) -> str:
+        marker = "/storage/"
+        if marker in path:
+            return f"/media/{path.split(marker, 1)[1]}"
+        return path
 
     def _source_metadata(self, item: VineImportItem, batch_id: int) -> dict:
         return {

@@ -151,7 +151,12 @@ def _add_months(base_date: date, months: int) -> date:
     return date(year, month, min(base_date.day, month_lengths[month - 1]))
 
 
-def calculate_vine_eligibility(item: dict, reference_date: date | None = None) -> tuple[date | None, str]:
+def calculate_vine_eligibility(
+    item: dict,
+    reference_date: date | None = None,
+    *,
+    enforce_six_month_lock: bool = True,
+) -> tuple[date | None, str]:
     reference = reference_date or date.today()
     base_date = item.get("shipped_date") or item.get("order_date")
     if item.get("order_type") == "CANCELLATION" or item.get("cancelled_date"):
@@ -159,12 +164,20 @@ def calculate_vine_eligibility(item: dict, reference_date: date | None = None) -
     if not item.get("order_number") or not item.get("asin") or not item.get("product_name") or not base_date:
         return None, "invalid"
     eligible_after = _add_months(base_date, 6)
+    if not enforce_six_month_lock:
+        return eligible_after, "eligible"
     if reference >= eligible_after:
         return eligible_after, "eligible"
     return eligible_after, f"locked_until_{eligible_after.isoformat()}"
 
 
-def normalize_vine_row(row: dict, *, reference_date: date | None = None, source_confidence: str = "high") -> ParsedVineRow:
+def normalize_vine_row(
+    row: dict,
+    *,
+    reference_date: date | None = None,
+    source_confidence: str = "high",
+    enforce_six_month_lock: bool = True,
+) -> ParsedVineRow:
     warnings: list[str] = []
     order_number = normalize_order_number(row.get("Order Number"))
     asin = normalize_whitespace(row.get("ASIN")).upper() or None
@@ -189,7 +202,11 @@ def normalize_vine_row(row: dict, *, reference_date: date | None = None, source_
         "review_deadline": parse_date_value(row.get("Review Deadline")),
         "item_url": normalize_whitespace(row.get("Item URL")) or None,
     }
-    eligible_after, eligibility_status = calculate_vine_eligibility(parsed, reference_date=reference_date)
+    eligible_after, eligibility_status = calculate_vine_eligibility(
+        parsed,
+        reference_date=reference_date,
+        enforce_six_month_lock=enforce_six_month_lock,
+    )
     if not order_number:
         warnings.append("Missing order number")
     if not asin:
@@ -316,7 +333,12 @@ def _detect_header_row(rows: list[dict[int, object]]) -> tuple[int, dict[int, st
     raise ValueError("Could not locate Vine report header row")
 
 
-def parse_vine_xlsx(file_bytes: bytes, *, reference_date: date | None = None) -> list[ParsedVineRow]:
+def parse_vine_xlsx(
+    file_bytes: bytes,
+    *,
+    reference_date: date | None = None,
+    enforce_six_month_lock: bool = True,
+) -> list[ParsedVineRow]:
     rows: list[ParsedVineRow] = []
     with zipfile.ZipFile(io.BytesIO(file_bytes)) as workbook:
         shared_strings = _load_shared_strings(workbook)
@@ -329,7 +351,11 @@ def parse_vine_xlsx(file_bytes: bytes, *, reference_date: date | None = None) ->
                 normalized = {header_map[index]: value for index, value in row.items() if index in header_map}
                 if not any(normalize_whitespace(str(value)) for value in normalized.values()):
                     continue
-                parsed = normalize_vine_row(normalized, reference_date=reference_date)
+                parsed = normalize_vine_row(
+                    normalized,
+                    reference_date=reference_date,
+                    enforce_six_month_lock=enforce_six_month_lock,
+                )
                 if should_skip_vine_row(parsed):
                     continue
                 rows.append(parsed)
@@ -348,7 +374,12 @@ def _normalize_csv_headers(headers: list[str]) -> dict[str, str]:
     return normalized
 
 
-def parse_vine_csv(file_bytes: bytes, *, reference_date: date | None = None) -> list[ParsedVineRow]:
+def parse_vine_csv(
+    file_bytes: bytes,
+    *,
+    reference_date: date | None = None,
+    enforce_six_month_lock: bool = True,
+) -> list[ParsedVineRow]:
     text = file_bytes.decode("utf-8-sig", errors="replace")
     reader = list(csv.DictReader(io.StringIO(text)))
     if not reader:
@@ -363,7 +394,12 @@ def parse_vine_csv(file_bytes: bytes, *, reference_date: date | None = None) -> 
             normalized[canonical_header] = row.get(raw_header)
         if not any(normalize_whitespace(str(value)) for value in normalized.values() if value is not None):
             continue
-        parsed = normalize_vine_row(normalized, reference_date=reference_date, source_confidence="high")
+        parsed = normalize_vine_row(
+            normalized,
+            reference_date=reference_date,
+            source_confidence="high",
+            enforce_six_month_lock=enforce_six_month_lock,
+        )
         if should_skip_vine_row(parsed):
             continue
         rows.append(parsed)
@@ -383,7 +419,12 @@ def _extract_pdf_text(file_bytes: bytes) -> str:
         temp_path.unlink(missing_ok=True)
 
 
-def _parse_pdf_record(lines: list[str], *, reference_date: date | None = None) -> ParsedVineRow:
+def _parse_pdf_record(
+    lines: list[str],
+    *,
+    reference_date: date | None = None,
+    enforce_six_month_lock: bool = True,
+) -> ParsedVineRow:
     text = " ".join(lines)
     order_number_match = ORDER_NUMBER_RE.search(text)
     asin_match = re.search(r"\b[A-Z0-9]{10}\b", text.upper())
@@ -404,7 +445,12 @@ def _parse_pdf_record(lines: list[str], *, reference_date: date | None = None) -
         if token:
             product_text = product_text.replace(str(token), " ")
     row["Product Name"] = normalize_whitespace(product_text)
-    parsed = normalize_vine_row(row, reference_date=reference_date, source_confidence="medium")
+    parsed = normalize_vine_row(
+        row,
+        reference_date=reference_date,
+        source_confidence="medium",
+        enforce_six_month_lock=enforce_six_month_lock,
+    )
     parsed.parse_warnings.extend(["PDF fallback parse", "Require preflight review before draft creation"])
     if not row["Order Number"] or not row["ASIN"] or len(dates) < 2:
         parsed.source_confidence = "low"
@@ -412,7 +458,12 @@ def _parse_pdf_record(lines: list[str], *, reference_date: date | None = None) -
     return parsed
 
 
-def parse_vine_pdf(file_bytes: bytes, *, reference_date: date | None = None) -> list[ParsedVineRow]:
+def parse_vine_pdf(
+    file_bytes: bytes,
+    *,
+    reference_date: date | None = None,
+    enforce_six_month_lock: bool = True,
+) -> list[ParsedVineRow]:
     text = _extract_pdf_text(file_bytes)
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     rows: list[ParsedVineRow] = []
@@ -426,12 +477,24 @@ def parse_vine_pdf(file_bytes: bytes, *, reference_date: date | None = None) -> 
         if not in_table:
             continue
         if ORDER_NUMBER_RE.search(line) and current:
-            rows.append(_parse_pdf_record(current, reference_date=reference_date))
+            rows.append(
+                _parse_pdf_record(
+                    current,
+                    reference_date=reference_date,
+                    enforce_six_month_lock=enforce_six_month_lock,
+                )
+            )
             current = [line]
         else:
             current.append(line)
     if current:
-        rows.append(_parse_pdf_record(current, reference_date=reference_date))
+        rows.append(
+            _parse_pdf_record(
+                current,
+                reference_date=reference_date,
+                enforce_six_month_lock=enforce_six_month_lock,
+            )
+        )
     if not rows:
         raise ValueError("No Vine rows found in PDF report")
     return detect_cancelled_items(dedupe_vine_items(rows))

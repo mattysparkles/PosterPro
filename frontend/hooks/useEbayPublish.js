@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 
-import { fetchEbayStatus, publishListing } from '../lib/api';
+import { fetchEbayStatus, publishListingEbay } from '../lib/api';
+import { formatPublishFailureMessage } from '../lib/publish-status';
 
 export function useEbayPublish() {
   const [publishing, setPublishing] = useState({});
@@ -27,7 +28,7 @@ export function useEbayPublish() {
             } else {
               setErrors((prev) => ({
                 ...prev,
-                [listingId]: statusData.marketplace_data?.error || 'Publishing failed',
+                [listingId]: formatPublishFailureMessage(statusData.marketplace_data?.error, 'ebay'),
               }));
             }
           }
@@ -45,7 +46,7 @@ export function useEbayPublish() {
     setErrors((prev) => ({ ...prev, [listingId]: '' }));
     setSuccess((prev) => ({ ...prev, [listingId]: '' }));
     try {
-      const result = await publishListing(listingId);
+      const result = await publishListingEbay(listingId);
       if (result.status === 'POSTED') {
         setPublishing((prev) => ({ ...prev, [listingId]: false }));
         setSuccess((prev) => ({ ...prev, [listingId]: result.ebay_url || '' }));
@@ -54,7 +55,7 @@ export function useEbayPublish() {
       }
     } catch (err) {
       setPublishing((prev) => ({ ...prev, [listingId]: false }));
-      setErrors((prev) => ({ ...prev, [listingId]: err.message }));
+      setErrors((prev) => ({ ...prev, [listingId]: formatPublishFailureMessage(err.message, 'ebay') }));
     }
   };
 

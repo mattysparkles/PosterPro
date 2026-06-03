@@ -5,10 +5,14 @@ import toast from "react-hot-toast";
 import { RefreshCcw } from "lucide-react";
 
 import AppShell from "../components/layout/AppShell";
+import ActionBar from "../components/ui/action-bar";
 import Button from "../components/ui/button";
 import DataTable from "../components/ui/data-table";
 import Drawer from "../components/ui/drawer";
 import EmptyState from "../components/ui/empty-state";
+import ErrorState from "../components/ui/error-state";
+import HealthIndicator from "../components/ui/health-indicator";
+import LoadingSkeleton from "../components/ui/loading-skeleton";
 import MetricCard from "../components/ui/metric-card";
 import PageHeader from "../components/ui/page-header";
 import SectionPanel from "../components/ui/section-panel";
@@ -174,13 +178,16 @@ export default function JobsPage() {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [bridgeSmoke, setBridgeSmoke] = useState(null);
   const [testingBridge, setTestingBridge] = useState(false);
+  const [loadError, setLoadError] = useState("");
 
   const load = async () => {
     setLoading(true);
+    setLoadError("");
     try {
       const data = await fetchMarketplaceJobsOverview();
       setJobsOverview(data || { import_jobs: [], crosspost_jobs: [] });
     } catch (error) {
+      setLoadError(error.message || "Failed to load jobs overview.");
       toast.error(error.message);
     } finally {
       setLoading(false);
@@ -441,6 +448,10 @@ export default function JobsPage() {
         <MetricCard label="Queued / running" value={summary.queued} detail="Jobs still moving through workers or awaiting execution." />
         <MetricCard label="Failed" value={summary.failed} detail="Jobs that should be reviewed and potentially retried." />
       </section>
+      <ActionBar
+        left={<HealthIndicator healthy={!bridgeSmoke || bridgeSmoke.ok} label={bridgeSmoke?.ok ? "Bridge healthy" : bridgeSmoke ? "Bridge needs attention" : "Bridge not tested"} />}
+        right={<span>{autoRefresh ? "Auto-refresh on" : "Auto-refresh off"}</span>}
+      />
 
       <SectionPanel title="Execution model" description="The same console tracks live eBay API work and structured secondary-marketplace handoff jobs.">
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
@@ -488,6 +499,8 @@ export default function JobsPage() {
           void updateRouteState({ tab: value, type: activeJob?.type, jobId: activeJob?.job?.id });
         }}
       />
+      {loadError ? <ErrorState title="Jobs feed unavailable" description={loadError} action={<Button variant="outline" onClick={load}>Retry</Button>} /> : null}
+      {loading ? <LoadingSkeleton lines={6} className="mb-4" /> : null}
 
       {activeTab === "crosspost" ? (
         <DataTable

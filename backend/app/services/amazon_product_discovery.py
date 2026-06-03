@@ -11,13 +11,20 @@ class AmazonProductDiscoveryService:
     def __init__(self, provider: AmazonProductMediaProvider):
         self.provider = provider
 
-    def discover_for_item(self, *, asin: str | None, product_name: str | None, manual_url: str | None = None) -> dict:
+    def discover_for_item(
+        self,
+        *,
+        asin: str | None,
+        product_name: str | None,
+        manual_url: str | None = None,
+        allow_title_search: bool = True,
+    ) -> dict:
         if manual_url:
             return self._discover_from_url(manual_url, confidence="manual")
 
         normalized_asin = self._normalize_asin(asin)
         if normalized_asin:
-            media = self.provider.lookup_by_asin(normalized_asin)
+            media = self.provider.lookup_by_asin(normalized_asin, title_hint=product_name)
             return {
                 "status": "matched" if (media.get("gallery_image_urls") or media.get("primary_image_url")) else "manual_review_needed",
                 "confidence": "high",
@@ -29,7 +36,7 @@ class AmazonProductDiscoveryService:
                 "image_status": media.get("status") or "pending",
             }
 
-        if product_name:
+        if product_name and allow_title_search:
             return self._discover_from_title(product_name)
 
         return {
@@ -42,6 +49,14 @@ class AmazonProductDiscoveryService:
             "local_asset_ids": [],
             "image_status": "missing_identifiers",
         }
+
+    def discover_for_vine_item(self, *, asin: str | None, product_name: str | None, manual_url: str | None = None) -> dict:
+        return self.discover_for_item(
+            asin=asin,
+            product_name=product_name,
+            manual_url=manual_url,
+            allow_title_search=False,
+        )
 
     def _discover_from_title(self, title: str) -> dict:
         suffix = self.provider.get_product_url("B000000000").split("/dp/")[0].split("amazon.", 1)[1]
@@ -57,7 +72,7 @@ class AmazonProductDiscoveryService:
             if not match:
                 return self._manual_needed(search_url, "no_search_match")
             asin = match.group(1)
-            media = self.provider.lookup_by_asin(asin)
+            media = self.provider.lookup_by_asin(asin, title_hint=title)
             return {
                 "status": "matched",
                 "confidence": "medium",

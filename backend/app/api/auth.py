@@ -113,6 +113,14 @@ _DEFAULT_WORKFLOW_PREFERENCES = {
     "bulk_approval_enabled": True,
     "listing_preview_mode": "marketplace",
 }
+_DEFAULT_VINE_PREFERENCES = {
+    "enforce_six_month_lock": True,
+}
+_DEFAULT_SOLD_SYNC_PREFERENCES = {
+    "sold_out_delist_everywhere": True,
+    "out_of_stock_delist_everywhere": False,
+    "remove_media_on_sold_out": False,
+}
 
 
 def _utcnow() -> datetime:
@@ -162,6 +170,46 @@ def _persist_workflow_preferences(user: User, updates: dict) -> None:
     user.settings_json = settings_json
 
 
+def _vine_preferences(user: User | None) -> dict:
+    if not user:
+        return dict(_DEFAULT_VINE_PREFERENCES)
+    settings_json = user.settings_json or {}
+    raw = settings_json.get("vine_preferences")
+    stored = raw if isinstance(raw, dict) else {}
+    return {
+        "enforce_six_month_lock": bool(stored.get("enforce_six_month_lock", _DEFAULT_VINE_PREFERENCES["enforce_six_month_lock"])),
+    }
+
+
+def _persist_vine_preferences(user: User, updates: dict) -> None:
+    settings_json = dict(user.settings_json or {})
+    current = _vine_preferences(user)
+    current.update(updates)
+    settings_json["vine_preferences"] = current
+    user.settings_json = settings_json
+
+
+def _sold_sync_preferences(user: User | None) -> dict:
+    if not user:
+        return dict(_DEFAULT_SOLD_SYNC_PREFERENCES)
+    settings_json = user.settings_json or {}
+    raw = settings_json.get("sold_sync_preferences")
+    stored = raw if isinstance(raw, dict) else {}
+    return {
+        "sold_out_delist_everywhere": bool(stored.get("sold_out_delist_everywhere", _DEFAULT_SOLD_SYNC_PREFERENCES["sold_out_delist_everywhere"])),
+        "out_of_stock_delist_everywhere": bool(stored.get("out_of_stock_delist_everywhere", _DEFAULT_SOLD_SYNC_PREFERENCES["out_of_stock_delist_everywhere"])),
+        "remove_media_on_sold_out": bool(stored.get("remove_media_on_sold_out", _DEFAULT_SOLD_SYNC_PREFERENCES["remove_media_on_sold_out"])),
+    }
+
+
+def _persist_sold_sync_preferences(user: User, updates: dict) -> None:
+    settings_json = dict(user.settings_json or {})
+    current = _sold_sync_preferences(user)
+    current.update(updates)
+    settings_json["sold_sync_preferences"] = current
+    user.settings_json = settings_json
+
+
 def _serialize_user(user: User) -> dict:
     return {
         "id": user.id,
@@ -173,6 +221,8 @@ def _serialize_user(user: User) -> dict:
         "role": get_user_role(user),
         "can_access_vine_import": settings.amazon_vine_import_enabled and user_has_vine_access(user),
         "workflow_preferences": _workflow_preferences(user),
+        "vine_enforce_six_month_lock": bool(_vine_preferences(user).get("enforce_six_month_lock", True)),
+        "sold_sync_preferences": _sold_sync_preferences(user),
     }
 
 
@@ -219,6 +269,7 @@ def _build_settings_panel_response(current_user: User, *, ebay_account: Marketpl
             "can_access_vine_import": settings.amazon_vine_import_enabled and user_has_vine_access(current_user),
         },
         "workflow": _workflow_preferences(current_user),
+        "sold_sync_preferences": _sold_sync_preferences(current_user),
         "ebay": {
             "client_id_configured": bool(settings.ebay_client_id),
             "client_secret_configured": bool(settings.ebay_client_secret),
@@ -346,6 +397,20 @@ def update_me(
         workflow_updates["listing_preview_mode"] = payload.listing_preview_mode.strip() or _DEFAULT_WORKFLOW_PREFERENCES["listing_preview_mode"]
     if workflow_updates:
         _persist_workflow_preferences(current_user, workflow_updates)
+    if payload.vine_enforce_six_month_lock is not None:
+        _persist_vine_preferences(
+            current_user,
+            {"enforce_six_month_lock": bool(payload.vine_enforce_six_month_lock)},
+        )
+    sold_sync_updates = {}
+    if payload.sold_out_delist_everywhere is not None:
+        sold_sync_updates["sold_out_delist_everywhere"] = bool(payload.sold_out_delist_everywhere)
+    if payload.out_of_stock_delist_everywhere is not None:
+        sold_sync_updates["out_of_stock_delist_everywhere"] = bool(payload.out_of_stock_delist_everywhere)
+    if payload.remove_media_on_sold_out is not None:
+        sold_sync_updates["remove_media_on_sold_out"] = bool(payload.remove_media_on_sold_out)
+    if sold_sync_updates:
+        _persist_sold_sync_preferences(current_user, sold_sync_updates)
     db.add(current_user)
     db.commit()
     db.refresh(current_user)

@@ -1,11 +1,12 @@
 import { useMemo, useState } from "react";
-import { Camera, Sparkles, WandSparkles } from "lucide-react";
+import { Camera, Sparkles, Trash2, WandSparkles } from "lucide-react";
 
 import MarketplaceStatusPanel from "./MarketplaceStatusPanel";
 import StatusPill from "./StatusPill";
 import Button from "./ui/button";
 import PhotoEditorModal from "./PhotoEditorModal";
 import Input from "./ui/input";
+import { toPublicImageUrl } from "../lib/api";
 
 const PLATFORM_OPTIONS = [
   "ebay",
@@ -16,6 +17,162 @@ const PLATFORM_OPTIONS = [
   "depop",
   "whatnot",
 ];
+
+function marketplacePreviewTitle(market) {
+  if (market === "facebook") return "Facebook Marketplace";
+  if (market === "ebay") return "eBay";
+  return market;
+}
+
+function MarketplacePreviewFrame({ market, listing, previewEntry, previewImages, statusMap, crosspostPreviewLoading }) {
+  const title = listing.title || "Draft title pending";
+  const price = listing.suggested_price || listing.listing_price || previewEntry?.price || 0;
+  const priceLabel = Number.isFinite(Number(price)) ? Number(price).toFixed(0) : String(price || "0");
+  const imageCount = previewImages.length;
+  const marketplaceName = marketplacePreviewTitle(market);
+  const notes = (previewEntry?.notes || []).slice(0, 4);
+  const imageColumns = previewImages.slice(1, 5);
+  const condition = listing.condition || previewEntry?.condition || "Condition pending";
+  const category = listing.category_suggestion || listing.category_id || previewEntry?.category_hint || "Category pending";
+  const shipping = previewEntry?.shipping_policy || previewEntry?.shipping || {};
+
+  return (
+    <div className="overflow-hidden rounded-[20px] border border-[#d0d5dd] bg-white shadow-[0_18px_50px_rgba(16,24,40,0.08)]">
+      <div className={`border-b px-4 py-3 ${market === "ebay" ? "bg-[#f5f9ff]" : "bg-[#f0f9ff]"}`}>
+        <div className="flex items-center gap-3">
+          <div className={`h-3 w-3 rounded-full ${market === "ebay" ? "bg-[#2563eb]" : "bg-[#1877f2]"}`} />
+          <div className="min-w-0">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[#667085]">{marketplaceName} preview</p>
+            <p className="truncate text-sm font-semibold text-[#101828]">{title}</p>
+          </div>
+          <span className="ml-auto rounded-full border border-[#d0d5dd] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#475467]">
+            {crosspostPreviewLoading ? "Loading…" : statusMap[market] || "Draft"}
+          </span>
+        </div>
+      </div>
+
+      <div className={`px-4 py-4 ${market === "ebay" ? "bg-[#f8fbff]" : "bg-[#f7fbff]"}`}>
+        <div className="rounded-[16px] border border-[#d0d5dd] bg-white shadow-sm">
+          <div className={`flex items-center gap-2 border-b px-3 py-2 text-[11px] uppercase tracking-[0.14em] ${market === "ebay" ? "bg-[#f8fbff] text-[#2563eb]" : "bg-[#eef6ff] text-[#1877f2]"}`}>
+            <span className={`h-2.5 w-2.5 rounded-full ${market === "ebay" ? "bg-[#2563eb]" : "bg-[#1877f2]"}`} />
+            {marketplaceName} listing page
+          </div>
+          <div className="grid gap-0 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]">
+            <div className="border-b lg:border-b-0 lg:border-r">
+              <div className="bg-[#0b1f3a] px-4 py-3 text-white">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-sm font-semibold">{market === "ebay" ? "eBay" : "Marketplace"}</p>
+                  <div className="rounded-full bg-white/10 px-2 py-1 text-[11px] font-medium">
+                    {market === "ebay" ? "Buy It Now" : "Marketplace listing"}
+                  </div>
+                </div>
+                <div className="mt-3 flex items-center gap-2">
+                  <div className="h-2.5 flex-1 rounded-full bg-white/10" />
+                  <div className="h-2.5 w-16 rounded-full bg-white/20" />
+                </div>
+              </div>
+              <div className="p-4">
+                <div className="overflow-hidden rounded-[16px] border border-[#e5e7eb] bg-[#f9fafb]">
+                  {previewImages.length ? (
+                    <img
+                      src={toPublicImageUrl(previewImages[0])}
+                      alt={title}
+                      className="h-72 w-full object-cover"
+                    />
+                  ) : (
+                    <div className="flex h-72 items-center justify-center text-sm text-[#667085]">No listing image yet</div>
+                  )}
+                </div>
+                {imageColumns.length ? (
+                  <div className="mt-3 grid grid-cols-4 gap-2">
+                    {imageColumns.map((imageUrl, index) => (
+                      <div key={`${market}-${imageUrl}-${index}`} className="overflow-hidden rounded-[10px] border border-[#e5e7eb] bg-[#f9fafb]">
+                        <img src={toPublicImageUrl(imageUrl)} alt={`${title} image ${index + 2}`} className="h-16 w-full object-cover" />
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="space-y-4 p-4">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">{market === "ebay" ? "Item details" : "Marketplace summary"}</p>
+                <h3 className="mt-1 text-xl font-semibold text-[#101828]">{title}</h3>
+                <p className="mt-1 text-sm text-[#667085]">Listing #{listing.id} · {imageCount} image{imageCount === 1 ? '' : 's'}</p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <span className="pp-chip">${priceLabel}</span>
+                  <span className="pp-chip">{condition}</span>
+                  <span className="pp-chip">{category}</span>
+                  {listing.quantity ? <span className="pp-chip">Qty {listing.quantity}</span> : null}
+                </div>
+              </div>
+
+              <div className={`rounded-[16px] border px-4 py-3 ${market === "ebay" ? "border-[#dbeafe] bg-[#eff6ff]" : "border-[#dbeafe] bg-[#eff6ff]"}`}>
+                <p className="text-sm font-semibold text-[#101828]">{market === "ebay" ? "About this item" : "Description"}</p>
+                <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-[#475467]">
+                  {listing.description || previewEntry?.description || "Description not generated yet."}
+                </p>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-2">
+                <div className="rounded-[14px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">Status</p>
+                  <p className="mt-2 text-sm font-semibold text-[#101828]">
+                    {crosspostPreviewLoading ? "Loading preview…" : statusMap[market] || "Draft"}
+                  </p>
+                </div>
+                <div className="rounded-[14px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">Shipping / delivery</p>
+                  <p className="mt-2 text-sm text-[#101828]">
+                    {market === "facebook"
+                      ? previewEntry?.delivery_method || "manual"
+                      : shipping?.service || shipping?.domestic_service || "Standard shipping"}
+                  </p>
+                </div>
+              </div>
+
+              <div className="rounded-[14px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">
+                  {market === "ebay" ? "Item specifics" : "Pickup / delivery"}
+                </p>
+                {market === "ebay" ? (
+                  <div className="mt-3 grid gap-2">
+                    {Object.entries(listing.item_specifics || {}).slice(0, 4).length ? (
+                      Object.entries(listing.item_specifics || {}).slice(0, 4).map(([key, value]) => (
+                        <div key={`${market}-${key}`} className="flex items-center justify-between gap-3 rounded-[10px] border border-[#eaecf0] bg-white px-3 py-2">
+                          <span className="text-sm text-[#667085]">{key}</span>
+                          <span className="text-sm font-semibold text-[#101828]">{String(value)}</span>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="text-sm text-[#667085]">Item specifics will appear here once the draft is enriched.</p>
+                    )}
+                  </div>
+                ) : (
+                  <p className="mt-2 text-sm text-[#475467]">
+                    {previewEntry?.meetup_notes || shipping?.facebook_meetup_notes || "Pickup and delivery details will appear here for Facebook Marketplace."}
+                  </p>
+                )}
+              </div>
+
+              {notes.length ? (
+                <div className="rounded-[14px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">Preview notes</p>
+                  <div className="mt-2 space-y-2">
+                    {notes.map((note) => (
+                      <p key={`${market}-${note}`} className="text-sm text-[#475467]">{note}</p>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function ListingEditor({
   listing,
@@ -28,7 +185,9 @@ export default function ListingEditor({
   onSave,
   onGenerate,
   onApprove,
+  onApproveAndNext,
   onPublish,
+  onDelete,
   onPhotoUpdated,
   publishState,
   statuses,
@@ -60,6 +219,15 @@ export default function ListingEditor({
     });
     return map;
   }, [crosspostPreview]);
+  const previewImages = useMemo(() => {
+    const sourceMetadata = listing?.source_metadata || {};
+    return Array.from(new Set([
+      ...(Array.isArray(listing?.image_urls) ? listing.image_urls : []),
+      ...(Array.isArray(sourceMetadata?.image_urls) ? sourceMetadata.image_urls : []),
+      ...(Array.isArray(sourceMetadata?.original_image_urls) ? sourceMetadata.original_image_urls : []),
+    ].filter(Boolean)));
+  }, [listing]);
+  const activePreviewEntry = previewMap[activePreviewMarket] || null;
 
   const togglePlatform = (platform) => {
     setSelectedPlatforms((prev) =>
@@ -297,75 +465,49 @@ export default function ListingEditor({
 
       {workflowPreferences?.listing_preview_mode === 'marketplace' ? (
         <div className="mt-4 rounded-[14px] border border-[#e5e7eb] bg-white p-4">
-          <div className="flex items-center justify-between gap-3">
-            <p className="text-sm font-semibold text-[#101828]">Marketplace preview</p>
-            <span className="text-xs text-[#667085]">Preview each target before approval/publish.</span>
-          </div>
-          <div className="mt-3 flex flex-wrap gap-2">
-            {PLATFORM_OPTIONS.map((market) => {
-              const selected = activePreviewMarket === market;
-              const mode = previewMap[market]?.execution_mode || null;
-              return (
-                <button
-                  key={`preview-${market}`}
-                  type="button"
-                  onClick={() => setActivePreviewMarket(market)}
-                  className={`rounded-full border px-3 py-1 text-xs font-semibold capitalize transition ${
-                    selected ? 'border-[#2563eb] bg-[#eef4ff] text-[#2563eb]' : 'border-[#e5e7eb] bg-white text-[#475467]'
-                  }`}
-                >
-                  {market}
-                  {mode ? ` · ${String(mode).replace('_', ' ')}` : ''}
-                </button>
-              );
-            })}
-          </div>
-          <div className="mt-4 rounded-[16px] border border-[#d0d5dd] bg-[#fcfcfd] p-4">
-            <div className="grid gap-4 md:grid-cols-[132px_minmax(0,1fr)]">
-              <div className="overflow-hidden rounded-[14px] border border-[#e5e7eb] bg-white">
-                {listing.image_urls?.[0] ? <img src={listing.image_urls[0]} alt={listing.title || 'Listing preview'} className="h-32 w-full object-cover" /> : null}
-              </div>
-              <div>
-                <p className="text-lg font-semibold text-[#111827]">{listing.title || 'Draft title pending'}</p>
-                <p className="mt-2 text-2xl font-semibold text-[#111827]">${listing.suggested_price || listing.listing_price || pricingAnalysis?.recommended_price || '0'}</p>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <span className="pp-chip">{listing.condition || 'Condition pending'}</span>
-                  <span className="pp-chip">{listing.category_suggestion || listing.category_id || 'Category pending'}</span>
-                  {listing.quantity ? <span className="pp-chip">Qty {listing.quantity}</span> : null}
-                </div>
-                <div className="mt-4 rounded-[12px] bg-white p-3 shadow-sm">
-                  <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Description preview</p>
-                  <p className="mt-2 whitespace-pre-wrap text-sm text-[#475467]">{listing.description || 'Description not generated yet.'}</p>
-                </div>
-                <div className="mt-3 rounded-[12px] border border-[#e5e7eb] bg-white p-3">
-                  <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">
-                    {activePreviewMarket} execution contract
-                  </p>
-                  {crosspostPreviewLoading ? (
-                    <p className="mt-2 text-sm text-[#667085]">Loading marketplace preview details…</p>
-                  ) : previewMap[activePreviewMarket] ? (
-                    <div className="mt-2 space-y-2">
-                      <p className="text-sm text-[#101828]">
-                        Mode: <span className="font-semibold">{String(previewMap[activePreviewMarket].execution_mode || 'unknown').replace('_', ' ')}</span>
-                      </p>
-                      {(previewMap[activePreviewMarket].notes || []).length ? (
-                        <div className="space-y-1">
-                          {(previewMap[activePreviewMarket].notes || []).map((note) => (
-                            <p key={note} className="text-sm text-[#475467]">{note}</p>
-                          ))}
-                        </div>
-                      ) : (
-                        <p className="text-sm text-[#667085]">No additional marketplace notes.</p>
-                      )}
-                    </div>
-                  ) : (
-                    <p className="mt-2 text-sm text-[#667085]">
-                      No preview payload yet for this marketplace target.
-                    </p>
-                  )}
-                </div>
-              </div>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold text-[#101828]">Marketplace preview</p>
+              <p className="text-xs text-[#667085]">These are styled like the live marketplace pages so you can review before approval/publish.</p>
             </div>
+            <div className="flex flex-wrap gap-2">
+              {PLATFORM_OPTIONS.filter((market) => market === 'ebay' || market === 'facebook').map((market) => {
+                const selected = activePreviewMarket === market;
+                const mode = previewMap[market]?.execution_mode || null;
+                return (
+                  <button
+                    key={`preview-${market}`}
+                    type="button"
+                    onClick={() => setActivePreviewMarket(market)}
+                    className={`rounded-full border px-3 py-1 text-xs font-semibold capitalize transition ${
+                      selected ? 'border-[#2563eb] bg-[#eef4ff] text-[#2563eb]' : 'border-[#e5e7eb] bg-white text-[#475467]'
+                    }`}
+                  >
+                    {market}
+                    {mode ? ` · ${String(mode).replace('_', ' ')}` : ''}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-4 xl:grid-cols-2">
+            <MarketplacePreviewFrame
+              market="ebay"
+              listing={listing}
+              previewEntry={previewMap.ebay || activePreviewEntry}
+              previewImages={previewImages}
+              statusMap={statusMap}
+              crosspostPreviewLoading={crosspostPreviewLoading}
+            />
+            <MarketplacePreviewFrame
+              market="facebook"
+              listing={listing}
+              previewEntry={previewMap.facebook || activePreviewEntry}
+              previewImages={previewImages}
+              statusMap={statusMap}
+              crosspostPreviewLoading={crosspostPreviewLoading}
+            />
           </div>
         </div>
       ) : null}
@@ -385,9 +527,23 @@ export default function ListingEditor({
         >
           <WandSparkles size={16} /> AI Enhance
         </Button>
-        {listing.needs_review || listing.restricted_review_required ? (
-          <Button variant="outline" onClick={() => onApprove(listing.id)} title="Move this draft from review into the ready queue.">
-            Approve Draft
+        {listing.needs_review || listing.restricted_review_required || listing.status === 'draft' ? (
+          <>
+            <Button variant="outline" onClick={() => onApprove(listing.id)} title="Move this draft from review into the ready queue.">
+              Approve Draft
+            </Button>
+            <Button variant="outline" onClick={() => (onApproveAndNext ? onApproveAndNext(listing.id) : onApprove(listing.id))} title="Approve this draft and move to the next listing in the current queue.">
+              Approve & Next
+            </Button>
+          </>
+        ) : null}
+        {onDelete ? (
+          <Button
+            variant="danger"
+            onClick={() => onDelete(listing.id)}
+            title="Permanently delete this listing and its attached media."
+          >
+            <Trash2 size={16} /> Delete
           </Button>
         ) : null}
         <Button

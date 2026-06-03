@@ -4,9 +4,12 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
 
 import AppShell from '../../components/layout/AppShell';
+import ActionBar from '../../components/ui/action-bar';
 import Button from '../../components/ui/button';
 import DataTable from '../../components/ui/data-table';
 import EmptyState from '../../components/ui/empty-state';
+import ErrorState from '../../components/ui/error-state';
+import LoadingSkeleton from '../../components/ui/loading-skeleton';
 import PageHeader from '../../components/ui/page-header';
 import SectionPanel from '../../components/ui/section-panel';
 import StatusPill from '../../components/ui/status-pill';
@@ -19,6 +22,7 @@ import {
   fetchVineBatches,
   fetchVineMedia,
   toggleAutonomousMode,
+  updateCurrentUser,
   updateVineItem,
   uploadVineReport,
   retryVineItemDiscovery,
@@ -49,7 +53,7 @@ function buildSkippedCsv(items) {
 
 export default function VineImportPage() {
   const router = useRouter();
-  const { user } = useAuth();
+  const { user, refreshUser } = useAuth();
   const { autonomousConfig, reload } = useDashboardData(user?.id);
   const fileInputRef = useRef(null);
   const [uploading, setUploading] = useState(false);
@@ -58,20 +62,36 @@ export default function VineImportPage() {
   const [activeBatch, setActiveBatch] = useState(null);
   const [selectedIds, setSelectedIds] = useState([]);
   const [lastDraftListingIds, setLastDraftListingIds] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState('');
+  const [enforceSixMonthLock, setEnforceSixMonthLock] = useState(true);
+  const [draftProgress, setDraftProgress] = useState(null);
 
   const canAccess = !!user?.can_access_vine_import;
 
+  useEffect(() => {
+    setEnforceSixMonthLock(user?.vine_enforce_six_month_lock ?? true);
+  }, [user?.vine_enforce_six_month_lock]);
+
   const loadBatches = async (batchId = null) => {
     if (!canAccess) return;
-    const history = await fetchVineBatches();
-    setBatches(history || []);
-    const targetId = batchId || activeBatch?.id || history?.[0]?.id;
-    if (targetId) {
-      const details = await fetchVineBatch(targetId);
-      setActiveBatch(details);
-      setSelectedIds([]);
-    } else {
-      setActiveBatch(null);
+    setLoading(true);
+    setLoadError('');
+    try {
+      const history = await fetchVineBatches();
+      setBatches(history || []);
+      const targetId = batchId || activeBatch?.id || history?.[0]?.id;
+      if (targetId) {
+        const details = await fetchVineBatch(targetId);
+        setActiveBatch(details);
+        setSelectedIds([]);
+      } else {
+        setActiveBatch(null);
+      }
+    } catch (error) {
+      setLoadError(error.message || 'Failed to load Vine import history.');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -123,7 +143,7 @@ export default function VineImportPage() {
     >
       <PageHeader
         title="Amazon Vine Import"
-        description="Import Amazon Vine itemized reports and create draft listings from eligible items."
+        description="Import Amazon Vine itemized reports and create robust draft listings, including rows marked locked/cancelled when needed."
         actions={
           <div className="flex gap-2">
             <Link href="/inventory">
@@ -137,6 +157,35 @@ export default function VineImportPage() {
       />
 
       <SectionPanel title="Upload" description="Accepted formats: .xlsx and .csv preferred, .pdf supported with required preflight review.">
+        <div className="mb-3 rounded-[12px] border border-[#e4e7ec] bg-[#f9fafb] px-4 py-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold text-[#101828]">6-month eligibility lock</p>
+              <p className="mt-1 text-xs text-[#667085]">
+                Keep this on to enforce lock windows. Turn it off to mark rows eligible by default while still recording and showing each row&apos;s &quot;Eligible After&quot; date.
+              </p>
+            </div>
+            <label className="inline-flex items-center gap-2 text-sm font-medium text-[#344054]">
+              <input
+                type="checkbox"
+                checked={!!enforceSixMonthLock}
+                onChange={async (event) => {
+                  const nextValue = event.target.checked;
+                  setEnforceSixMonthLock(nextValue);
+                  try {
+                    await updateCurrentUser({ vine_enforce_six_month_lock: nextValue });
+                    await refreshUser();
+                    toast.success(nextValue ? '6-month lock enforcement enabled.' : '6-month lock enforcement disabled.');
+                  } catch (error) {
+                    setEnforceSixMonthLock((user?.vine_enforce_six_month_lock ?? true));
+                    toast.error(error.message || 'Failed to update Vine lock preference.');
+                  }
+                }}
+              />
+              Enforce 6-month lock
+            </label>
+          </div>
+        </div>
         <div className="flex flex-wrap items-center gap-3 rounded-[12px] border border-dashed border-[#d0d5dd] bg-white px-4 py-5">
           <input
             ref={fileInputRef}
@@ -167,6 +216,8 @@ export default function VineImportPage() {
           </div>
         </div>
       </SectionPanel>
+      {loadError ? <ErrorState title="Could not load Vine imports" description={loadError} action={<Button variant="outline" onClick={() => loadBatches(activeBatch?.id || null)}>Retry</Button>} /> : null}
+      {loading ? <LoadingSkeleton lines={4} className="mb-4" /> : null}
 
       <SectionPanel title="Import History" description="Recent private Vine imports for this account.">
         <DataTable
@@ -195,9 +246,14 @@ export default function VineImportPage() {
         />
       </SectionPanel>
 
-      <SectionPanel title="Preflight Review" description="Review parsed rows before creating inventory or drafts. Cancelled, locked, restricted, and low-confidence rows stay gated.">
+      <SectionPanel title="Preflight Review" description="Review parsed rows before creating inventory or drafts. For this workflow, locked/cancelled rows can still be drafted so nothing gets stranded.">
         {activeBatch ? (
           <>
+            {!enforceSixMonthLock ? (
+              <div className="mb-3 rounded-[10px] border border-[#fec84b] bg-[#fffaeb] px-3 py-2 text-xs text-[#7a2e0e]">
+                Lock enforcement is currently off for your account. Rows are marked eligible by default; review each row&apos;s <strong>Eligible After</strong> date before posting.
+              </div>
+            ) : null}
             <div className="mb-4 flex flex-wrap items-center gap-2">
               <StatusPill status="default" label={`${activeBatch.parsed_count} parsed`} />
               <StatusPill status="success" label={`${activeBatch.eligible_count} eligible`} />
@@ -296,7 +352,7 @@ export default function VineImportPage() {
                   onClick={async () => {
                     setBusyAction('inventory');
                     try {
-                      await createVineInventory(activeBatch.id, selectedIds, true);
+                      await createVineInventory(activeBatch.id, selectedIds, true, true);
                       await loadBatches(activeBatch.id);
                       toast.success('Inventory records created.');
                     } catch (error) {
@@ -314,29 +370,49 @@ export default function VineImportPage() {
                   onClick={async () => {
                     setBusyAction('drafts');
                     try {
-                      const result = await createVineDrafts(activeBatch.id, selectedIds, {
-                        fetchMediaFirst: true,
-                        requireMediaForAsin: true,
-                        allowDraftsWithoutMedia: false,
-                      });
-                      const listingIds = result?.listing_ids || result?.created_listing_ids || [];
-                      setLastDraftListingIds(Array.isArray(listingIds) ? listingIds : []);
-                      await loadBatches(activeBatch.id);
-                      const created = Number(result?.created || 0);
-                      const updated = Number(result?.updated || 0);
-                      if (created || updated) {
-                        toast.success(`Listing drafts ready (${created} created, ${updated} updated).`);
-                      } else {
-                        toast.success('Listing drafts ready.');
+                      const chunkSize = 5;
+                      const chunks = [];
+                      for (let index = 0; index < selectedIds.length; index += chunkSize) {
+                        chunks.push(selectedIds.slice(index, index + chunkSize));
                       }
+
+                      let totalCreated = 0;
+                      let totalUpdated = 0;
+                      let totalSkipped = 0;
+                      let combinedListingIds = [];
+
+                      for (let index = 0; index < chunks.length; index += 1) {
+                        const chunk = chunks[index];
+                        setDraftProgress({ current: index + 1, total: chunks.length });
+                        const result = await createVineDrafts(activeBatch.id, chunk, {
+                          fetchMediaFirst: false,
+                          requireMediaForAsin: false,
+                          allowDraftsWithoutMedia: true,
+                          includeCancelled: true,
+                        });
+                        totalCreated += Number(result?.created || 0);
+                        totalUpdated += Number(result?.updated || 0);
+                        totalSkipped += Number(result?.skipped || 0);
+                        const listingIds = result?.listing_ids || result?.created_listing_ids || [];
+                        if (Array.isArray(listingIds) && listingIds.length) {
+                          combinedListingIds = [...combinedListingIds, ...listingIds];
+                        }
+                      }
+
+                      setLastDraftListingIds(combinedListingIds);
+                      await loadBatches(activeBatch.id);
+                      toast.success(`Listing drafts ready (${totalCreated} created, ${totalUpdated} updated, ${totalSkipped} skipped).`);
                     } catch (error) {
                       toast.error(error.message);
                     } finally {
+                      setDraftProgress(null);
                       setBusyAction('');
                     }
                   }}
                 >
-                  Fetch images + generate drafts
+                  {busyAction === 'drafts' && draftProgress
+                    ? `Generating drafts ${draftProgress.current}/${draftProgress.total}...`
+                    : 'Fetch images + generate drafts'}
                 </Button>
                 <Button size="sm" variant="outline" onClick={exportSkippedRows}>
                   Export skipped/error rows

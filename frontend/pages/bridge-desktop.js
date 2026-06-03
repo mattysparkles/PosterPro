@@ -192,9 +192,9 @@ export default function BridgeDesktopPage() {
 
     const connectViewer = async () => {
       try {
-        const module = await import('@novnc/novnc');
+        const novncModule = await import('@novnc/novnc');
         if (disposed || !viewerRef.current) return;
-        const RFB = module.default;
+        const RFB = novncModule.default;
         const url = buildBridgeDesktopWebsocketUrl(desktopAccess.websocket_path, desktopAccess.token);
         const rfb = new RFB(viewerRef.current, url);
         rfbRef.current = rfb;

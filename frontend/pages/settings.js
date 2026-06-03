@@ -6,10 +6,16 @@ import toast from 'react-hot-toast';
 
 import AppShell from '../components/layout/AppShell';
 import CmsTemplateWorkspace from '../components/CmsTemplateWorkspace';
+import ThemeSelector from '../components/settings/ThemeSelector';
+import SettingsLayout from '../components/settings/SettingsLayout';
+import SettingsNav from '../components/settings/SettingsNav';
+import { SettingsGuideCard as GuideCard, SettingsInstructionTable as InstructionTable } from '../components/settings/SettingsGuideCard';
+import AppCard from '../components/ui/app-card';
 import Button from '../components/ui/button';
 import Drawer from '../components/ui/drawer';
 import EmptyState from '../components/ui/empty-state';
 import FormSection from '../components/ui/form-section';
+import HealthIndicator from '../components/ui/health-indicator';
 import HelpTip from '../components/ui/help-tip';
 import Input from '../components/ui/input';
 import MetricCard from '../components/ui/metric-card';
@@ -17,6 +23,7 @@ import PageHeader from '../components/ui/page-header';
 import SectionPanel from '../components/ui/section-panel';
 import StatusPill from '../components/ui/status-pill';
 import { useAuth } from '../contexts/AuthContext';
+import useAdminTheme from '../hooks/useAdminTheme';
 import { useEbayAuth } from '../hooks/useEbayAuth';
 import useDashboardData from '../hooks/useDashboardData';
 import {
@@ -42,375 +49,32 @@ import {
   upsertBridgeAccount,
 } from '../lib/api';
 import { buildTemplateDraftForPage, CMS_PAGE_CONFIG, CMS_PAGE_KEYS, createDefaultCmsPages } from '../lib/cmsTemplates';
-
-const SETTINGS_TABS = [
-  { value: 'overview', label: 'Overview' },
-  { value: 'profile', label: 'Profile' },
-  { value: 'workflow', label: 'Workflow' },
-  { value: 'ebay', label: 'eBay' },
-  { value: 'amazon', label: 'Amazon' },
-  { value: 'marketplaces', label: 'Marketplaces' },
-  { value: 'automation', label: 'Automation' },
-  { value: 'api-keys', label: 'API Keys' },
-  { value: 'hosted-pages', label: 'CMS + Themes' },
-  { value: 'email', label: 'Email' },
-  { value: 'server', label: 'Server' },
-];
-
-const SETTINGS_GROUPS = [
-  { label: 'Account', tabs: ['overview', 'profile', 'workflow'] },
-  { label: 'Channels', tabs: ['ebay', 'amazon', 'marketplaces'] },
-  { label: 'Admin', tabs: ['automation', 'api-keys', 'hosted-pages', 'email', 'server'] },
-];
-
-const MARKETPLACE_LABELS = {
-  ebay: 'eBay',
-  etsy: 'Etsy',
-  facebook: 'Facebook Marketplace',
-  mercari: 'Mercari',
-  poshmark: 'Poshmark',
-  depop: 'Depop',
-  whatnot: 'Whatnot',
-  vinted: 'Vinted',
-};
-
-const BRIDGE_MARKETPLACE_OPTIONS = ['facebook', 'etsy', 'mercari', 'poshmark', 'depop', 'whatnot', 'vinted'];
-const BROWSER_CONNECT_MARKETPLACES = ['facebook', 'mercari', 'poshmark', 'etsy', 'depop', 'whatnot', 'vinted'];
-const BROWSER_IMPORT_MARKETPLACES = ['facebook'];
-
-const RESELLER_PRIORITY_MARKETPLACES = ['mercari', 'poshmark', 'whatnot'];
-const MARKETPLACE_CARD_PRIORITY = ['ebay', 'facebook', ...RESELLER_PRIORITY_MARKETPLACES, 'etsy', 'depop', 'vinted'];
-
-const MARKETPLACE_GUIDES = {
-  ebay: {
-    summary: 'Use the eBay app credentials plus the RuName-backed hosted pages to connect each operator account cleanly.',
-    tooltip: 'PosterPro stores the server app settings, generates the three public URLs eBay asks for, and then lets each operator connect their own account.',
-    prerequisites: ['Admin saves App ID, Cert ID, and RuName', 'Admin pastes the generated privacy, accepted, and declined URLs into the eBay developer RuName config', 'Operator signs into the correct eBay seller account'],
-    steps: [
-      'Open the eBay tab and save the server OAuth credentials, especially the RuName value from eBay.',
-      'Open Hosted Pages and confirm the privacy policy and eBay landing pages are published at the generated URLs.',
-      'Paste those three generated URLs into the matching eBay RuName fields, then click Connect eBay from the operator account you want tied to this workspace.',
-    ],
-  },
-  amazon: {
-    summary: 'Amazon support is currently for Vine import and media lookup rather than direct marketplace publishing.',
-    tooltip: 'These settings unlock Vine ingestion and Amazon image/media enrichment, not a full Amazon seller connector.',
-    prerequisites: ['Admin decides whether Vine import is enabled', 'Optional PA-API credentials are available for media lookup', 'Marketplace region and rate limits are defined'],
-    steps: [
-      'Enable the Vine importer only for the roles or plans that should access it.',
-      'Add PA-API credentials if you want PosterPro to pull Amazon media automatically.',
-      'Choose the fetch mode and rate limit that match the hosting environment.',
-    ],
-  },
-  mercari: {
-    summary: 'Mercari uses an assisted workflow. PosterPro tracks the account identity, bridge session, and readiness for cross-post drafting and handoff.',
-    tooltip: 'Mercari is not a native OAuth/direct-API connector here. Use the bridge desktop to capture a real authenticated browser session.',
-    prerequisites: ['Bridge account key (mercari-main)', 'Store or closet name + handle', 'Operator posting notes (shipping, pricing, required fields)'],
-    steps: [
-      'Save a bridge account key and store the operator identity details.',
-      'Use Connect Mercari account to capture a valid browser session in Bridge Desktop.',
-      'Mark the channel Ready only after the session is valid and the workflow is confirmed.',
-      'Use listing previews + cross-post jobs to generate a structured handoff plan for Mercari.',
-    ],
-  },
-  etsy: {
-    summary: 'Etsy is modeled as a catalog-first manual/provider-assisted channel with stronger product-specific prep than a casual resale marketplace.',
-    tooltip: 'Use this setup to capture shop identity, fulfillment defaults, and handmade or vintage listing notes before the team publishes.',
-    prerequisites: ['Shop name', 'Etsy seller handle', 'Production or fulfillment notes', 'Category and attribute expectations for handmade or vintage items'],
-    steps: [
-      'Save the Etsy shop identity and operator handle that will own the listings.',
-      'Document fulfillment, production, and attribute expectations in notes so repeatable product data is not improvised.',
-      'Move the channel to Ready only after the team has validated the listing template and shipping workflow for Etsy.',
-    ],
-  },
-  poshmark: {
-    summary: 'Poshmark uses an assisted workflow. PosterPro tracks the closet identity, bridge session health, and readiness for drafting/handoff.',
-    tooltip: 'Poshmark is supported through the automation bridge/browser workflow rather than a direct API integration in this deployment.',
-    prerequisites: ['Bridge account key (poshmark-main)', 'Closet name + @username', 'Operator notes (sharing, bundles, offers, shipping defaults)'],
-    steps: [
-      'Save the bridge account key and operator identity fields.',
-      'Connect Poshmark in Bridge Desktop and confirm the session state is Ready/Valid.',
-      'Mark Ready after you’ve verified the listing workflow and required fields.',
-      'Use listing previews to review how the listing will map into Poshmark draft fields before handoff.',
-    ],
-  },
-  facebook: {
-    summary: 'Facebook Marketplace is tracked as an operator workflow so setup is consistent even without a direct API integration.',
-    tooltip: 'PosterPro can store the process and account context even when publishing still involves manual work.',
-    prerequisites: ['Marketplace profile name', 'Internal account notes', 'Local shipping or meetup rules'],
-    steps: [
-      'Record which Facebook profile or business page owns the channel.',
-      'Add any policy or handoff notes the operator needs before publishing.',
-      'Mark the workflow Ready only after the real account has been reviewed.',
-    ],
-  },
-  depop: {
-    summary: 'Depop setup is handled as a guided manual process with saved account context and workflow notes.',
-    tooltip: 'Use this to standardize onboarding now, even before a fuller connector exists.',
-    prerequisites: ['Shop name', 'Depop handle', 'Operator-specific listing notes'],
-    steps: [
-      'Save the Depop shop identity for this workspace.',
-      'Add internal notes for shipping, style, or negotiation expectations.',
-      'Mark the channel Ready once a real operator can execute the process cleanly.',
-    ],
-  },
-  whatnot: {
-    summary: 'Whatnot is modeled as a live-sale channel. PosterPro tracks the operator identity, bridge session, and readiness for drafting and follow-up.',
-    tooltip: 'Whatnot posting is not a direct API publish path here. Use assisted workflows and operator policy for final submission.',
-    prerequisites: ['Bridge account key (whatnot-main)', 'Seller handle', 'Operator notes (show schedule, shipping, category rules)'],
-    steps: [
-      'Save the bridge account key and seller identity details.',
-      'Connect Whatnot in Bridge Desktop and confirm the session state is Ready/Valid.',
-      'Mark Ready once the operator workflow for live-sale preparation is confirmed.',
-      'Use listing previews to prepare consistent titles, prices, and item specifics before handoff.',
-    ],
-  },
-  vinted: {
-    summary: 'Vinted is represented as a guided manual channel with stored account metadata and readiness.',
-    tooltip: 'Use the saved notes to reduce handoff mistakes between operators.',
-    prerequisites: ['Closet name', 'Vinted username', 'Country or shipping caveats'],
-    steps: [
-      'Add the Vinted account identity used by the operator.',
-      'Record any platform-specific notes that affect listings or fulfillment.',
-      'Mark the channel Ready after the process is actually ready for production use.',
-    ],
-  },
-};
-
-const SERVICE_GUIDES = {
-  openai: {
-    title: 'OpenAI',
-    tooltip: 'Used for listing copy, pricing help, and AI-assisted product enrichment.',
-    steps: [
-      'Create an API key in the OpenAI account that should fund PosterPro usage.',
-      'Paste it into the API Keys tab and save it from an admin session.',
-      'Recheck the setup center to confirm the server now reports OpenAI ready.',
-    ],
-  },
-  photoroom: {
-    title: 'PhotoRoom',
-    tooltip: 'Used for background removal and photo cleanup flows.',
-    steps: [
-      'Generate a PhotoRoom API key in the production PhotoRoom account.',
-      'Paste it into the API Keys tab and save it from an admin session.',
-      'Validate the photo tools workflow from a real listing after saving.',
-    ],
-  },
-  security: {
-    title: 'Secret storage',
-    tooltip: 'PosterPro stores runtime secrets encrypted at rest and never returns them to the browser after save.',
-    steps: [
-      'Keep a strong SESSION_SECRET configured on the server before saving credentials.',
-      'Enter keys only from the admin settings panels, not directly in browser code.',
-      'Rotate a provider key here whenever a credential is replaced upstream.',
-    ],
-  },
-};
-
-const WORKFLOW_PREVIEW_OPTIONS = [
-  { value: 'marketplace', label: 'Marketplace preview' },
-  { value: 'editor', label: 'Editor first' },
-];
-
-const CREDENTIAL_INSTRUCTIONS = {
-  openai: [
-    { field: 'OpenAI API key', where: 'OpenAI dashboard -> API keys', how: 'Create a project or organization key with billing enabled.', purpose: 'Powers title, description, enrichment, and AI pricing assistance.' },
-  ],
-  photoroom: [
-    { field: 'PhotoRoom API key', where: 'PhotoRoom developer or API dashboard', how: 'Create an API key for the production workspace that will handle background removal.', purpose: 'Enables background removal and photo cleanup tools from the listing editor.' },
-  ],
-  ebay: [
-    { field: 'App ID', where: 'eBay Developers Program -> Application Keys', how: 'Create or open the production app, then copy the App ID exactly as shown.', purpose: 'Identifies the PosterPro app during eBay OAuth.' },
-    { field: 'Cert ID', where: 'eBay Developers Program -> Application Keys', how: 'Copy the production Cert ID from the same eBay app and save it here.', purpose: 'Authenticates PosterPro when it exchanges eBay OAuth tokens.' },
-    { field: 'RuName / redirect_uri value', where: 'eBay Developers Program -> User Tokens / RuName', how: 'Copy the OAuth-enabled RuName exactly as eBay generated it, for example matthew_ruderma-matthewr-poster-cyatix.', purpose: 'This is the exact redirect_uri value eBay expects in the OAuth authorize and token-exchange flow.' },
-    { field: 'Privacy Policy URL', where: 'eBay Developers Program -> User Tokens / RuName', how: 'Use the generated Hosted Pages privacy policy URL from PosterPro and paste it into the RuName settings.', purpose: 'Required by eBay for user-token OAuth applications.' },
-    { field: 'Auth Accepted URL', where: 'eBay Developers Program -> User Tokens / RuName', how: 'Use the generated Hosted Pages accepted URL from PosterPro and paste it into the RuName settings.', purpose: 'This is where eBay sends the operator after they approve PosterPro access.' },
-    { field: 'Auth Declined URL', where: 'eBay Developers Program -> User Tokens / RuName', how: 'Use the generated Hosted Pages declined URL from PosterPro and paste it into the RuName settings.', purpose: 'This is where eBay sends the operator if they decline or cancel the consent flow.' },
-  ],
-  amazon: [
-    { field: 'PA-API access key', where: 'Amazon Associates / Product Advertising API console', how: 'Generate access credentials for the account that will handle media lookup.', purpose: 'Lets PosterPro request Amazon product metadata and media.' },
-    { field: 'PA-API secret key', where: 'Amazon Associates / Product Advertising API console', how: 'Copy the matching secret key immediately after generation.', purpose: 'Authenticates the PA-API calls used for enrichment.' },
-    { field: 'Partner tag', where: 'Amazon Associates account settings', how: 'Copy the tracking tag for the approved associates account.', purpose: 'Required by Amazon PA-API request signing.' },
-  ],
-  email: [
-    { field: 'SMTP host', where: 'Your mail provider admin panel', how: 'Use the provider SMTP hostname, such as the transactional email relay host.', purpose: 'Determines where PosterPro sends password reset mail.' },
-    { field: 'SMTP username', where: 'Your mail provider account or SMTP credentials panel', how: 'Create a sending credential or use the provider-issued SMTP username.', purpose: 'Authenticates the mail session when the relay requires login.' },
-    { field: 'SMTP password', where: 'Your mail provider account or SMTP credentials panel', how: 'Generate an app password or SMTP secret and store it here.', purpose: 'Secures the SMTP login used for reset delivery.' },
-    { field: 'From address', where: 'Verified sending domain or mailbox in your mail provider', how: 'Use a verified sender, for example noreply@yourdomain.com.', purpose: 'Controls the address reset emails appear to come from.' },
-  ],
-};
-
-const DEFAULT_THEME_IMPORT_TEMPLATE = JSON.stringify(
-  {
-    activate_theme_id: 'boardroom-ink',
-    themes: [
-      {
-        id: 'boardroom-ink',
-        name: 'Boardroom Ink',
-        description: 'A restrained corporate theme with a darker hero and high-clarity policy pages.',
-        hero_eyebrow: 'Investor-grade operations',
-        hero_title: 'Clean public handoff pages',
-        hero_body: 'Use this theme when the hosted CMS should feel more like a polished SaaS trust center than a default product install.',
-        layout: {
-          align: 'left',
-          content_width: '920px',
-          hero_style: 'split-band',
-          card_style: 'elevated',
-          show_brand_badge: true,
-        },
-        palette: {
-          page_background: 'linear-gradient(180deg, #edf2f8 0%, #ffffff 45%, #eef2f7 100%)',
-          hero_background: 'linear-gradient(135deg, #111827 0%, #1f2937 46%, #2563eb 100%)',
-          hero_foreground: '#f8fafc',
-          surface_background: 'rgba(255, 255, 255, 0.97)',
-          surface_foreground: '#0f172a',
-          surface_muted: '#475467',
-          border_color: '#d0d9e5',
-          accent_color: '#1d4ed8',
-          accent_soft: '#dbeafe',
-          success_color: '#166534',
-          warning_color: '#b54708',
-          danger_color: '#b42318',
-        },
-        typography: {
-          font_family: "'Plus Jakarta Sans', 'Segoe UI', sans-serif",
-          heading_family: "'Plus Jakarta Sans', 'Segoe UI', sans-serif",
-          base_size: '15px',
-        },
-        chrome: {
-          footer_note: 'Boardroom Ink is intended as a clean baseline import for PosterPro hosted CMS pages.',
-          primary_cta_label: 'Open PosterPro',
-          secondary_cta_label: 'Close window',
-        },
-      },
-    ],
-  },
-  null,
-  2,
-);
-
-function formatDateTimeValue(value) {
-  if (!value) return 'Not reported';
-  return new Intl.DateTimeFormat('en-US', {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  }).format(new Date(value));
-}
-
-function bridgeSessionTone(sessionState) {
-  return ['ready', 'active', 'valid'].includes(String(sessionState || '').toLowerCase()) ? 'success' : 'warning';
-}
-
-function bridgeNextStep({ bridgeAccount, browserConnectInProgress, supportsBrowserImport }) {
-  if (browserConnectInProgress) {
-    return 'Resume the live bridge workspace and complete the login or MFA step there before returning to Settings.';
-  }
-  if (!bridgeAccount) {
-    return 'Save a bridge account key first so PosterPro has a runner-side identity for this marketplace.';
-  }
-  if (!bridgeAccount.credential_configured && !bridgeAccount.session_payload) {
-    return 'Add bridge credentials or capture a browser session so assisted jobs have something usable to run against.';
-  }
-  if (!['ready', 'active', 'valid'].includes(String(bridgeAccount.session_state || '').toLowerCase())) {
-    return 'Reconnect this marketplace in the bridge workspace or save a fresh storage-state payload before relying on assisted jobs.';
-  }
-  if (supportsBrowserImport) {
-    return 'This bridge session looks usable. You can run assisted posting now, and Facebook import should also be available.';
-  }
-  return 'This bridge session looks usable. Assisted posting should have the browser context it needs.';
-}
-
-function supportTone(level) {
-  if (level === 'direct_api') return 'success';
-  if (level === 'browser_assist' || level === 'provider_assist' || level === 'csv_assist') return 'info';
-  return 'default';
-}
-
-function GuideCard({ title, description, tooltip, prerequisites = [], steps = [], tone = 'blue' }) {
-  const toneClass =
-    tone === 'amber'
-      ? 'border-amber-200 bg-amber-50/80'
-      : tone === 'slate'
-      ? 'border-slate-200 bg-slate-50'
-      : 'border-[#dbe7ff] bg-[#f6f9ff]';
-
-  return (
-    <div className={`rounded-[16px] border ${toneClass} p-4`}>
-      <div className="flex items-start justify-between gap-3">
-        <div className="max-w-[1024px]">
-          <p className="text-sm font-semibold text-[#101828]">{title}</p>
-          {description ? <p className="mt-1 text-sm text-[#475467]">{description}</p> : null}
-        </div>
-        {tooltip ? <HelpTip label={`${title} help`}>{tooltip}</HelpTip> : null}
-      </div>
-      {prerequisites.length ? (
-        <div className="mt-4">
-          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">Before you start</p>
-          <div className="mt-2 flex flex-wrap gap-2">
-            {prerequisites.map((item) => (
-              <span key={item} className="rounded-full border border-white/80 bg-white/80 px-3 py-1 text-xs font-medium text-[#344054]">
-                {item}
-              </span>
-            ))}
-          </div>
-        </div>
-      ) : null}
-      {steps.length ? (
-        <ol className="mt-4 space-y-2">
-          {steps.map((step, index) => (
-            <li key={step} className="flex gap-3 text-sm text-[#344054]">
-              <span className="mt-[1px] flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white text-xs font-semibold text-[#1d4ed8]">
-                {index + 1}
-              </span>
-              <span>{step}</span>
-            </li>
-          ))}
-        </ol>
-      ) : null}
-    </div>
-  );
-}
-
-function InstructionTable({ title, rows }) {
-  return (
-    <div className="overflow-hidden rounded-[16px] border border-[#e5e7eb] bg-white">
-      <div className="border-b border-[#e5e7eb] bg-[#f8fafc] px-4 py-3">
-        <p className="text-sm font-semibold text-[#101828]">{title}</p>
-      </div>
-      <div className="overflow-x-auto">
-        <table className="min-w-full text-left text-sm">
-          <thead className="bg-[#fcfcfd] text-[#667085]">
-            <tr>
-              <th className="px-4 py-3 font-medium">Field</th>
-              <th className="px-4 py-3 font-medium">Where to get it</th>
-              <th className="px-4 py-3 font-medium">How to obtain it</th>
-              <th className="px-4 py-3 font-medium">What it does</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => (
-              <tr key={row.field} className="border-t border-[#e5e7eb] align-top">
-                <td className="px-4 py-3 font-medium text-[#101828]">{row.field}</td>
-                <td className="px-4 py-3 text-[#475467]">{row.where}</td>
-                <td className="px-4 py-3 text-[#475467]">{row.how}</td>
-                <td className="px-4 py-3 text-[#475467]">{row.purpose}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
+import {
+  BROWSER_CONNECT_MARKETPLACES,
+  BROWSER_IMPORT_MARKETPLACES,
+  BRIDGE_MARKETPLACE_OPTIONS,
+  CREDENTIAL_INSTRUCTIONS,
+  DEFAULT_THEME_IMPORT_TEMPLATE,
+  MARKETPLACE_CARD_PRIORITY,
+  MARKETPLACE_GUIDES,
+  MARKETPLACE_LABELS,
+  RESELLER_PRIORITY_MARKETPLACES,
+  SETTINGS_GROUPS,
+  SETTINGS_TABS,
+  SERVICE_GUIDES,
+  WORKFLOW_PREVIEW_OPTIONS,
+  bridgeNextStep,
+  bridgeSessionTone,
+  formatDateTimeValue,
+  supportTone,
+} from '../components/settings/settingsConfig';
 
 export default function SettingsPage() {
   const router = useRouter();
   const { user, refreshUser, changePassword, setViewAsRegular } = useAuth();
   const { autonomousConfig, reload: reloadDashboard } = useDashboardData(user?.id);
   const { loading: connectingEbay, error: ebayConnectError, connect: connectEbay } = useEbayAuth(user?.id);
+  const { activeThemeId, activeTheme, setThemeId } = useAdminTheme();
   const [activeTab, setActiveTab] = useState('overview');
   const [setupSummary, setSetupSummary] = useState(null);
   const [settingsPanels, setSettingsPanels] = useState(null);
@@ -503,6 +167,12 @@ export default function SettingsPage() {
     sale_detection_dry_run: false,
     sale_detection_poll_minutes: 15,
   });
+  const [soldSyncForm, setSoldSyncForm] = useState({
+    sold_out_delist_everywhere: true,
+    out_of_stock_delist_everywhere: false,
+    remove_media_on_sold_out: false,
+  });
+  const [savingSoldSync, setSavingSoldSync] = useState(false);
   const [serverForm, setServerForm] = useState({ app_base_url: '', environment: '', storage_root: '' });
   const [emailForm, setEmailForm] = useState({
     smtp_host: '',
@@ -539,7 +209,7 @@ export default function SettingsPage() {
   const canManageServer = !!settingsPanels?.server?.can_manage;
   const visibleTabs = SETTINGS_TABS.filter((tab) => {
     if (canManageServer) return true;
-    return ['overview', 'profile', 'workflow', 'ebay', 'marketplaces'].includes(tab.value);
+    return ['overview', 'profile', 'workflow', 'appearance', 'ebay', 'marketplaces'].includes(tab.value);
   });
   const visibleTabGroups = SETTINGS_GROUPS.map((group) => ({
     ...group,
@@ -624,6 +294,11 @@ export default function SettingsPage() {
         sale_detection_enabled: !!panels.automation.sale_detection_enabled,
         sale_detection_dry_run: !!panels.automation.sale_detection_dry_run,
         sale_detection_poll_minutes: Number(panels.automation.sale_detection_poll_minutes || 15),
+      });
+      setSoldSyncForm({
+        sold_out_delist_everywhere: panels.sold_sync_preferences?.sold_out_delist_everywhere ?? true,
+        out_of_stock_delist_everywhere: panels.sold_sync_preferences?.out_of_stock_delist_everywhere ?? false,
+        remove_media_on_sold_out: panels.sold_sync_preferences?.remove_media_on_sold_out ?? false,
       });
       setServerForm({
         app_base_url: panels.server.app_base_url || '',
@@ -1232,7 +907,15 @@ export default function SettingsPage() {
         }
       />
 
-      <div>
+      <SettingsLayout
+        nav={
+          <SettingsNav
+            groups={visibleTabGroups}
+            activeTab={activeTab}
+            onSelect={selectTab}
+          />
+        }
+      >
           {activeTab === 'overview' ? (
             <SectionPanel title="Settings Overview" description="A clean summary of operator-level choices, channel setup, and admin credentials that still need attention.">
               <div className="space-y-6">
@@ -1295,6 +978,32 @@ export default function SettingsPage() {
                 </div>
 
                 <InstructionTable title="Remaining production inputs" rows={[...CREDENTIAL_INSTRUCTIONS.openai, ...CREDENTIAL_INSTRUCTIONS.photoroom, ...CREDENTIAL_INSTRUCTIONS.ebay, ...CREDENTIAL_INSTRUCTIONS.email]} />
+              </div>
+            </SectionPanel>
+          ) : null}
+
+          {activeTab === 'appearance' ? (
+            <SectionPanel title="Appearance" description="Select the admin dashboard theme without affecting hosted public CMS page themes.">
+              <div className="space-y-5">
+                <div className="grid gap-4 md:grid-cols-3">
+                  <MetricCard label="Active admin theme" value={activeTheme?.name || 'PosterPro Classic'} detail="Applied to dashboard shell, cards, forms, and tables." />
+                  <MetricCard label="Theme family" value={activeTheme?.category || 'SaaS'} detail="Visual style category for this operator workspace." />
+                  <MetricCard label="Mode" value={activeTheme?.mode || 'light'} detail="Light, dark, or accessibility-first contrast mode." />
+                </div>
+                <AppCard className="flex flex-wrap items-center justify-between gap-3 p-4">
+                  <div>
+                    <p className="text-sm font-semibold text-[var(--pp-text)]">Theme scope</p>
+                    <p className="mt-1 text-sm text-[var(--pp-muted)]">Admin themes style the internal dashboard only. Hosted Pages / Themes remains a separate public CMS system.</p>
+                  </div>
+                  <HealthIndicator healthy label="Admin theme system active" />
+                </AppCard>
+                <ThemeSelector
+                  activeThemeId={activeThemeId}
+                  onApply={(nextThemeId) => {
+                    setThemeId(nextThemeId);
+                    toast.success('Admin theme updated.');
+                  }}
+                />
               </div>
             </SectionPanel>
           ) : null}
@@ -2992,6 +2701,60 @@ export default function SettingsPage() {
                     onChange={(event) => setAutomationForm((current) => ({ ...current, sale_detection_poll_minutes: Number(event.target.value || 1) }))}
                   />
                 </div>
+                <div className="rounded-[14px] border border-[#e5e7eb] bg-[#fcfcfd] p-4">
+                  <p className="text-sm font-semibold text-[#101828]">Sold/out-of-stock rules</p>
+                  <p className="mt-1 text-sm text-[#667085]">
+                    Control delist behavior and optional media cleanup when a one-off item sells out.
+                  </p>
+                  <div className="mt-4 space-y-3">
+                    <label className="flex items-center justify-between rounded-[10px] border border-[#e5e7eb] bg-white px-4 py-3 text-sm text-[#101828]">
+                      Sold out: delist all marketplaces
+                      <input
+                        type="checkbox"
+                        checked={soldSyncForm.sold_out_delist_everywhere}
+                        onChange={(event) => setSoldSyncForm((current) => ({ ...current, sold_out_delist_everywhere: event.target.checked }))}
+                      />
+                    </label>
+                    <label className="flex items-center justify-between rounded-[10px] border border-[#e5e7eb] bg-white px-4 py-3 text-sm text-[#101828]">
+                      Out of stock: delist all marketplaces
+                      <input
+                        type="checkbox"
+                        checked={soldSyncForm.out_of_stock_delist_everywhere}
+                        onChange={(event) => setSoldSyncForm((current) => ({ ...current, out_of_stock_delist_everywhere: event.target.checked }))}
+                      />
+                    </label>
+                    <label className="flex items-center justify-between rounded-[10px] border border-[#e5e7eb] bg-white px-4 py-3 text-sm text-[#101828]">
+                      Remove media files when sold out
+                      <input
+                        type="checkbox"
+                        checked={soldSyncForm.remove_media_on_sold_out}
+                        onChange={(event) => setSoldSyncForm((current) => ({ ...current, remove_media_on_sold_out: event.target.checked }))}
+                      />
+                    </label>
+                  </div>
+                  <div className="mt-4 flex justify-end">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={savingSoldSync}
+                      onClick={async () => {
+                        setSavingSoldSync(true);
+                        try {
+                          await updateCurrentUser(soldSyncForm);
+                          await refreshUser();
+                          await reload();
+                          toast.success('Sold/out-of-stock preferences saved.');
+                        } catch (error) {
+                          toast.error(error.message);
+                        } finally {
+                          setSavingSoldSync(false);
+                        }
+                      }}
+                    >
+                      {savingSoldSync ? 'Saving...' : 'Save sold-sync preferences'}
+                    </Button>
+                  </div>
+                </div>
                 <Button type="submit" disabled={savingServer || !canManageServer}>
                   {savingServer ? 'Saving...' : 'Save automation'}
                 </Button>
@@ -3254,7 +3017,7 @@ export default function SettingsPage() {
               </form>
             </SectionPanel>
           ) : null}
-      </div>
+      </SettingsLayout>
 
       <Drawer
         open={activeTab === 'marketplaces' && !!configuredMarketplace && configuredMarketplace.connection_mode === 'manual'}

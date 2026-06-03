@@ -12,16 +12,22 @@ export default function DataTable({
   allSelected = false,
   getRowClassName,
   onRowClick,
+  stickyHeader = false,
+  density = 'default',
 }) {
+  const headerClass = stickyHeader ? 'sticky top-0 z-10 bg-[#f9fafb]' : 'bg-[#f9fafb]';
+  const rowPadding = density === 'compact' ? 'px-4 py-2.5' : 'px-4 py-3.5';
+
   return (
-    <div className={cn('overflow-hidden rounded-[12px] border border-[#e5e7eb] bg-white', className)}>
+    <div className={cn('overflow-hidden rounded-2xl border border-[#e4e7ec] bg-white', className)}>
       <div className="overflow-x-auto">
         <table className="min-w-full text-left text-sm">
-          <thead className="bg-[#f9fafb]">
+          <thead className={headerClass}>
             <tr>
               {onToggleRow ? (
                 <th className="w-12 px-4 py-3">
                   <input
+                    aria-label="Select all rows"
                     type="checkbox"
                     checked={allSelected}
                     onChange={onToggleAll}
@@ -32,10 +38,7 @@ export default function DataTable({
               {columns.map((column) => (
                 <th
                   key={column.key}
-                  className={cn(
-                    'px-4 py-3 text-[12px] font-semibold uppercase tracking-[0.08em] text-[#667085]',
-                    column.headerClassName,
-                  )}
+                  className={cn('px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-[#667085]', column.headerClassName)}
                 >
                   {column.label}
                 </th>
@@ -51,7 +54,8 @@ export default function DataTable({
                   <tr
                     key={key}
                     className={cn(
-                      'h-14 border-t border-[#e5e7eb] hover:bg-[#f9fafb]',
+                      'border-t border-[#f2f4f7] transition hover:bg-[#f9fafb]',
+                      selected ? 'bg-[#f5f8ff]' : '',
                       onRowClick ? 'cursor-pointer' : '',
                       getRowClassName?.(row, selected),
                     )}
@@ -59,12 +63,13 @@ export default function DataTable({
                   >
                     {onToggleRow ? (
                       <td
-                        className="px-4 py-3"
+                        className={rowPadding}
                         onClick={(event) => {
                           event.stopPropagation();
                         }}
                       >
                         <input
+                          aria-label={`Select row ${index + 1}`}
                           type="checkbox"
                           checked={selected}
                           onChange={() => onToggleRow(key)}
@@ -73,7 +78,7 @@ export default function DataTable({
                       </td>
                     ) : null}
                     {columns.map((column) => (
-                      <td key={column.key} className={cn('px-4 py-3 align-middle text-[#101828]', column.cellClassName)}>
+                      <td key={column.key} className={cn(rowPadding, 'align-middle text-[#101828]', column.cellClassName)}>
                         {column.render ? column.render(row) : row[column.key]}
                       </td>
                     ))}
@@ -82,7 +87,7 @@ export default function DataTable({
               })
             ) : (
               <tr>
-                <td colSpan={columns.length + (onToggleRow ? 1 : 0)} className="px-4 py-12 text-center text-sm text-[#667085]">
+                <td colSpan={columns.length + (onToggleRow ? 1 : 0)} className="px-4 py-14 text-center text-sm text-[#667085]">
                   {emptyState}
                 </td>
               </tr>
