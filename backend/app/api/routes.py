@@ -17,6 +17,8 @@ from app.api.schemas import (
     BulkListingApproveRequest,
     BulkListingApproveResponse,
     GooglePhotosImportRequest,
+    ListingPhotoActionRequest,
+    ListingPhotoSetPrimaryRequest,
     GooglePhotosWatchRequest,
     ListingApprovalResponse,
     ListingCreateRequest,
@@ -45,6 +47,7 @@ from app.models.models import (
     MarketplaceCrosspostJob,
     MarketplaceImportJob,
     MarketplaceListing,
+    MarketplacePublishAttempt,
     ProductMediaCache,
     Sale,
     StorageUnitBatch,
@@ -57,6 +60,13 @@ from app.services.google_photos import GooglePhotosService
 from app.services.image_pipeline import ImagePipelineService
 from app.services.inventory_service import InventorySafetyError, InventoryService
 from app.services.listing_ai import ListingAIService
+from app.services.listing_review import (
+    derive_condition_data,
+    derive_shipping_profile,
+    normalize_listing_images,
+    summarize_listing_readiness,
+    sync_listing_review_state,
+)
 from app.services.media_lifecycle import purge_listing_media
 from app.services.listing_workspace import normalize_marketplace_data
 from app.services.marketplace_orchestrator import queue_publish
@@ -64,6 +74,7 @@ from app.services.profit_service import ProfitService
 from app.services.storage import LocalStorage
 from app.services.pricing_service import PricingService
 from app.services.pricing_intelligence_service import PricingIntelligenceService
+from app.services.pricing_research_service import compute_listing_quality_summary
 from app.services.photo_editor import PhotoEditorService
 from app.services.listing_templates_service import listing_template_service
 from app.services.amazon_media import AmazonProductMediaProvider
@@ -103,6 +114,115 @@ def _workflow_preferences(user: User | None) -> dict:
         "bulk_approval_enabled": bool(stored.get("bulk_approval_enabled", _DEFAULT_WORKFLOW_PREFERENCES["bulk_approval_enabled"])),
         "listing_preview_mode": str(stored.get("listing_preview_mode") or _DEFAULT_WORKFLOW_PREFERENCES["listing_preview_mode"]),
     }
+
+
+def _serialize_listing_response(listing: Listing) -> dict:
+    sync_listing_review_state(listing=listing)
+    base = ListingResponse.model_validate(listing).model_dump()
+    latest_rows_by_marketplace: dict[str, MarketplaceListing] = {}
+    for row in sorted(
+        listing.marketplace_listings or [],
+        key=lambda item: (
+            item.updated_at.isoformat() if item.updated_at else "",
+            item.id or 0,
+        ),
+        reverse=True,
+    ):
+        key = row.marketplace.value
+        if key in latest_rows_by_marketplace:
+            continue
+        latest_rows_by_marketplace[key] = row
+
+    base["marketplace_statuses"] = [
+        {
+            "marketplace": row.marketplace.value,
+            "status": row.status.value if hasattr(row.status, "value") else str(row.status),
+            "marketplace_listing_id": row.marketplace_listing_id,
+            "raw_response": row.raw_response,
+        }
+        for row in latest_rows_by_marketplace.values()
+    ]
+    base["readiness_summary"] = summarize_listing_readiness(
+        listing_images=listing.listing_images,
+        condition_data=listing.condition_data,
+        shipping_profile=listing.shipping_profile,
+        listing={
+            "category_id": listing.category_id,
+            "category_suggestion": listing.category_suggestion,
+            "listing_price": listing.listing_price,
+            "suggested_price": listing.suggested_price,
+        },
+    )
+    pricing_analysis = ((listing.marketplace_data or {}).get("pricing_analysis") or {}) if isinstance(listing.marketplace_data, dict) else {}
+    base["quality_summary"] = compute_listing_quality_summary(listing, pricing_analysis=pricing_analysis)
+    marketplace_data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}
+    base["marketplace_preflight_summary"] = marketplace_data.get("marketplace_preflight") if isinstance(marketplace_data.get("marketplace_preflight"), dict) else None
+    latest_attempt = None
+    if listing.publish_attempts:
+        attempts = [attempt for attempt in listing.publish_attempts if isinstance(attempt, MarketplacePublishAttempt)]
+        attempts = sorted(
+            attempts,
+            key=lambda attempt: (
+                attempt.updated_at.isoformat() if attempt.updated_at else "",
+                attempt.id or 0,
+            ),
+            reverse=True,
+        )
+        latest_attempt = attempts[0] if attempts else None
+    base["latest_publish_attempt"] = (
+        {
+            "id": latest_attempt.id,
+            "listing_id": latest_attempt.listing_id,
+            "marketplace": latest_attempt.marketplace.value if hasattr(latest_attempt.marketplace, "value") else str(latest_attempt.marketplace),
+            "started_at": latest_attempt.started_at,
+            "finished_at": latest_attempt.finished_at,
+            "dry_run": latest_attempt.dry_run,
+            "preflight_status": latest_attempt.preflight_status,
+            "payload_snapshot": latest_attempt.payload_snapshot,
+            "payload_hash": latest_attempt.payload_hash,
+            "inventory_item_sku": latest_attempt.inventory_item_sku,
+            "offer_id": latest_attempt.offer_id,
+            "marketplace_listing_id": latest_attempt.marketplace_listing_id,
+            "marketplace_status": latest_attempt.marketplace_status,
+            "translated_error": latest_attempt.translated_error,
+            "raw_error": latest_attempt.raw_error,
+            "retryable": latest_attempt.retryable,
+            "retry_count": latest_attempt.retry_count,
+            "previous_attempt_id": latest_attempt.previous_attempt_id,
+            "job_id": latest_attempt.job_id,
+            "task_id": latest_attempt.task_id,
+        }
+        if latest_attempt
+        else None
+    )
+    return base
+
+
+def _apply_listing_review_defaults(listing: Listing) -> None:
+    listing.listing_images = normalize_listing_images(
+        listing_images=listing.listing_images,
+        image_urls=listing.image_urls,
+        source_url=(listing.source_metadata or {}).get("source_image_url") if isinstance(listing.source_metadata, dict) else None,
+        source_page_url=(listing.source_metadata or {}).get("amazon_source_page_url") if isinstance(listing.source_metadata, dict) else None,
+        source_platform=listing.source_type or "upload",
+        default_is_reference=bool(
+            listing.source_type in {"amazon_vine", "google_photos_album"}
+            or str((listing.source_metadata or {}).get("source_marketplace") or "").strip()
+        ),
+        approved=listing.source_type in {"upload", "storage_batch", "google_photos_album"},
+    )
+    listing.image_urls = [item["storage_path"] for item in (listing.listing_images or []) if item.get("operator_state") != "rejected"]
+    listing.condition_data = derive_condition_data(
+        listing={"condition": listing.condition, "source_type": listing.source_type},
+        source_type=listing.source_type,
+        source_metadata=listing.source_metadata,
+        existing=listing.condition_data,
+    )
+    listing.shipping_profile = derive_shipping_profile(
+        listing={"title": listing.title, "description": listing.description},
+        item_specifics=listing.item_specifics,
+        existing=listing.shipping_profile,
+    )
 
 
 def _delete_listing_for_user(db: Session, *, listing: Listing, current_user: User) -> dict:
@@ -160,7 +280,7 @@ def _approve_listing_for_user(db: Session, *, listing: Listing, current_user: Us
         results = queue_publish(db, listing.id, targets)
         db.refresh(listing)
     return {
-        "listing": listing,
+        "listing": _serialize_listing_response(listing),
         "auto_publish_after_approval": bool(preferences.get("auto_publish_after_approval")),
         "results": results,
     }
@@ -174,6 +294,72 @@ def _to_public_image_url(path: str) -> str:
         return f"/media/{relative.as_posix()}"
     except ValueError:
         return path
+
+
+_UPLOAD_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+_UPLOAD_ALLOWED_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
+
+
+def _validate_photo_upload(*, upload: UploadFile, content: bytes) -> str:
+    if not content:
+        raise HTTPException(status_code=400, detail=f"{upload.filename or 'photo'} is empty.")
+    suffix = Path(upload.filename or "").suffix.lower()
+    if suffix not in _UPLOAD_ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"{upload.filename or 'photo'} has an unsupported file extension.")
+    content_type = str(upload.content_type or "").lower().strip()
+    if content_type not in _UPLOAD_ALLOWED_MIME_TYPES:
+        raise HTTPException(status_code=400, detail=f"{upload.filename or 'photo'} has an unsupported MIME type.")
+    return ".jpg" if suffix == ".jpeg" else suffix
+
+
+def _normalized_listing_photo_response(listing: Listing) -> dict:
+    sync_listing_review_state(listing=listing)
+    return {
+        "listing": _serialize_listing_response(listing),
+        "photo_summary": summarize_listing_readiness(
+            listing_images=listing.listing_images,
+            condition_data=listing.condition_data,
+            shipping_profile=listing.shipping_profile,
+            listing={
+                "category_id": listing.category_id,
+                "category_suggestion": listing.category_suggestion,
+                "listing_price": listing.listing_price,
+                "suggested_price": listing.suggested_price,
+            },
+        ),
+    }
+
+
+def _mutate_listing_images(
+    *,
+    listing: Listing,
+    matcher,
+    mutator,
+) -> bool:
+    images = normalize_listing_images(
+        listing_images=listing.listing_images,
+        image_urls=listing.image_urls,
+        source_url=(listing.source_metadata or {}).get("source_image_url") if isinstance(listing.source_metadata, dict) else None,
+        source_page_url=(listing.source_metadata or {}).get("amazon_source_page_url") if isinstance(listing.source_metadata, dict) else None,
+        source_platform=listing.source_type or "upload",
+        default_is_reference=bool(
+            str(listing.source_type or "").strip().lower() in {"amazon_vine", "google_photos_album"}
+            or str((listing.source_metadata or {}).get("source_marketplace") or "").strip()
+        ),
+        approved=str(listing.source_type or "").strip().lower() in {"upload", "storage_batch"},
+    )
+    changed = False
+    next_images: list[dict] = []
+    for image in images:
+        next_image = dict(image)
+        if matcher(next_image):
+            mutator(next_image)
+            changed = True
+        next_images.append(next_image)
+    if changed:
+        listing.listing_images = normalize_listing_images(listing_images=next_images)
+        listing.image_urls = [item["storage_path"] for item in (listing.listing_images or []) if item.get("operator_state") != "rejected"]
+    return changed
 
 
 def _google_photos_watch_settings(user: User | None) -> dict:
@@ -242,6 +428,20 @@ def _import_google_photos_album(
                 title="Google Photos intake draft",
                 description="Generated from monitored Google Photos album intake.",
                 image_urls=[_to_public_image_url(processed)],
+                listing_images=[
+                    {
+                        "storage_path": _to_public_image_url(processed),
+                        "source_url": url,
+                        "source_page_url": str(album_url),
+                        "source_platform": "google_photos",
+                        "role": "primary",
+                        "confidence": 0.86,
+                        "operator_state": "suggested",
+                        "display_order": 0,
+                        "is_reference": False,
+                        "label": "Google Photos intake",
+                    }
+                ],
                 source_type="google_photos_album",
                 source_metadata={
                     "album_url": str(album_url),
@@ -252,6 +452,7 @@ def _import_google_photos_album(
                 needs_review=True,
                 marketplace_data=normalize_marketplace_data({"targets": ["ebay", "facebook"], "crosspost_mode": "approval_required"}),
             )
+            _apply_listing_review_defaults(listing)
             db.add(listing)
             db.flush()
             created_listing_ids.append(listing.id)
@@ -303,9 +504,23 @@ def _create_storage_batch(
             cluster_id=None,
             status=ListingStatus.INGESTED,
             image_urls=[raw_path],
+            listing_images=[
+                {
+                    "storage_path": raw_path,
+                    "source_platform": "upload",
+                    "role": "primary",
+                    "confidence": 1.0,
+                    "operator_state": "approved",
+                    "display_order": 0,
+                    "is_reference": False,
+                    "label": "Batch intake photo",
+                }
+            ],
             raw_photo_path=raw_path,
             storage_unit_name=storage_unit_name,
+            source_type="storage_batch",
         )
+        _apply_listing_review_defaults(listing)
         db.add(listing)
     return batch
 
@@ -468,7 +683,8 @@ def get_listings(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return db.execute(select(Listing).where(Listing.user_id == current_user.id).order_by(Listing.updated_at.desc())).scalars().all()
+    rows = db.execute(select(Listing).where(Listing.user_id == current_user.id).order_by(Listing.updated_at.desc())).scalars().all()
+    return [_serialize_listing_response(listing) for listing in rows]
 
 
 @router.post("/listings/vine/backfill-images")
@@ -618,6 +834,13 @@ def backfill_vine_listing_images(
         gallery_urls = [str(url) for url in (cache.gallery_image_urls_json or []) if str(url).strip()]
         if gallery_urls:
             listing.image_urls = gallery_urls
+            listing.listing_images = normalize_listing_images(
+                image_urls=gallery_urls,
+                source_page_url=item_url,
+                source_platform="amazon",
+                default_is_reference=True,
+                approved=False,
+            )
             source_meta = dict(listing.source_metadata or {})
             source_meta["asin"] = asin
             source_meta["product_name"] = product_name
@@ -642,6 +865,13 @@ def backfill_vine_listing_images(
             continue
         if cache.primary_image_url:
             listing.image_urls = [cache.primary_image_url]
+            listing.listing_images = normalize_listing_images(
+                image_urls=[cache.primary_image_url],
+                source_page_url=item_url,
+                source_platform="amazon",
+                default_is_reference=True,
+                approved=False,
+            )
             source_meta = dict(listing.source_metadata or {})
             source_meta["asin"] = asin
             source_meta["product_name"] = product_name
@@ -655,6 +885,13 @@ def backfill_vine_listing_images(
                 refreshed_gallery = [str(url) for url in (cache.gallery_image_urls_json or []) if str(url).strip()]
                 if refreshed_gallery:
                     listing.image_urls = refreshed_gallery
+                    listing.listing_images = normalize_listing_images(
+                        image_urls=refreshed_gallery,
+                        source_page_url=item_url,
+                        source_platform="amazon",
+                        default_is_reference=True,
+                        approved=False,
+                    )
                     source_meta = dict(listing.source_metadata or {})
                     source_meta["asin"] = asin
                     source_meta["product_name"] = product_name
@@ -664,6 +901,13 @@ def backfill_vine_listing_images(
                     continue
                 if cache.primary_image_url:
                     listing.image_urls = [cache.primary_image_url]
+                    listing.listing_images = normalize_listing_images(
+                        image_urls=[cache.primary_image_url],
+                        source_page_url=item_url,
+                        source_platform="amazon",
+                        default_is_reference=True,
+                        approved=False,
+                    )
                     source_meta = dict(listing.source_metadata or {})
                     source_meta["asin"] = asin
                     source_meta["product_name"] = product_name
@@ -673,6 +917,7 @@ def backfill_vine_listing_images(
                     continue
         if force_refresh:
             listing.image_urls = []
+            listing.listing_images = []
             labels = set(listing.custom_labels or [])
             labels.add("needs_photos")
             listing.custom_labels = sorted(labels)
@@ -706,7 +951,7 @@ def get_listing(
     if not listing:
         raise HTTPException(status_code=404, detail="Listing not found")
     ensure_user_owns_resource(current_user, listing.user_id)
-    return listing
+    return _serialize_listing_response(listing)
 
 
 @router.post("/listings", response_model=ListingResponse)
@@ -719,6 +964,7 @@ def create_listing(
         user_id=current_user.id,
         status=ListingStatus(payload.status) if payload.status else ListingStatus.draft,
         image_urls=payload.image_urls or [],
+        listing_images=payload.listing_images or [],
         raw_photo_path=payload.raw_photo_path,
         storage_unit_name=payload.storage_unit_name,
         title=payload.title,
@@ -739,6 +985,7 @@ def create_listing(
         shipping_cost=payload.shipping_cost,
         sale_price=payload.sale_price,
         condition=payload.condition,
+        condition_data=payload.condition_data or {},
         photo_quality_score=payload.photo_quality_score,
         quantity=payload.quantity or 1,
         platform_quantities=payload.platform_quantities or {},
@@ -746,6 +993,7 @@ def create_listing(
         last_refreshed=payload.last_refreshed,
         source_type=payload.source_type or "manual",
         source_metadata=payload.source_metadata or {},
+        shipping_profile=payload.shipping_profile or {},
         marketplace_data=normalize_marketplace_data(payload.marketplace_data),
         needs_review=payload.needs_review if payload.needs_review is not None else True,
         restricted_review_required=bool(payload.restricted_review_required),
@@ -753,10 +1001,11 @@ def create_listing(
         detected_category_guess=payload.detected_category_guess,
         marketplace_allowed_status=payload.marketplace_allowed_status,
     )
+    _apply_listing_review_defaults(listing)
     db.add(listing)
     db.commit()
     db.refresh(listing)
-    return listing
+    return _serialize_listing_response(listing)
 
 
 @router.patch("/listings/{listing_id}", response_model=ListingResponse)
@@ -780,6 +1029,7 @@ def update_listing(
         setattr(listing, key, value)
     if payload.marketplace_data is not None:
         listing.marketplace_data = normalize_marketplace_data(payload.marketplace_data)
+    _apply_listing_review_defaults(listing)
     try:
         inventory_service.update_listing_inventory(
             listing,
@@ -794,7 +1044,7 @@ def update_listing(
         ProfitService().update_profit_on_sale_event(listing, "ebay")
     db.commit()
     db.refresh(listing)
-    return listing
+    return _serialize_listing_response(listing)
 
 
 @router.post("/listings/{listing_id}/approve", response_model=ListingApprovalResponse)
@@ -905,6 +1155,24 @@ async def process_listing_photo(
         raise HTTPException(status_code=502, detail=f"Background removal failed: {exc}") from exc
 
     listing.image_urls = [*(listing.image_urls or []), saved_path]
+    listing.listing_images = [
+        *(listing.listing_images or []),
+        {
+            "storage_path": saved_path,
+            "source_platform": "upload",
+            "role": "alternate_angle" if (listing.listing_images or listing.image_urls) else "primary",
+            "confidence": 1.0,
+            "operator_state": "approved",
+            "display_order": len(listing.listing_images or []),
+            "is_reference": False,
+            "label": "Edited photo",
+            "metadata": {
+                "filter_name": parsed.filter_name,
+                "remove_background": bool(remove_background),
+            },
+        },
+    ]
+    _apply_listing_review_defaults(listing)
     db.add(listing)
     db.commit()
     db.refresh(listing)
@@ -913,6 +1181,182 @@ async def process_listing_photo(
         image_url=_to_public_image_url(saved_path),
         image_urls=[_to_public_image_url(path) for path in (listing.image_urls or [])],
     )
+
+
+@router.post("/listings/{listing_id}/photos/upload")
+async def upload_listing_photos(
+    listing_id: int,
+    photos: list[UploadFile] = File(...),
+    role: str | None = Form(default=None),
+    note: str | None = Form(default=None),
+    source: str = Form(default="actual_upload"),
+    operator_state: str = Form(default="suggested"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    listing = db.get(Listing, listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    ensure_user_owns_resource(current_user, listing.user_id)
+    if not photos:
+        raise HTTPException(status_code=400, detail="No photos uploaded")
+
+    normalized_state = str(operator_state or "suggested").strip().lower()
+    if normalized_state not in {"suggested", "approved"}:
+        raise HTTPException(status_code=400, detail="operator_state must be suggested or approved")
+
+    normalized_role = str(role or "").strip().lower() or None
+    normalized_source = str(source or "actual_upload").strip().lower() or "actual_upload"
+    storage = LocalStorage()
+    base_images = normalize_listing_images(
+        listing_images=listing.listing_images,
+        image_urls=listing.image_urls,
+        source_url=(listing.source_metadata or {}).get("source_image_url") if isinstance(listing.source_metadata, dict) else None,
+        source_page_url=(listing.source_metadata or {}).get("amazon_source_page_url") if isinstance(listing.source_metadata, dict) else None,
+        source_platform=listing.source_type or "upload",
+        default_is_reference=False,
+        approved=False,
+    )
+    next_images = list(base_images)
+    uploaded_paths: list[str] = []
+    start_order = len(next_images)
+
+    for offset, photo in enumerate(photos):
+        content = await photo.read()
+        suffix = _validate_photo_upload(upload=photo, content=content)
+        saved_path = storage.save_bytes(content, extension=suffix, prefix=f"listing-photos/{listing.user_id}/{listing.id}")
+        uploaded_paths.append(saved_path)
+        next_images.append(
+            {
+                "storage_path": saved_path,
+                "source_platform": normalized_source,
+                "role": normalized_role or ("primary" if not next_images else "alternate_angle"),
+                "confidence": 1.0,
+                "operator_state": normalized_state,
+                "display_order": start_order + offset,
+                "is_reference": False,
+                "label": "Actual item photo upload",
+                "metadata": {
+                    "original_filename": str(photo.filename or "").strip() or None,
+                    "content_type": str(photo.content_type or "").strip() or None,
+                    "note": str(note or "").strip() or None,
+                },
+            }
+        )
+
+    listing.listing_images = normalize_listing_images(listing_images=next_images)
+    listing.image_urls = [item["storage_path"] for item in (listing.listing_images or []) if item.get("operator_state") != "rejected"]
+    db.add(listing)
+    db.commit()
+    db.refresh(listing)
+    response = _normalized_listing_photo_response(listing)
+    response["uploaded_paths"] = [_to_public_image_url(path) for path in uploaded_paths]
+    return response
+
+
+@router.post("/listings/{listing_id}/photos/approve")
+def approve_listing_photos(
+    listing_id: int,
+    payload: ListingPhotoActionRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    listing = db.get(Listing, listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    ensure_user_owns_resource(current_user, listing.user_id)
+    target_paths = {str(path).strip() for path in (payload.storage_paths or []) if str(path).strip()}
+    if not target_paths:
+        raise HTTPException(status_code=400, detail="No photo storage paths provided")
+
+    changed = _mutate_listing_images(
+        listing=listing,
+        matcher=lambda image: str(image.get("storage_path") or "").strip() in target_paths,
+        mutator=lambda image: image.update({
+            "operator_state": "approved",
+            "operator_approved": True,
+            "operator_rejected": False,
+            "is_reference": False,
+        }),
+    )
+    if not changed:
+        raise HTTPException(status_code=404, detail="No matching listing photos found")
+    db.add(listing)
+    db.commit()
+    db.refresh(listing)
+    return _normalized_listing_photo_response(listing)
+
+
+@router.post("/listings/{listing_id}/photos/reject")
+def reject_listing_photos(
+    listing_id: int,
+    payload: ListingPhotoActionRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    listing = db.get(Listing, listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    ensure_user_owns_resource(current_user, listing.user_id)
+    target_paths = {str(path).strip() for path in (payload.storage_paths or []) if str(path).strip()}
+    if not target_paths:
+        raise HTTPException(status_code=400, detail="No photo storage paths provided")
+
+    changed = _mutate_listing_images(
+        listing=listing,
+        matcher=lambda image: str(image.get("storage_path") or "").strip() in target_paths,
+        mutator=lambda image: image.update({
+            "operator_state": "rejected",
+            "operator_approved": False,
+            "operator_rejected": True,
+        }),
+    )
+    if not changed:
+        raise HTTPException(status_code=404, detail="No matching listing photos found")
+    db.add(listing)
+    db.commit()
+    db.refresh(listing)
+    return _normalized_listing_photo_response(listing)
+
+
+@router.post("/listings/{listing_id}/photos/set-primary")
+def set_listing_photo_primary(
+    listing_id: int,
+    payload: ListingPhotoSetPrimaryRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    listing = db.get(Listing, listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    ensure_user_owns_resource(current_user, listing.user_id)
+    target = str(payload.storage_path or "").strip()
+    if not target:
+        raise HTTPException(status_code=400, detail="storage_path is required")
+
+    images = normalize_listing_images(
+        listing_images=listing.listing_images,
+        image_urls=listing.image_urls,
+        source_url=(listing.source_metadata or {}).get("source_image_url") if isinstance(listing.source_metadata, dict) else None,
+        source_page_url=(listing.source_metadata or {}).get("amazon_source_page_url") if isinstance(listing.source_metadata, dict) else None,
+        source_platform=listing.source_type or "upload",
+        default_is_reference=bool(
+            str(listing.source_type or "").strip().lower() in {"amazon_vine", "google_photos_album"}
+            or str((listing.source_metadata or {}).get("source_marketplace") or "").strip()
+        ),
+        approved=str(listing.source_type or "").strip().lower() in {"upload", "storage_batch"},
+    )
+    matched = any(str(image.get("storage_path") or "").strip() == target for image in images)
+    if not matched:
+        raise HTTPException(status_code=404, detail="No matching listing photo found")
+    reordered = [image for image in images if str(image.get("storage_path") or "").strip() == target]
+    reordered.extend(image for image in images if str(image.get("storage_path") or "").strip() != target)
+    listing.listing_images = normalize_listing_images(listing_images=reordered)
+    listing.image_urls = [item["storage_path"] for item in (listing.listing_images or []) if item.get("operator_state") != "rejected"]
+    db.add(listing)
+    db.commit()
+    db.refresh(listing)
+    return _normalized_listing_photo_response(listing)
 
 
 @router.post("/ingest/photos")
@@ -942,9 +1386,23 @@ async def ingest_photos(
             cluster_id=None,
             status=ListingStatus.INGESTED,
             image_urls=[raw_path],
+            listing_images=[
+                {
+                    "storage_path": raw_path,
+                    "source_platform": "upload",
+                    "role": "primary",
+                    "confidence": 1.0,
+                    "operator_state": "approved",
+                    "display_order": 0,
+                    "is_reference": False,
+                    "label": "Loose upload",
+                }
+            ],
             raw_photo_path=raw_path,
             storage_unit_name=storage_unit_name,
+            source_type="upload",
         )
+        _apply_listing_review_defaults(listing)
         db.add(listing)
         db.flush()
         listing_ids.append(listing.id)
@@ -1224,9 +1682,10 @@ def generate_listing(
     listing.source_metadata = source_metadata
     listing.needs_review = True
     listing.status = "ready"
+    _apply_listing_review_defaults(listing)
     db.commit()
     db.refresh(listing)
-    return listing
+    return _serialize_listing_response(listing)
 
 
 @router.get("/listings/{listing_id}/intelligence")
@@ -1246,6 +1705,17 @@ def get_listing_intelligence(
 
     intelligence = (listing.source_metadata or {}).get("listing_intelligence") or {}
     draft_meta = (listing.marketplace_data or {}).get("ai_draft") or {}
+    readiness_summary = summarize_listing_readiness(
+        listing_images=listing.listing_images,
+        condition_data=listing.condition_data,
+        shipping_profile=listing.shipping_profile,
+        listing={
+            "category_id": listing.category_id,
+            "category_suggestion": listing.category_suggestion,
+            "listing_price": listing.listing_price,
+            "suggested_price": listing.suggested_price,
+        },
+    )
     readiness = {
         "needs_review": bool(listing.needs_review or listing.restricted_review_required),
         "missing_information_count": len(intelligence.get("missing_information") or []),
@@ -1254,7 +1724,10 @@ def get_listing_intelligence(
             and not listing.restricted_review_required
             and bool(listing.title)
             and bool(listing.description)
+            and not readiness_summary.get("blocked_for_publish")
         ),
+        "review_summary": readiness_summary,
+        "quality_summary": compute_listing_quality_summary(listing, pricing_analysis=pricing_analysis),
     }
 
     return {

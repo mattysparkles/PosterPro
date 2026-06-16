@@ -38,6 +38,10 @@ celery_app.conf.update(
             "task": "poll_for_sales",
             "schedule": crontab(minute="*/15"),
         },
+        "sync-ebay-active-listings-twice-daily": {
+            "task": "sync_ebay_active_listings",
+            "schedule": crontab(minute=0, hour="6,18"),
+        },
         "flag-stale-listings-daily": {
             "task": "flag_stale_listings",
             "schedule": crontab(minute=5, hour=0),

@@ -41,12 +41,12 @@ export function useEbayPublish() {
     return () => clearInterval(timer);
   }, [tracking]);
 
-  const publish = async (listingId) => {
+  const publish = async (listingId, extra = {}) => {
     setPublishing((prev) => ({ ...prev, [listingId]: true }));
     setErrors((prev) => ({ ...prev, [listingId]: '' }));
     setSuccess((prev) => ({ ...prev, [listingId]: '' }));
     try {
-      const result = await publishListingEbay(listingId);
+      const result = await publishListingEbay(listingId, extra);
       if (result.status === 'POSTED') {
         setPublishing((prev) => ({ ...prev, [listingId]: false }));
         setSuccess((prev) => ({ ...prev, [listingId]: result.ebay_url || '' }));

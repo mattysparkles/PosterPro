@@ -15,7 +15,9 @@ from app.api.schemas import VineImportActionRequest
 from app.api.vine_imports import create_vine_drafts, create_vine_inventory, list_vine_batches, upload_vine_report
 from app.models.models import Image, Listing, ProductMediaCache, User, VineImportItem
 from app.services.amazon_media import AmazonProductMediaProvider
-from app.services.vine_import_service import VineImportService
+from app.services.amazon_product_discovery import AmazonProductDiscoveryService
+from app.services.listing_review import normalize_listing_images
+from app.services.vine_import_service import VineImportService, _is_unsafe_vine_image
 from app.services.vine_parser import calculate_vine_eligibility, parse_vine_csv, parse_vine_pdf, parse_vine_xlsx
 from app.services.vine_policy import review_vine_product
 
@@ -273,7 +275,10 @@ def test_media_fetch_failure_does_not_fail_import(monkeypatch, db_session):
         reference_date=date(2026, 5, 5),
     )
 
-    monkeypatch.setattr("app.services.amazon_media.AmazonProductMediaProvider.lookup_by_asin", lambda self, asin: {"status": "blocked", "local_asset_ids": []})
+    monkeypatch.setattr(
+        "app.services.amazon_media.AmazonProductMediaProvider.lookup_by_asin",
+        lambda self, asin, **kwargs: {"status": "blocked", "local_asset_ids": []},
+    )
     result = VineImportService().fetch_media(
         db_session,
         batch=batch,
@@ -304,7 +309,7 @@ def test_amazon_media_provider_uses_owner_user_and_region(monkeypatch, db_sessio
 
     class FakeResponse:
         status_code = 200
-        text = '<meta property="og:image" content="https://images.example.com/primary.jpg" />'
+        text = '<meta property="og:image" content="https://m.media-amazon.com/images/I/primary.jpg" />'
 
     class FakeClient:
         def __init__(self, *args, **kwargs):
@@ -320,7 +325,11 @@ def test_amazon_media_provider_uses_owner_user_and_region(monkeypatch, db_sessio
             return FakeResponse()
 
     monkeypatch.setattr("app.services.amazon_media.httpx.Client", FakeClient)
-    monkeypatch.setattr(provider.storage, "save_from_url", lambda url, prefix="amazon-vine": f"/tmp/storage/{prefix}/cached.jpg")
+    monkeypatch.setattr(
+        provider.storage,
+        "save_from_url",
+        lambda url, prefix="amazon-vine", suggested_basename=None: f"/tmp/storage/{prefix}/cached.jpg",
+    )
 
     result = provider._lookup_from_product_page("B000TEST01")
     images = db_session.query(Image).filter(Image.user_id == user.id).all()
@@ -553,10 +562,11 @@ def test_fetch_media_with_lookup_disabled_sets_manual_only_and_drafts_mark_needs
         require_media_for_asin=True,
         allow_drafts_without_media=False,
     )
-    assert drafts["created"] >= 1
+    assert drafts["created"] == 0
+    assert drafts["skipped"] >= 1
     created_listings = db_session.query(Listing).filter(Listing.user_id == user.id, Listing.source_type == "amazon_vine").all()
     assert created_listings
-    assert any("needs_photos" in (listing.custom_labels or []) for listing in created_listings)
+    assert all("needs_photos" in (listing.custom_labels or []) for listing in created_listings)
 
 
 def test_create_listing_drafts_attaches_cached_amazon_images_and_is_idempotent(db_session):
@@ -622,6 +632,297 @@ def test_create_listing_drafts_attaches_cached_amazon_images_and_is_idempotent(d
     assert second["created"] == 0
 
 
+def test_create_listing_drafts_uses_amazon_discovery_for_images_and_description(monkeypatch, db_session):
+    user = User(email=f"vine-no-fallback-{uuid4()}@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    service = VineImportService()
+    batch = service.create_batch_from_upload(
+        db_session,
+        current_user=user,
+        filename="vine.xlsx",
+        file_bytes=build_sample_xlsx(),
+        reference_date=date(2026, 5, 5),
+    )
+    eligible_item = db_session.query(VineImportItem).filter(VineImportItem.batch_id == batch.id, VineImportItem.eligibility_status == "eligible").first()
+    assert eligible_item is not None
+    service.create_inventory_records(db_session, batch=batch, item_ids=[eligible_item.id], include_locked=True)
+
+    def _fake_discover_for_vine_item(*args, **kwargs):  # noqa: ARG001
+        return {
+            "status": "matched",
+            "confidence": "high",
+            "asin": eligible_item.asin,
+            "title": "Desk Lamp",
+            "source_page_url": f"https://www.amazon.com/dp/{eligible_item.asin}",
+            "images": ["/media/amazon-vine/good.jpg"],
+            "local_asset_ids": [],
+            "image_status": "fetched",
+            "description": "Amazon page description with useful product details.",
+        }
+
+    monkeypatch.setattr("app.services.amazon_product_discovery.AmazonProductDiscoveryService.discover_for_vine_item", _fake_discover_for_vine_item)
+
+    result = service.create_listing_drafts(
+        db_session,
+        batch=batch,
+        item_ids=[eligible_item.id],
+        fetch_media_first=False,
+        allow_drafts_without_media=True,
+    )
+    assert result["created"] == 1
+    listing = db_session.query(Listing).filter(Listing.user_id == user.id, Listing.source_type == "amazon_vine", Listing.id == eligible_item.listing_id).one()
+    assert listing.image_urls == ["/media/amazon-vine/good.jpg"]
+    assert "vine" not in (listing.description or "").lower()
+    assert listing.condition == "New"
+
+
+def test_repair_vine_listing_images_replaces_unsafe_sources_with_amazon_cache(db_session):
+    user = User(email=f"vine-repair-{uuid4()}@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    service = VineImportService()
+    batch = service.create_batch_from_upload(
+        db_session,
+        current_user=user,
+        filename="vine.xlsx",
+        file_bytes=build_sample_xlsx(),
+        reference_date=date(2026, 5, 5),
+    )
+    eligible_item = db_session.query(VineImportItem).filter(VineImportItem.batch_id == batch.id, VineImportItem.eligibility_status == "eligible").first()
+    assert eligible_item is not None
+    service.create_inventory_records(db_session, batch=batch, item_ids=[eligible_item.id], include_locked=True)
+    service.create_listing_drafts(db_session, batch=batch, item_ids=[eligible_item.id], allow_drafts_without_media=True)
+
+    listing = db_session.query(Listing).filter(Listing.user_id == user.id, Listing.source_type == "amazon_vine", Listing.id == eligible_item.listing_id).one()
+    listing.listing_images = normalize_listing_images(
+        listing_images=[
+            {
+                "storage_path": "/media/vine-search-auto/bad.jpg",
+                "source_url": "https://example.invalid/bad.jpg",
+                "source_platform": "amazon",
+                "operator_state": "suggested",
+                "is_reference": True,
+            }
+        ],
+        approved=False,
+        default_is_reference=True,
+        source_platform="amazon",
+    )
+    listing.image_urls = ["/media/vine-search-auto/bad.jpg"]
+    cache = db_session.query(ProductMediaCache).filter(ProductMediaCache.asin == eligible_item.asin).first()
+    if cache is None:
+        cache = ProductMediaCache(
+            asin=eligible_item.asin,
+            marketplace_region=settings.amazon_marketplace_region.upper(),
+        )
+    cache.fetch_status = "fetched"
+    cache.source_provider = "page_metadata"
+    cache.primary_image_url = "/media/amazon-vine/good.jpg"
+    cache.gallery_image_urls_json = ["/media/amazon-vine/good.jpg", "/media/amazon-vine/second.jpg"]
+    cache.local_asset_ids_json = []
+    db_session.add(cache)
+    db_session.commit()
+
+    result = service.repair_vine_listing_images(
+        db_session,
+        user_id=user.id,
+        listing_ids=[listing.id],
+        include_archived=False,
+        force_refresh=True,
+        use_bridge_session=False,
+    )
+    refreshed = db_session.get(Listing, listing.id)
+    assert refreshed is not None
+    assert result["updated"] == 1
+    assert all("vine-search" not in str(image.get("storage_path") or "") for image in (refreshed.listing_images or []))
+    assert refreshed.image_urls and refreshed.image_urls[0] == "/media/amazon-vine/good.jpg"
+    assert "vine" not in (refreshed.description or "").lower()
+    assert refreshed.condition == "New"
+
+
+def test_discover_for_vine_item_allows_title_search(db_session, monkeypatch):
+    provider = AmazonProductMediaProvider(db_session, owner_user_id=None)
+    service = AmazonProductDiscoveryService(provider)
+
+    html = """
+    <html>
+      <body>
+        <div data-asin="B000BAD000">
+          <span class="a-size-medium a-color-base a-text-normal">Completely Different Item</span>
+        </div>
+        <div data-asin="B000GOOD01">
+          <span class="a-size-medium a-color-base a-text-normal">Desk Lamp LED Table Light</span>
+        </div>
+      </body>
+    </html>
+    """
+
+    class FakeResponse:
+        status_code = 200
+        text = html
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url):
+            return FakeResponse()
+
+    lookup_calls = {"asin": None}
+
+    def _fake_lookup_by_asin(self, asin, **kwargs):  # noqa: ARG001
+        lookup_calls["asin"] = asin
+        return {
+            "status": "fetched",
+            "primary_image_url": "/media/amazon-vine/good.jpg",
+            "gallery_image_urls": ["/media/amazon-vine/good.jpg"],
+            "local_asset_ids": [1],
+            "description": None,
+        }
+
+    monkeypatch.setattr("app.services.amazon_product_discovery.httpx.Client", FakeClient)
+    monkeypatch.setattr("app.services.amazon_media.AmazonProductMediaProvider.lookup_by_asin", _fake_lookup_by_asin)
+    monkeypatch.setattr("app.services.amazon_media.AmazonProductMediaProvider.fetch_product_page_description", lambda self, asin, title_hint=None: "Title search description")
+
+    result = service.discover_for_vine_item(asin=None, product_name="Desk Lamp", manual_url=None)
+    assert result["asin"] == "B000GOOD01"
+    assert lookup_calls["asin"] == "B000GOOD01"
+    assert result["description"] == "Title search description"
+    assert result["images"] == ["/media/amazon-vine/good.jpg"]
+
+
+def test_discover_for_vine_item_falls_back_to_title_search_when_asin_page_has_no_images(monkeypatch, db_session):
+    provider = AmazonProductMediaProvider(db_session, owner_user_id=None)
+    service = AmazonProductDiscoveryService(provider)
+
+    monkeypatch.setattr(
+        "app.services.amazon_media.AmazonProductMediaProvider.lookup_by_asin",
+        lambda self, asin, **kwargs: {
+            "status": "blocked",
+            "primary_image_url": None,
+            "gallery_image_urls": [],
+            "local_asset_ids": [],
+            "description": None,
+        },
+    )
+    monkeypatch.setattr(
+        "app.services.amazon_media.AmazonProductMediaProvider.fetch_product_page_description",
+        lambda self, asin, title_hint=None: None,
+    )
+
+    html = """
+    <html>
+      <body>
+        <div data-asin="B000BAD000">
+          <span class="a-size-medium a-color-base a-text-normal">Wrong Match Item</span>
+        </div>
+        <div data-asin="B000GOOD02">
+          <span class="a-size-medium a-color-base a-text-normal">Desk Lamp LED Table Light</span>
+        </div>
+      </body>
+    </html>
+    """
+
+    class FakeResponse:
+        status_code = 200
+        text = html
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url):
+            return FakeResponse()
+
+    monkeypatch.setattr("app.services.amazon_product_discovery.httpx.Client", FakeClient)
+    monkeypatch.setattr("app.services.amazon_media.AmazonProductMediaProvider.lookup_by_asin", lambda self, asin, **kwargs: {
+        "status": "blocked" if asin == "B000ASIN01" else "fetched",
+        "primary_image_url": None if asin == "B000ASIN01" else "/media/amazon-vine/fallback.jpg",
+        "gallery_image_urls": [] if asin == "B000ASIN01" else ["/media/amazon-vine/fallback.jpg"],
+        "local_asset_ids": [],
+        "description": None,
+    })
+    monkeypatch.setattr("app.services.amazon_media.AmazonProductMediaProvider.fetch_product_page_description", lambda self, asin, title_hint=None: "Title search description")
+
+    result = service.discover_for_item(asin="B000ASIN01", product_name="Desk Lamp", manual_url=None, allow_title_search=True)
+    assert result["asin"] == "B000GOOD02"
+    assert result["images"] == ["/media/amazon-vine/fallback.jpg"] or result["images"] == ["/media/amazon-vine/good.jpg"]
+
+
+def test_create_listing_drafts_resolves_title_only_rows_via_search(monkeypatch, db_session):
+    user = User(email=f"vine-title-only-{uuid4()}@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    service = VineImportService()
+    batch = service.create_batch_from_upload(
+        db_session,
+        current_user=user,
+        filename="vine.xlsx",
+        file_bytes=build_sample_xlsx(),
+        reference_date=date(2026, 5, 5),
+    )
+    item = db_session.query(VineImportItem).filter(VineImportItem.batch_id == batch.id, VineImportItem.eligibility_status == "eligible").first()
+    assert item is not None
+    item.asin = None
+    db_session.add(item)
+    db_session.commit()
+
+    def _fake_discover_for_vine_item(*args, **kwargs):  # noqa: ARG001
+        return {
+            "status": "matched",
+            "confidence": "high",
+            "asin": "B000TITLE1",
+            "title": "Desk Lamp",
+            "source_page_url": "https://www.amazon.com/dp/B000TITLE1",
+            "images": ["/media/amazon-vine/title-match.jpg"],
+            "local_asset_ids": [],
+            "image_status": "fetched",
+            "description": "Amazon page description with useful product details.",
+        }
+
+    monkeypatch.setattr("app.services.amazon_product_discovery.AmazonProductDiscoveryService.discover_for_vine_item", _fake_discover_for_vine_item)
+
+    result = service.create_listing_drafts(
+        db_session,
+        batch=batch,
+        item_ids=[item.id],
+        fetch_media_first=False,
+        allow_drafts_without_media=True,
+    )
+    assert result["created"] == 1
+    refreshed_item = db_session.get(VineImportItem, item.id)
+    assert refreshed_item is not None
+    assert refreshed_item.asin == "B000TITLE1"
+    listing = db_session.query(Listing).filter(Listing.user_id == user.id, Listing.source_type == "amazon_vine").first()
+    assert listing is not None
+    assert listing.image_urls == ["/media/amazon-vine/title-match.jpg"]
+    assert "vine" not in (listing.description or "").lower()
+    assert listing.condition == "New"
+
+
+def test_is_unsafe_vine_image_flags_vine_search_last():
+    assert _is_unsafe_vine_image({"storage_path": "storage/vine-search-last/example.jpg"})
+
+
 def test_fetch_media_handles_missing_asin_gracefully(db_session):
     user = User(email=f"vine-missing-asin-{uuid4()}@example.com", role="owner", is_admin=True)
     db_session.add(user)
@@ -653,7 +954,7 @@ def test_fetch_media_handles_missing_asin_gracefully(db_session):
     result = service.fetch_media(db_session, batch=batch, item_ids=[item.id])
     assert result["blocked"] == 0
     refreshed = db_session.query(VineImportItem).filter(VineImportItem.id == item.id).one()
-    assert refreshed.media_status in {"search_failed", "no_search_match", "missing_identifiers"}
+    assert refreshed.media_status in {"search_failed", "no_search_match", "missing_identifiers", "search_http_error"}
 
 
 def test_vine_duplicate_import_reuses_existing_listing(db_session):
@@ -688,6 +989,50 @@ def test_vine_duplicate_import_reuses_existing_listing(db_session):
     assert item_b.listing_id is not None
     created = db_session.query(Listing).filter(Listing.user_id == user.id, Listing.source_type == "amazon_vine").all()
     assert len(created) == 1
+
+
+def test_vine_duplicate_import_rows_are_skipped_until_prior_listing_exists(db_session):
+    service = VineImportService()
+    user = User(email=f"vine-dup-skip-{uuid4()}@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    batch_a = service.create_batch_from_upload(
+        db_session,
+        current_user=user,
+        filename="vine.csv",
+        file_bytes=build_sample_csv(),
+        reference_date=date(2026, 5, 5),
+    )
+    item_a = db_session.query(VineImportItem).filter(VineImportItem.batch_id == batch_a.id).first()
+    assert item_a is not None
+
+    batch_b = service.create_batch_from_upload(
+        db_session,
+        current_user=user,
+        filename="vine.csv",
+        file_bytes=build_sample_csv(),
+        reference_date=date(2026, 5, 5),
+    )
+    item_b = db_session.query(VineImportItem).filter(VineImportItem.batch_id == batch_b.id).first()
+    assert item_b is not None
+    assert any(
+        str(warning).lower().startswith("duplicate of prior vine import row") for warning in (item_b.parse_warnings_json or [])
+    )
+
+    result = service.create_listing_drafts(
+        db_session,
+        batch=batch_b,
+        item_ids=[item_b.id],
+        fetch_media_first=False,
+        allow_drafts_without_media=True,
+    )
+    assert result["created"] == 0
+    assert result["skipped"] == 1
+    db_session.refresh(item_b)
+    assert item_b.listing_id is None
+    assert batch_b.stats_json and batch_b.stats_json.get("rows_duplicate") == 1
 
 
 def test_upload_vine_report_returns_400_for_unexpected_parse_errors(monkeypatch, db_session):

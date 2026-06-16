@@ -121,6 +121,36 @@ _DEFAULT_SOLD_SYNC_PREFERENCES = {
     "out_of_stock_delist_everywhere": False,
     "remove_media_on_sold_out": False,
 }
+_DEFAULT_EBAY_POLICY_SETTINGS = {
+    "fulfillment_policy_id": "",
+    "fulfillment_policy_name": "",
+    "payment_policy_id": "",
+    "payment_policy_name": "",
+    "return_policy_id": "",
+    "return_policy_name": "",
+    "merchant_location_key": "",
+    "merchant_location_verified": False,
+    "merchant_location_status": "unverified",
+    "merchant_location_last_checked_at": "",
+    "merchant_location_error": "",
+    "merchant_location_location_name": "PosterPro Default Location",
+    "merchant_location_postal_code": "95125",
+    "merchant_location_country": "US",
+    "merchant_location_city": "San Jose",
+    "merchant_location_state_or_province": "CA",
+    "merchant_location_phone": "",
+    "shipping_service_code": "USPSGroundAdvantage",
+    "handling_time_days": 1,
+    "local_pickup_allowed": False,
+    "calculated_shipping": False,
+    "package_weight_required": True,
+    "package_dimensions_required": True,
+    "marketplace_id": "EBAY_US",
+    "last_policy_sync_at": "",
+    "policy_sync_status": "uninitialized",
+    "policy_sync_error": "",
+    "policy_candidates": {},
+}
 
 
 def _utcnow() -> datetime:
@@ -202,6 +232,53 @@ def _sold_sync_preferences(user: User | None) -> dict:
     }
 
 
+def _ebay_marketplace_policy_settings(user: User | None) -> dict:
+    if not user:
+        return dict(_DEFAULT_EBAY_POLICY_SETTINGS)
+    settings_json = user.settings_json or {}
+    raw = settings_json.get("ebay_marketplace_policy_settings")
+    stored = raw if isinstance(raw, dict) else {}
+    return {
+        "fulfillment_policy_id": str(stored.get("fulfillment_policy_id") or "").strip(),
+        "fulfillment_policy_name": str(stored.get("fulfillment_policy_name") or "").strip(),
+        "payment_policy_id": str(stored.get("payment_policy_id") or "").strip(),
+        "payment_policy_name": str(stored.get("payment_policy_name") or "").strip(),
+        "return_policy_id": str(stored.get("return_policy_id") or "").strip(),
+        "return_policy_name": str(stored.get("return_policy_name") or "").strip(),
+        "merchant_location_key": str(stored.get("merchant_location_key") or "").strip(),
+        "merchant_location_verified": bool(stored.get("merchant_location_verified")),
+        "merchant_location_status": str(stored.get("merchant_location_status") or "unverified").strip(),
+        "merchant_location_last_checked_at": str(stored.get("merchant_location_last_checked_at") or "").strip(),
+        "merchant_location_error": str(stored.get("merchant_location_error") or "").strip(),
+        "merchant_location_location_name": str(stored.get("merchant_location_location_name") or "PosterPro Default Location").strip(),
+        "merchant_location_postal_code": str(stored.get("merchant_location_postal_code") or "95125").strip(),
+        "merchant_location_country": str(stored.get("merchant_location_country") or "US").strip(),
+        "merchant_location_city": str(stored.get("merchant_location_city") or "San Jose").strip(),
+        "merchant_location_state_or_province": str(stored.get("merchant_location_state_or_province") or "CA").strip(),
+        "merchant_location_phone": str(stored.get("merchant_location_phone") or "").strip(),
+        "shipping_service_code": str(stored.get("shipping_service_code") or _DEFAULT_EBAY_POLICY_SETTINGS["shipping_service_code"]).strip(),
+        "handling_time_days": int(stored.get("handling_time_days") or _DEFAULT_EBAY_POLICY_SETTINGS["handling_time_days"]),
+        "local_pickup_allowed": bool(stored.get("local_pickup_allowed", _DEFAULT_EBAY_POLICY_SETTINGS["local_pickup_allowed"])),
+        "calculated_shipping": bool(stored.get("calculated_shipping", _DEFAULT_EBAY_POLICY_SETTINGS["calculated_shipping"])),
+        "package_weight_required": bool(stored.get("package_weight_required", _DEFAULT_EBAY_POLICY_SETTINGS["package_weight_required"])),
+        "package_dimensions_required": bool(stored.get("package_dimensions_required", _DEFAULT_EBAY_POLICY_SETTINGS["package_dimensions_required"])),
+        "marketplace_id": str(stored.get("marketplace_id") or "EBAY_US").strip() or "EBAY_US",
+        "last_policy_sync_at": str(stored.get("last_policy_sync_at") or "").strip(),
+        "policy_sync_status": str(stored.get("policy_sync_status") or "uninitialized").strip(),
+        "policy_sync_error": str(stored.get("policy_sync_error") or "").strip(),
+        "policy_candidates": stored.get("policy_candidates") if isinstance(stored.get("policy_candidates"), dict) else {},
+    }
+
+
+def _persist_ebay_marketplace_policy_settings(user: User, updates: dict) -> None:
+    settings_json = dict(user.settings_json or {})
+    current = _ebay_marketplace_policy_settings(user)
+    current.update({key: value for key, value in updates.items() if value is not None})
+    current["handling_time_days"] = max(1, int(current.get("handling_time_days") or 1))
+    settings_json["ebay_marketplace_policy_settings"] = current
+    user.settings_json = settings_json
+
+
 def _persist_sold_sync_preferences(user: User, updates: dict) -> None:
     settings_json = dict(user.settings_json or {})
     current = _sold_sync_preferences(user)
@@ -223,6 +300,7 @@ def _serialize_user(user: User) -> dict:
         "workflow_preferences": _workflow_preferences(user),
         "vine_enforce_six_month_lock": bool(_vine_preferences(user).get("enforce_six_month_lock", True)),
         "sold_sync_preferences": _sold_sync_preferences(user),
+        "ebay_marketplace_policy_settings": _ebay_marketplace_policy_settings(user),
     }
 
 
@@ -270,6 +348,7 @@ def _build_settings_panel_response(current_user: User, *, ebay_account: Marketpl
         },
         "workflow": _workflow_preferences(current_user),
         "sold_sync_preferences": _sold_sync_preferences(current_user),
+        "ebay_marketplace_policy_settings": _ebay_marketplace_policy_settings(current_user),
         "ebay": {
             "client_id_configured": bool(settings.ebay_client_id),
             "client_secret_configured": bool(settings.ebay_client_secret),
@@ -284,9 +363,16 @@ def _build_settings_panel_response(current_user: User, *, ebay_account: Marketpl
             "import_ready": ebay_health["import_ready"],
             "reconnect_required": ebay_health["reconnect_required"],
             "status_note": ebay_health["status_note"],
+            "policy_sync_status": _ebay_marketplace_policy_settings(current_user).get("policy_sync_status"),
+            "policy_sync_error": _ebay_marketplace_policy_settings(current_user).get("policy_sync_error"),
+            "merchant_location_verified": _ebay_marketplace_policy_settings(current_user).get("merchant_location_verified"),
+            "merchant_location_status": _ebay_marketplace_policy_settings(current_user).get("merchant_location_status"),
+            "merchant_location_last_checked_at": _ebay_marketplace_policy_settings(current_user).get("merchant_location_last_checked_at"),
+            "merchant_location_error": _ebay_marketplace_policy_settings(current_user).get("merchant_location_error"),
             "privacy_policy_url": page_urls["privacy_policy_url"],
             "auth_accepted_url": page_urls["auth_accepted_url"],
             "auth_declined_url": page_urls["auth_declined_url"],
+            "policy_settings": _ebay_marketplace_policy_settings(current_user),
         },
         "api_keys": {
             "openai_configured": bool(settings.openai_api_key),
@@ -411,6 +497,11 @@ def update_me(
         sold_sync_updates["remove_media_on_sold_out"] = bool(payload.remove_media_on_sold_out)
     if sold_sync_updates:
         _persist_sold_sync_preferences(current_user, sold_sync_updates)
+    if payload.ebay_marketplace_policy_settings is not None:
+        _persist_ebay_marketplace_policy_settings(
+            current_user,
+            payload.ebay_marketplace_policy_settings,
+        )
     db.add(current_user)
     db.commit()
     db.refresh(current_user)

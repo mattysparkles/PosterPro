@@ -32,12 +32,17 @@ import {
   fetchMarketplaceImportJob,
   fetchAccountSetupSummary,
   fetchBridgeAccounts,
+  fetchEbayAccountReadiness,
+  fetchEbayPolicies,
   fetchSaleDetectionSettings,
   fetchSettingsPanels,
   importHostedPageTheme,
   importEbayTokens,
   publishHostedPages,
   runAutomationBridgeSmokeTest,
+  syncEbayPolicySettings,
+  createEbayMerchantLocation,
+  verifyEbayMerchantLocation,
   toggleAutonomousMode,
   updateBridgeAccountSession,
   updateCurrentUser,
@@ -73,11 +78,12 @@ export default function SettingsPage() {
   const router = useRouter();
   const { user, refreshUser, changePassword, setViewAsRegular } = useAuth();
   const { autonomousConfig, reload: reloadDashboard } = useDashboardData(user?.id);
-  const { loading: connectingEbay, error: ebayConnectError, connect: connectEbay } = useEbayAuth(user?.id);
   const { activeThemeId, activeTheme, setThemeId } = useAdminTheme();
   const [activeTab, setActiveTab] = useState('overview');
   const [setupSummary, setSetupSummary] = useState(null);
   const [settingsPanels, setSettingsPanels] = useState(null);
+  const ebayAuthRedirectUri = settingsPanels?.ebay?.runame || settingsPanels?.ebay?.redirect_uri;
+  const { loading: connectingEbay, error: ebayConnectError, connect: connectEbay } = useEbayAuth(user?.id, ebayAuthRedirectUri);
   const [salePlatforms, setSalePlatforms] = useState([]);
   const [profileName, setProfileName] = useState('');
   const [loading, setLoading] = useState(true);
@@ -88,6 +94,7 @@ export default function SettingsPage() {
   const [testingBridge, setTestingBridge] = useState(false);
   const [bridgeSmokeResult, setBridgeSmokeResult] = useState(null);
   const [bridgeAccounts, setBridgeAccounts] = useState([]);
+  const [ebayAccountReadiness, setEbayAccountReadiness] = useState(null);
   const [bridgeAccountForm, setBridgeAccountForm] = useState({
     marketplace: 'facebook',
     account_key: '',
@@ -149,6 +156,31 @@ export default function SettingsPage() {
     expires_in_seconds: 7200,
     external_account_id: '',
   });
+  const [ebayPolicyForm, setEbayPolicyForm] = useState({
+    fulfillment_policy_id: '',
+    fulfillment_policy_name: '',
+    payment_policy_id: '',
+    payment_policy_name: '',
+    return_policy_id: '',
+    return_policy_name: '',
+    merchant_location_key: '',
+    merchant_location_location_name: 'PosterPro Default Location',
+    merchant_location_postal_code: '95125',
+    merchant_location_country: 'US',
+    merchant_location_city: 'San Jose',
+    merchant_location_state_or_province: 'CA',
+    merchant_location_phone: '',
+    shipping_service_code: '',
+    handling_time_days: 1,
+    local_pickup_allowed: false,
+    calculated_shipping: false,
+    package_weight_required: true,
+    package_dimensions_required: true,
+  });
+  const [ebayPolicyCatalog, setEbayPolicyCatalog] = useState(null);
+  const [syncingEbayPolicies, setSyncingEbayPolicies] = useState(false);
+  const [verifyingEbayLocation, setVerifyingEbayLocation] = useState(false);
+  const [creatingEbayLocation, setCreatingEbayLocation] = useState(false);
   const [apiKeyForm, setApiKeyForm] = useState({ openai_api_key: '', photoroom_api_key: '' });
   const [workflowForm, setWorkflowForm] = useState({
     review_before_publish: true,
@@ -259,15 +291,42 @@ export default function SettingsPage() {
         fetchSettingsPanels(),
         fetchBridgeAccounts().catch(() => ({ accounts: [] })),
       ]);
+      const [ebayReadiness, ebayPolicies] = await Promise.all([
+        fetchEbayAccountReadiness().catch(() => null),
+        fetchEbayPolicies().catch(() => null),
+      ]);
       setSetupSummary(summary);
       setSalePlatforms(salesConfig.marketplaces || []);
       setSettingsPanels(panels);
       setBridgeAccounts(bridgeAccountData?.accounts || []);
+      setEbayAccountReadiness(ebayReadiness);
+      setEbayPolicyCatalog(ebayPolicies);
       setProfileName(panels.profile.full_name || '');
       setEbayForm({
         ebay_client_id: '',
         ebay_client_secret: '',
         ebay_redirect_uri: panels.ebay.runame || panels.ebay.redirect_uri || '',
+      });
+      setEbayPolicyForm({
+        fulfillment_policy_id: panels.ebay?.policy_settings?.fulfillment_policy_id || '',
+        fulfillment_policy_name: panels.ebay?.policy_settings?.fulfillment_policy_name || '',
+        payment_policy_id: panels.ebay?.policy_settings?.payment_policy_id || '',
+        payment_policy_name: panels.ebay?.policy_settings?.payment_policy_name || '',
+        return_policy_id: panels.ebay?.policy_settings?.return_policy_id || '',
+        return_policy_name: panels.ebay?.policy_settings?.return_policy_name || '',
+        merchant_location_key: panels.ebay?.policy_settings?.merchant_location_key || '',
+        merchant_location_location_name: panels.ebay?.policy_settings?.merchant_location_location_name || 'PosterPro Default Location',
+        merchant_location_postal_code: panels.ebay?.policy_settings?.merchant_location_postal_code || '95125',
+        merchant_location_country: panels.ebay?.policy_settings?.merchant_location_country || 'US',
+        merchant_location_city: panels.ebay?.policy_settings?.merchant_location_city || 'San Jose',
+        merchant_location_state_or_province: panels.ebay?.policy_settings?.merchant_location_state_or_province || 'CA',
+        merchant_location_phone: panels.ebay?.policy_settings?.merchant_location_phone || '',
+        shipping_service_code: panels.ebay?.policy_settings?.shipping_service_code || '',
+        handling_time_days: Number(panels.ebay?.policy_settings?.handling_time_days || 1),
+        local_pickup_allowed: !!panels.ebay?.policy_settings?.local_pickup_allowed,
+        calculated_shipping: !!panels.ebay?.policy_settings?.calculated_shipping,
+        package_weight_required: panels.ebay?.policy_settings?.package_weight_required ?? true,
+        package_dimensions_required: panels.ebay?.policy_settings?.package_dimensions_required ?? true,
       });
       setHostedPagesForm({
         brand_name: panels.hosted_pages?.brand_name || 'PosterPro',
@@ -486,6 +545,17 @@ export default function SettingsPage() {
     MARKETPLACE_GUIDES[selectedMarketplace] ||
     MARKETPLACE_GUIDES[configuredMarketplace?.marketplace] ||
     null;
+  const ebayPolicyCatalogSource = ebayPolicyCatalog || settingsPanels?.ebay?.policy_settings?.policy_candidates || {};
+  const ebayPolicyLists = {
+    payment_policies: ebayPolicyCatalogSource.payment_policies || ebayPolicyCatalogSource.payment || [],
+    fulfillment_policies: ebayPolicyCatalogSource.fulfillment_policies || ebayPolicyCatalogSource.fulfillment || [],
+    return_policies: ebayPolicyCatalogSource.return_policies || ebayPolicyCatalogSource.return || [],
+  };
+  const resolveEbayPolicyName = (kind, policyId) => {
+    const policies = Array.isArray(ebayPolicyLists?.[kind]) ? ebayPolicyLists[kind] : [];
+    const match = policies.find((policy) => String(policy.id || '').trim() === String(policyId || '').trim());
+    return match?.name || '';
+  };
   const getBridgeAccountForMarketplace = (marketplace) => {
     if (!marketplace) return null;
     const accountKey = String(marketplace.bridge_account_key || '').trim().toLowerCase();
@@ -663,6 +733,59 @@ export default function SettingsPage() {
       loginHandle: '',
       notes: marketplace.notes || '',
     });
+  };
+
+  const syncEbayPolicyCatalog = async (createMissingDefaults = false) => {
+    setSyncingEbayPolicies(true);
+    try {
+      const report = await syncEbayPolicySettings({
+        marketplace_id: 'EBAY_US',
+        create_missing_defaults: createMissingDefaults,
+      });
+      setEbayPolicyCatalog(report);
+      setEbayPolicyForm((current) => ({
+        ...current,
+        payment_policy_id: report?.policy_settings?.payment_policy_id || current.payment_policy_id,
+        payment_policy_name: report?.policy_settings?.payment_policy_name || current.payment_policy_name,
+        fulfillment_policy_id: report?.policy_settings?.fulfillment_policy_id || current.fulfillment_policy_id,
+        fulfillment_policy_name: report?.policy_settings?.fulfillment_policy_name || current.fulfillment_policy_name,
+        return_policy_id: report?.policy_settings?.return_policy_id || current.return_policy_id,
+        return_policy_name: report?.policy_settings?.return_policy_name || current.return_policy_name,
+        merchant_location_key: report?.policy_settings?.merchant_location_key || current.merchant_location_key,
+        merchant_location_location_name: report?.policy_settings?.merchant_location_location_name || current.merchant_location_location_name,
+        merchant_location_postal_code: report?.policy_settings?.merchant_location_postal_code || current.merchant_location_postal_code,
+        merchant_location_country: report?.policy_settings?.merchant_location_country || current.merchant_location_country,
+        merchant_location_city: report?.policy_settings?.merchant_location_city || current.merchant_location_city,
+        merchant_location_state_or_province: report?.policy_settings?.merchant_location_state_or_province || current.merchant_location_state_or_province,
+        merchant_location_phone: report?.policy_settings?.merchant_location_phone || current.merchant_location_phone,
+      }));
+      await reload();
+      toast.success(createMissingDefaults ? 'Created and synced eBay policy settings.' : 'Synced eBay policy settings from eBay.');
+    } catch (error) {
+      toast.error(error.message);
+    } finally {
+      setSyncingEbayPolicies(false);
+    }
+  };
+
+  const runEbayMerchantLocationCheck = async (createIfMissing = false) => {
+    const payload = {
+      merchant_location_key: String(ebayPolicyForm.merchant_location_key || '').trim() || undefined,
+      create_if_missing: createIfMissing,
+    };
+    setVerifyingEbayLocation(!createIfMissing);
+    setCreatingEbayLocation(createIfMissing);
+    try {
+      const report = createIfMissing ? await createEbayMerchantLocation(payload) : await verifyEbayMerchantLocation(payload);
+      setEbayPolicyCatalog((current) => current ? { ...current, policy_settings: report?.settings_updates ? { ...(current.policy_settings || {}), ...report.settings_updates } : current.policy_settings } : current);
+      await reload();
+      toast.success(createIfMissing ? 'Merchant location created and verified.' : 'Merchant location verified.');
+    } catch (error) {
+      toast.error(error.message);
+    } finally {
+      setVerifyingEbayLocation(false);
+      setCreatingEbayLocation(false);
+    }
   };
 
   const waitForMarketplaceImportJob = async (jobId, { label = 'Marketplace', timeoutMs = 180000, pollMs = 1500 } = {}) => {
@@ -917,7 +1040,10 @@ export default function SettingsPage() {
         }
       >
           {activeTab === 'overview' ? (
-            <SectionPanel title="Settings Overview" description="A clean summary of operator-level choices, channel setup, and admin credentials that still need attention.">
+            <SectionPanel
+              title="Settings Overview"
+              description="The shortest path to the settings areas that matter: profile, workflow, marketplace setup, and jobs."
+            >
               <div className="space-y-6">
                 <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                   {workflowCards.map((card) => (
@@ -925,59 +1051,54 @@ export default function SettingsPage() {
                   ))}
                 </section>
 
-                <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(320px,0.9fr)]">
-                  <SectionPanel
-                    className="border-none bg-transparent p-0 shadow-none"
-                    title="User-level settings"
-                    description="Controls that belong to the signed-in operator rather than the server."
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <button
+                    type="button"
+                    onClick={() => selectTab('profile')}
+                    className="rounded-[14px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]"
                   >
-                    <div className="grid gap-3 md:grid-cols-2">
-                      <button type="button" onClick={() => selectTab('profile')} className="rounded-[12px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#bfd2ff] hover:bg-[#f8fbff]">
-                        <p className="text-sm font-semibold text-[#101828]">Profile</p>
-                        <p className="mt-1 text-sm text-[#667085]">Operator name, password changes, and account-level identity.</p>
-                      </button>
-                      <button type="button" onClick={() => selectTab('workflow')} className="rounded-[12px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#bfd2ff] hover:bg-[#f8fbff]">
-                        <p className="text-sm font-semibold text-[#101828]">Workflow</p>
-                        <p className="mt-1 text-sm text-[#667085]">Review-before-publish, bulk approvals, and preview layout.</p>
-                      </button>
-                      <button type="button" onClick={() => selectTab('ebay')} className="rounded-[12px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#bfd2ff] hover:bg-[#f8fbff]">
-                        <p className="text-sm font-semibold text-[#101828]">eBay account</p>
-                        <p className="mt-1 text-sm text-[#667085]">Server OAuth setup plus the current user connection state.</p>
-                      </button>
-                      <button type="button" onClick={() => selectTab('marketplaces')} className="rounded-[12px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#bfd2ff] hover:bg-[#f8fbff]">
-                        <p className="text-sm font-semibold text-[#101828]">Channel onboarding</p>
-                        <p className="mt-1 text-sm text-[#667085]">Manual and connected marketplace readiness for this workspace.</p>
-                      </button>
-                      <Link href="/jobs" className="rounded-[12px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#bfd2ff] hover:bg-[#f8fbff]">
-                        <p className="text-sm font-semibold text-[#101828]">Jobs console</p>
-                        <p className="mt-1 text-sm text-[#667085]">Inspect assisted imports, bridge outcomes, retries, and operator follow-up in one place.</p>
-                      </Link>
-                    </div>
-                  </SectionPanel>
-
-                  <SectionPanel
-                    className="border-none bg-transparent p-0 shadow-none"
-                    title="Admin credentials"
-                    description="Deployment-level credentials and tokens that should live only in admin settings."
+                    <p className="text-sm font-semibold text-[#101828]">Profile</p>
+                    <p className="mt-1 text-sm text-[#667085]">Operator identity, password changes, and personal account details.</p>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => selectTab('workflow')}
+                    className="rounded-[14px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]"
                   >
-                    <div className="space-y-3">
-                      {[
-                        ['API Keys', 'OpenAI and PhotoRoom secrets for AI enrichment and photo tooling.', 'api-keys'],
-                        ['CMS + Themes', 'Hosted public pages, theme imports, and clean OAuth handoff content.', 'hosted-pages'],
-                        ['Email Delivery', 'SMTP relay settings for real forgot-password delivery.', 'email'],
-                        ['Server', 'Public URL, storage root, and deployment-wide environment values.', 'server'],
-                        ['Automation', 'Global publish and polling behavior that affects every user.', 'automation'],
-                      ].map(([title, note, tab]) => (
-                        <button key={tab} type="button" onClick={() => selectTab(tab)} className="w-full rounded-[12px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#bfd2ff] hover:bg-[#f8fbff]">
-                          <p className="text-sm font-semibold text-[#101828]">{title}</p>
-                          <p className="mt-1 text-sm text-[#667085]">{note}</p>
-                        </button>
-                      ))}
-                    </div>
-                  </SectionPanel>
+                    <p className="text-sm font-semibold text-[#101828]">Workflow</p>
+                    <p className="mt-1 text-sm text-[#667085]">Review-before-publish, bulk actions, and queue behavior.</p>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => selectTab('ebay')}
+                    className="rounded-[14px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]"
+                  >
+                    <p className="text-sm font-semibold text-[#101828]">eBay setup</p>
+                    <p className="mt-1 text-sm text-[#667085]">Connect the account, sync policies, and verify merchant location.</p>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => selectTab('marketplaces')}
+                    className="rounded-[14px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]"
+                  >
+                    <p className="text-sm font-semibold text-[#101828]">Marketplace setup</p>
+                    <p className="mt-1 text-sm text-[#667085]">Assisted channels, manual connections, and onboarding status.</p>
+                  </button>
+                  <Link
+                    href="/jobs"
+                    className="rounded-[14px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]"
+                  >
+                    <p className="text-sm font-semibold text-[#101828]">Jobs console</p>
+                    <p className="mt-1 text-sm text-[#667085]">Imports, assisted jobs, retries, and bridge outcomes.</p>
+                  </Link>
+                  <Link
+                    href="/listings"
+                    className="rounded-[14px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]"
+                  >
+                    <p className="text-sm font-semibold text-[#101828]">Listings</p>
+                    <p className="mt-1 text-sm text-[#667085]">Review drafts, pricing, publish readiness, and repair queues.</p>
+                  </Link>
                 </div>
-
-                <InstructionTable title="Remaining production inputs" rows={[...CREDENTIAL_INSTRUCTIONS.openai, ...CREDENTIAL_INSTRUCTIONS.photoroom, ...CREDENTIAL_INSTRUCTIONS.ebay, ...CREDENTIAL_INSTRUCTIONS.email]} />
               </div>
             </SectionPanel>
           ) : null}
@@ -1009,8 +1130,13 @@ export default function SettingsPage() {
           ) : null}
 
           {activeTab === 'profile' ? (
-            <SectionPanel title="Profile" description="This is the operator identity used across the workspace.">
+            <SectionPanel title="Profile" description="Keep the operator identity, sign-in, and recovery flow simple.">
               <div className="space-y-6">
+                <div className="grid gap-4 md:grid-cols-3">
+                  <MetricCard label="Profile status" value={setupSummary?.account_profile_complete ? 'Complete' : 'Needs attention'} detail="Name and account identity used across the workspace." />
+                  <MetricCard label="Password status" value="Manage locally" detail="Rotate the operator password without server access." />
+                  <MetricCard label="Admin preview" value={user?.is_admin ? (user?.view_as_regular ? 'Regular view' : 'Admin view') : 'Not available'} detail="Review the UI as an operator when needed." />
+                </div>
                 <form
                   className="space-y-4"
                   onSubmit={async (event) => {
@@ -1055,14 +1181,13 @@ export default function SettingsPage() {
                       </div>
                     </div>
                     <GuideCard
-                      title="Account hygiene"
-                      description="A complete profile and tested sign-in flow reduce onboarding friction for every operator added later."
-                      tooltip="This section controls the identity and access behavior tied to the current operator account."
-                      prerequisites={['Real operator name or business name', 'Reachable account email', 'Strong password policy']}
+                      title="What to do here"
+                      description="Set the operator name, confirm the email, and keep the password flow local to this page."
+                      prerequisites={['Real operator name or business name', 'Reachable account email']}
                       steps={[
-                        'Save the operator or business name that should appear throughout the workspace.',
-                        'Use Change password below to rotate credentials without involving server access.',
-                        'If you are an admin, toggle regular-user preview before reviewing the onboarding flow.',
+                        'Save the name that should appear across the app.',
+                        'Change the password here when credentials need rotation.',
+                        'Use admin preview only if you need to check operator-only screens.',
                       ]}
                       tone="slate"
                     />
@@ -1100,7 +1225,7 @@ export default function SettingsPage() {
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <p className="text-sm font-semibold text-[#101828]">Password</p>
-                        <p className="mt-1 text-sm text-[#667085]">Store passwords as salted PBKDF2 hashes and let operators rotate them from inside the app.</p>
+                        <p className="mt-1 text-sm text-[#667085]">Rotate the password from inside PosterPro without touching server settings.</p>
                       </div>
                       <HelpTip label="Password help">
                         Passwords are never stored in plain text. PosterPro verifies them against salted PBKDF2 password hashes.
@@ -1150,9 +1275,7 @@ export default function SettingsPage() {
                       <div className="flex items-start justify-between gap-3">
                         <div>
                           <p className="text-sm font-semibold text-[#101828]">Admin preview mode</p>
-                          <p className="mt-1 text-sm text-[#667085]">
-                            View the product as a normal operator so onboarding, settings visibility, and permission-sensitive flows can be reviewed without creating a second account.
-                          </p>
+                          <p className="mt-1 text-sm text-[#667085]">Temporarily hide admin-only controls so you can review the operator flow as a regular user.</p>
                         </div>
                         <HelpTip label="Admin preview help">
                           Regular-user preview keeps the same account signed in but suppresses admin-only settings and permissions for this session.
@@ -1187,7 +1310,7 @@ export default function SettingsPage() {
                   ) : (
                     <GuideCard
                       title="Password recovery"
-                      description="If the current operator loses access, the public forgot-password flow can issue a recovery token for the reset form."
+                      description="If access is lost, use the public reset flow to recover the account."
                       steps={[
                         'Open the forgot-password screen from sign-in or this profile page.',
                         'Request a reset for the account email.',
@@ -1196,14 +1319,19 @@ export default function SettingsPage() {
                       tone="amber"
                     />
                   )}
-                </div>
-              </div>
-            </SectionPanel>
+	              </div>
+	              </div>
+	            </SectionPanel>
           ) : null}
 
           {activeTab === 'workflow' ? (
-            <SectionPanel title="Workflow" description="Control how drafts move from AI generation into human review and publish approval.">
+            <SectionPanel title="Workflow" description="Keep the draft pipeline simple: generate, review, approve, publish.">
               <div className="space-y-6">
+                <div className="grid gap-4 md:grid-cols-3">
+                  <MetricCard label="Review gate" value={workflowForm.review_before_publish ? 'On' : 'Off'} detail="Drafts stop for human review before any publish call." />
+                  <MetricCard label="Bulk approvals" value={workflowForm.bulk_approval_enabled ? 'Enabled' : 'Disabled'} detail="Approve many drafts after a queue spot-check." />
+                  <MetricCard label="Preview mode" value={WORKFLOW_PREVIEW_OPTIONS.find((option) => option.value === workflowForm.listing_preview_mode)?.label || 'Marketplace preview'} detail="How the review drawer opens by default." />
+                </div>
                 <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(320px,0.9fr)]">
                   <form
                     className="space-y-4"
@@ -1226,7 +1354,7 @@ export default function SettingsPage() {
                       <label className="flex items-center justify-between rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-4 text-sm text-[#101828]">
                         <div>
                           <p className="font-semibold text-[#101828]">Require review before publish</p>
-                          <p className="mt-1 text-sm text-[#667085]">Default to a draft-review queue so AI fills the listing, then a human approves it before any live publish call.</p>
+                          <p className="mt-1 text-sm text-[#667085]">Keep drafts in review until an operator approves them.</p>
                         </div>
                         <input
                           type="checkbox"
@@ -1237,7 +1365,7 @@ export default function SettingsPage() {
                       <label className="flex items-center justify-between rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-4 text-sm text-[#101828]">
                         <div>
                           <p className="font-semibold text-[#101828]">Allow auto-publish after approval</p>
-                          <p className="mt-1 text-sm text-[#667085]">If enabled, approved drafts can move directly into queueing when the operator confirms them.</p>
+                          <p className="mt-1 text-sm text-[#667085]">Use this only if you want approved drafts to queue immediately after confirmation.</p>
                         </div>
                         <input
                           type="checkbox"
@@ -1248,7 +1376,7 @@ export default function SettingsPage() {
                       <label className="flex items-center justify-between rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-4 text-sm text-[#101828]">
                         <div>
                           <p className="font-semibold text-[#101828]">Enable bulk approvals</p>
-                          <p className="mt-1 text-sm text-[#667085]">Lets the operator select many drafts and approve them together after checking the queue.</p>
+                          <p className="mt-1 text-sm text-[#667085]">Select many drafts and approve them together after a queue spot-check.</p>
                         </div>
                         <input
                           type="checkbox"
@@ -1258,7 +1386,7 @@ export default function SettingsPage() {
                       </label>
                       <div className="rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-4">
                         <label className="text-sm font-semibold text-[#101828]">Default review layout</label>
-                        <p className="mt-1 text-sm text-[#667085]">Choose whether the review drawer should open as a marketplace-style preview or a direct editor first.</p>
+                        <p className="mt-1 text-sm text-[#667085]">Choose whether the review drawer opens in marketplace preview or editor mode.</p>
                         <div className="mt-3 flex flex-wrap gap-2">
                           {WORKFLOW_PREVIEW_OPTIONS.map((option) => (
                             <button
@@ -1288,13 +1416,13 @@ export default function SettingsPage() {
 
                   <GuideCard
                     title="Recommended operator flow"
-                    description="This is the closest PosterPro can currently get to the ideal workflow you described without overpromising the unfinished deep vision and sold-comps automation."
-                    tooltip="Review-first mode is the safe default because some AI and marketplace integrations are still partial."
-                    prerequisites={['Import a photo batch', 'Let the draft pipeline generate listing data', 'Open drafts from the Listings review queue']}
+                    description="Use review-first mode. It is the safe default and keeps drafts out of the publish queue until they are checked."
+                    tooltip="Some AI and marketplace paths are still partial, so review-first is the best operator default."
+                    prerequisites={['Import a photo batch', 'Generate listing data', 'Open drafts from the Listings review queue']}
                     steps={[
-                      'Leave review-before-publish enabled so every draft lands in a review queue first.',
-                      'Use the pricing reasoning and marketplace preview in Listings to approve or correct each draft.',
-                      'Use bulk approval only after the queue has been spot-checked for a batch quality pass.',
+                      'Leave review-before-publish enabled.',
+                      'Check price, photos, and marketplace readiness in Listings.',
+                      'Use bulk approval only after a batch spot-check.',
                     ]}
                     tone="slate"
                   />
@@ -1304,17 +1432,96 @@ export default function SettingsPage() {
           ) : null}
 
           {activeTab === 'ebay' ? (
-            <SectionPanel title="eBay" description="Configure the server app, publish the three required public URLs, and connect the current operator account.">
+            <SectionPanel
+              title="eBay"
+              description="Connect the account first, then sync policies and verify merchant location before importing or publishing."
+            >
               <div className="space-y-6">
-                <GuideCard
-                  title="eBay onboarding"
-                  description={MARKETPLACE_GUIDES.ebay.summary}
-                  tooltip={MARKETPLACE_GUIDES.ebay.tooltip}
-                  prerequisites={MARKETPLACE_GUIDES.ebay.prerequisites}
-                  steps={MARKETPLACE_GUIDES.ebay.steps}
-                />
-                <div className="grid gap-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(340px,0.85fr)]">
+                <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)]">
+                  <div className="rounded-[18px] border border-[#e5e7eb] bg-white p-5">
+                    <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#667085]">Step 1</p>
+                    <h3 className="mt-2 text-lg font-semibold tracking-[-0.02em] text-[#101828]">Connect the seller account</h3>
+                    <p className="mt-2 text-sm leading-6 text-[#667085]">
+                      Use the OAuth button below. If the token is stale, reconnecting here is the first fix. Do not skip ahead to policies until this is connected.
+                    </p>
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      <a href="#ebay-connect" className="rounded-full border border-[#d0d5dd] bg-white px-3 py-2 text-sm font-medium text-[#344054] transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]">
+                        Connect
+                      </a>
+                      <a href="#ebay-policies" className="rounded-full border border-[#d0d5dd] bg-white px-3 py-2 text-sm font-medium text-[#344054] transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]">
+                        Policies
+                      </a>
+                      <a href="#ebay-location" className="rounded-full border border-[#d0d5dd] bg-white px-3 py-2 text-sm font-medium text-[#344054] transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]">
+                        Location
+                      </a>
+                      <a href="#ebay-import" className="rounded-full border border-[#d0d5dd] bg-white px-3 py-2 text-sm font-medium text-[#344054] transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]">
+                        Import
+                      </a>
+                    </div>
+                    <ol className="mt-4 space-y-2 text-sm text-[#344054]">
+                      {(MARKETPLACE_GUIDES.ebay.steps || []).slice(0, 4).map((step, index) => (
+                        <li key={step} className="flex gap-3 rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] px-3 py-2">
+                          <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#eff6ff] text-xs font-semibold text-[#2563eb]">
+                            {index + 1}
+                          </span>
+                          <span className="leading-6">{step}</span>
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
+                  <div className="rounded-[18px] border border-[#dbe7ff] bg-[#f7faff] p-5">
+                    <p className="text-sm font-semibold text-[#101828]">Primary action</p>
+                    <p className="mt-1 text-sm text-[#667085]">
+                      {ebayReconnectRequired
+                        ? 'Reconnect the seller account if the current token is no longer usable.'
+                        : 'Use OAuth to connect the current operator account.'}
+                    </p>
+                    <Button
+                      type="button"
+                      size="lg"
+                      variant={ebayReconnectRequired ? 'danger' : 'default'}
+                      className="mt-4 w-full"
+                      onClick={connectEbay}
+                      disabled={connectingEbay || !settingsPanels?.ebay?.oauth_ready}
+                    >
+                      {connectingEbay ? 'Opening OAuth...' : ebayReconnectRequired ? 'Reconnect eBay now' : 'Connect eBay now'}
+                    </Button>
+                    <p className="mt-3 text-xs uppercase tracking-[0.12em] text-[#667085]">This opens the eBay connect flow.</p>
+                  </div>
+                </div>
+
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <div className="rounded-[18px] border border-[#e5e7eb] bg-white p-5">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-semibold text-[#101828]">Connection status</p>
+                        <p className="mt-1 text-sm text-[#667085]">This reflects the current operator’s account state.</p>
+                      </div>
+                      <StatusPill status={settingsPanels?.ebay?.connected ? 'success' : 'default'} label={settingsPanels?.ebay?.connected ? 'Connected' : 'Not connected'} />
+                    </div>
+                    <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                      {[
+                        ['Import ready', ebayImportReady ? 'Yes' : 'No', ebayImportReady ? 'success' : ebayReconnectRequired ? 'warning' : 'default'],
+                        ['Refresh token', ebayConnection?.has_refresh_token ? 'Saved' : 'Missing', ebayConnection?.has_refresh_token ? 'success' : 'warning'],
+                        ['Publish ready', ebayAccountReadiness?.publish_ready ? 'Yes' : 'No', ebayAccountReadiness?.publish_ready ? 'success' : 'danger'],
+                        ['Token valid', ebayConnection?.import_ready ? 'Yes' : 'No', ebayConnection?.import_ready ? 'success' : 'danger'],
+                      ].map(([label, value, tone]) => (
+                        <div key={label} className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+                          <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">{label}</p>
+                          <StatusPill className="mt-2" status={tone} label={String(value)} />
+                        </div>
+                      ))}
+                    </div>
+                    <p className="mt-4 text-sm leading-6 text-[#667085]">
+                      {ebayAccountReadiness?.summary ||
+                        ebayConnection?.status_note ||
+                        (ebayReconnectRequired ? 'Reconnect eBay before import or publish.' : 'Connect eBay before importing or publishing.')}
+                    </p>
+                    {ebayConnection?.error ? <p className="mt-3 text-sm text-[#b42318]">{ebayConnection.error}</p> : null}
+                  </div>
+
                   <form
+                    id="ebay-connect"
                     className="space-y-4 rounded-[18px] border border-[#e5e7eb] bg-[#fcfcfd] p-5"
                     onSubmit={async (event) => {
                       event.preventDefault();
@@ -1347,7 +1554,12 @@ export default function SettingsPage() {
                       </div>
                       <StatusPill status={settingsPanels?.ebay?.oauth_ready ? 'success' : 'warning'} label={settingsPanels?.ebay?.oauth_ready ? 'OAuth ready' : 'Credentials incomplete'} />
                     </div>
-                    <InstructionTable title="eBay credentials" rows={CREDENTIAL_INSTRUCTIONS.ebay} />
+                    <details className="rounded-[14px] border border-[#e5e7eb] bg-white p-4">
+                      <summary className="cursor-pointer text-sm font-semibold text-[#101828]">What these credentials do</summary>
+                      <div className="mt-3">
+                        <InstructionTable title="eBay credentials" rows={CREDENTIAL_INSTRUCTIONS.ebay} />
+                      </div>
+                    </details>
                     <div className="grid gap-4 md:grid-cols-2">
                       <div className="space-y-2">
                         <label className="flex items-center gap-2 text-sm font-medium text-[#101828]">
@@ -1390,161 +1602,228 @@ export default function SettingsPage() {
                       {!canManageServer ? <p className="text-sm text-[#667085]">Only the bootstrap admin can change server-side credentials.</p> : null}
                     </div>
                   </form>
+                </div>
 
-                  <div className="space-y-4">
-                    <div className="rounded-[18px] border border-[#dbe7ff] bg-[#f7faff] p-5">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className="text-sm font-semibold text-[#101828]">Required eBay URLs</p>
-                          <p className="mt-1 text-sm text-[#667085]">Paste these exact values into the matching RuName fields inside the eBay developer dashboard.</p>
-                        </div>
-                        <StatusPill status={settingsPanels?.server?.app_base_url ? 'info' : 'warning'} label={settingsPanels?.server?.app_base_url ? 'Base URL ready' : 'App base URL missing'} />
-                      </div>
-                      <div className="mt-4 space-y-3">
-                        {[
-                          ['Privacy Policy URL', settingsPanels?.ebay?.privacy_policy_url],
-                          ['Auth Accepted URL', settingsPanels?.ebay?.auth_accepted_url],
-                          ['Auth Declined URL', settingsPanels?.ebay?.auth_declined_url],
-                        ].map(([label, value]) => (
-                          <div key={label} className="rounded-[12px] border border-white/80 bg-white/90 p-3">
-                            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[#667085]">{label}</p>
-                            <p className="mt-2 break-all text-sm text-[#101828]">{value || 'Set APP_BASE_URL and Hosted Pages slugs to generate this URL.'}</p>
-                          </div>
-                        ))}
-                      </div>
-                      <div className="mt-4 flex flex-wrap gap-2">
-                        <Button type="button" variant="outline" onClick={() => selectTab('hosted-pages')}>
-                          Open hosted pages CMS
-                        </Button>
-                      </div>
-                    </div>
-
-                    <div className="rounded-[18px] border border-[#e5e7eb] bg-white p-5">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className="text-sm font-semibold text-[#101828]">Current operator connection</p>
-                          <p className="mt-1 text-sm text-[#667085]">Use the OAuth flow for the real long-term connection. Manual token import is available for advanced recovery or testing.</p>
-                        </div>
-                        <StatusPill status={settingsPanels?.ebay?.connected ? 'success' : 'default'} label={settingsPanels?.ebay?.connected ? 'Connected' : 'Not connected'} />
-                      </div>
-                      <div className="mt-4 flex flex-wrap gap-2">
-                        <StatusPill
-                          status={ebayImportReady ? 'success' : ebayReconnectRequired ? 'warning' : 'default'}
-                          label={ebayImportReady ? 'Import ready' : ebayReconnectRequired ? 'Reconnect required' : 'Import blocked'}
-                        />
-                        <StatusPill
-                          status={ebayConnection?.has_refresh_token ? 'success' : 'warning'}
-                          label={ebayConnection?.has_refresh_token ? 'Refresh token saved' : 'Manual token only'}
-                        />
-                      </div>
-                      <div className="mt-4 rounded-[14px] border border-[#e5e7eb] bg-[#f8fafc] p-4">
-                        <p className="text-sm font-medium text-[#101828]">{ebayConnection?.status_note || ebaySetupStatus?.status_note || 'Connect eBay for this operator.'}</p>
-                        {(ebayConnection?.external_account_id || ebaySetupStatus?.external_account_id || ebayConnection?.token_expires_at) ? (
-                          <div className="mt-2 space-y-1 text-sm text-[#667085]">
-                            <p>Account: {ebayConnection?.external_account_id || ebaySetupStatus?.external_account_id || 'Unknown'}</p>
-                            <p>Token expiry: {ebayConnection?.token_expires_at ? new Date(ebayConnection.token_expires_at).toLocaleString() : 'Not reported'}</p>
-                          </div>
-                        ) : null}
-                      </div>
-                      <div className="mt-4 flex flex-wrap gap-2">
-                        <Button type="button" onClick={connectEbay} disabled={connectingEbay || !settingsPanels?.ebay?.oauth_ready}>
-                          {connectingEbay ? 'Opening OAuth...' : ebayReconnectRequired ? 'Reconnect eBay' : 'Connect eBay'}
-                        </Button>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          disabled={runningMarketplaceImport || !ebayImportReady}
-                          onClick={async () => {
-                            try {
-                              await runEbayImport({ maxListings: 50 });
-                            } catch (error) {
-                              toast.error(error.message);
-                            }
-                          }}
-                        >
-                          {runningMarketplaceImport ? 'Importing listings...' : 'Import existing eBay listings'}
-                        </Button>
-                      </div>
-                      {ebayConnectError ? <p className="mt-3 text-sm text-[#b42318]">{ebayConnectError}</p> : null}
-                    </div>
-
-                    <form
-                      className="space-y-3 rounded-[18px] border border-[#e5e7eb] bg-white p-5"
-                      onSubmit={async (event) => {
-                        event.preventDefault();
-                        setSavingMarketplace(true);
-                        try {
-                          await importEbayTokens(
-                            {
-                              access_token: ebayTokenForm.access_token.trim(),
-                              refresh_token: ebayTokenForm.refresh_token.trim() || undefined,
-                              expires_in_seconds: Number(ebayTokenForm.expires_in_seconds || 7200),
-                              external_account_id: ebayTokenForm.external_account_id.trim() || undefined,
-                            },
-                            user?.id,
-                          );
-                          setEbayTokenForm({
-                            access_token: '',
-                            refresh_token: '',
-                            expires_in_seconds: 7200,
-                            external_account_id: '',
-                          });
-                          await reload();
-                          toast.success('eBay token data saved for this operator.');
-                        } catch (error) {
-                          toast.error(error.message);
-                        } finally {
-                          setSavingMarketplace(false);
-                        }
-                      }}
-                    >
+                <div className="grid gap-4 xl:grid-cols-2">
+                  <section id="ebay-policies" className="rounded-[18px] border border-[#e5e7eb] bg-white p-5">
+                    <div className="flex items-start justify-between gap-3">
                       <div>
-                        <p className="text-sm font-semibold text-[#101828]">Advanced token import</p>
-                        <p className="mt-1 text-sm text-[#667085]">Only use this if you intentionally generated a user token outside PosterPro. A refresh token is strongly recommended for anything beyond short-lived testing.</p>
+                        <p className="text-sm font-semibold text-[#101828]">Policies and profile</p>
+                        <p className="mt-1 text-sm text-[#667085]">Sync from eBay, save the chosen policy IDs, and keep the merchant location in one place.</p>
                       </div>
-                      <div className="space-y-2">
-                        <label className="text-sm font-medium text-[#101828]">Access token</label>
-                        <textarea
-                          value={ebayTokenForm.access_token}
-                          onChange={(event) => setEbayTokenForm((current) => ({ ...current, access_token: event.target.value }))}
-                          placeholder="Paste the eBay user access token if you need a manual import."
-                          className="min-h-24 w-full rounded-[10px] border border-[#e5e7eb] bg-white p-3 text-sm text-[#101828] outline-none transition placeholder:text-[#98a2b3] focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <label className="text-sm font-medium text-[#101828]">Refresh token</label>
-                        <textarea
-                          value={ebayTokenForm.refresh_token}
-                          onChange={(event) => setEbayTokenForm((current) => ({ ...current, refresh_token: event.target.value }))}
-                          placeholder="Paste the refresh token when available so PosterPro can keep the connection alive."
-                          className="min-h-24 w-full rounded-[10px] border border-[#e5e7eb] bg-white p-3 text-sm text-[#101828] outline-none transition placeholder:text-[#98a2b3] focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
-                        />
-                      </div>
-                      <div className="grid gap-3 md:grid-cols-2">
-                        <div className="space-y-2">
-                          <label className="text-sm font-medium text-[#101828]">Token lifetime in seconds</label>
+                      <StatusPill status={ebayAccountReadiness?.policy_sync_status === 'synced' ? 'success' : 'warning'} label={ebayAccountReadiness?.policy_sync_status || 'uninitialized'} />
+                    </div>
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={async () => {
+                          await syncEbayPolicyCatalog(false);
+                        }}
+                        disabled={syncingEbayPolicies}
+                      >
+                        {syncingEbayPolicies ? 'Syncing...' : 'Sync from eBay'}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        onClick={async () => {
+                          await syncEbayPolicyCatalog(true);
+                        }}
+                        disabled={syncingEbayPolicies}
+                      >
+                        Create default policies
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={async () => {
+                          await runEbayMerchantLocationCheck(false);
+                        }}
+                        disabled={verifyingEbayLocation || creatingEbayLocation}
+                      >
+                        {verifyingEbayLocation ? 'Verifying...' : 'Verify merchant location'}
+                      </Button>
+                    </div>
+                    <div className="mt-4 rounded-[14px] border border-[#e5e7eb] bg-[#f8fafc] p-4 text-sm text-[#475467]">
+                      <p><span className="font-semibold text-[#101828]">Policy sync:</span> {ebayAccountReadiness?.policy_sync_status || settingsPanels?.ebay?.policy_sync_status || 'uninitialized'}</p>
+                      <p className="mt-2"><span className="font-semibold text-[#101828]">Merchant location:</span> {ebayAccountReadiness?.merchant_location_status || settingsPanels?.ebay?.merchant_location_status || 'unverified'}</p>
+                      {ebayAccountReadiness?.policy_sync_error || settingsPanels?.ebay?.policy_sync_error ? (
+                        <p className="mt-2 text-[#b42318]">{ebayAccountReadiness?.policy_sync_error || settingsPanels?.ebay?.policy_sync_error}</p>
+                      ) : null}
+                      {ebayAccountReadiness?.merchant_location_error || settingsPanels?.ebay?.merchant_location_error ? (
+                        <p className="mt-2 text-[#b42318]">{ebayAccountReadiness?.merchant_location_error || settingsPanels?.ebay?.merchant_location_error}</p>
+                      ) : null}
+                    </div>
+                    <div className="mt-4 grid gap-3 md:grid-cols-2">
+                      {[
+                        { label: 'Payment policy', key: 'payment_policy_id', listKey: 'payment_policies' },
+                        { label: 'Fulfillment policy', key: 'fulfillment_policy_id', listKey: 'fulfillment_policies' },
+                        { label: 'Return policy', key: 'return_policy_id', listKey: 'return_policies' },
+                      ].map(({ label, key, listKey }) => (
+                        <div key={key} className="space-y-2">
+                          <label className="text-sm font-medium text-[#101828]">{label}</label>
+                          <select
+                            value={ebayPolicyForm[key]}
+                            onChange={(event) => setEbayPolicyForm((current) => ({ ...current, [key]: event.target.value }))}
+                            className="w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 py-2 text-sm text-[#101828] outline-none transition focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                          >
+                            <option value="">Select a synced policy</option>
+                            {(ebayPolicyLists?.[listKey] || []).map((policy) => (
+                              <option key={policy.id} value={policy.id}>
+                                {policy.name || policy.id}
+                                {policy.is_default ? ' (default)' : ''}
+                              </option>
+                            ))}
+                          </select>
                           <Input
-                            type="number"
-                            value={ebayTokenForm.expires_in_seconds}
-                            onChange={(event) => setEbayTokenForm((current) => ({ ...current, expires_in_seconds: event.target.value }))}
+                            value={ebayPolicyForm[key]}
+                            onChange={(event) => setEbayPolicyForm((current) => ({ ...current, [key]: event.target.value }))}
+                            placeholder={`Manual ${label.toLowerCase()} ID`}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+
+                  <section id="ebay-location" className="rounded-[18px] border border-[#e5e7eb] bg-white p-5">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-semibold text-[#101828]">Merchant location origin</p>
+                        <p className="mt-1 text-sm text-[#667085]">Postal code and country are required. City and state make eBay validation easier.</p>
+                      </div>
+                      <StatusPill status={ebayAccountReadiness?.merchant_location_verified ? 'success' : 'warning'} label={ebayAccountReadiness?.merchant_location_status || 'unverified'} />
+                    </div>
+                    <div className="mt-4 grid gap-3 md:grid-cols-2">
+                      {[
+                        ['Location name', 'merchant_location_location_name', 'PosterPro Default Location'],
+                        ['Postal code', 'merchant_location_postal_code', '95125'],
+                        ['Country', 'merchant_location_country', 'US'],
+                        ['City', 'merchant_location_city', 'San Jose'],
+                        ['State / province', 'merchant_location_state_or_province', 'CA'],
+                        ['Phone (optional)', 'merchant_location_phone', ''],
+                      ].map(([label, key, placeholder]) => (
+                        <div key={key} className="space-y-2">
+                          <label className="text-sm font-medium text-[#101828]">{label}</label>
+                          <Input
+                            value={ebayPolicyForm[key]}
+                            onChange={(event) => setEbayPolicyForm((current) => ({ ...current, [key]: event.target.value }))}
+                            placeholder={placeholder}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                    <div className="mt-4 grid gap-2 md:grid-cols-2">
+                      {[
+                        ['local_pickup_allowed', 'Local pickup allowed'],
+                        ['calculated_shipping', 'Calculated shipping'],
+                        ['package_weight_required', 'Package weight required'],
+                        ['package_dimensions_required', 'Package dimensions required'],
+                      ].map(([key, label]) => (
+                        <label key={key} className="flex items-center gap-2 rounded-[10px] border border-[#e5e7eb] bg-white px-3 py-2 text-sm text-[#475467]">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(ebayPolicyForm[key])}
+                            onChange={(event) => setEbayPolicyForm((current) => ({ ...current, [key]: event.target.checked }))}
+                          />
+                          {label}
+                        </label>
+                      ))}
+                    </div>
+                  </section>
+
+                  <section id="ebay-import" className="rounded-[18px] border border-[#e5e7eb] bg-white p-5">
+                    <p className="text-sm font-semibold text-[#101828]">Import existing eBay listings</p>
+                    <p className="mt-1 text-sm text-[#667085]">Pull live inventory into PosterPro for review and dedupe after the account is connected.</p>
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      <Button type="button" variant="outline" onClick={startEbayImport} disabled={importingEbay}>
+                        {importingEbay ? 'Importing...' : 'Import existing eBay listings'}
+                      </Button>
+                      <Button type="button" variant="ghost" onClick={refreshEbaySetup} disabled={refreshingEbaySetup}>
+                        {refreshingEbaySetup ? 'Refreshing...' : 'Refresh eBay account readiness'}
+                      </Button>
+                    </div>
+                    {ebayImportError ? <p className="mt-3 text-sm text-[#b42318]">{ebayImportError}</p> : null}
+                  </section>
+
+                  <section id="ebay-advanced" className="rounded-[18px] border border-[#e5e7eb] bg-white p-5">
+                    <details open={false}>
+                      <summary className="cursor-pointer text-sm font-semibold text-[#101828]">Advanced token import</summary>
+                      <form
+                        className="mt-4 space-y-3"
+                        onSubmit={async (event) => {
+                          event.preventDefault();
+                          setSavingMarketplace(true);
+                          try {
+                            await importEbayTokens(
+                              {
+                                access_token: ebayTokenForm.access_token.trim(),
+                                refresh_token: ebayTokenForm.refresh_token.trim() || undefined,
+                                expires_in_seconds: Number(ebayTokenForm.expires_in_seconds || 7200),
+                                external_account_id: ebayTokenForm.external_account_id.trim() || undefined,
+                              },
+                              user?.id,
+                            );
+                            setEbayTokenForm({
+                              access_token: '',
+                              refresh_token: '',
+                              expires_in_seconds: 7200,
+                              external_account_id: '',
+                            });
+                            await reload();
+                            toast.success('eBay token data saved for this operator.');
+                          } catch (error) {
+                            toast.error(error.message);
+                          } finally {
+                            setSavingMarketplace(false);
+                          }
+                        }}
+                      >
+                        <p className="text-sm text-[#667085]">Only use this if you intentionally generated a user token outside PosterPro.</p>
+                        <div className="space-y-2">
+                          <label className="text-sm font-medium text-[#101828]">Access token</label>
+                          <textarea
+                            value={ebayTokenForm.access_token}
+                            onChange={(event) => setEbayTokenForm((current) => ({ ...current, access_token: event.target.value }))}
+                            placeholder="Paste the eBay user access token if you need a manual import."
+                            className="min-h-24 w-full rounded-[10px] border border-[#e5e7eb] bg-white p-3 text-sm text-[#101828] outline-none transition placeholder:text-[#98a2b3] focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
                           />
                         </div>
                         <div className="space-y-2">
-                          <label className="text-sm font-medium text-[#101828]">External account label</label>
-                          <Input
-                            value={ebayTokenForm.external_account_id}
-                            onChange={(event) => setEbayTokenForm((current) => ({ ...current, external_account_id: event.target.value }))}
-                            placeholder="optional-seller-handle"
+                          <label className="text-sm font-medium text-[#101828]">Refresh token</label>
+                          <textarea
+                            value={ebayTokenForm.refresh_token}
+                            onChange={(event) => setEbayTokenForm((current) => ({ ...current, refresh_token: event.target.value }))}
+                            placeholder="Paste the refresh token when available."
+                            className="min-h-24 w-full rounded-[10px] border border-[#e5e7eb] bg-white p-3 text-sm text-[#101828] outline-none transition placeholder:text-[#98a2b3] focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
                           />
                         </div>
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        <Button type="submit" variant="outline" disabled={savingMarketplace}>
-                          {savingMarketplace ? 'Saving...' : 'Import tokens'}
-                        </Button>
-                      </div>
-                    </form>
-                  </div>
+                        <div className="grid gap-3 md:grid-cols-2">
+                          <div className="space-y-2">
+                            <label className="text-sm font-medium text-[#101828]">Token lifetime in seconds</label>
+                            <Input
+                              type="number"
+                              value={ebayTokenForm.expires_in_seconds}
+                              onChange={(event) => setEbayTokenForm((current) => ({ ...current, expires_in_seconds: event.target.value }))}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <label className="text-sm font-medium text-[#101828]">External account label</label>
+                            <Input
+                              value={ebayTokenForm.external_account_id}
+                              onChange={(event) => setEbayTokenForm((current) => ({ ...current, external_account_id: event.target.value }))}
+                              placeholder="optional-seller-handle"
+                            />
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <Button type="submit" variant="outline" disabled={savingMarketplace}>
+                            {savingMarketplace ? 'Saving...' : 'Import tokens'}
+                          </Button>
+                        </div>
+                      </form>
+                    </details>
+                  </section>
                 </div>
               </div>
             </SectionPanel>
@@ -1958,13 +2237,19 @@ export default function SettingsPage() {
           ) : null}
 
           {activeTab === 'marketplaces' ? (
-            <SectionPanel title="Marketplaces" description="Control which channels are active for publishing and sales sync.">
+            <SectionPanel title="Marketplaces" description="Set up each channel in one consistent flow: connect, verify, then enable.">
               <div className="space-y-4">
+                <div className="grid gap-4 md:grid-cols-3">
+                  <MetricCard label="Connected channels" value={(setupSummary?.marketplace_connections || []).filter((marketplace) => marketplace.connected).length} detail="Channels already ready for publishing or sync." />
+                  <MetricCard label="Import-ready channels" value={eligibleMarketplaceBulkImports.length} detail="Channels that can import or sync drafts now." />
+                  <MetricCard label="Assisted channels" value={(setupSummary?.marketplace_connections || []).filter((marketplace) => ['browser_assist', 'manual'].includes(marketplace.connection_mode)).length} detail="Channels that rely on browser-assist or manual setup." />
+                </div>
+
                 <div className="rounded-[18px] border border-[#e5e7eb] bg-white p-5">
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div>
                       <p className="text-sm font-semibold text-[#101828]">Import + sync drafts</p>
-                      <p className="mt-1 text-sm text-[#667085]">Queue import jobs for every connected marketplace that can pull listings into PosterPro drafts.</p>
+                      <p className="mt-1 text-sm text-[#667085]">Queue import jobs for connected marketplaces that can actually pull listings into PosterPro drafts.</p>
                       {eligibleMarketplaceBulkImports.length ? (
                         <p className="mt-2 text-xs text-[#667085]">
                           Ready now: <span className="font-medium text-[#101828]">{eligibleMarketplaceBulkImports.map((name) => MARKETPLACE_LABELS[name] || name).join(', ')}</span>
@@ -1984,38 +2269,38 @@ export default function SettingsPage() {
                     </Button>
                   </div>
                   <div className="mt-4 flex flex-wrap gap-2">
-                    <Link href="/jobs?tab=imports">
-                      <Button type="button" variant="outline">Open import jobs</Button>
-                    </Link>
-                    <Link href="/listings?tab=drafts">
-                      <Button type="button" variant="outline">Open drafts</Button>
-                    </Link>
+                    <Button href="/jobs?tab=imports" type="button" variant="outline">
+                      Open import jobs
+                    </Button>
+                    <Button href="/listings?tab=drafts" type="button" variant="outline">
+                      Open drafts
+                    </Button>
                   </div>
                 </div>
                 <GuideCard
-                  title="Reseller marketplaces (priority)"
-                  description="Mercari, Poshmark, and Whatnot are treated as assisted channels. The goal is one clean operator workflow: save identity → connect bridge session → validate mapping → handoff or submit with policy."
-                  tooltip="These channels tend to fail when onboarding is ambiguous. This card keeps the steps explicit and repeatable."
+                  title="Assisted marketplaces"
+                  description="Mercari, Poshmark, and Whatnot use the bridge. Keep the workflow explicit: save identity, connect, validate, then hand off."
+                  tooltip="These channels work best when the operator has one clear next action at each step."
                   prerequisites={[
                     'Bridge account key saved for the marketplace (ex: mercari-main)',
                     'Operator can complete login/MFA inside Bridge Desktop',
                     'Posting policy decided (draft-fill/handoff vs final submit)',
                   ]}
                   steps={[
-                    'Open the marketplace setup drawer and save the account identity + notes.',
-                    'Click Connect now and complete login in Bridge Desktop until the session state is Ready/Valid.',
-                    'Run a small import/cross-post test and confirm previews map correctly before scaling.',
+                    'Open the marketplace drawer and save the account identity.',
+                    'Connect in Bridge Desktop until the session state is Ready/Valid.',
+                    'Run one small import or cross-post test before scaling up.',
                   ]}
                 />
                 <GuideCard
                   title="Channel onboarding flow"
-                  description="Every marketplace should move through the same sequence: confirm prerequisites, save account details, mark the workflow ready, then enable publishing or sales sync."
-                  tooltip="This is meant to make marketplace onboarding feel structured rather than improvised."
+                  description="Every marketplace should follow the same sequence: confirm prerequisites, save details, verify readiness, then enable publish or sales sync."
+                  tooltip="This keeps marketplace onboarding structured instead of improvised."
                   prerequisites={['Server-level credentials saved where required', 'Real seller account chosen', 'Operator process documented']}
                   steps={[
-                    'Open the marketplace setup and complete the account-specific instructions.',
-                    'Confirm the readiness badge turns into Ready before enabling publishing.',
-                    'Enable sales sync only on channels where PosterPro can truly monitor post-sale activity.',
+                    'Open the marketplace setup and follow the account-specific instructions.',
+                    'Wait for the readiness badge to turn Ready before enabling publishing.',
+                    'Enable sales sync only where PosterPro can truly monitor post-sale activity.',
                   ]}
                 />
                 {[...(setupSummary?.marketplace_connections || [])]
@@ -2207,11 +2492,9 @@ export default function SettingsPage() {
                             >
                               {`Open ${MARKETPLACE_LABELS[marketplace.marketplace] || marketplace.marketplace} setup`}
                             </Button>
-                            <Link href={`/jobs?tab=${supportsBrowserImport ? 'imports' : 'crosspost'}`}>
-                              <Button variant="outline" size="sm" type="button">
-                                Open jobs console
-                              </Button>
-                            </Link>
+                            <Button href={`/jobs?tab=${supportsBrowserImport ? 'imports' : 'crosspost'}`} variant="outline" size="sm" type="button">
+                              Open jobs console
+                            </Button>
                           </div>
                         </div>
                       ) : null}
@@ -3215,9 +3498,9 @@ export default function SettingsPage() {
                     })}
                   </p>
                   <div className="mt-3 flex flex-wrap gap-2">
-                    <Link href={`/jobs?tab=${BROWSER_IMPORT_MARKETPLACES.includes(configuredMarketplace.marketplace) ? 'imports' : 'crosspost'}`}>
-                      <Button type="button" variant="outline">Open jobs console</Button>
-                    </Link>
+                    <Button href={`/jobs?tab=${BROWSER_IMPORT_MARKETPLACES.includes(configuredMarketplace.marketplace) ? 'imports' : 'crosspost'}`} type="button" variant="outline">
+                      Open jobs console
+                    </Button>
                     {configuredMarketplace.support_url ? (
                       <a href={configuredMarketplace.support_url} target="_blank" rel="noreferrer">
                         <Button type="button" variant="outline">Open runbook</Button>

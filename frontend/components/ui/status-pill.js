@@ -12,6 +12,7 @@ const STATUS_MAP = {
   failed: 'danger',
   error: 'danger',
   sold: 'danger',
+  closed: 'warning',
   blocked: 'danger',
   manual_only: 'warning',
   fetched: 'success',

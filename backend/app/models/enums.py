@@ -36,4 +36,6 @@ class MarketplaceListingStatus(str, enum.Enum):
     UPDATED = "UPDATED"
     FAILED = "FAILED"
     DELETED = "DELETED"
+    SOLD = "SOLD"
+    CLOSED = "CLOSED"
     PENDING = "PENDING"

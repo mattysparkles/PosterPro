@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import csv
-import html
 import io
+import hashlib
 import json
 import re
-import urllib.parse
-import urllib.request
 from datetime import date
 from pathlib import Path
 
@@ -15,14 +13,50 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.enums import ListingStatus, MarketplaceName
-from app.models.models import Image, Listing, ProductMediaCache, VineImportBatch, VineImportItem, User
+from app.models.models import Listing, ProductMediaCache, VineImportBatch, VineImportItem, User
+from app.services.automation_bridge import submit_bridge_job, wait_for_bridge_job
 from app.services.amazon_media import AmazonProductMediaProvider
 from app.services.amazon_product_discovery import AmazonProductDiscoveryService
+from app.services.listing_review import derive_condition_data, derive_shipping_profile, normalize_listing_images
 from app.services.listing_workspace import normalize_marketplace_data
 from app.services.marketplace_field_mapper import build_marketplace_payload
-from app.services.storage import LocalStorage
 from app.services.vine_parser import ParsedVineRow, parse_vine_csv, parse_vine_pdf, parse_vine_xlsx
+from app.services.vine_parser import parse_date_value
 from app.services.vine_policy import review_vine_product
+
+
+def _is_unsafe_vine_image(image: dict) -> bool:
+    path = " ".join(
+        str(image.get(key) or "").strip()
+        for key in ("storage_path", "source_url", "source_page_url")
+    ).lower()
+    metadata = image.get("metadata") if isinstance(image.get("metadata"), dict) else {}
+    provider = str(metadata.get("provider") or image.get("source_platform") or "").strip().lower()
+    return any(
+        token in path
+        for token in (
+            "vine-search-auto",
+            "vine-search-fallback",
+            "vine-search-last",
+            "/vine-search/",
+            "vine-search/",
+            "vine-search-fallback/",
+            "vine-search-last/",
+        )
+    ) or provider in {"vine_search_auto", "bing_image_search"}
+
+
+def _sanitize_vine_text(value: str | None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    raw = re.sub(r"\bamazon\s+vine\b", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"\bvine\s+report\b", "report", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"\binternal\s+vine\s+intake\s+workflow\b", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"\bvine\b", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"\s{2,}", " ", raw)
+    raw = re.sub(r"\n{3,}", "\n\n", raw)
+    return raw.strip(" \t\r\n-")
 
 
 class VineImportService:
@@ -66,6 +100,7 @@ class VineImportService:
                 reference_date=reference_date,
                 enforce_six_month_lock=enforce_six_month_lock,
             )
+        existing_fingerprints = self._load_existing_vine_fingerprints(db, current_user.id)
         batch = VineImportBatch(
             user_id=current_user.id,
             filename=filename,
@@ -81,6 +116,12 @@ class VineImportService:
         for parsed in parsed_rows:
             policy = review_vine_product(parsed.product_name)
             warnings = list(parsed.parse_warnings or [])
+            fingerprint = self._vine_row_fingerprint(parsed)
+            duplicate_item = existing_fingerprints.get(fingerprint)
+            if duplicate_item is not None:
+                duplicate_warning = f"Duplicate of prior Vine import row (matched item {duplicate_item.id})"
+                if duplicate_warning not in warnings:
+                    warnings.append(duplicate_warning)
             if (
                 not enforce_six_month_lock
                 and parsed.eligible_after
@@ -141,9 +182,12 @@ class VineImportService:
         manual_review = 0
         for item in items:
             result = discovery.discover_for_vine_item(asin=item.asin, product_name=item.product_name, manual_url=item.manual_amazon_url)
+            resolved_asin = str(result.get("asin") or item.asin or "").strip().upper()
+            if resolved_asin and resolved_asin != item.asin:
+                item.asin = resolved_asin
             item.amazon_match_status = result.get("status")
             item.amazon_match_confidence = result.get("confidence")
-            item.amazon_match_asin = result.get("asin") or item.asin
+            item.amazon_match_asin = resolved_asin or item.asin
             item.amazon_match_title = result.get("title") or item.product_name
             item.amazon_source_page_url = result.get("source_page_url")
             item.media_status = result.get("image_status") or "blocked"
@@ -173,9 +217,20 @@ class VineImportService:
         created = 0
         skipped = 0
         reused = 0
+        previous_items_by_fingerprint = self._load_existing_vine_fingerprints(db, batch.user_id)
         for item in items:
             if item.inventory_item_id:
                 skipped += 1
+                continue
+            if self._is_duplicate_vine_item(item):
+                duplicate_listing = self._resolve_duplicate_listing_from_map(db, item, previous_items_by_fingerprint)
+                if duplicate_listing is not None:
+                    item.inventory_item_id = duplicate_listing.id
+                    item.listing_id = duplicate_listing.id
+                    reused += 1
+                    db.add(item)
+                else:
+                    skipped += 1
                 continue
             if item.eligibility_status == "cancelled" and not include_cancelled:
                 skipped += 1
@@ -196,12 +251,22 @@ class VineImportService:
                 status=ListingStatus.draft,
                 title=item.product_name,
                 quantity=1,
-                condition="Open Box",
+                condition="Needs review",
+                condition_data=derive_condition_data(
+                    listing={"condition": None, "source_type": "amazon_vine"},
+                    source_type="amazon_vine",
+                    source_metadata=self._source_metadata(item, batch.id),
+                    existing={"condition_source": "import"},
+                ),
                 source_type="amazon_vine",
                 source_metadata=self._source_metadata(item, batch.id),
                 purchase_cost=item.estimated_tax_value,
                 suggested_price=item.estimated_tax_value,
                 listing_price=item.estimated_tax_value,
+                shipping_profile=derive_shipping_profile(
+                    listing={"title": item.product_name},
+                    existing={"estimated": True, "manual_measurement_needed": True, "shipping_notes": "Review actual package weight and dimensions before publish."},
+                ),
                 custom_labels=self._build_labels(item, has_photos=bool(cached_urls)),
                 needs_review=True,
                 restricted_review_required=item.restricted_review_required,
@@ -209,6 +274,13 @@ class VineImportService:
                 detected_category_guess=item.detected_category_guess,
                 marketplace_allowed_status=item.marketplace_allowed_status,
                 image_urls=cached_urls,
+                listing_images=normalize_listing_images(
+                    image_urls=cached_urls,
+                    source_page_url=item.amazon_source_page_url or item.item_url or item.manual_amazon_url,
+                    source_platform="amazon",
+                    default_is_reference=True,
+                    approved=False,
+                ),
             )
             db.add(listing)
             db.flush()
@@ -236,9 +308,20 @@ class VineImportService:
         skipped = 0
         created_listing_ids: list[int] = []
 
-        provider = AmazonProductMediaProvider(db, owner_user_id=batch.user_id) if fetch_media_first else None
-        discovery = AmazonProductDiscoveryService(provider) if provider is not None else None
+        provider = AmazonProductMediaProvider(db, owner_user_id=batch.user_id)
+        discovery = AmazonProductDiscoveryService(provider)
+        previous_items_by_fingerprint = self._load_existing_vine_fingerprints(db, batch.user_id)
         for item in items:
+            if self._is_duplicate_vine_item(item):
+                duplicate_listing = self._resolve_duplicate_listing_from_map(db, item, previous_items_by_fingerprint)
+                if duplicate_listing is not None:
+                    item.inventory_item_id = duplicate_listing.id
+                    item.listing_id = duplicate_listing.id
+                    db.add(item)
+                    updated += 1
+                else:
+                    skipped += 1
+                continue
             if item.eligibility_status == "cancelled" and not include_cancelled:
                 skipped += 1
                 continue
@@ -259,30 +342,32 @@ class VineImportService:
                 skipped += 1
                 continue
 
-            if provider is not None:
-                if not item.asin:
-                    item.media_status = "missing_asin"
-                    item.parse_warnings_json = [*(item.parse_warnings_json or []), "Cannot fetch images without ASIN"]
-                else:
-                    result = discovery.discover_for_vine_item(
-                        asin=item.asin,
-                        product_name=item.product_name,
-                        manual_url=item.manual_amazon_url,
-                    )
-                    item.media_status = result.get("status") or item.media_status or "blocked"
-                    item.media_asset_ids_json = result.get("local_asset_ids") or item.media_asset_ids_json or []
-                    item.amazon_match_status = result.get("status") or item.amazon_match_status
-                    item.amazon_match_confidence = result.get("confidence") or item.amazon_match_confidence
-                    item.amazon_match_asin = result.get("asin") or item.amazon_match_asin or item.asin
-                    item.amazon_match_title = result.get("title") or item.amazon_match_title or item.product_name
-                    item.amazon_source_page_url = result.get("source_page_url") or item.amazon_source_page_url
-                db.add(item)
+            result = discovery.discover_for_vine_item(
+                asin=item.asin,
+                product_name=item.product_name,
+                manual_url=item.manual_amazon_url,
+            )
+            resolved_asin = str(result.get("asin") or item.asin or "").strip().upper()
+            if resolved_asin and resolved_asin != item.asin:
+                item.asin = resolved_asin
+            if not resolved_asin:
+                item.media_status = "missing_asin"
+                item.parse_warnings_json = [*(item.parse_warnings_json or []), "Cannot fetch images without ASIN"]
+            else:
+                item.media_status = result.get("status") or item.media_status or "blocked"
+                item.media_asset_ids_json = result.get("local_asset_ids") or item.media_asset_ids_json or []
+                item.amazon_match_status = result.get("status") or item.amazon_match_status
+                item.amazon_match_confidence = result.get("confidence") or item.amazon_match_confidence
+                item.amazon_match_asin = resolved_asin or item.amazon_match_asin or item.asin
+                item.amazon_match_title = result.get("title") or item.amazon_match_title or item.product_name
+                item.amazon_source_page_url = result.get("source_page_url") or item.amazon_source_page_url
+            db.add(item)
 
             cached_urls = self._lookup_cached_media_urls(db, item.asin)
-            if not cached_urls:
-                cached_urls = self._try_web_image_fallback(db, item=item)
+            discovered_urls = [str(url).strip() for url in (result.get("images") or []) if str(url).strip()]
+            discovered_description = _sanitize_vine_text(result.get("description") or "")
             if require_media_for_asin and not allow_drafts_without_media and item.asin:
-                if settings.amazon_media_lookup_enabled and settings.amazon_media_page_fallback_enabled and not cached_urls:
+                if not (cached_urls or discovered_urls):
                     item.parse_warnings_json = [*(item.parse_warnings_json or []), "Draft creation blocked until photos are fetched for this ASIN"]
                     if item.media_status in {None, "pending"}:
                         item.media_status = "blocked"
@@ -291,12 +376,22 @@ class VineImportService:
                     continue
 
             listing.title = self._generate_title(item.product_name)
-            listing.description = self._generate_description(item)
+            listing.description = self._generate_description(item, amazon_description=discovered_description)
             listing.status = ListingStatus.draft
             listing.needs_review = True
-            listing.condition = listing.condition or "Open Box"
+            listing.condition = "New"
+            listing.condition_data = derive_condition_data(
+                listing={"condition": listing.condition, "source_type": "amazon_vine"},
+                source_type="amazon_vine",
+                source_metadata=self._source_metadata(item, batch.id),
+                existing=listing.condition_data,
+            )
             listing.source_type = "amazon_vine"
             listing.source_metadata = self._source_metadata(item, batch.id)
+            listing.shipping_profile = derive_shipping_profile(
+                listing={"title": listing.title, "description": listing.description},
+                existing=listing.shipping_profile or {"estimated": True, "manual_measurement_needed": True},
+            )
             listing.category_suggestion = item.category or item.detected_category_guess or listing.category_suggestion
             listing.item_specifics = self._build_item_specifics(item, listing.item_specifics)
             listing.tags = self._build_tags(item, listing.tags)
@@ -331,8 +426,16 @@ class VineImportService:
             }
 
             if not (listing.image_urls or []):
-                if cached_urls:
-                    listing.image_urls = cached_urls
+                image_urls_to_use = cached_urls or discovered_urls
+                if image_urls_to_use:
+                    listing.image_urls = image_urls_to_use
+                    listing.listing_images = normalize_listing_images(
+                        image_urls=image_urls_to_use,
+                        source_page_url=result.get("source_page_url") or item.amazon_source_page_url or item.item_url or item.manual_amazon_url,
+                        source_platform="amazon",
+                        default_is_reference=True,
+                        approved=False,
+                    )
                 else:
                     listing.custom_labels = list(dict.fromkeys([*(listing.custom_labels or []), "needs_photos"]))
             else:
@@ -390,6 +493,7 @@ class VineImportService:
         batch.locked_count = sum(1 for item in items if item.eligibility_status.startswith("locked_until_"))
         batch.cancelled_count = sum(1 for item in items if item.eligibility_status == "cancelled")
         batch.error_count = sum(1 for item in items if item.eligibility_status == "invalid")
+        duplicate_count = sum(1 for item in items if self._is_duplicate_vine_item(item))
         db.add(batch)
         self._update_batch_stats_json(
             db,
@@ -400,6 +504,8 @@ class VineImportService:
                 "rows_locked": batch.locked_count,
                 "rows_cancelled": batch.cancelled_count,
                 "rows_invalid": batch.error_count,
+                "rows_duplicate": duplicate_count,
+                "rows_new": max(batch.parsed_count - duplicate_count, 0),
             },
             commit=False,
         )
@@ -428,83 +534,263 @@ class VineImportService:
 
         return []
 
-    def _try_web_image_fallback(self, db: Session, *, item: VineImportItem, limit: int = 3) -> list[str]:
-        queries = [
-            " ".join(part for part in [item.asin or "", item.product_name or ""] if part).strip(),
-            f"{(item.product_name or '').strip()} product".strip(),
-            f"{(item.asin or '').strip()} amazon".strip(),
-        ]
-        candidates: list[str] = []
-        for query in queries:
-            if not query:
-                continue
-            candidates.extend(self._search_bing_image_urls(query=query, limit=12))
-            if len(candidates) >= 8:
-                break
-        deduped: list[str] = []
-        for candidate in candidates:
-            if candidate not in deduped:
-                deduped.append(candidate)
-
-        storage = LocalStorage()
-        local_urls: list[str] = []
-        for source_url in deduped[:12]:
-            try:
-                local_path = storage.save_from_url(source_url, prefix="vine-search-auto")
-                image = Image(user_id=item.user_id, source_url=source_url, local_path=local_path)
-                db.add(image)
-                db.flush()
-                local_urls.append(self._to_public_media_path(local_path))
-                if len(local_urls) >= limit:
-                    break
-            except Exception:
-                continue
-        if local_urls:
-            item.media_status = "fetched"
-            db.add(item)
-        return local_urls
-
-    def _search_bing_image_urls(self, *, query: str, limit: int = 10) -> list[str]:
-        url = f"https://www.bing.com/images/search?q={urllib.parse.quote_plus(query)}"
-        request = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/125.0.0.0 Safari/537.36"
-                )
-            },
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=20) as response:
-                body = response.read().decode("utf-8", errors="ignore")
-        except Exception:
-            return []
-
-        urls: list[str] = []
-        for match in re.finditer(r'class="iusc"[^>]+\sm="([^"]+)"', body):
-            raw = html.unescape(match.group(1))
-            try:
-                payload = json.loads(raw)
-            except Exception:
-                continue
-            for key in ("murl", "turl"):
-                candidate = str(payload.get(key) or "").strip()
-                if not candidate.startswith("http"):
-                    continue
-                if candidate in urls:
-                    continue
-                urls.append(candidate)
-                if len(urls) >= limit:
-                    return urls
-        return urls
-
     def _to_public_media_path(self, path: str) -> str:
         marker = "/storage/"
         if marker in path:
             return f"/media/{path.split(marker, 1)[1]}"
         return path
+
+    def _is_archived_vine_listing(self, listing: Listing) -> bool:
+        status = str(listing.status or "").strip().lower()
+        return status in {"sold", "closed"} or bool(listing.sold_at)
+
+    def repair_vine_listing_images(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        batch_id: int | None = None,
+        listing_ids: list[int] | None = None,
+        include_archived: bool = False,
+        force_refresh: bool = True,
+        use_bridge_session: bool = True,
+        only_missing_images: bool = False,
+        limit: int | None = None,
+    ) -> dict:
+        query = select(Listing).where(Listing.user_id == user_id, Listing.source_type == "amazon_vine")
+        if listing_ids:
+            query = query.where(Listing.id.in_(listing_ids))
+        listings = db.execute(query).scalars().all()
+        provider = AmazonProductMediaProvider(db, owner_user_id=user_id)
+        discovery = AmazonProductDiscoveryService(provider)
+        updated = 0
+        removed_unsafe = 0
+        already_present = 0
+        missing_asin = 0
+        no_cache = 0
+        bridge_refetched = 0
+        bridge_failed = 0
+        processed = 0
+
+        for listing in listings:
+            if limit is not None and processed >= max(0, limit):
+                break
+            if not include_archived and self._is_archived_vine_listing(listing):
+                continue
+
+            normalized_images = normalize_listing_images(
+                listing_images=listing.listing_images,
+                image_urls=listing.image_urls,
+                source_url=(listing.source_metadata or {}).get("source_image_url") if isinstance(listing.source_metadata, dict) else None,
+                source_page_url=(listing.source_metadata or {}).get("amazon_source_page_url") if isinstance(listing.source_metadata, dict) else None,
+                source_platform=listing.source_type or "amazon",
+                default_is_reference=True,
+                approved=False,
+            )
+            unsafe_images = [image for image in normalized_images if _is_unsafe_vine_image(image)]
+            has_approved_actual = any(
+                not image.get("is_reference") and image.get("operator_state") == "approved"
+                for image in normalized_images
+            )
+            if only_missing_images and normalized_images and not unsafe_images and has_approved_actual:
+                already_present += 1
+                continue
+            if not force_refresh and normalized_images and not unsafe_images:
+                already_present += 1
+                continue
+
+            processed += 1
+            item = (
+                db.execute(
+                    select(VineImportItem)
+                    .where((VineImportItem.listing_id == listing.id) | (VineImportItem.inventory_item_id == listing.id))
+                    .order_by(VineImportItem.updated_at.desc(), VineImportItem.id.desc())
+                )
+                .scalars()
+                .first()
+            )
+            source_metadata = dict(listing.source_metadata or {})
+            asin = str((item.asin if item and item.asin else source_metadata.get("asin") or "")).strip().upper()
+            product_name = str(listing.title or source_metadata.get("product_name") or "").strip() or None
+            manual_url = (
+                str(source_metadata.get("manual_amazon_url") or source_metadata.get("item_url") or "").strip()
+                or (str(item.manual_amazon_url).strip() if item and item.manual_amazon_url else None)
+            )
+            result = {}
+            try:
+                result = discovery.discover_for_vine_item(
+                    asin=asin or None,
+                    product_name=product_name,
+                    manual_url=manual_url,
+                ) if (asin or product_name or manual_url) else {}
+            except Exception:
+                result = {}
+            resolved_asin = str(result.get("asin") or asin or "").strip().upper()
+            if resolved_asin and resolved_asin != asin:
+                asin = resolved_asin
+                if item and not item.asin:
+                    item.asin = resolved_asin
+                    db.add(item)
+
+            if not asin:
+                missing_asin += 1
+                if unsafe_images:
+                    removed_unsafe += len(unsafe_images)
+                listing.listing_images = [image for image in normalized_images if image not in unsafe_images]
+                listing.image_urls = [image.get("storage_path") for image in (listing.listing_images or []) if image.get("operator_state") != "rejected"]
+                if not any(image.get("operator_state") != "rejected" for image in (listing.listing_images or [])):
+                    listing.image_urls = []
+                labels = set(listing.custom_labels or [])
+                labels.add("needs_photos")
+                listing.custom_labels = sorted(labels)
+                db.add(listing)
+                continue
+
+            cache = db.execute(
+                select(ProductMediaCache).where(
+                    ProductMediaCache.asin == asin,
+                    ProductMediaCache.marketplace_region == settings.amazon_marketplace_region.upper(),
+                )
+            ).scalar_one_or_none()
+            if cache is not None and cache.fetch_status == "fetched" and cache.source_provider not in {"manual"}:
+                gallery_urls = [str(url) for url in (cache.gallery_image_urls_json or []) if str(url).strip()]
+            else:
+                gallery_urls = []
+                if result and result.get("image_status") in {"cached", "fetched"}:
+                    gallery_urls = [str(url) for url in (result.get("images") or []) if str(url).strip()]
+                if not gallery_urls:
+                    cache = db.execute(
+                        select(ProductMediaCache).where(
+                            ProductMediaCache.asin == asin,
+                            ProductMediaCache.marketplace_region == settings.amazon_marketplace_region.upper(),
+                        )
+                    ).scalar_one_or_none()
+                    if cache is not None and cache.fetch_status == "fetched" and cache.source_provider not in {"manual"}:
+                        gallery_urls = [str(url) for url in (cache.gallery_image_urls_json or []) if str(url).strip()]
+
+            if not gallery_urls and use_bridge_session:
+                cache = self._bridge_capture_for_asin(db, asin, product_name)
+                if cache is not None:
+                    bridge_refetched += 1
+                    gallery_urls = [str(url) for url in (cache.gallery_image_urls_json or []) if str(url).strip()]
+                else:
+                    bridge_failed += 1
+
+            safe_reference_images = normalize_listing_images(
+                image_urls=gallery_urls,
+                source_page_url=item.item_url if item else source_metadata.get("item_url"),
+                source_platform="amazon",
+                default_is_reference=True,
+                approved=False,
+            ) if gallery_urls else []
+            refreshed_images = [image for image in normalized_images if not _is_unsafe_vine_image(image)]
+            discovered_description = _sanitize_vine_text((result or {}).get("description") or (listing.description or ""))
+            if has_approved_actual:
+                merged_images = refreshed_images
+                if safe_reference_images:
+                    existing_keys = {
+                        f"{str(img.get('storage_path') or '')}|{str(img.get('source_url') or '')}"
+                        for img in merged_images
+                    }
+                    for image in safe_reference_images:
+                        key = f"{str(image.get('storage_path') or '')}|{str(image.get('source_url') or '')}"
+                        if key not in existing_keys:
+                            merged_images.append(image)
+                            existing_keys.add(key)
+                listing.listing_images = normalize_listing_images(listing_images=merged_images)
+                listing.image_urls = [image["storage_path"] for image in (listing.listing_images or []) if image.get("operator_state") != "rejected"]
+            elif safe_reference_images:
+                listing.listing_images = normalize_listing_images(listing_images=safe_reference_images)
+                listing.image_urls = [image["storage_path"] for image in (listing.listing_images or []) if image.get("operator_state") != "rejected"]
+            else:
+                listing.listing_images = refreshed_images
+                listing.image_urls = [image["storage_path"] for image in (listing.listing_images or []) if image.get("operator_state") != "rejected"]
+
+            if discovered_description:
+                listing.description = self._generate_description(item, amazon_description=discovered_description)
+            else:
+                listing.description = _sanitize_vine_text(listing.description) or listing.description
+            listing.title = self._generate_title(item.product_name or listing.title)
+            listing.condition = "New"
+            listing.condition_data = derive_condition_data(
+                listing={"condition": listing.condition, "source_type": "amazon_vine"},
+                source_type="amazon_vine",
+                source_metadata=source_metadata,
+                existing=listing.condition_data,
+            )
+
+            if unsafe_images:
+                removed_unsafe += len(unsafe_images)
+
+            if not any(image.get("operator_state") != "rejected" for image in (listing.listing_images or [])):
+                labels = set(listing.custom_labels or [])
+                labels.add("needs_photos")
+                listing.custom_labels = sorted(labels)
+            else:
+                labels = [label for label in (listing.custom_labels or []) if label != "needs_photos"]
+                listing.custom_labels = labels or None
+
+            db.add(listing)
+            updated += 1
+
+        db.commit()
+        return {
+            "updated": updated,
+            "removed_unsafe": removed_unsafe,
+            "already_present": already_present,
+            "missing_asin": missing_asin,
+            "no_cache": no_cache,
+            "bridge_refetched": bridge_refetched,
+            "bridge_failed": bridge_failed,
+            "total_vine_listings": len(listings),
+            "processed": processed,
+            "include_archived": include_archived,
+            "force_refresh": force_refresh,
+            "listing_ids": listing_ids or [],
+            "batch_id": batch_id,
+        }
+
+    def _bridge_capture_for_asin(self, db: Session, asin: str, title_hint: str | None) -> ProductMediaCache | None:
+        try:
+            bridge_submission = submit_bridge_job(
+                job_type="import",
+                execution_mode="browser_assist",
+                payload={
+                    "source_marketplace": "amazon",
+                    "asin": asin,
+                    "asins": [asin],
+                    "payload": {
+                        "asin": asin,
+                        "product_name": title_hint,
+                    },
+                },
+            )
+            bridge_job_id = str((((bridge_submission or {}).get("bridge_response") or {}).get("job_id") or "")).strip()
+            if not bridge_job_id:
+                return None
+            bridge_completion = wait_for_bridge_job(job_id=bridge_job_id, timeout_seconds=45, poll_interval_seconds=1.0)
+            if str(bridge_completion.get("status") or "").lower() != "completed":
+                return None
+            captured = ((bridge_completion.get("result") or {}).get("imported_listings") or [])
+            first = captured[0] if captured and isinstance(captured[0], dict) else {}
+            captured_urls = [str(url).strip() for url in (first.get("image_urls") or []) if str(url).strip()]
+            if not captured_urls:
+                return None
+            provider = AmazonProductMediaProvider(db, owner_user_id=None)
+            provider.cache_gallery_from_remote_urls(
+                asin=asin,
+                image_urls=captured_urls,
+                title_hint=title_hint,
+                source_provider="bridge_browser",
+            )
+            return db.execute(
+                select(ProductMediaCache).where(
+                    ProductMediaCache.asin == asin,
+                    ProductMediaCache.marketplace_region == settings.amazon_marketplace_region.upper(),
+                )
+            ).scalar_one_or_none()
+        except Exception:
+            return None
 
     def _source_metadata(self, item: VineImportItem, batch_id: int) -> dict:
         return {
@@ -528,10 +814,12 @@ class VineImportService:
         }
 
     def _generate_title(self, product_name: str | None) -> str:
-        base = (product_name or "Amazon Vine Item").strip()
-        return " ".join(word for word in base.split() if "amazon" not in word.lower())[:80] or "Amazon Vine Item"
+        base = _sanitize_vine_text(product_name or "Amazon item")
+        cleaned = " ".join(word for word in base.split() if word.lower() not in {"amazon", "vine"})
+        cleaned = _sanitize_vine_text(cleaned)
+        return cleaned[:80] or "Amazon item"
 
-    def _generate_description(self, item: VineImportItem) -> str:
+    def _generate_description(self, item: VineImportItem, *, amazon_description: str | None = None) -> str:
         name = (item.product_name or "Item").strip()
         bullet_lines: list[str] = []
         if item.brand:
@@ -548,17 +836,25 @@ class VineImportService:
             bullet_lines.append(f"- Source URL: {item.item_url}")
 
         bullets = "\n".join(bullet_lines)
-        header = f"{name}\n\n" if name else ""
-        return (
-            f"{header}"
-            "Condition: Open box or unused customer-owned item from an internal Vine intake workflow.\n"
-            "Review checklist before publish:\n"
-            "- Confirm exact condition, completeness, and accessories.\n"
-            "- Verify functional testing notes and photo evidence.\n"
-            "- Adjust pricing/marketplace specifics before approval.\n"
-            f"{bullets + chr(10) if bullets else ''}"
-            "Draft is prepared for manual approval and marketplace handoff."
-        )
+        header = _sanitize_vine_text(name)
+        body_lines: list[str] = []
+        if header:
+            body_lines.append(header)
+            body_lines.append("")
+        if amazon_description:
+            body_lines.append(_sanitize_vine_text(amazon_description))
+            body_lines.append("")
+        body_lines.append("Condition: New.")
+        body_lines.append("Review checklist before publish:")
+        body_lines.append("- Confirm exact condition, completeness, and accessories.")
+        body_lines.append("- Verify functional testing notes and photo evidence.")
+        body_lines.append("- Adjust pricing and marketplace specifics before approval.")
+        if bullets:
+            body_lines.append("")
+            body_lines.append(bullets)
+        body_lines.append("")
+        body_lines.append("Draft is prepared for manual approval and marketplace handoff.")
+        return _sanitize_vine_text("\n".join(body_lines))
 
     def _build_item_specifics(self, item: VineImportItem, existing: dict | None) -> dict:
         specifics = dict(existing or {})
@@ -646,6 +942,114 @@ class VineImportService:
         db.add(batch)
         if commit:
             db.commit()
+
+    def _normalize_vine_fingerprint_value(self, value: object) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, float):
+            return f"{value:.2f}"
+        if isinstance(value, int):
+            return str(value)
+        if hasattr(value, "isoformat"):
+            try:
+                return str(value.isoformat())
+            except Exception:
+                return str(value)
+        text = re.sub(r"\s+", " ", str(value)).strip().lower()
+        parsed_date = parse_date_value(text, allow_excel_serial=True)
+        if parsed_date is not None:
+            return parsed_date.isoformat()
+        return text
+
+    def _vine_row_fingerprint(self, row: ParsedVineRow | VineImportItem | dict | None) -> str:
+        if row is None:
+            return ""
+        if isinstance(row, dict):
+            payload = row
+        elif isinstance(row, VineImportItem):
+            payload = dict(row.raw_row_json or {})
+            payload.setdefault("Order Number", row.order_number)
+            payload.setdefault("ASIN", row.asin)
+            payload.setdefault("Product Name", row.product_name)
+            payload.setdefault("Order Type", row.order_type)
+            payload.setdefault("Order Date", row.order_date)
+            payload.setdefault("Shipped Date", row.shipped_date)
+            payload.setdefault("Cancelled Date", row.cancelled_date)
+            payload.setdefault("Estimated Tax Value", row.estimated_tax_value)
+            payload.setdefault("Brand", row.brand)
+            payload.setdefault("Category", row.category)
+            payload.setdefault("Review Deadline", row.review_deadline)
+            payload.setdefault("Item URL", row.item_url)
+        else:
+            payload = {
+                "Order Number": row.order_number,
+                "ASIN": row.asin,
+                "Product Name": row.product_name,
+                "Order Type": row.order_type,
+                "Order Date": row.order_date,
+                "Shipped Date": row.shipped_date,
+                "Cancelled Date": row.cancelled_date,
+                "Estimated Tax Value": row.estimated_tax_value,
+                "Brand": row.brand,
+                "Category": row.category,
+                "Review Deadline": row.review_deadline,
+                "Item URL": row.item_url,
+            }
+        normalized = {
+            key: self._normalize_vine_fingerprint_value(payload.get(key))
+            for key in (
+                "Order Number",
+                "ASIN",
+                "Product Name",
+                "Order Type",
+                "Order Date",
+                "Shipped Date",
+                "Cancelled Date",
+                "Estimated Tax Value",
+                "Brand",
+                "Category",
+                "Review Deadline",
+                "Item URL",
+            )
+        }
+        fingerprint_source = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(fingerprint_source.encode("utf-8")).hexdigest()
+
+    def _load_existing_vine_fingerprints(self, db: Session, user_id: int) -> dict[str, VineImportItem]:
+        items = db.execute(
+            select(VineImportItem).where(VineImportItem.user_id == user_id).order_by(VineImportItem.id.asc())
+        ).scalars().all()
+        fingerprints: dict[str, VineImportItem] = {}
+        for item in items:
+            fingerprint = self._vine_row_fingerprint(item)
+            if fingerprint and fingerprint not in fingerprints:
+                fingerprints[fingerprint] = item
+        return fingerprints
+
+    def _is_duplicate_vine_item(self, item: VineImportItem) -> bool:
+        warnings = [str(warning).strip().lower() for warning in (item.parse_warnings_json or [])]
+        return any(warning.startswith("duplicate of prior vine import row") for warning in warnings)
+
+    def _resolve_duplicate_listing_from_map(
+        self,
+        db: Session,
+        item: VineImportItem,
+        previous_items_by_fingerprint: dict[str, VineImportItem],
+    ) -> Listing | None:
+        fingerprint = self._vine_row_fingerprint(item)
+        if not fingerprint:
+            return None
+        candidate = previous_items_by_fingerprint.get(fingerprint)
+        if candidate is not None:
+            if candidate.listing_id:
+                listing = db.get(Listing, candidate.listing_id)
+                if listing is not None:
+                    return listing
+            if candidate.inventory_item_id:
+                listing = db.get(Listing, candidate.inventory_item_id)
+                if listing is not None:
+                    return listing
+        return None
 
     def _detect_report_year(self, rows: list[ParsedVineRow], filename: str) -> int | None:
         for row in rows:

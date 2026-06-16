@@ -421,12 +421,18 @@ def queue_crosspost_job(
     db.flush()
 
     for market in targets:
-        existing = db.execute(
-            select(MarketplaceListing).where(
-                MarketplaceListing.listing_id == listing.id,
-                MarketplaceListing.marketplace == MarketplaceName(market),
+        existing = (
+            db.execute(
+                select(MarketplaceListing)
+                .where(
+                    MarketplaceListing.listing_id == listing.id,
+                    MarketplaceListing.marketplace == MarketplaceName(market),
+                )
+                .order_by(MarketplaceListing.updated_at.desc(), MarketplaceListing.id.desc())
             )
-        ).scalar_one_or_none()
+            .scalars()
+            .first()
+        )
         if not existing:
             db.add(
                 MarketplaceListing(

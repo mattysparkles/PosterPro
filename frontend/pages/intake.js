@@ -454,9 +454,9 @@ export default function IntakePage() {
               <Button variant="outline" onClick={syncGoogleWatchNow} disabled={watchSaving || watchRunning}>
                 {watchRunning ? 'Syncing...' : 'Run sync now'}
               </Button>
-              <Link href="/listings">
-                <Button variant="ghost">Open listings queue</Button>
-              </Link>
+              <Button href="/listings" variant="ghost">
+                Open listings queue
+              </Button>
             </div>
             <p className="text-xs text-[#667085]">
               Last sync: {googleWatch.last_synced_at ? new Date(googleWatch.last_synced_at).toLocaleString() : 'Never'} · Last import: {googleWatch.last_imported_count || 0} new item(s)
@@ -472,9 +472,15 @@ export default function IntakePage() {
         left={<p className="text-sm font-medium text-[#101828]">Next best action</p>}
         right={
           <div className="flex flex-wrap gap-2">
-            <Link href="/listings?tab=drafts"><Button variant="outline" size="sm">Review generated drafts</Button></Link>
-            <Link href="/inventory?tab=batches"><Button variant="outline" size="sm">Open batch inventory</Button></Link>
-            <Link href="/listings"><Button size="sm">Go to listings</Button></Link>
+            <Button href="/listings?tab=drafts" variant="outline" size="sm">
+              Review generated drafts
+            </Button>
+            <Button href="/inventory?tab=batches" variant="outline" size="sm">
+              Open batch inventory
+            </Button>
+            <Button href="/listings" size="sm">
+              Go to listings
+            </Button>
           </div>
         }
       />

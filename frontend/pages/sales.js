@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Download, Info, RefreshCcw, ShoppingCart, Wallet } from 'lucide-react';
+import toast from 'react-hot-toast';
 
 import AppShell from '../components/layout/AppShell';
 import Button from '../components/ui/button';
 import DataTableCard from '../components/ui/data-table-card';
 import EmptyState from '../components/ui/empty-state';
 import FormSection from '../components/ui/form-section';
+import Input from '../components/ui/input';
 import MetricCard from '../components/ui/metric-card';
 import PageHeader from '../components/ui/page-header';
 import SectionPanel from '../components/ui/section-panel';
@@ -16,6 +18,7 @@ import {
   fetchAutonomousConfig,
   fetchSaleDetectionSettings,
   fetchSalesDashboard,
+  reconcileSale,
   toggleAutonomousMode,
   updateSaleDetails,
   updateSaleDetectionSettings,
@@ -39,11 +42,14 @@ export default function SalesPage() {
   const [autonomousConfig, setAutonomousConfig] = useState({ autonomous_mode: true, autonomous_dry_run: true });
   const [platformSettings, setPlatformSettings] = useState([]);
   const [activeSale, setActiveSale] = useState(null);
+  const [search, setSearch] = useState('');
+  const [sortBy, setSortBy] = useState('sold_at');
+  const [sortDir, setSortDir] = useState('desc');
 
   const reload = async () => {
     if (!user?.id) return;
     const [salesData, autoData, settings] = await Promise.all([
-      fetchSalesDashboard(user.id, 200),
+      fetchSalesDashboard(user.id, 200, { search, sortBy, sortDir }),
       fetchAutonomousConfig(),
       fetchSaleDetectionSettings(user.id),
     ]);
@@ -56,17 +62,19 @@ export default function SalesPage() {
     reload();
     const interval = setInterval(reload, 20000);
     return () => clearInterval(interval);
-  }, [user?.id]);
+  }, [user?.id, search, sortBy, sortDir]);
 
   const summaryCards = useMemo(() => {
     const summary = dashboard.summary || {};
+    const unmatched = (dashboard.sales || []).filter((sale) => !sale.matched).length;
     return [
       { label: 'Gross sales', value: `$${Number(summary.gross || 0).toFixed(2)}`, detail: 'Top-line sales captured across tracked channels.' },
+      { label: 'Net profit', value: `$${Number(summary.total_profit || 0).toFixed(2)}`, detail: 'Profit after fees and shipping when available.' },
       { label: 'Sales detected', value: summary.total_sales || 0, detail: 'Completed sales rows pulled into PosterPro.' },
       { label: 'Units sold', value: summary.units || 0, detail: 'Total item quantity sold in the visible history.' },
-      { label: 'Connected detectors', value: platformSettings.length, detail: 'Marketplaces currently included in sale polling.' },
+      { label: 'Needs review', value: unmatched, detail: unmatched ? 'Sales not yet linked to a local listing.' : 'All visible sales are linked to local listings.' },
     ];
-  }, [dashboard, platformSettings.length]);
+  }, [dashboard]);
 
   const platformRows = useMemo(
     () =>
@@ -78,6 +86,11 @@ export default function SalesPage() {
           sales: platformSummary.total_sales || 0,
           gross: platformSummary.gross || 0,
           units: platformSummary.units || 0,
+          fees_actual: platformSummary.fees_actual || 0,
+          shipping_cost: platformSummary.shipping_cost || 0,
+          promotional_fees: platformSummary.promotional_fees || 0,
+          marketplace_fees: platformSummary.marketplace_fees || 0,
+          profit: platformSummary.profit || 0,
         };
       }),
     [dashboard.summary, platformSettings],
@@ -103,10 +116,25 @@ export default function SalesPage() {
   );
 
   const exportCsv = () => {
-    const rows = ['id,platform,amount,currency,quantity,sold_at,status,order_id'];
+    const rows = ['id,platform,amount,currency,quantity,fees_actual,shipping_cost,promotional_fees,marketplace_fees,profit,roi_percentage,sold_at,status,order_id'];
     (dashboard.sales || []).forEach((sale) => {
       rows.push(
-        [sale.id, sale.platform, sale.amount || '', sale.currency, sale.quantity, sale.sold_at || '', sale.status, sale.marketplace_order_id || '']
+        [
+          sale.id,
+          sale.platform,
+          sale.amount || '',
+          sale.currency,
+          sale.quantity,
+          sale.fees_actual || '',
+          sale.shipping_cost || '',
+          sale.promotional_fees || '',
+          sale.marketplace_fees || '',
+          sale.profit || '',
+          sale.roi_percentage || '',
+          sale.sold_at || '',
+          sale.status,
+          sale.marketplace_order_id || '',
+        ]
           .map((cell) => `"${String(cell).replaceAll('"', '""')}"`)
           .join(','),
       );
@@ -208,13 +236,17 @@ export default function SalesPage() {
       <div id="mix">
       <DataTableCard
         title="Marketplace sales mix"
-        description="Current sales and gross totals by channel included in the sale detector."
+        description="Current sales, gross totals, fees, and profit by channel included in the sale detector."
         columns={[
-          { key: 'marketplace', label: 'Marketplace', render: (row) => <span className="capitalize">{row.marketplace}</span> },
-          { key: 'enabled', label: 'Polling', render: (row) => <StatusPill status={row.enabled ? 'success' : 'default'} label={row.enabled ? 'Enabled' : 'Disabled'} /> },
-          { key: 'sales', label: 'Sales' },
+            { key: 'marketplace', label: 'Marketplace', render: (row) => <span className="capitalize">{row.marketplace}</span> },
+            { key: 'enabled', label: 'Polling', render: (row) => <StatusPill status={row.enabled ? 'success' : 'default'} label={row.enabled ? 'Enabled' : 'Disabled'} /> },
+            { key: 'sales', label: 'Sales' },
           { key: 'units', label: 'Units' },
           { key: 'gross', label: 'Gross', render: (row) => `$${Number(row.gross || 0).toFixed(2)}` },
+          { key: 'fees_actual', label: 'Fees', render: (row) => `$${Number(row.fees_actual || 0).toFixed(2)}` },
+          { key: 'shipping_cost', label: 'Shipping', render: (row) => `$${Number(row.shipping_cost || 0).toFixed(2)}` },
+          { key: 'promotional_fees', label: 'Promo', render: (row) => `$${Number(row.promotional_fees || 0).toFixed(2)}` },
+          { key: 'profit', label: 'Profit', render: (row) => `$${Number(row.profit || 0).toFixed(2)}` },
         ]}
         rows={platformRows}
         rowKey={(row) => row.marketplace}
@@ -226,7 +258,50 @@ export default function SalesPage() {
       <DataTableCard
         title="Sales timeline"
         description="Latest detected sales across connected marketplaces. Select a row to finish bookkeeping details."
+        toolbar={
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search listing, platform, order..."
+              className="w-full md:w-72"
+            />
+            <select
+              value={sortBy}
+              onChange={(event) => setSortBy(event.target.value)}
+              className="h-10 rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]"
+            >
+              <option value="sold_at">Sold at</option>
+              <option value="amount">Amount</option>
+              <option value="profit">Profit</option>
+              <option value="fees_actual">Fees</option>
+              <option value="shipping_cost">Shipping</option>
+              <option value="platform">Marketplace</option>
+            </select>
+            <select
+              value={sortDir}
+              onChange={(event) => setSortDir(event.target.value)}
+              className="h-10 rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]"
+            >
+              <option value="desc">Descending</option>
+              <option value="asc">Ascending</option>
+            </select>
+          </div>
+        }
         columns={[
+          {
+            key: 'listing',
+            label: 'Listing',
+            cellClassName: 'min-w-[260px]',
+            render: (sale) => (
+              <div>
+                <p className="font-medium text-[#101828]">{sale.listing_title || 'Unmatched sale'}</p>
+                <p className="mt-1 text-xs text-[#667085]">
+                  {sale.listing_id ? `Listing #${sale.listing_id}` : `Marketplace listing ${sale.marketplace_listing_id || 'unknown'}`}
+                </p>
+              </div>
+            ),
+          },
           {
             key: 'platform',
             label: 'Marketplace',
@@ -239,18 +314,48 @@ export default function SalesPage() {
           },
           { key: 'amount', label: 'Amount', render: (sale) => `$${Number(sale.amount || 0).toFixed(2)}` },
           { key: 'quantity', label: 'Qty', render: (sale) => sale.quantity || 1 },
+          { key: 'fees_actual', label: 'Fees', render: (sale) => `$${Number(sale.fees_actual || 0).toFixed(2)}` },
+          { key: 'shipping_cost', label: 'Shipping', render: (sale) => `$${Number(sale.shipping_cost || 0).toFixed(2)}` },
+          { key: 'promotional_fees', label: 'Promo', render: (sale) => `$${Number(sale.promotional_fees || 0).toFixed(2)}` },
+          { key: 'marketplace_fees', label: 'Marketplace', render: (sale) => `$${Number(sale.marketplace_fees || 0).toFixed(2)}` },
+          { key: 'profit', label: 'Profit', render: (sale) => `$${Number(sale.profit || 0).toFixed(2)}` },
           { key: 'sold_at', label: 'Sold at', render: (sale) => formatTime(sale.sold_at) },
           { key: 'status', label: 'Status', render: (sale) => <StatusPill status={sale.status || 'completed'} label={sale.status || 'completed'} /> },
           {
             key: 'note',
             label: 'Automation note',
-            cellClassName: 'min-w-[260px]',
-            render: () => (
+            cellClassName: 'min-w-[280px]',
+            render: (sale) => (
               <div className="flex items-center gap-2 text-sm text-[#667085]">
                 <Info size={14} />
-                Auto-delist can remove the item from other channels after sale detection.
+                {sale.matched
+                  ? 'Matched sales are removed from active inventory and delisted from secondary channels.'
+                  : 'Unmatched sale. Reconcile it so PosterPro can mark the local item sold and fan out delists.'}
               </div>
             ),
+          },
+          {
+            key: 'actions',
+            label: 'Actions',
+            render: (sale) =>
+              sale.matched ? null : (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={async (event) => {
+                    event.stopPropagation();
+                    try {
+                      await reconcileSale(sale.id);
+                      await reload();
+                      toast.success('Sale reconciled and listing marked sold.');
+                    } catch (error) {
+                      toast.error(error.message);
+                    }
+                  }}
+                >
+                  Reconcile
+                </Button>
+              ),
           },
         ]}
         rows={dashboard.sales || []}
@@ -296,6 +401,8 @@ export default function SalesPage() {
                 await updateSaleDetails(activeSale.id, {
                   fees_actual: Number(form.get('fees_actual') || 0),
                   shipping_cost: Number(form.get('shipping_cost') || 0),
+                  promotional_fees: Number(form.get('promotional_fees') || 0),
+                  marketplace_fees: Number(form.get('marketplace_fees') || 0),
                   notes: String(form.get('notes') || ''),
                 });
                 setActiveSale(null);
@@ -306,11 +413,19 @@ export default function SalesPage() {
                 <FormSection title="Settlement" description="Record true platform fees and shipping cost.">
                   <label className="block text-sm font-medium text-[#101828]">
                     Platform fees
-                    <input name="fees_actual" type="number" step="0.01" placeholder="0.00" className="mt-2 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]" />
+                    <input name="fees_actual" type="number" step="0.01" placeholder="0.00" defaultValue={activeSale.fees_actual ?? ''} className="mt-2 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]" />
                   </label>
                   <label className="block text-sm font-medium text-[#101828]">
                     Shipping cost
-                    <input name="shipping_cost" type="number" step="0.01" placeholder="0.00" className="mt-2 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]" />
+                    <input name="shipping_cost" type="number" step="0.01" placeholder="0.00" defaultValue={activeSale.shipping_cost ?? ''} className="mt-2 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]" />
+                  </label>
+                  <label className="block text-sm font-medium text-[#101828]">
+                    Promotional fees
+                    <input name="promotional_fees" type="number" step="0.01" placeholder="0.00" defaultValue={activeSale.promotional_fees ?? ''} className="mt-2 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]" />
+                  </label>
+                  <label className="block text-sm font-medium text-[#101828]">
+                    Marketplace fees
+                    <input name="marketplace_fees" type="number" step="0.01" placeholder="0.00" defaultValue={activeSale.marketplace_fees ?? ''} className="mt-2 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]" />
                   </label>
                 </FormSection>
                 <FormSection title="Notes" description="Keep any order-specific context with the sale.">

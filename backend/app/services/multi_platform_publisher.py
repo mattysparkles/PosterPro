@@ -89,12 +89,18 @@ def upsert_marketplace_listing(
     response: dict[str, Any] | None,
 ) -> MarketplaceListing:
     market = MarketplaceName(marketplace.lower())
-    row = db.execute(
-        select(MarketplaceListing).where(
-            MarketplaceListing.listing_id == listing_id,
-            MarketplaceListing.marketplace == market,
+    row = (
+        db.execute(
+            select(MarketplaceListing)
+            .where(
+                MarketplaceListing.listing_id == listing_id,
+                MarketplaceListing.marketplace == market,
+            )
+            .order_by(MarketplaceListing.updated_at.desc(), MarketplaceListing.id.desc())
         )
-    ).scalar_one_or_none()
+        .scalars()
+        .first()
+    )
 
     if not row:
         row = MarketplaceListing(listing_id=listing_id, marketplace=market, status=status)

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from celery import chord, group
-from sqlalchemy import select
+from sqlalchemy import select, update as sql_update
 
 from app.core.config import settings
 from app.core.database import SessionLocal
@@ -28,6 +28,7 @@ from app.models.models import (
     User,
 )
 from app.services.listing_workspace import normalize_marketplace_data
+from app.services.listing_review import derive_condition_data, derive_shipping_profile, normalize_listing_images
 from app.services.marketplace_execution import resolve_execution_mode
 from app.services.marketplace_field_mapper import build_marketplace_payload, normalize_import_payload
 from app.services.automation_bridge import submit_bridge_job, wait_for_bridge_job, get_bridge_asset, AutomationBridgeError
@@ -42,7 +43,7 @@ from app.services.pricing_service import PricingService
 from app.services.multi_platform_publisher import get_enabled_platforms, multi_platform_publisher, upsert_marketplace_listing
 from app.services.offer_service import OfferService
 from app.services.sale_detection_service import SaleDetectionService
-from app.services.ebay_service import EbayIntegrationError, get_active_ebay_listings
+from app.services.ebay_service import EbayIntegrationError, get_active_ebay_listings, sync_ebay_active_listings
 from app.workers.celery_app import celery_app
 from app.services.clustering import cluster_embeddings
 from app.services.rate_limiter import rate_limiter
@@ -53,6 +54,46 @@ STALE_IMPORT_JOB_AFTER = timedelta(minutes=20)
 
 sale_detection_service = SaleDetectionService()
 inventory_service = InventoryService()
+
+
+def _force_marketplace_listing_state(
+    db,
+    *,
+    listing_id: int,
+    marketplace: str,
+    status: MarketplaceListingStatus,
+    response: dict | None,
+) -> None:
+    market = MarketplaceName(marketplace)
+    external_listing_id = None
+    if isinstance(response, dict):
+        external_listing_id = (
+            response.get("listing_id")
+            or response.get("external_listing_id")
+            or (((response.get("bridge_completion") or {}).get("result") or {}).get("listing_id"))
+        )
+    updated = db.execute(
+        sql_update(MarketplaceListing)
+        .where(
+            MarketplaceListing.listing_id == listing_id,
+            MarketplaceListing.marketplace == market,
+        )
+        .values(
+            status=status,
+            raw_response=response,
+            marketplace_listing_id=external_listing_id,
+        )
+    )
+    if updated.rowcount == 0:
+        db.add(
+            MarketplaceListing(
+                listing_id=listing_id,
+                marketplace=market,
+                status=status,
+                raw_response=response,
+                marketplace_listing_id=external_listing_id,
+            )
+        )
 
 
 def _is_placeholder_import_title(value: str | None) -> bool:
@@ -322,6 +363,25 @@ def _create_imported_listing(
         "raw_payload": raw_payload,
         "original_image_urls": normalized.get("image_urls") or [],
     }
+    listing_images = normalize_listing_images(
+        image_urls=localized_images,
+        source_url=None,
+        source_page_url=raw_payload.get("source_url") if isinstance(raw_payload, dict) else None,
+        source_platform=source_marketplace,
+        default_is_reference=True,
+        approved=False,
+    )
+    condition_data = derive_condition_data(
+        listing={"condition": normalized.get("condition"), "source_type": f"{source_marketplace}_import"},
+        source_type=f"{source_marketplace}_import",
+        source_metadata=source_metadata,
+        existing={"condition_source": "import"},
+    )
+    shipping_profile = derive_shipping_profile(
+        listing={"title": normalized.get("title"), "description": normalized.get("description")},
+        item_specifics=normalized.get("item_specifics") or {},
+        existing={"estimated": True, "manual_measurement_needed": True},
+    )
     if raw_payload.get("image_assets"):
         source_metadata["bridge_image_assets"] = raw_payload.get("image_assets")
     if image_import_failures:
@@ -377,6 +437,8 @@ def _create_imported_listing(
             existing_listing.listing_price = normalized.get("listing_price")
         if not existing_listing.image_urls and localized_images:
             existing_listing.image_urls = localized_images
+        if not existing_listing.listing_images and listing_images:
+            existing_listing.listing_images = listing_images
         if not existing_listing.item_specifics:
             existing_listing.item_specifics = normalized.get("item_specifics") or {}
         if not existing_listing.tags:
@@ -384,6 +446,8 @@ def _create_imported_listing(
         if not existing_listing.quantity:
             existing_listing.quantity = int(normalized.get("quantity") or 1)
         existing_listing.source_metadata = {**existing_source_metadata, **source_metadata, "import_sources": import_sources}
+        existing_listing.condition_data = existing_listing.condition_data or condition_data
+        existing_listing.shipping_profile = existing_listing.shipping_profile or shipping_profile
         existing_listing.marketplace_data = existing_listing.marketplace_data or marketplace_data
         if isinstance(existing_listing.marketplace_data, dict):
             existing_listing.marketplace_data = normalize_marketplace_data(
@@ -410,10 +474,13 @@ def _create_imported_listing(
         listing_price=normalized.get("listing_price"),
         quantity=int(normalized.get("quantity") or 1),
         image_urls=localized_images,
+        listing_images=listing_images,
         item_specifics=normalized.get("item_specifics") or {},
         tags=normalized.get("tags") or [],
         source_type=f"{source_marketplace}_import",
         source_metadata=source_metadata,
+        condition_data=condition_data,
+        shipping_profile=shipping_profile,
         marketplace_data=marketplace_data,
         needs_review=True,
     )
@@ -605,6 +672,13 @@ def process_marketplace_crosspost_job_task(self, job_id: int) -> dict:
                     status=result.status,
                     response=result.response,
                 )
+                _force_marketplace_listing_state(
+                    db,
+                    listing_id=listing.id,
+                    marketplace=market,
+                    status=result.status,
+                    response=result.response,
+                )
                 results.append(
                     {
                         "marketplace": market,
@@ -646,8 +720,15 @@ def process_marketplace_crosspost_job_task(self, job_id: int) -> dict:
                         else:
                             bridge_result = bridge_completion.get("result") if isinstance(bridge_completion.get("result"), dict) else {}
                             result_status = str(bridge_result.get("status") or response.get("status") or "planned")
-                            if str(result_status).strip().lower() in {"submitted_to_marketplace", "published"}:
+                            submitted_to_marketplace = bool(bridge_result.get("submitted")) or str(result_status).strip().lower() in {"submitted_to_marketplace", "published"}
+                            if submitted_to_marketplace:
                                 listing_status = MarketplaceListingStatus.PUBLISHED
+                                response = {
+                                    **(response if isinstance(response, dict) else {}),
+                                    "status": result_status,
+                                    "bridge_completion": bridge_completion,
+                                    "submitted": True,
+                                }
                     except Exception as exc:
                         error_message = str(exc)
 
@@ -658,6 +739,13 @@ def process_marketplace_crosspost_job_task(self, job_id: int) -> dict:
                         "error": error_message,
                     }
                     upsert_marketplace_listing(
+                        db,
+                        listing_id=listing.id,
+                        marketplace=market,
+                        status=MarketplaceListingStatus.FAILED,
+                        response=failure_response,
+                    )
+                    _force_marketplace_listing_state(
                         db,
                         listing_id=listing.id,
                         marketplace=market,
@@ -676,6 +764,13 @@ def process_marketplace_crosspost_job_task(self, job_id: int) -> dict:
                     continue
 
                 upsert_marketplace_listing(
+                    db,
+                    listing_id=listing.id,
+                    marketplace=market,
+                    status=listing_status,
+                    response=response,
+                )
+                _force_marketplace_listing_state(
                     db,
                     listing_id=listing.id,
                     marketplace=market,
@@ -953,6 +1048,32 @@ def poll_for_sales_task(self, dry_run: bool | None = None) -> dict:
         )
         logger.info("Sale detection polling task completed", extra=result)
         return result
+
+
+@celery_app.task(
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_jitter=True,
+    max_retries=3,
+    name="sync_ebay_active_listings",
+)
+def sync_ebay_active_listings_task(self, user_id: int | None = None, limit: int = 100) -> dict:
+    with SessionLocal() as db:
+        if user_id is not None:
+            result = asyncio.run(sync_ebay_active_listings(user_id, db, limit=limit))
+            logger.info("eBay sync task completed", extra=result)
+            return result
+        users = db.execute(select(User)).scalars().all()
+        results = []
+        for user in users:
+            try:
+                result = asyncio.run(sync_ebay_active_listings(user.id, db, limit=limit))
+            except Exception as exc:  # pragma: no cover - logged for operator visibility
+                logger.exception("eBay sync failed", extra={"user_id": user.id, "error": str(exc)})
+                result = {"user_id": user.id, "status": "failed", "error": str(exc)}
+            results.append(result)
+        return {"processed_users": len(results), "results": results}
 
 
 @celery_app.task(name="recompute_daily_analytics")

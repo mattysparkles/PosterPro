@@ -27,6 +27,14 @@ const PUBLISHING_TABS = [
   { value: 'health', label: 'Marketplace Health' },
 ];
 
+const LIVE_STATUSES = ['POSTED', 'LIVE', 'PUBLISHED'];
+const SOLD_STATUSES = ['SOLD', 'CLOSED'];
+const TERMINAL_STATUSES = [...LIVE_STATUSES, ...SOLD_STATUSES, 'DELETED'];
+
+function isSoldListing(listing) {
+  return Boolean(listing?.sold_at) || Number(listing?.quantity ?? 1) <= 0;
+}
+
 function getListingTargets(listing, enabledPlatforms) {
   const targets = new Set(listing.marketplace_data?.targets || []);
   if (listing.ebay_publish_status || listing.ebay_listing_id) targets.add('ebay');
@@ -42,6 +50,10 @@ function formatMarketplace(name) {
 }
 
 function marketplaceStatusFor(listing, marketplace) {
+  const explicit = (listing.marketplace_statuses || []).find((row) => row.marketplace === marketplace);
+  if (explicit?.status) {
+    return explicit.status;
+  }
   if (marketplace === 'ebay') {
     return listing.ebay_publish_status || (listing.ebay_listing_id ? 'POSTED' : listing.status || 'DRAFT');
   }
@@ -49,6 +61,10 @@ function marketplaceStatusFor(listing, marketplace) {
 }
 
 function marketplaceErrorFor(listing, marketplace) {
+  const explicit = (listing.marketplace_statuses || []).find((row) => row.marketplace === marketplace);
+  if (explicit?.raw_response?.error) {
+    return explicit.raw_response.error;
+  }
   if (marketplace === 'ebay' && listing.ebay_publish_status === 'FAILED') {
     return formatPublishFailureMessage(listing.marketplace_data?.error, 'ebay');
   }
@@ -140,14 +156,14 @@ export default function PublishingPage() {
 
   const queueRows = useMemo(
     () =>
-      marketplaceRows.filter((row) => !['POSTED', 'LIVE', 'SOLD'].includes(String(row.status).toUpperCase())),
+      marketplaceRows.filter((row) => !TERMINAL_STATUSES.includes(String(row.status).toUpperCase())),
     [marketplaceRows],
   );
 
   const approvalRows = useMemo(
     () =>
       listings
-        .filter((listing) => listing.needs_review || listing.restricted_review_required)
+        .filter((listing) => !isSoldListing(listing) && (listing.needs_review || listing.restricted_review_required))
         .map((listing) => ({
           id: listing.id,
           listing_id: listing.id,
@@ -163,7 +179,12 @@ export default function PublishingPage() {
 
   const liveRows = useMemo(
     () =>
-      marketplaceRows.filter((row) => ['POSTED', 'LIVE', 'SOLD'].includes(String(row.status).toUpperCase())),
+      marketplaceRows.filter((row) => LIVE_STATUSES.includes(String(row.status).toUpperCase())),
+    [marketplaceRows],
+  );
+  const soldRows = useMemo(
+    () =>
+      marketplaceRows.filter((row) => SOLD_STATUSES.includes(String(row.status).toUpperCase())),
     [marketplaceRows],
   );
 
@@ -195,8 +216,10 @@ export default function PublishingPage() {
         current.errors += 1;
         current.status = 'Attention needed';
       }
-      if (['POSTED', 'LIVE', 'SOLD'].includes(String(row.status).toUpperCase())) {
+      if (LIVE_STATUSES.includes(String(row.status).toUpperCase())) {
         current.live_count += 1;
+      } else if (SOLD_STATUSES.includes(String(row.status).toUpperCase()) || String(row.status).toUpperCase() === 'DELETED') {
+        current.queued_count += 0;
       } else {
         current.queued_count += 1;
       }
@@ -214,8 +237,8 @@ export default function PublishingPage() {
         grouped[row.marketplace] = { marketplace: row.marketplace, live_count: 0, queued_count: 0, errors: 0, last_sync: row.last_sync };
       }
       if (row.error) grouped[row.marketplace].errors += 1;
-      if (['POSTED', 'LIVE', 'SOLD'].includes(String(row.status).toUpperCase())) grouped[row.marketplace].live_count += 1;
-      else grouped[row.marketplace].queued_count += 1;
+      if (LIVE_STATUSES.includes(String(row.status).toUpperCase())) grouped[row.marketplace].live_count += 1;
+      else if (!TERMINAL_STATUSES.includes(String(row.status).toUpperCase())) grouped[row.marketplace].queued_count += 1;
       if (row.last_sync && (!grouped[row.marketplace].last_sync || new Date(row.last_sync) > new Date(grouped[row.marketplace].last_sync))) {
         grouped[row.marketplace].last_sync = row.last_sync;
       }
@@ -304,12 +327,10 @@ export default function PublishingPage() {
         description="Watch the publish queue, live marketplace listings, and sync health from one place."
         actions={
           <div className="flex flex-wrap gap-2">
-            <Link href="/jobs">
-              <Button variant="outline">Open jobs console</Button>
-            </Link>
-            <Link href="/listings">
-              <Button>Open listings</Button>
-            </Link>
+            <Button href="/jobs" variant="outline">
+              Open jobs console
+            </Button>
+            <Button href="/listings">Open listings</Button>
           </div>
         }
       />
@@ -318,7 +339,7 @@ export default function PublishingPage() {
         <MetricCard label="Awaiting approval" value={approvalRows.length} detail="Drafts that still need a human sign-off." />
         <MetricCard label="Queued to publish" value={queueRows.length} detail="Marketplace rows still moving through queue or posting." />
         <MetricCard label="Live now" value={liveRows.length} detail="Listings already posted or live in marketplace feeds." />
-        <MetricCard label="Sync issues" value={syncRows.filter((row) => row.errors).length} detail="Marketplace channels with publish or sync errors." />
+        <MetricCard label="Sold / closed" value={soldRows.length} detail="Marketplace rows closed by post-sale automation." />
       </section>
 
       <SectionPanel title="Publishing progress" description="Worker queue state for marketplace publish jobs." action={<Link href="/jobs" className="text-sm font-medium text-[#2563eb]">Open jobs console</Link>}>

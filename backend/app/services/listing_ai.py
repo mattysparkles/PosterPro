@@ -29,6 +29,8 @@ class ListingAIService:
         merged["research_queries"] = self._normalize_string_list(merged.get("research_queries"), fallback["research_queries"])
         merged["estimated_value"] = self._safe_float(merged.get("estimated_value"), fallback["estimated_value"])
         merged["draft_quality"] = self._draft_quality(merged)
+        merged["title"] = self._sanitize_claims(merged["title"], image_signals)
+        merged["description"] = self._sanitize_claims(merged["description"], image_signals)
         merged["prompt_used"] = LISTING_PROMPT_TEMPLATE
         merged["intelligence_prompt"] = get_prompt_template("generate_listing_intelligence")
         merged["model_used"] = self.model if llm else "heuristic-fallback"
@@ -78,9 +80,9 @@ class ListingAIService:
             photo_notes.append(f"Draft was generated from {source_type.replace('_', ' ')} source signals.")
         return {
             "title": title[:80],
-            "description": "Pre-owned item. Review condition, included accessories, measurements, and visible wear before publishing.",
+            "description": "Item needs operator review. Confirm condition, included accessories, measurements, and visible wear before publishing.",
             "category_suggestion": category,
-            "condition": "Used",
+            "condition": "Needs review",
             "item_specifics": {
                 "Brand": "Needs review",
                 "Model": "Needs review",
@@ -125,3 +127,17 @@ class ListingAIService:
         if score >= 2:
             return "partial"
         return "weak"
+
+    @staticmethod
+    def _sanitize_claims(text: str, image_signals: dict[str, Any]) -> str:
+        supported = json.dumps(image_signals).lower()
+        output = text
+        if "warranty" not in supported:
+            output = output.replace("warranty", "coverage")
+        if "authentic" not in supported:
+            output = output.replace("Authentic", "").replace("authentic", "")
+        if "oem" not in supported:
+            output = output.replace("OEM", "").replace("oem", "")
+        if "compatible" not in supported and "fitment" not in supported:
+            output = output.replace("compatible with", "review compatibility for")
+        return " ".join(output.split()).strip()

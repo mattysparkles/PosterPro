@@ -7,9 +7,10 @@ import re
 import tempfile
 import time
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote_plus, urlparse
 
 import httpx
 
@@ -65,6 +66,43 @@ MARKETPLACE_BROWSER_SPECS: dict[str, MarketplaceBrowserSpec] = {
         supports_import=True,
         auth_cookie_names=("session-id", "ubid-main"),
         auth_url_tokens=("/gp/", "/dp/", "/s?", "amazon.com"),
+    ),
+    "ebay": MarketplaceBrowserSpec(
+        marketplace="ebay",
+        label="eBay",
+        home_url="https://www.ebay.com/",
+        create_url="https://www.ebay.com/sl/sell",
+        auth_check_url="https://www.ebay.com/sh/lst/active",
+        connect_start_url="https://signin.ebay.com/",
+        title_selectors=(
+            'input[aria-label*="title" i]',
+            'input[placeholder*="title" i]',
+            'input[name*="title" i]',
+            'input[type="text"]',
+        ),
+        price_selectors=(
+            'input[aria-label*="price" i]',
+            'input[placeholder*="price" i]',
+            'input[name*="price" i]',
+            'input[inputmode="decimal"]',
+            'input[inputmode="numeric"]',
+        ),
+        description_selectors=(
+            'textarea[aria-label*="description" i]',
+            'textarea[placeholder*="description" i]',
+            'textarea[name*="description" i]',
+            "textarea",
+        ),
+        submit_selectors=(
+            'button:has-text("List it")',
+            'button:has-text("List item")',
+            'button:has-text("Publish")',
+            'button:has-text("Continue")',
+            '[role="button"]:has-text("List it")',
+        ),
+        auth_cookie_names=("nonsession", "s"),
+        auth_url_tokens=("/sh/", "/sl/sell", "ebay.com"),
+        auth_required_text=("seller hub", "selling", "list an item"),
     ),
     "facebook": MarketplaceBrowserSpec(
         marketplace="facebook",
@@ -1330,19 +1368,27 @@ class AmazonMarketplaceBrowserRunner(MarketplaceBrowserRunner):
                 page.screenshot(path=str(overview_path), full_page=True)
                 page.close()
                 imported_listings: list[dict[str, Any]] = []
+                title_hint = str(
+                    raw_payload.get("product_name")
+                    or raw_payload.get("title")
+                    or payload.get("product_name")
+                    or payload.get("title")
+                    or ""
+                ).strip()
                 for asin in normalized_asins:
-                    product_url = f"https://www.amazon.com/dp/{asin}"
-                    item_page = context.new_page()
                     try:
-                        item_page.goto(product_url, wait_until="domcontentloaded")
-                        item_page.wait_for_timeout(1500)
-                        image_urls = self._extract_amazon_product_images(item_page)
-                        title = self._extract_amazon_title(item_page)
+                        capture = None
+                        if title_hint:
+                            capture = self._capture_amazon_product_by_title(context, title_hint=title_hint)
+                        if capture is None:
+                            capture = self._capture_amazon_product_by_asin(context, asin=asin)
+                        product_url = capture["source_url"]
+                        image_urls = capture["image_urls"]
+                        title = capture.get("title")
                     except Exception:
+                        product_url = f"https://www.amazon.com/dp/{asin}"
                         image_urls = []
                         title = None
-                    finally:
-                        item_page.close()
                     imported_listings.append(
                         {
                             "source_listing_reference": asin,
@@ -1373,6 +1419,119 @@ class AmazonMarketplaceBrowserRunner(MarketplaceBrowserRunner):
                 raise BrowserRunnerError(f"Amazon media capture timed out: {exc}") from exc
             finally:
                 browser.close()
+
+    def _capture_amazon_product_by_asin(self, context: Any, *, asin: str) -> dict[str, Any]:
+        product_url = f"https://www.amazon.com/dp/{asin}"
+        item_page = context.new_page()
+        try:
+            item_page.goto(product_url, wait_until="domcontentloaded")
+            item_page.wait_for_timeout(1500)
+            image_urls = self._extract_amazon_product_images(item_page)
+            title = self._extract_amazon_title(item_page)
+            return {
+                "source_url": product_url,
+                "image_urls": image_urls,
+                "title": title,
+            }
+        finally:
+            item_page.close()
+
+    def _capture_amazon_product_by_title(self, context: Any, *, title_hint: str) -> dict[str, Any] | None:
+        for query in self._amazon_title_search_variants(title_hint):
+            search_url = f"https://www.amazon.com/s?k={quote_plus(query)}"
+            search_page = context.new_page()
+            try:
+                search_page.goto(search_url, wait_until="domcontentloaded")
+                search_page.wait_for_timeout(1500)
+                candidates = self._collect_amazon_search_candidates(search_page.content())
+                if not candidates:
+                    continue
+                scored = sorted(
+                    ((self._score_text_match(title_hint, candidate["title"]), candidate) for candidate in candidates),
+                    key=lambda item: item[0],
+                    reverse=True,
+                )
+                best_score, best_candidate = scored[0]
+                if best_score < 0.52:
+                    continue
+                asin = best_candidate["asin"]
+                capture = self._capture_amazon_product_by_asin(context, asin=asin)
+                if not capture["image_urls"]:
+                    continue
+                if not capture.get("title"):
+                    capture["title"] = best_candidate["title"]
+                capture["source_url"] = f"https://www.amazon.com/dp/{asin}"
+                return capture
+            finally:
+                search_page.close()
+        return None
+
+    def _amazon_title_search_variants(self, title_hint: str) -> list[str]:
+        normalized = self._normalize_text(title_hint)
+        tokens = [token for token in normalized.split() if len(token) > 2]
+        variants: list[str] = []
+        for candidate in [
+            title_hint,
+            " ".join(tokens[:10]),
+            " ".join(tokens[:8]),
+            " ".join(tokens[:6]),
+            " ".join(tokens[:4]),
+        ]:
+            cleaned = str(candidate or "").strip()
+            if cleaned and cleaned not in variants:
+                variants.append(cleaned)
+        return variants[:5]
+
+    def _collect_amazon_search_candidates(self, html: str) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for match in re.finditer(r'data-asin="([A-Z0-9]{10})"', html, flags=re.IGNORECASE):
+            asin = match.group(1).upper()
+            if asin in seen:
+                continue
+            seen.add(asin)
+            window = html[match.start() : min(len(html), match.start() + 6000)]
+            title = None
+            for pattern in (
+                r'<span[^>]*class="a-size-medium a-color-base a-text-normal"[^>]*>(.*?)</span>',
+                r'<span[^>]*class="a-size-base-plus a-color-base a-text-normal"[^>]*>(.*?)</span>',
+                r'<h2[^>]*>(.*?)</h2>',
+            ):
+                title_match = re.search(pattern, window, flags=re.IGNORECASE | re.DOTALL)
+                if title_match:
+                    title = self._clean_title_text(title_match.group(1))
+                    if title:
+                        break
+            if title:
+                candidates.append({"asin": asin, "title": title})
+            if len(candidates) >= 24:
+                break
+        return candidates
+
+    def _clean_title_text(self, value: str | None) -> str:
+        text = re.sub(r"<[^>]+>", " ", str(value or ""))
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
+
+    def _score_text_match(self, query: str | None, candidate: str | None) -> float:
+        normalized_query = self._normalize_text(query)
+        normalized_candidate = self._normalize_text(candidate)
+        if not normalized_query or not normalized_candidate:
+            return 0.0
+        query_tokens = set(normalized_query.split())
+        candidate_tokens = set(normalized_candidate.split())
+        if not query_tokens or not candidate_tokens:
+            return 0.0
+        overlap = len(query_tokens & candidate_tokens)
+        recall = overlap / len(query_tokens)
+        precision = overlap / len(candidate_tokens)
+        similarity = SequenceMatcher(None, normalized_query, normalized_candidate).ratio()
+        return round((0.5 * recall) + (0.2 * precision) + (0.3 * similarity), 4)
+
+    def _normalize_text(self, value: str | None) -> str:
+        text = re.sub(r"<[^>]+>", " ", str(value or "").lower())
+        text = re.sub(r"[^a-z0-9]+", " ", text)
+        return re.sub(r"\s+", " ", text).strip()
 
     def _extract_amazon_title(self, page: Any) -> str | None:
         selectors = ("#productTitle", "h1.a-size-large", "h1#title")

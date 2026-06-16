@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
+import re
 
 from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
@@ -10,11 +11,19 @@ from sqlalchemy.orm import Session
 from app.connectors.registry import get_connector
 from app.core.config import settings
 from app.models.enums import MarketplaceListingStatus, MarketplaceName
+from app.models.enums import ListingStatus
 from app.models.models import Listing, MarketplaceListing, Sale, User
 from app.services.media_lifecycle import purge_listing_media
+from app.services.profit_service import ProfitService
 from app.services.rate_limiter import rate_limiter
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_match_text(value: str | None) -> str:
+    raw = str(value or "").lower()
+    cleaned = re.sub(r"[^a-z0-9]+", " ", raw)
+    return " ".join(cleaned.split())
 
 
 class SaleDetectionService:
@@ -69,6 +78,41 @@ class SaleDetectionService:
             ).scalar_one_or_none()
             if marketplace_listing:
                 return db.get(Listing, marketplace_listing.listing_id)
+
+        raw_payload = event.get("raw") if isinstance(event.get("raw"), dict) else {}
+        item_payload = raw_payload.get("item") if isinstance(raw_payload.get("item"), dict) else {}
+        order_payload = raw_payload.get("order") if isinstance(raw_payload.get("order"), dict) else {}
+        line_items = order_payload.get("lineItems") if isinstance(order_payload.get("lineItems"), list) else []
+        first_line_item = line_items[0] if line_items and isinstance(line_items[0], dict) else {}
+        title = (
+            item_payload.get("title")
+            or first_line_item.get("title")
+            or event.get("title")
+        )
+        normalized_title = _normalize_match_text(title)
+        amount = event.get("amount")
+        try:
+            target_amount = float(amount) if amount is not None else None
+        except (TypeError, ValueError):
+            target_amount = None
+        if not normalized_title:
+            return None
+
+        candidates = db.execute(select(Listing).where(Listing.user_id == user_id)).scalars().all()
+        exact_matches: list[Listing] = []
+        for candidate in candidates:
+            if candidate.sold_at or int(candidate.quantity or 0) <= 0:
+                continue
+            candidate_title = _normalize_match_text(candidate.title)
+            if not candidate_title or candidate_title != normalized_title:
+                continue
+            if target_amount is not None:
+                candidate_amount = candidate.listing_price or candidate.suggested_price or candidate.estimated_value
+                if candidate_amount is not None and abs(float(candidate_amount) - target_amount) > 25:
+                    continue
+            exact_matches.append(candidate)
+        if len(exact_matches) == 1:
+            return exact_matches[0]
         return None
 
     def _record_sale(self, db: Session, user_id: int, listing: Listing | None, event: dict) -> Sale:
@@ -81,6 +125,12 @@ class SaleDetectionService:
             quantity=max(1, int(event.get("quantity") or 1)),
             amount=float(event["amount"]) if event.get("amount") is not None else None,
             currency=event.get("currency") or "USD",
+            fees_actual=(listing.fees_actual if listing else None),
+            shipping_cost=(listing.shipping_cost if listing else None),
+            promotional_fees=float((listing.marketplace_data or {}).get("promotional_fees") or 0) if listing else None,
+            marketplace_fees=(ProfitService().estimate_fees_by_marketplace(listing, event["marketplace"]) if listing else None),
+            profit=(listing.profit if listing else None),
+            roi_percentage=(listing.roi_percentage if listing else None),
             sold_at=self._parse_sold_at(event.get("sold_at")),
             status="DETECTED",
             details=event.get("raw") or event,
@@ -97,7 +147,16 @@ class SaleDetectionService:
             "remove_media_on_sold_out": bool(stored.get("remove_media_on_sold_out", False)),
         }
 
-    async def _fanout_quantity_adjustment(self, db: Session, listing: Listing, user: User, sold_platform: str, quantity_sold: int, dry_run: bool) -> dict:
+    async def _fanout_quantity_adjustment(
+        self,
+        db: Session,
+        listing: Listing,
+        user: User,
+        sold_platform: str,
+        quantity_sold: int,
+        dry_run: bool,
+        sale_amount: float | None = None,
+    ) -> dict:
         new_quantity = max(0, int(listing.quantity or 0) - quantity_sold)
         platform_quantities = dict(listing.platform_quantities or {})
         outcomes: dict[str, dict] = {}
@@ -107,13 +166,27 @@ class SaleDetectionService:
         for row in listing.marketplace_listings:
             market = row.marketplace.value
             if market == sold_platform:
+                if sold_out:
+                    row.status = MarketplaceListingStatus.SOLD
+                    row.raw_response = {
+                        **(row.raw_response or {}),
+                        "sale_detection": {
+                            "action": "sold_on_marketplace",
+                            "new_quantity": new_quantity,
+                            "dry_run": dry_run,
+                            "executed_at": datetime.now(UTC).isoformat(),
+                            "response": {"status": "RECORDED_SOLD_SOURCE"},
+                        },
+                    }
+                    outcomes[market] = {"action": "sold_on_marketplace", "response": {"status": "RECORDED_SOLD_SOURCE"}}
+                    db.add(row)
                 continue
 
             connector = get_connector(market)
             rate_limiter.acquire(market)
             if sold_out and prefs["sold_out_delist_everywhere"]:
                 action = "delist"
-                row.status = MarketplaceListingStatus.DELETED
+                row.status = MarketplaceListingStatus.CLOSED
                 if dry_run:
                     response = {"status": "DRY_RUN", "action": action}
                 else:
@@ -142,6 +215,24 @@ class SaleDetectionService:
 
         listing.quantity = new_quantity
         listing.platform_quantities = platform_quantities
+        if sold_out:
+            listing.sold_at = datetime.now(UTC).replace(tzinfo=None)
+            if sale_amount is not None:
+                listing.sale_price = float(sale_amount)
+            if listing.status in {ListingStatus.ready, ListingStatus.draft, ListingStatus.posted}:
+                listing.status = ListingStatus.posted
+            current_labels = {str(label).strip() for label in (listing.custom_labels or []) if str(label).strip()}
+            current_labels.add("archived_sold")
+            listing.custom_labels = sorted(current_labels)
+            archived_state = dict(listing.marketplace_data or {})
+            archived_state["archive_state"] = {
+                "status": "sold",
+                "sold_platform": sold_platform,
+                "sold_at": datetime.now(UTC).replace(tzinfo=None).isoformat(),
+                "quantity_sold": quantity_sold,
+                "dry_run": dry_run,
+            }
+            listing.marketplace_data = archived_state
         if sold_out and not dry_run and prefs["remove_media_on_sold_out"]:
             cleanup = purge_listing_media(db, listing, clear_references=True)
             outcomes["media_cleanup"] = cleanup
@@ -208,6 +299,7 @@ class SaleDetectionService:
                         sold_platform=platform,
                         quantity_sold=max(1, int(event.get("quantity") or 1)),
                         dry_run=dry_run,
+                        sale_amount=float(event["amount"]) if event.get("amount") is not None else None,
                     )
                 )
                 adjusted += len(outcome)
@@ -227,6 +319,58 @@ class SaleDetectionService:
             "sales_detected": detected,
             "adjustments_triggered": adjusted,
         }
+
+    def reconcile_unmatched_sale(
+        self,
+        db: Session,
+        user: User,
+        sale: Sale,
+        *,
+        listing_id: int | None = None,
+        dry_run: bool = False,
+    ) -> dict:
+        if sale.user_id != user.id:
+            raise ValueError("Sale does not belong to the supplied user.")
+        if sale.listing_id:
+            return {"status": "already_matched", "listing_id": sale.listing_id}
+
+        listing = db.get(Listing, listing_id) if listing_id else None
+        if listing_id and (not listing or listing.user_id != user.id):
+            raise ValueError("Listing not found for reconciliation.")
+
+        event = {
+            "marketplace": sale.platform.value,
+            "marketplace_order_id": sale.marketplace_order_id,
+            "marketplace_listing_id": sale.marketplace_listing_id,
+            "quantity": sale.quantity,
+            "amount": sale.amount,
+            "currency": sale.currency,
+            "sold_at": sale.sold_at.isoformat() if sale.sold_at else None,
+            "raw": sale.details or {},
+            "title": ((sale.details or {}).get("item") or {}).get("title"),
+        }
+        if not listing:
+            listing = self._find_listing(db, user.id, event)
+        if not listing:
+            return {"status": "unmatched"}
+
+        outcome = asyncio.run(
+            self._fanout_quantity_adjustment(
+                db,
+                listing,
+                user,
+                sold_platform=sale.platform.value,
+                quantity_sold=max(1, int(sale.quantity or 1)),
+                dry_run=dry_run,
+                sale_amount=sale.amount,
+            )
+        )
+        sale.listing_id = listing.id
+        sale.status = "DRY_RUN" if dry_run else "SYNCED"
+        sale.details = {**(sale.details or {}), "reconciled": {"listing_id": listing.id, "fanout": outcome, "dry_run": dry_run}}
+        db.add(sale)
+        db.commit()
+        return {"status": sale.status, "listing_id": listing.id, "fanout": outcome}
 
     def poll_all_users(self, db: Session, *, dry_run: bool = True, lookback_minutes: int = 30) -> dict:
         users = db.execute(select(User)).scalars().all()

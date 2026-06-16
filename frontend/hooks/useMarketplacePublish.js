@@ -33,17 +33,21 @@ export function useMarketplacePublish() {
     return () => clearInterval(timer);
   }, [tracking, refreshStatus]);
 
-  const publish = async (listingId, marketplaces) => {
+  const publish = async (listingId, marketplaces, extra = {}) => {
     setPublishing((prev) => ({ ...prev, [listingId]: true }));
     setErrors((prev) => ({ ...prev, [listingId]: '' }));
     try {
       const normalizedMarketplaces = Array.isArray(marketplaces)
         ? marketplaces.map((market) => String(market).toLowerCase()).filter(Boolean)
         : [];
+      let response;
       if (normalizedMarketplaces.length === 1 && normalizedMarketplaces[0] === 'ebay') {
-        await publishListingEbay(listingId);
+        response = await publishListingEbay(listingId, extra);
       } else {
-        await publishListing(listingId, marketplaces);
+        response = await publishListing(listingId, marketplaces, extra);
+      }
+      if (response?.error) {
+        throw new Error(response.error);
       }
       setTracking((prev) => [...new Set([...prev, listingId])]);
       await refreshStatus(listingId);

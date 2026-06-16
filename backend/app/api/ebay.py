@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.schemas import EbayManualConnectRequest
+from app.api.schemas import EbayManualConnectRequest, EbayPublishConfirmationRequest
 from app.core.auth import ensure_user_owns_resource, get_current_user, resolve_user_scope
 from app.core.config import settings
 from app.core.database import get_db
@@ -20,8 +20,10 @@ from app.services.ebay_service import (
     get_or_refresh_account,
     parse_oauth_state,
     publish_listing_to_ebay,
+    revise_ebay_listing,
+    sync_ebay_active_listings,
 )
-
+from app.services.pricing_research_service import validate_marketplace_readiness
 router = APIRouter()
 
 
@@ -129,9 +131,24 @@ async def save_ebay_tokens_manually(
     }
 
 
+@router.post("/sync")
+async def sync_ebay_inventory(
+    user_id: int | None = Query(None),
+    limit: int = Query(100, ge=1, le=250),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    scoped_user_id = resolve_user_scope(current_user, user_id)
+    try:
+        return await sync_ebay_active_listings(scoped_user_id, db, limit=limit)
+    except EbayIntegrationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/listings/{listing_id}/publish/ebay")
 async def publish_listing_ebay(
     listing_id: int,
+    payload: EbayPublishConfirmationRequest | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -141,9 +158,42 @@ async def publish_listing_ebay(
     ensure_user_owns_resource(current_user, listing.user_id)
     if not listing.title or not listing.description:
         raise HTTPException(status_code=400, detail="Listing must be generated before publishing")
+    if not payload or not payload.confirm_live_publish or str(payload.confirmation_phrase or "").strip() != "QUEUE LIVE EBAY READY LISTINGS":
+        raise HTTPException(
+            status_code=400,
+            detail="Live eBay publish requires explicit confirmation. Use the phrase 'QUEUE LIVE EBAY READY LISTINGS' to proceed.",
+        )
+    pricing = ((listing.marketplace_data or {}).get("pricing_analysis") or {}) if isinstance(listing.marketplace_data, dict) else {}
+    blockers = validate_marketplace_readiness(listing=listing, marketplace="ebay", pricing_analysis=pricing)
+    if blockers:
+        raise HTTPException(status_code=400, detail="; ".join(blockers))
 
     try:
         return await publish_listing_to_ebay(listing, db)
+    except EbayIntegrationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/listings/{listing_id}/sync")
+async def sync_listing_to_ebay(
+    listing_id: int,
+    payload: EbayPublishConfirmationRequest | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    listing = db.get(Listing, listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    ensure_user_owns_resource(current_user, listing.user_id)
+    if not listing.ebay_listing_id:
+        raise HTTPException(status_code=400, detail="Listing has not been published to eBay yet")
+    if not payload or not payload.confirm_live_publish or str(payload.confirmation_phrase or "").strip() != "QUEUE LIVE EBAY READY LISTINGS":
+        raise HTTPException(
+            status_code=400,
+            detail="Live eBay update requires explicit confirmation. Use the phrase 'QUEUE LIVE EBAY READY LISTINGS' to proceed.",
+        )
+    try:
+        return await revise_ebay_listing(listing, db)
     except EbayIntegrationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

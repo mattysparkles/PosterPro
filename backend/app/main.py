@@ -151,6 +151,63 @@ def _resolve_media_root() -> Path:
     best = max(existing, key=_score)
     return best
 
+
+def _repair_unsafe_vine_images_on_startup() -> dict[str, object]:
+    environment = str(settings.environment or "").strip().lower()
+    if environment not in {"production", "staging"}:
+        return {"ran": False, "reason": "environment_not_production"}
+    if not settings.amazon_vine_import_enabled:
+        return {"ran": False, "reason": "vine_import_disabled"}
+    if settings.autonomous_dry_run:
+        return {"ran": False, "reason": "dry_run_mode_requires_manual_repair"}
+
+    from app.services.listing_review import normalize_listing_images
+    from app.services.vine_import_service import VineImportService, _is_unsafe_vine_image
+
+    scanned = 0
+    repair_map: dict[int, list[int]] = {}
+    with SessionLocal() as db:
+        rows = db.execute(
+            text(
+                "select id, user_id, listing_images, image_urls "
+                "from listings where source_type = 'amazon_vine'"
+            )
+        ).all()
+        for row in rows:
+            scanned += 1
+            normalized = normalize_listing_images(
+                listing_images=row.listing_images,
+                image_urls=row.image_urls,
+                source_platform="amazon_vine",
+                default_is_reference=True,
+                approved=False,
+            )
+            if not normalized or any(_is_unsafe_vine_image(image) for image in normalized):
+                repair_map.setdefault(int(row.user_id), []).append(int(row.id))
+
+        service = VineImportService()
+        repaired = 0
+        processed_users = 0
+        for user_id, listing_ids in repair_map.items():
+            result = service.repair_vine_listing_images(
+                db,
+                user_id=user_id,
+                listing_ids=listing_ids,
+                include_archived=False,
+                force_refresh=True,
+                use_bridge_session=False,
+                only_missing_images=False,
+            )
+            processed_users += 1
+            repaired += int(result.get("updated") or 0)
+    return {
+        "ran": bool(repair_map),
+        "scanned": scanned,
+        "repaired": repaired,
+        "users": processed_users,
+        "unsafe_listing_count": sum(len(listing_ids) for listing_ids in repair_map.values()),
+    }
+
 app = FastAPI(title="PosterPro API")
 app.add_middleware(
     CORSMiddleware,
@@ -176,9 +233,10 @@ app.mount("/media", StaticFiles(directory=_resolve_media_root()), name="media")
 def startup() -> None:
     try:
         bootstrap_summary = _bootstrap_database()
+        vine_repair_summary = _repair_unsafe_vine_images_on_startup()
         app.state.database_ready = True
         app.state.database_error = None
-        app.state.bootstrap_summary = bootstrap_summary
+        app.state.bootstrap_summary = {**bootstrap_summary, "vine_image_repair": vine_repair_summary}
     except SQLAlchemyError as exc:
         logger.exception("PosterPro database bootstrap failed")
         app.state.database_ready = False
@@ -186,6 +244,7 @@ def startup() -> None:
         app.state.bootstrap_summary = {
             "startup_schema_compat_enabled": bool(settings.startup_schema_compat_enabled),
             "legacy_schema_columns_applied": [],
+            "vine_image_repair": {"ran": False, "reason": "bootstrap_failed"},
         }
 
 
@@ -199,6 +258,7 @@ def health():
         "database_error": getattr(app.state, "database_error", None),
         "startup_schema_compat_enabled": bool(bootstrap_summary.get("startup_schema_compat_enabled", settings.startup_schema_compat_enabled)),
         "legacy_schema_columns_applied": bootstrap_summary.get("legacy_schema_columns_applied", []),
+        "vine_image_repair": bootstrap_summary.get("vine_image_repair", {}),
     }
     if database_ready:
         return payload

@@ -10,7 +10,6 @@ import {
   Package,
   PlusCircle,
   RefreshCcw,
-  Settings2,
   ShoppingCart,
   Store,
   Upload,
@@ -59,6 +58,36 @@ function toStatusTone(connected, warning = false) {
   if (connected) return 'success';
   if (warning) return 'warning';
   return 'default';
+}
+
+function SectionSwitcher({ sections, activeSection, onSelect }) {
+  return (
+    <SectionPanel
+      title="Workspace sections"
+      description="Switch between the main operator views without carrying a second sidebar around the page."
+    >
+      <div className="flex flex-wrap gap-2">
+        {sections.map((section) => {
+          const active = activeSection === section.key;
+          return (
+            <button
+              key={section.key}
+              type="button"
+              onClick={() => onSelect(section.key)}
+              className={[
+                'inline-flex items-center rounded-full border px-4 py-2 text-sm font-medium transition',
+                active
+                  ? 'border-[#2563eb] bg-[#eff6ff] text-[#1d4ed8]'
+                  : 'border-[#d0d5dd] bg-white text-[#344054] hover:border-[#98a2b3] hover:bg-[#f9fafb]',
+              ].join(' ')}
+            >
+              {section.label}
+            </button>
+          );
+        })}
+      </div>
+    </SectionPanel>
+  );
 }
 
 export default function Dashboard() {
@@ -175,8 +204,7 @@ export default function Dashboard() {
 
   const dashboardSections = useMemo(
     () => [
-      { key: 'overview', label: 'Overview', description: 'Primary metrics and dashboard summary' },
-      { key: 'listings', label: 'Listings', description: 'Open the full listings workspace and queues.', href: '/listings' },
+      { key: 'overview', label: 'Overview', description: 'Primary metrics and workspace summary' },
       { key: 'activity', label: 'Activity', description: 'Recent listing movement and alerts' },
       { key: 'jobs', label: 'Jobs', description: 'Import and cross-post queue status' },
       { key: 'operations', label: 'Operations', description: 'Workflow posture and quick actions' },
@@ -198,11 +226,6 @@ export default function Dashboard() {
   }, [dashboardSections, router.isReady, router.query.section]);
 
   const selectSection = (key) => {
-    const section = dashboardSections.find((item) => item.key === key);
-    if (section?.href) {
-      router.push(section.href);
-      return;
-    }
     setActiveSection(key);
     router.replace(
       {
@@ -210,14 +233,11 @@ export default function Dashboard() {
         query: key === 'overview' ? {} : { section: key },
       },
       undefined,
-      { shallow: true }
+      { shallow: true },
     );
   };
 
-  const activeSectionMeta =
-    dashboardSections.find((section) => section.key === activeSection && !section.href) ||
-    dashboardSections.find((section) => !section.href) ||
-    dashboardSections[0];
+  const activeSectionMeta = dashboardSections.find((section) => section.key === activeSection) || dashboardSections[0];
 
   const renderOverview = () => (
     <div className="space-y-5">
@@ -227,7 +247,7 @@ export default function Dashboard() {
       />
       <SectionPanel
         title="Workspace overview"
-        description="Primary throughput, backlog, and publishing posture in one compact operator module."
+        description="Primary throughput, backlog, and publishing posture in one operator view."
         action={
           <Link href="/publishing" className="inline-flex items-center gap-1 text-sm font-medium text-[#2563eb]">
             Open publish queue
@@ -236,11 +256,11 @@ export default function Dashboard() {
         }
       >
         <div className="space-y-4">
-          <div className="pp-dashboard-hero p-5">
-            <p className="pp-dashboard-hero__eyebrow">Control room</p>
-            <h2 className="pp-dashboard-hero__title mt-3">Run reseller operations from a structured admin workspace.</h2>
-            <p className="pp-dashboard-hero__body mt-3">
-              The dashboard now behaves more like a CMS backend: choose a section from the left menu, then work through a focused panel on the right instead of scanning one long page.
+          <div className="rounded-[20px] border border-[#dbe4ff] bg-gradient-to-br from-[#f8fbff] via-white to-[#f3f7ff] p-5 shadow-[0_1px_0_rgba(16,24,40,0.02)]">
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">Control room</p>
+            <h2 className="mt-3 text-2xl font-semibold tracking-[-0.03em] text-[#101828]">Run intake, publishing, jobs, and account readiness from one screen.</h2>
+            <p className="mt-3 max-w-3xl text-sm leading-6 text-[#475467]">
+              The dashboard now keeps the shell simple: the top navigation stays fixed, and this page shows only one section at a time so the operator is not fighting a second menu.
             </p>
           </div>
           <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-4">
@@ -426,9 +446,13 @@ export default function Dashboard() {
               </div>
               <p className="mt-2 text-sm text-[#667085]">{activeBridgeConnectSession.message || 'PosterPro is waiting for Facebook authentication in the bridge workspace.'}</p>
               <div className="mt-3">
-                <Link href={`/bridge-desktop?connectSessionId=${encodeURIComponent(activeBridgeConnectSession.connect_session_id)}`}>
-                  <Button variant="outline" size="sm">Resume Facebook login</Button>
-                </Link>
+                <Button
+                  href={`/bridge-desktop?connectSessionId=${encodeURIComponent(activeBridgeConnectSession.connect_session_id)}`}
+                  variant="outline"
+                  size="sm"
+                >
+                  Resume Facebook login
+                </Button>
               </div>
             </div>
           ) : null}
@@ -516,7 +540,6 @@ export default function Dashboard() {
     setup: renderSetup(),
     system: renderSystem(),
   };
-  const renderedSectionContent = sectionContent[activeSection] || sectionContent.overview;
 
   return (
     <AppShell
@@ -531,7 +554,7 @@ export default function Dashboard() {
     >
       <PageHeader
         title="Reseller command center"
-        description="Use one clean operator dashboard for intake, listing production, marketplace publishing, job flow, and account readiness."
+        description="One clean operator dashboard for intake, listing production, marketplace publishing, job flow, and account readiness."
         actions={
           <>
             {user?.can_access_vine_import ? (
@@ -540,18 +563,14 @@ export default function Dashboard() {
                 {vineUploading ? 'Uploading Vine report...' : 'Upload Vine report'}
               </Button>
             ) : null}
-            <Link href="/intake">
-              <Button variant="outline">
-                <Upload size={16} />
-                Upload photos
-              </Button>
-            </Link>
-            <Link href="/listings/new">
-              <Button>
-                <PlusCircle size={16} />
-                Create listing
-              </Button>
-            </Link>
+            <Button href="/intake" variant="outline">
+              <Upload size={16} />
+              Upload photos
+            </Button>
+            <Button href="/listings/new">
+              <PlusCircle size={16} />
+              Create listing
+            </Button>
           </>
         }
       />
@@ -579,50 +598,15 @@ export default function Dashboard() {
         />
       ) : null}
 
-      <div className="pp-section-workspace pp-dashboard-theme">
-        <aside className="pp-section-workspace__menu space-y-4">
-          <div className="pp-dashboard-menu-card p-4">
-            <p className="pp-dashboard-menu-label">Dashboard menu</p>
-            <p className="pp-dashboard-menu-copy mt-2 text-sm leading-6">Use the left rail like a CMS backend to switch the active workspace panel.</p>
-            <div className="mt-4 space-y-1.5">
-              {dashboardSections.map((section) => {
-                const active = activeSection === section.key;
-                return (
-                  <button
-                    key={section.key}
-                    type="button"
-                    onClick={() => selectSection(section.key)}
-                    className={`pp-dashboard-menu-button px-3 py-3 text-left ${active ? 'is-active' : ''}`}
-                  >
-                    <p className="pp-dashboard-menu-button__title">{section.label}</p>
-                    <p className="pp-dashboard-menu-button__copy">{section.description}</p>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="pp-dashboard-note-card p-4">
-            <p className="pp-dashboard-note-label">Current view</p>
-            <p className="mt-2 font-[var(--pp-heading-font)] text-base font-semibold tracking-[-0.02em] text-[#172033]">{activeSectionMeta.label}</p>
-            <p className="pp-dashboard-note-copy mt-1 text-sm leading-6">{activeSectionMeta.description}</p>
-            <div className="mt-4 flex flex-wrap gap-2">
-              <StatusPill status={autonomousConfig?.autonomous_mode ? 'success' : 'default'} label={autonomousConfig?.autonomous_mode ? 'Automation on' : 'Automation off'} />
-              <StatusPill status={blockers.length ? 'warning' : 'success'} label={blockers.length ? `${blockers.length} blockers` : 'Setup healthy'} />
-            </div>
-          </div>
-        </aside>
-
-        <div className="pp-section-workspace__content space-y-5">
-          <div className="pp-dashboard-stage p-5">
-            <div className="pp-dashboard-stage__header pb-4">
-              <p className="pp-dashboard-stage-label">Workspace panel</p>
-              <h2 className="pp-dashboard-stage__title mt-2">{activeSectionMeta.label}</h2>
-              <p className="pp-dashboard-stage-copy mt-2 text-sm leading-6">{activeSectionMeta.description}</p>
-            </div>
-            <div className="pt-5">{renderedSectionContent}</div>
-          </div>
+      <div className="space-y-5">
+        <SectionSwitcher sections={dashboardSections} activeSection={activeSection} onSelect={selectSection} />
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <MetricCard label="Ready to publish" value={readyCount} detail="Listings that can move straight into marketplace publishing." href="/listings?tab=ready" />
+          <MetricCard label="Pending review" value={reviewCount} detail="Drafts still waiting for operator approval." href="/listings?tab=review" />
+          <MetricCard label="Live listings" value={liveCount} detail="Listings already posted or actively synced." href="/listings?tab=published" />
+          <MetricCard label="Draft backlog" value={draftCount} detail="Items still moving through enrichment and manual edits." href="/listings?tab=drafts" />
         </div>
+        {sectionContent[activeSection] || sectionContent.overview}
       </div>
     </AppShell>
   );

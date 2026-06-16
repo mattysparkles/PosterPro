@@ -17,12 +17,10 @@ export default function ClusterPreview({ clusters }) {
             The dashboard keeps incoming photo groups visible so the user can verify inventory chunks before they disappear into deeper workflow pages.
           </CardDescription>
         </div>
-        <Link href="/inventory">
-          <Button variant="outline">
-            Open inventory
-            <ArrowRight size={15} />
-          </Button>
-        </Link>
+        <Button href="/inventory" variant="outline">
+          Open inventory
+          <ArrowRight size={15} />
+        </Button>
       </div>
 
       {!clusters.length ? (

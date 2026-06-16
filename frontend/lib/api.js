@@ -333,6 +333,44 @@ export async function updateListing(id, body) {
   });
 }
 
+export async function uploadListingPhotos(listingId, { files = [], role, note, source = "actual_upload", operatorState = "suggested" } = {}) {
+  const form = new FormData();
+  (files || []).forEach((file) => form.append("photos", file));
+  if (role) form.append("role", role);
+  if (note) form.append("note", note);
+  if (source) form.append("source", source);
+  if (operatorState) form.append("operator_state", operatorState);
+  return jsonFetch(`${API_BASE}/listings/${listingId}/photos/upload`, {
+    method: "POST",
+    body: form,
+    timeoutMs: 180000,
+  });
+}
+
+export async function approveListingPhotos(listingId, storagePaths = []) {
+  return jsonFetch(`${API_BASE}/listings/${listingId}/photos/approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ storage_paths: storagePaths }),
+  });
+}
+
+export async function rejectListingPhotos(listingId, storagePaths = []) {
+  return jsonFetch(`${API_BASE}/listings/${listingId}/photos/reject`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ storage_paths: storagePaths }),
+  });
+}
+
+export async function setPrimaryListingPhoto(listingId, storagePath) {
+  return jsonFetch(`${API_BASE}/listings/${listingId}/photos/set-primary`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ storage_path: storagePath }),
+  });
+}
+
 export async function approveListing(id) {
   return jsonFetch(`${API_BASE}/listings/${id}/approve`, {
     method: "POST",
@@ -392,25 +430,150 @@ export async function generateListing(id) {
   });
 }
 
-export async function publishListing(id, marketplaces) {
+export async function publishListing(id, marketplaces, extra = {}) {
   return jsonFetch(`${API_BASE}/listings/${id}/publish`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ marketplaces }),
+    body: JSON.stringify({ marketplaces, ...extra }),
   });
 }
 
-export async function publishListingEbay(id) {
+export async function publishListingEbay(id, extra = {}) {
   return jsonFetch(`${API_BASE}/listings/${id}/publish/ebay`, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(extra),
   });
 }
 
-export async function publishListingsBulk(listingIds = [], marketplaces) {
+export async function publishListingsBulk(listingIds = [], marketplaces, extra = {}) {
   return jsonFetch(`${API_BASE}/listings/publish-bulk`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ listing_ids: listingIds, marketplaces }),
+    body: JSON.stringify({ listing_ids: listingIds, marketplaces, ...extra }),
+  });
+}
+
+export async function fetchMarketplacePreflight(listingId, marketplace) {
+  return jsonFetch(`${API_BASE}/marketplaces/${encodeURIComponent(marketplace)}/listings/${encodeURIComponent(listingId)}/preflight`);
+}
+
+export async function fetchMarketplacePayloadPreview(listingId, marketplace) {
+  return jsonFetch(`${API_BASE}/marketplaces/${encodeURIComponent(marketplace)}/listings/${encodeURIComponent(listingId)}/payload-preview`);
+}
+
+export async function fetchMarketplacePreflightBulk(body) {
+  return jsonFetch(`${API_BASE}/marketplaces/preflight/bulk`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function exportMarketplacePreflightCsv(body) {
+  const response = await fetch(`${API_BASE}/marketplaces/preflight/bulk/export`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `Request failed (${response.status} ${response.statusText})`);
+  }
+  return response.text();
+}
+
+export async function publishMarketplaceReadyBulk(body) {
+  return jsonFetch(`${API_BASE}/marketplaces/publish-ready/bulk`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function fetchLaunchCandidates(params = {}) {
+  const url = new URL(`${API_BASE}/marketplaces/launch-candidates`);
+  if (params.marketplace) url.searchParams.set("marketplace", params.marketplace);
+  if (Number.isFinite(Number(params.max_items))) url.searchParams.set("max_items", String(Number(params.max_items)));
+  if (Number.isFinite(Number(params.max_price))) url.searchParams.set("max_price", String(Number(params.max_price)));
+  if (params.include_warning_only != null) url.searchParams.set("include_warning_only", String(Boolean(params.include_warning_only)));
+  if (params.include_local_pickup != null) url.searchParams.set("include_local_pickup", String(Boolean(params.include_local_pickup)));
+  if (params.include_risky_shipping != null) url.searchParams.set("include_risky_shipping", String(Boolean(params.include_risky_shipping)));
+  return jsonFetch(url.toString());
+}
+
+export async function fetchEbayLaunchRepairQueue(params = {}) {
+  const url = new URL(`${API_BASE}/marketplaces/ebay/launch-repair-queue`);
+  if (Number.isFinite(Number(params.max_items))) url.searchParams.set("max_items", String(Number(params.max_items)));
+  if (Number.isFinite(Number(params.max_price))) url.searchParams.set("max_price", String(Number(params.max_price)));
+  if (params.image_status) url.searchParams.set("image_status", params.image_status);
+  if (params.has_category_suggestion != null) url.searchParams.set("has_category_suggestion", String(Boolean(params.has_category_suggestion)));
+  if (params.repair_difficulty) url.searchParams.set("repair_difficulty", params.repair_difficulty);
+  return jsonFetch(url.toString());
+}
+
+export async function applyEbayLaunchRepair(listingId, body = {}) {
+  return jsonFetch(`${API_BASE}/marketplaces/ebay/listings/${encodeURIComponent(listingId)}/repair`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function runLaunchDrillDryRun(body) {
+  return jsonFetch(`${API_BASE}/marketplaces/launch-drill/dry-run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function fetchEbayAccountReadiness() {
+  return jsonFetch(`${API_BASE}/marketplaces/ebay/account-readiness`);
+}
+
+export async function fetchEbayPolicies(marketplaceId = 'EBAY_US') {
+  const url = new URL(`${API_BASE}/marketplaces/ebay/policies`);
+  if (marketplaceId) url.searchParams.set('marketplace_id', marketplaceId);
+  return jsonFetch(url.toString());
+}
+
+export async function syncEbayPolicySettings(body = {}) {
+  return jsonFetch(`${API_BASE}/marketplaces/ebay/policies/sync`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function selectEbayPolicySettings(body = {}) {
+  return jsonFetch(`${API_BASE}/marketplaces/ebay/policies/select`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function verifyEbayMerchantLocation(body = {}) {
+  return jsonFetch(`${API_BASE}/marketplaces/ebay/location/verify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function createEbayMerchantLocation(body = {}) {
+  return jsonFetch(`${API_BASE}/marketplaces/ebay/location/create`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function refreshEbayPolicySettings() {
+  return jsonFetch(`${API_BASE}/marketplaces/ebay/policies/refresh`, {
+    method: "POST",
   });
 }
 
@@ -476,6 +639,32 @@ export async function fetchAnalyticsDashboard(userId, days = 30) {
 
 export async function fetchPricingRecommendation(id) {
   return jsonFetch(`${API_BASE}/pricing/recommendations/${id}`);
+}
+
+export async function refreshPricingRecommendation(id) {
+  return jsonFetch(`${API_BASE}/pricing/recommendations/${id}/refresh`, {
+    method: "POST",
+  });
+}
+
+export async function applyPricingRecommendation(id, body) {
+  return jsonFetch(`${API_BASE}/pricing/recommendations/${id}/apply`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function bulkPricingAction(body) {
+  return jsonFetch(`${API_BASE}/pricing/recommendations/bulk`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function fetchListingReadiness(id) {
+  return jsonFetch(`${API_BASE}/listings/${id}/readiness`);
 }
 
 export async function optimizeListing(id) {
@@ -629,6 +818,15 @@ export async function fetchVineMedia(batchId, itemIds) {
   });
 }
 
+export async function repairVineImages(batchId, itemIds) {
+  return jsonFetch(`${API_BASE}/imports/vine/batches/${batchId}/repair-images`, {
+    method: "POST",
+    timeoutMs: 0,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ item_ids: itemIds }),
+  });
+}
+
 export async function createVineInventory(batchId, itemIds, includeLocked = true, includeCancelled = false) {
   return jsonFetch(`${API_BASE}/imports/vine/batches/${batchId}/create-inventory`, {
     method: "POST",
@@ -692,10 +890,14 @@ export async function fetchBulkJob(jobId) {
   return jsonFetch(`${API_BASE}/bulk-jobs/${jobId}`);
 }
 
-export async function fetchSalesDashboard(userId, limit = 100) {
+export async function fetchSalesDashboard(userId, limit = 100, options = {}) {
   const url = new URL(`${API_BASE}/sales/dashboard`);
   if (userId) url.searchParams.set("user_id", String(userId));
   url.searchParams.set("limit", String(limit));
+  if (options.search) url.searchParams.set("search", options.search);
+  if (options.marketplace) url.searchParams.set("marketplace", options.marketplace);
+  if (options.sortBy) url.searchParams.set("sort_by", options.sortBy);
+  if (options.sortDir) url.searchParams.set("sort_dir", options.sortDir);
   return jsonFetch(url.toString());
 }
 
@@ -710,6 +912,30 @@ export function downloadInventoryReportCsv(userId) {
 export async function updateSaleDetails(saleId, body) {
   return jsonFetch(`${API_BASE}/sales/${saleId}/details`, {
     method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function syncEbayListing(listingId, body = {}) {
+  return jsonFetch(`${API_BASE}/marketplaces/ebay/listings/${listingId}/sync`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function refreshEbayInventory(body = {}) {
+  return jsonFetch(`${API_BASE}/marketplaces/ebay/sync`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function reconcileSale(saleId, body = {}) {
+  return jsonFetch(`${API_BASE}/sales/${saleId}/reconcile`, {
+    method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });

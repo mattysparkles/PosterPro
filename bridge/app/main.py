@@ -1135,7 +1135,7 @@ def update_account_session(marketplace: str, account_key: str, payload: BridgeAc
 def _prepare_connect_account(marketplace: str, account_key: str, payload: BridgeAccountConnectRequest) -> tuple[str, str, dict[str, Any], dict[str, Any] | None]:
     normalized_marketplace = marketplace.strip().lower()
     normalized_key = account_key.strip().lower()
-    supported_marketplaces = {"amazon", "facebook", "mercari", "poshmark", "etsy", "depop", "whatnot", "vinted"}
+    supported_marketplaces = {"amazon", "ebay", "facebook", "mercari", "poshmark", "etsy", "depop", "whatnot", "vinted"}
     if normalized_marketplace not in supported_marketplaces:
         raise HTTPException(
             status_code=400,

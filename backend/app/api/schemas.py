@@ -21,6 +21,7 @@ class ListingGenerateRequest(BaseModel):
 class ListingCreateRequest(BaseModel):
     status: str | None = None
     image_urls: list[str] | None = None
+    listing_images: list[dict] | None = None
     raw_photo_path: str | None = None
     storage_unit_name: str | None = None
     title: str | None = None
@@ -41,6 +42,7 @@ class ListingCreateRequest(BaseModel):
     shipping_cost: float | None = None
     sale_price: float | None = None
     condition: str | None = None
+    condition_data: dict | None = None
     photo_quality_score: float | None = None
     quantity: int | None = None
     platform_quantities: dict | None = None
@@ -48,6 +50,7 @@ class ListingCreateRequest(BaseModel):
     last_refreshed: datetime | None = None
     source_type: str | None = None
     source_metadata: dict | None = None
+    shipping_profile: dict | None = None
     marketplace_data: dict | None = None
     needs_review: bool | None = None
     restricted_review_required: bool | None = None
@@ -60,12 +63,20 @@ class ListingUpdateRequest(ListingCreateRequest):
     pass
 
 
+class MarketplaceStatusEntry(BaseModel):
+    marketplace: str
+    status: str
+    marketplace_listing_id: str | None = None
+    raw_response: dict | None = None
+
+
 class ListingResponse(BaseModel):
     id: int
     user_id: int
     cluster_id: int | None
     status: str
     image_urls: list[str] | None = None
+    listing_images: list[dict] | None = None
     raw_photo_path: str | None = None
     storage_unit_name: str | None = None
     title: str | None
@@ -87,20 +98,27 @@ class ListingResponse(BaseModel):
     sale_price: float | None = None
     profit: float | None = None
     roi_percentage: float | None = None
+    condition_data: dict | None = None
     ebay_listing_id: str | None = None
     ebay_publish_status: str | None = None
     marketplace_data: dict | None = None
+    marketplace_preflight_summary: dict | None = None
     quantity: int = 1
     platform_quantities: dict | None = None
     custom_labels: list[str] | None = None
     last_refreshed: datetime | None = None
     source_type: str | None = None
     source_metadata: dict | None = None
+    shipping_profile: dict | None = None
     needs_review: bool = False
     restricted_review_required: bool = False
     restricted_reasons: list[str] | None = None
     detected_category_guess: str | None = None
     marketplace_allowed_status: str | None = None
+    marketplace_statuses: list[MarketplaceStatusEntry] = Field(default_factory=list)
+    readiness_summary: dict = Field(default_factory=dict)
+    quality_summary: dict = Field(default_factory=dict)
+    latest_publish_attempt: dict | None = None
 
     class Config:
         from_attributes = True
@@ -108,17 +126,405 @@ class ListingResponse(BaseModel):
 
 class MarketplacePublishRequest(BaseModel):
     marketplaces: list[str] | None = None
+    confirm_live_publish: bool = False
+    confirmation_phrase: str | None = None
+
+
+class EbayPublishConfirmationRequest(BaseModel):
+    confirm_live_publish: bool = False
+    confirmation_phrase: str | None = None
 
 
 class BulkMarketplacePublishRequest(BaseModel):
     listing_ids: list[int] = Field(default_factory=list)
     marketplaces: list[str] | None = None
+    confirm_live_publish: bool = False
+    confirmation_phrase: str | None = None
+    confirm_live_publish: bool = False
+    confirmation_phrase: str | None = None
 
 
 class MarketplacePublishResult(BaseModel):
     marketplace: str
     task_id: str | None = None
     status: str
+
+
+class MarketplacePreflightIssue(BaseModel):
+    code: str
+    field: str | None = None
+    message: str
+    fix_hint: str | None = None
+    severity: str = "blocker"
+    retryable: bool = False
+
+
+class MarketplacePayloadPreview(BaseModel):
+    payload: dict = Field(default_factory=dict)
+    sections: list[str] = Field(default_factory=list)
+
+
+class MarketplacePreflightResponse(BaseModel):
+    listing_id: int
+    marketplace: str
+    status: str
+    blockers: list[MarketplacePreflightIssue] = Field(default_factory=list)
+    warnings: list[MarketplacePreflightIssue] = Field(default_factory=list)
+    missing_fields: list[str] = Field(default_factory=list)
+    invalid_fields: list[str] = Field(default_factory=list)
+    suggested_fixes: list[str] = Field(default_factory=list)
+    required_operator_actions: list[str] = Field(default_factory=list)
+    payload_preview: MarketplacePayloadPreview = Field(default_factory=MarketplacePayloadPreview)
+    policy_summary: dict = Field(default_factory=dict)
+    category_summary: dict = Field(default_factory=dict)
+    shipping_summary: dict = Field(default_factory=dict)
+    image_summary: dict = Field(default_factory=dict)
+    pricing_summary: dict = Field(default_factory=dict)
+    condition_summary: dict = Field(default_factory=dict)
+    quality_summary: dict = Field(default_factory=dict)
+    readiness_summary: dict = Field(default_factory=dict)
+    last_checked_at: datetime | None = None
+    source_version: str = "v1"
+
+
+class PublishAttemptResponse(BaseModel):
+    id: int
+    listing_id: int
+    marketplace: str
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    dry_run: bool = True
+    preflight_status: str | None = None
+    payload_snapshot: dict | None = None
+    payload_hash: str | None = None
+    inventory_item_sku: str | None = None
+    offer_id: str | None = None
+    marketplace_listing_id: str | None = None
+    marketplace_status: str | None = None
+    translated_error: dict | None = None
+    raw_error: str | None = None
+    retryable: bool = False
+    retry_count: int = 0
+    previous_attempt_id: int | None = None
+    job_id: int | None = None
+    task_id: str | None = None
+
+
+class EbayAccountReadinessResponse(BaseModel):
+    connected: bool
+    has_refresh_token: bool
+    token_status: str
+    import_ready: bool
+    reconnect_required: bool
+    status_note: str
+    payment_policy_name: str | None = None
+    payment_policy_id: str | None = None
+    fulfillment_policy_name: str | None = None
+    fulfillment_policy_id: str | None = None
+    return_policy_name: str | None = None
+    return_policy_id: str | None = None
+    merchant_location_key: str | None = None
+    merchant_location_verified: bool = False
+    merchant_location_status: str | None = None
+    merchant_location_last_checked_at: datetime | None = None
+    policy_sync_status: str | None = None
+    policy_sync_error: str | None = None
+    shipping_service_code: str | None = None
+    handling_time_days: int | None = None
+    local_pickup_allowed: bool = False
+    calculated_shipping: bool = False
+    package_weight_required: bool = True
+    package_dimensions_required: bool = True
+    policies_present: bool = False
+    location_present: bool = False
+    publish_ready: bool = False
+    mode: str | None = None
+
+
+class EbayPolicyCandidate(BaseModel):
+    id: str
+    name: str | None = None
+    marketplace_id: str | None = None
+    is_default: bool = False
+    category_types: list[str] = Field(default_factory=list)
+    raw_category_types: list[dict] = Field(default_factory=list)
+
+
+class EbayPolicyCatalogResponse(BaseModel):
+    marketplace_id: str = "EBAY_US"
+    status: str = "ready"
+    payment_policies: list[EbayPolicyCandidate] = Field(default_factory=list)
+    fulfillment_policies: list[EbayPolicyCandidate] = Field(default_factory=list)
+    return_policies: list[EbayPolicyCandidate] = Field(default_factory=list)
+    selected: dict = Field(default_factory=dict)
+    policy_settings: dict = Field(default_factory=dict)
+    missing_policy_types: list[str] = Field(default_factory=list)
+    sync_error: str | None = None
+    last_synced_at: datetime | None = None
+
+
+class EbayPolicySyncRequest(BaseModel):
+    marketplace_id: str = "EBAY_US"
+    create_missing_defaults: bool = False
+
+
+class EbayPolicySelectRequest(BaseModel):
+    marketplace_id: str = "EBAY_US"
+    payment_policy_id: str | None = None
+    payment_policy_name: str | None = None
+    fulfillment_policy_id: str | None = None
+    fulfillment_policy_name: str | None = None
+    return_policy_id: str | None = None
+    return_policy_name: str | None = None
+
+
+class EbayMerchantLocationRequest(BaseModel):
+    merchant_location_key: str | None = None
+    create_if_missing: bool = False
+
+
+class LaunchCandidateRequest(BaseModel):
+    marketplace: str = "ebay"
+    max_items: int = 10
+    max_price: float = 50
+    include_warning_only: bool = False
+    include_local_pickup: bool = False
+    include_risky_shipping: bool = False
+
+
+class LaunchCandidateEntry(BaseModel):
+    listing_id: int
+    title: str | None = None
+    price: float | None = None
+    quality_score: float | None = None
+    preflight_status: str | None = None
+    top_warnings: list[str] = Field(default_factory=list)
+    payload_preview_available: bool = False
+    reason_selected: str | None = None
+    reason_excluded: str | None = None
+    marketplace_summary: dict = Field(default_factory=dict)
+
+
+class LaunchCandidateResponse(BaseModel):
+    marketplace: str
+    max_items: int
+    max_price: float
+    include_warning_only: bool = False
+    include_local_pickup: bool = False
+    include_risky_shipping: bool = False
+    generated_at: datetime | None = None
+    candidates: list[LaunchCandidateEntry] = Field(default_factory=list)
+    excluded: list[dict] = Field(default_factory=list)
+    summary: dict = Field(default_factory=dict)
+
+
+class LaunchDrillRequest(BaseModel):
+    listing_ids: list[int] = Field(default_factory=list)
+    marketplace: str = "ebay"
+    max_items: int = 10
+    require_ready: bool = True
+    include_payload_preview: bool = True
+
+
+class LaunchDrillItemResponse(BaseModel):
+    listing_id: int
+    title: str | None = None
+    status: str
+    preflight: dict | None = None
+    payload_preview: dict | None = None
+    blockers: list[dict] = Field(default_factory=list)
+    warnings: list[dict] = Field(default_factory=list)
+    launch_checklist: list[dict] = Field(default_factory=list)
+    reason: str | None = None
+
+
+class LaunchDrillResponse(BaseModel):
+    marketplace: str
+    generated_at: datetime | None = None
+    summary: dict = Field(default_factory=dict)
+    items: list[LaunchDrillItemResponse] = Field(default_factory=list)
+
+
+class EbayLaunchRepairQueueEntry(BaseModel):
+    listing_id: int
+    title: str | None = None
+    price: float | None = None
+    status: str | None = None
+    current_preflight_status: str | None = None
+    blocker_codes: list[str] = Field(default_factory=list)
+    warning_codes: list[str] = Field(default_factory=list)
+    photo_counts: dict = Field(default_factory=dict)
+    image_status: str | None = None
+    ready_for_image_preflight: bool = False
+    category_status: dict = Field(default_factory=dict)
+    suggested_category: dict | None = None
+    required_aspects_status: dict = Field(default_factory=dict)
+    shipping_status: dict = Field(default_factory=dict)
+    condition_status: dict = Field(default_factory=dict)
+    recommended_next_repair_action: str | None = None
+    estimated_repair_difficulty: str | None = None
+    quality_score: float | None = None
+
+
+class EbayLaunchRepairQueueResponse(BaseModel):
+    marketplace: str = "ebay"
+    generated_at: datetime | None = None
+    summary: dict = Field(default_factory=dict)
+    items: list[EbayLaunchRepairQueueEntry] = Field(default_factory=list)
+
+
+class EbayLaunchRepairActionRequest(BaseModel):
+    apply_category_suggestion: bool = False
+    validate_images: bool = False
+
+
+class ListingPhotoActionRequest(BaseModel):
+    storage_paths: list[str] = Field(default_factory=list)
+
+
+class ListingPhotoSetPrimaryRequest(BaseModel):
+    storage_path: str
+
+
+class MarketplaceBulkPreflightMarketResult(BaseModel):
+    marketplace: str
+    status: str
+    blocker_count: int = 0
+    warning_count: int = 0
+    blocker_codes: list[str] = Field(default_factory=list)
+    warning_codes: list[str] = Field(default_factory=list)
+    blocker_messages: list[str] = Field(default_factory=list)
+    warning_messages: list[str] = Field(default_factory=list)
+    missing_fields: list[str] = Field(default_factory=list)
+    invalid_fields: list[str] = Field(default_factory=list)
+    ready: bool = False
+    payload_preview_available: bool = False
+    cached: bool = False
+    stale: bool = False
+    last_checked_at: datetime | None = None
+    source_version: str | None = None
+    top_blocker_code: str | None = None
+    top_warning_code: str | None = None
+    top_blocker_message: str | None = None
+    top_warning_message: str | None = None
+    blockers: list[MarketplacePreflightIssue] = Field(default_factory=list)
+    warnings: list[MarketplacePreflightIssue] = Field(default_factory=list)
+
+
+class MarketplaceBulkPreflightListingResult(BaseModel):
+    listing_id: int
+    title: str | None = None
+    marketplaces: dict[str, MarketplaceBulkPreflightMarketResult] = Field(default_factory=dict)
+    ready_marketplaces: list[str] = Field(default_factory=list)
+    blocked_marketplaces: list[str] = Field(default_factory=list)
+    warning_marketplaces: list[str] = Field(default_factory=list)
+    top_blocker_code: str | None = None
+    top_blocker_message: str | None = None
+    top_warning_code: str | None = None
+    top_warning_message: str | None = None
+    price: float | None = None
+    category: str | None = None
+    condition: str | None = None
+    image_count: int | None = None
+    actual_image_count: int | None = None
+    package_weight: float | None = None
+    package_dimensions: dict | None = None
+    last_preflight_at: datetime | None = None
+
+
+class MarketplaceBulkPreflightSummary(BaseModel):
+    total_listings_checked: int = 0
+    total_marketplaces_checked: int = 0
+    ready_for_ebay: int = 0
+    ready_for_facebook: int = 0
+    ready_with_warnings: int = 0
+    blocked: int = 0
+    blocked_listings: int = 0
+    warning_only_listings: int = 0
+    ready_listings: int = 0
+    missing_photos: int = 0
+    missing_price: int = 0
+    missing_shipping: int = 0
+    missing_policies: int = 0
+    missing_ebay_aspects: int = 0
+    weak_pricing: int = 0
+    reference_images_only: int = 0
+    preflight_failed: int = 0
+    blocker_codes: dict[str, int] = Field(default_factory=dict)
+    warning_codes: dict[str, int] = Field(default_factory=dict)
+    most_common_blocker: str | None = None
+    most_common_warning: str | None = None
+    timestamp: datetime | None = None
+
+
+class BulkMarketplacePreflightRequest(BaseModel):
+    listing_ids: list[int] = Field(default_factory=list)
+    marketplaces: list[str] = Field(default_factory=lambda: ["ebay", "facebook"])
+    force_refresh: bool = False
+    only_drafts: bool = False
+    selected_statuses: list[str] | None = None
+    only_missing_preflight: bool = False
+    only_stale_preflight: bool = False
+    only_ready_candidates: bool = False
+    only_blocked_candidates: bool = False
+
+
+class BulkMarketplacePreflightResponse(BaseModel):
+    items: list[MarketplaceBulkPreflightListingResult] = Field(default_factory=list)
+    summary: MarketplaceBulkPreflightSummary = Field(default_factory=MarketplaceBulkPreflightSummary)
+    marketplaces: list[str] = Field(default_factory=list)
+    generated_at: datetime | None = None
+
+
+class BulkMarketplacePublishReadyRequest(BaseModel):
+    listing_ids: list[int] = Field(default_factory=list)
+    marketplaces: list[str] = Field(default_factory=lambda: ["ebay", "facebook"])
+    allow_warnings: bool = False
+    dry_run: bool = True
+    force_preflight_refresh: bool = False
+    skip_already_queued: bool = True
+    confirm_live_publish: bool = False
+    confirmation_phrase: str | None = None
+
+
+class BulkMarketplacePublishReadyMarketResult(BaseModel):
+    marketplace: str
+    status: str
+    task_id: str | None = None
+    error: str | None = None
+    error_details: list[dict] | dict | None = None
+    warnings: list[dict] = Field(default_factory=list)
+    preflight: dict | None = None
+
+
+class BulkMarketplacePublishReadyListingResult(BaseModel):
+    listing_id: int
+    title: str | None = None
+    marketplaces: dict[str, BulkMarketplacePublishReadyMarketResult] = Field(default_factory=dict)
+    ready_marketplaces: list[str] = Field(default_factory=list)
+    blocked_marketplaces: list[str] = Field(default_factory=list)
+    warning_marketplaces: list[str] = Field(default_factory=list)
+
+
+class BulkMarketplacePublishReadySummary(BaseModel):
+    queued: int = 0
+    skipped_blocked: int = 0
+    skipped_warning_requires_confirmation: int = 0
+    skipped_unsupported_marketplace: int = 0
+    skipped_already_queued: int = 0
+    failed: int = 0
+    dry_run_ready: int = 0
+    dry_run_blocked: int = 0
+
+
+class BulkMarketplacePublishReadyResponse(BaseModel):
+    items: list[BulkMarketplacePublishReadyListingResult] = Field(default_factory=list)
+    summary: BulkMarketplacePublishReadySummary = Field(default_factory=BulkMarketplacePublishReadySummary)
+    markets: list[str] = Field(default_factory=list)
+    dry_run: bool = True
+    allow_warnings: bool = False
+    skip_already_queued: bool = True
+    generated_at: datetime | None = None
 
 
 class ListingApprovalResponse(BaseModel):
@@ -139,16 +545,20 @@ class BulkMarketplacePublishResponse(BaseModel):
     results: list[dict] = Field(default_factory=list)
 
 
+class PricingBulkRequest(BaseModel):
+    listing_ids: list[int] = Field(default_factory=list)
+    action: str = "refresh"
+    manual_comp: dict | None = None
+
+
+class PricingApplyRequest(BaseModel):
+    strategy: str = "recommended"
+    override_reason: str | None = None
+
+
 class ConnectMarketplaceResponse(BaseModel):
     marketplace: str
     auth: dict
-
-
-class MarketplaceStatusEntry(BaseModel):
-    marketplace: str
-    status: str
-    marketplace_listing_id: str | None = None
-    raw_response: dict | None = None
 
 
 class SoldSyncRequest(BaseModel):
@@ -219,6 +629,13 @@ class SaleDetectionConfigRequest(BaseModel):
 class SaleDetailsUpdateRequest(BaseModel):
     fees_actual: float | None = None
     shipping_cost: float | None = None
+    promotional_fees: float | None = None
+    marketplace_fees: float | None = None
+    notes: str | None = None
+
+
+class SaleReconcileRequest(BaseModel):
+    listing_id: int | None = None
     notes: str | None = None
 
 class PhotoEditRequest(BaseModel):
@@ -301,6 +718,7 @@ class UserResponse(BaseModel):
     workflow_preferences: dict = Field(default_factory=dict)
     vine_enforce_six_month_lock: bool = True
     sold_sync_preferences: dict = Field(default_factory=dict)
+    ebay_marketplace_policy_settings: dict = Field(default_factory=dict)
 
     class Config:
         from_attributes = True
@@ -321,6 +739,7 @@ class UserUpdateRequest(BaseModel):
     sold_out_delist_everywhere: bool | None = None
     out_of_stock_delist_everywhere: bool | None = None
     remove_media_on_sold_out: bool | None = None
+    ebay_marketplace_policy_settings: dict | None = None
 
 
 class ServerSettingsUpdateRequest(BaseModel):

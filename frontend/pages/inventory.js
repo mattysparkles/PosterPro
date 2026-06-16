@@ -222,9 +222,7 @@ export default function InventoryPage() {
         description="Track intake, active inventory, sold items, and batches."
         actions={
           user?.can_access_vine_import ? (
-            <Link href="/imports/vine">
-              <Button>Import Vine report</Button>
-            </Link>
+            <Button href="/imports/vine">Import Vine report</Button>
           ) : null
         }
       />

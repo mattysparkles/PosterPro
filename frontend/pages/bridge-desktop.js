@@ -18,6 +18,7 @@ import {
 
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'canceled']);
 const MARKETPLACE_LABELS = {
+  ebay: 'eBay',
   facebook: 'Facebook Marketplace',
   mercari: 'Mercari',
   poshmark: 'Poshmark',
@@ -341,11 +342,9 @@ export default function BridgeDesktopPage() {
               <Button type="button" variant="outline" onClick={() => window.location.reload()}>
                 Refresh status
               </Button>
-              <Link href={returnHref}>
-                <Button type="button" variant="outline">
-                  Return to settings
-                </Button>
-              </Link>
+              <Button href={returnHref} variant="outline">
+                Return to settings
+              </Button>
             </div>
           )}
         />

@@ -91,6 +91,31 @@ def fetch_vine_media(
     return service.fetch_media(db, batch=batch, item_ids=payload.item_ids)
 
 
+@router.post("/batches/{batch_id}/repair-images")
+def repair_vine_images(
+    batch_id: int,
+    payload: VineImportActionRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ensure_vine_access(current_user)
+    batch = db.get(VineImportBatch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    ensure_user_owns_resource(current_user, batch.user_id)
+    return service.repair_vine_listing_images(
+        db,
+        user_id=current_user.id,
+        batch_id=batch.id,
+        listing_ids=payload.item_ids or None,
+        include_archived=False,
+        force_refresh=True,
+        use_bridge_session=True,
+        only_missing_images=False,
+        limit=None,
+    )
+
+
 @router.post("/batches/{batch_id}/create-inventory")
 def create_vine_inventory(
     batch_id: int,

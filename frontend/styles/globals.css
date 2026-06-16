@@ -3,63 +3,65 @@
 @tailwind utilities;
 
 :root {
-  --background: 210 30% 98%;
-  --foreground: 222 24% 12%;
+  --background: 220 25% 97%;
+  --foreground: 222 30% 10%;
   --card: 0 0% 100%;
-  --card-foreground: 222 24% 12%;
-  --primary: 217 91% 60%;
+  --card-foreground: 222 30% 10%;
+  --primary: 222 72% 14%;
   --primary-foreground: 0 0% 100%;
-  --muted: 210 20% 96%;
-  --muted-foreground: 220 9% 46%;
-  --border: 220 14% 90%;
+  --muted: 220 18% 95%;
+  --muted-foreground: 220 9% 42%;
+  --border: 220 16% 88%;
 
-  --pp-bg: #f7f9fc;
+  --pp-bg: #f8fafc;
   --pp-surface: #ffffff;
-  --pp-surface-strong: #f2f4f7;
-  --pp-text: #101828;
-  --pp-muted: #667085;
-  --pp-border: #e4e7ec;
-  --pp-primary: #2563eb;
-  --pp-primary-hover: #1d4ed8;
-  --pp-primary-soft: #bfd2ff;
-  --pp-success: #067647;
-  --pp-warning: #b54708;
+  --pp-surface-strong: #f1f5f9;
+  --pp-text: #0f172a;
+  --pp-muted: #334155;
+  --pp-border: #d7dee8;
+  --pp-primary: #163c7a;
+  --pp-primary-hover: #102f61;
+  --pp-primary-soft: #dbe7ff;
+  --pp-success: #0f766e;
+  --pp-warning: #b45309;
   --pp-danger: #b42318;
-  --pp-info: #175cd3;
+  --pp-info: #1d4ed8;
   --pp-card: #ffffff;
-  --pp-card-border: #eaecf0;
-  --pp-card-shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
-  --pp-shell-bg: #f4f7fb;
+  --pp-card-border: #dbe1ea;
+  --pp-card-shadow: 0 1px 2px rgba(15, 23, 42, 0.05), 0 12px 30px rgba(15, 23, 42, 0.05);
+  --pp-shell-bg: #eef1f6;
   --pp-shell-sidebar: #ffffff;
   --pp-shell-header: #ffffff;
-  --pp-shell-title: #101828;
-  --pp-shell-copy: #475467;
-  --pp-shell-soft-copy: #98a2b3;
-  --pp-shell-hover: #f8fafc;
-  --pp-shell-active: #eff4ff;
-  --pp-dashboard-accent: #175cd3;
-  --pp-dashboard-accent-soft: #f7faff;
+  --pp-shell-title: #0f172a;
+  --pp-shell-copy: #0f172a;
+  --pp-shell-soft-copy: #667085;
+  --pp-shell-hover: #f3f4f6;
+  --pp-shell-active: #eff6ff;
+  --pp-dashboard-accent: #163c7a;
+  --pp-dashboard-accent-soft: #eff4ff;
   --pp-focus-ring: #2563eb;
+  --pp-heading-font: "Avenir Next", "Segoe UI", "Helvetica Neue", sans-serif;
+  --pp-body-font: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 :root[data-admin-theme='midnight-operator'] {
   --pp-bg: #0b1220;
-  --pp-surface: #111a2d;
-  --pp-surface-strong: #17223a;
-  --pp-text: #e2e8f0;
-  --pp-muted: #94a3b8;
-  --pp-border: #24324f;
+  --pp-surface: #111827;
+  --pp-surface-strong: #1e293b;
+  --pp-text: #f8fafc;
+  --pp-muted: #cbd5e1;
+  --pp-border: #243047;
   --pp-primary: #4f7cff;
   --pp-primary-hover: #3b67e8;
   --pp-primary-soft: #2c3f70;
   --pp-shell-bg: #0b1220;
-  --pp-shell-sidebar: #111a2d;
+  --pp-shell-sidebar: #111827;
   --pp-shell-header: #111a2d;
   --pp-shell-title: #f8fafc;
   --pp-shell-copy: #cbd5e1;
   --pp-shell-soft-copy: #94a3b8;
-  --pp-shell-hover: #16233d;
-  --pp-shell-active: #1f325a;
+  --pp-shell-hover: #1e293b;
+  --pp-shell-active: #1d4ed8;
   --pp-dashboard-accent-soft: #15223a;
   --pp-focus-ring: #4f7cff;
 }
@@ -95,13 +97,20 @@ body {
   background: var(--pp-bg);
   color: var(--pp-text);
   -webkit-font-smoothing: antialiased;
-  font-family: "Avenir Next", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  line-height: 1.5;
+  font-size: 16px;
+  font-family: var(--pp-body-font);
   overflow-x: hidden;
 }
 
 a {
   color: inherit;
   text-decoration: none;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--pp-primary) 18%, transparent);
+  color: var(--pp-text);
 }
 
 .posterpro-app-shell {
@@ -145,9 +154,9 @@ a {
 }
 
 .pp-dashboard-hero {
-  border-radius: 16px;
-  border: 1px solid #dbe7ff;
-  background: linear-gradient(135deg, #f8fbff 0%, #eef4ff 100%);
+  border-radius: 20px;
+  border: 1px solid #d9e3f4;
+  background: linear-gradient(135deg, #fafcff 0%, #eef3fb 100%);
 }
 
 .pp-dashboard-hero__eyebrow {
@@ -155,19 +164,19 @@ a {
   text-transform: uppercase;
   letter-spacing: 0.08em;
   font-weight: 700;
-  color: #175cd3;
+  color: var(--pp-primary);
 }
 
 .pp-dashboard-hero__title {
-  font-size: 1.5rem;
+  font-size: 1.6rem;
   line-height: 1.2;
   letter-spacing: -0.03em;
   font-weight: 700;
-  color: #101828;
+  color: var(--pp-text);
 }
 
 .pp-dashboard-hero__body {
-  color: #475467;
+  color: var(--pp-muted);
   font-size: 0.95rem;
   line-height: 1.6;
 }
@@ -227,24 +236,6 @@ a {
   gap: 1.25rem;
 }
 
-@media (min-width: 1024px) {
-  .pp-section-workspace {
-    grid-template-columns: 280px minmax(0, 1fr);
-    align-items: start;
-  }
-}
-
-.pp-section-workspace__menu {
-  min-width: 0;
-}
-
-@media (min-width: 1024px) {
-  .pp-section-workspace__menu {
-    position: sticky;
-    top: 92px;
-  }
-}
-
 .pp-section-workspace__content {
   min-width: 0;
 }
@@ -253,23 +244,45 @@ a {
   letter-spacing: -0.01em;
 }
 
-.pp-dashboard-theme .pp-dashboard-menu-card,
-.pp-dashboard-theme .pp-dashboard-note-card,
-.pp-dashboard-theme .pp-dashboard-stage {
-  border: 1px solid #eaecf0;
-  border-radius: 16px;
-  background: #fff;
-  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+.pp-field {
+  display: grid;
+  gap: 0.45rem;
 }
 
-.pp-dashboard-menu-label,
-.pp-dashboard-note-label,
-.pp-dashboard-stage-label {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-weight: 700;
-  color: #667085;
+.pp-field label {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--pp-text);
+}
+
+.pp-auth-form {
+  display: grid;
+  gap: 1rem;
+}
+
+.pp-auth-form .pp-input,
+.pp-auth-form input {
+  min-height: 3rem;
+}
+
+.pp-auth-links {
+  margin-top: 1.5rem;
+  display: grid;
+  gap: 0.75rem;
+  text-align: center;
+}
+
+.pp-auth-links a {
+  color: var(--pp-primary);
+  font-weight: 600;
+}
+
+.pp-auth-links a:hover {
+  text-decoration: underline;
+}
+
+.pp-auth-page {
+  min-height: 100vh;
 }
 
 .pp-dashboard-menu-copy,
@@ -281,19 +294,21 @@ a {
 .pp-dashboard-menu-button {
   width: 100%;
   border: 1px solid transparent;
-  border-radius: 10px;
+  border-radius: 16px;
   background: transparent;
-  transition: border-color 0.15s ease, background-color 0.15s ease;
+  transition: transform 0.14s ease, border-color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .pp-dashboard-menu-button:hover {
   border-color: #eaecf0;
   background: #f8fafc;
+  transform: translateY(-1px);
 }
 
 .pp-dashboard-menu-button.is-active {
-  border-color: #bfd2ff;
-  background: #eff4ff;
+  border-color: var(--pp-primary-soft);
+  background: color-mix(in srgb, var(--pp-primary) 10%, var(--pp-surface));
+  box-shadow: 0 8px 22px rgba(37, 99, 235, 0.08);
 }
 
 .pp-dashboard-menu-button__title {
@@ -314,6 +329,14 @@ a {
   letter-spacing: -0.02em;
   font-weight: 700;
   color: #101828;
+}
+
+.pp-dashboard-stage {
+  overflow: hidden;
+}
+
+.pp-dashboard-stage__header {
+  border-bottom: 1px solid var(--pp-border);
 }
 
 :root[data-admin-theme='graphite-pro'] {

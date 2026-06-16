@@ -67,6 +67,7 @@ class Listing(Base, TimestampMixin):
     batch_id: Mapped[int | None] = mapped_column(ForeignKey("storage_unit_batches.id"), index=True, nullable=True)
     status: Mapped[ListingStatus] = mapped_column(Enum(ListingStatus), default=ListingStatus.draft)
     image_urls: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    listing_images: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
     raw_photo_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     storage_unit_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -91,6 +92,7 @@ class Listing(Base, TimestampMixin):
     sold_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     photo_quality_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     condition: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    condition_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     ebay_listing_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     ebay_publish_status: Mapped[EbayPublishStatus] = mapped_column(
         Enum(EbayPublishStatus), default=EbayPublishStatus.DRAFT, index=True
@@ -103,6 +105,7 @@ class Listing(Base, TimestampMixin):
     stale_flag: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     source_type: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     source_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    shipping_profile: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     needs_review: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     restricted_review_required: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     restricted_reasons: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
@@ -113,6 +116,7 @@ class Listing(Base, TimestampMixin):
     cluster: Mapped["Cluster | None"] = relationship(back_populates="listings")
     batch: Mapped["StorageUnitBatch | None"] = relationship(back_populates="listings")
     marketplace_listings: Mapped[list["MarketplaceListing"]] = relationship(back_populates="listing")
+    publish_attempts: Mapped[list["MarketplacePublishAttempt"]] = relationship(back_populates="listing")
     sales: Mapped[list["Sale"]] = relationship(back_populates="listing")
 
 
@@ -161,6 +165,17 @@ class MarketplaceListing(Base, TimestampMixin):
     listing: Mapped["Listing"] = relationship(back_populates="marketplace_listings")
 
 
+class MarketplaceMetadataCache(Base, TimestampMixin):
+    __tablename__ = "marketplace_metadata_cache"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    marketplace: Mapped[str] = mapped_column(String(64), index=True)
+    cache_key: Mapped[str] = mapped_column(String(255), index=True)
+    payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    source_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+
+
 class MarketplaceImportJob(Base, TimestampMixin):
     __tablename__ = "marketplace_import_jobs"
 
@@ -193,6 +208,35 @@ class MarketplaceCrosspostJob(Base, TimestampMixin):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class MarketplacePublishAttempt(Base, TimestampMixin):
+    __tablename__ = "marketplace_publish_attempts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    listing_id: Mapped[int] = mapped_column(ForeignKey("listings.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    marketplace: Mapped[MarketplaceName] = mapped_column(Enum(MarketplaceName), index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    dry_run: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    preflight_status: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    payload_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    payload_hash: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    inventory_item_sku: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    offer_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    marketplace_listing_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    marketplace_status: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    translated_error: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    raw_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retryable: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    previous_attempt_id: Mapped[int | None] = mapped_column(ForeignKey("marketplace_publish_attempts.id"), nullable=True, index=True)
+    job_id: Mapped[int | None] = mapped_column(ForeignKey("marketplace_crosspost_jobs.id"), nullable=True, index=True)
+    task_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+
+    listing: Mapped["Listing"] = relationship(back_populates="publish_attempts")
+    user: Mapped["User"] = relationship()
+
+
 class ListingTemplate(Base, TimestampMixin):
     __tablename__ = "listing_templates"
 
@@ -218,6 +262,12 @@ class Sale(Base, TimestampMixin):
     quantity: Mapped[int] = mapped_column(Integer, default=1)
     amount: Mapped[float | None] = mapped_column(Float, nullable=True)
     currency: Mapped[str] = mapped_column(String(8), default="USD")
+    fees_actual: Mapped[float | None] = mapped_column(Float, nullable=True)
+    shipping_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
+    promotional_fees: Mapped[float | None] = mapped_column(Float, nullable=True)
+    marketplace_fees: Mapped[float | None] = mapped_column(Float, nullable=True)
+    profit: Mapped[float | None] = mapped_column(Float, nullable=True)
+    roi_percentage: Mapped[float | None] = mapped_column(Float, nullable=True)
     sold_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="DETECTED")
     details: Mapped[dict | None] = mapped_column(JSON, nullable=True)

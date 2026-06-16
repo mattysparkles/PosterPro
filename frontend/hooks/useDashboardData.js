@@ -16,7 +16,8 @@ import {
   optimizeListing,
 } from "../lib/api";
 
-export default function useDashboardData(userId) {
+export default function useDashboardData(userId, options = {}) {
+  const includeLeadInsights = Boolean(options.includeLeadInsights);
   const [clusters, setClusters] = useState([]);
   const [listings, setListings] = useState([]);
   const [marketplaces, setMarketplaces] = useState([]);
@@ -39,44 +40,61 @@ export default function useDashboardData(userId) {
 
   const reload = useCallback(async () => {
     if (!userId) return;
-    const [
-      c,
-      l,
-      m,
-      a,
-      al,
-      autoConfig,
-      offerData,
-      platformConfig,
-      batches,
-      templates,
-    ] = await Promise.all([
+    const settled = await Promise.allSettled([
       fetchClusters(),
       fetchListings(),
       fetchMarketplaces(),
       fetchAnalyticsOverview(userId),
       fetchAlerts(userId),
       fetchAutonomousConfig(),
-      fetchEbayOfferDashboard(userId).catch(() => ({
-        active_offers: [],
-        decision_log: [],
-      })),
-      fetchPlatformConfig(userId).catch(() => ({ enabled_platforms: ["ebay"] })),
-      fetchStorageUnitBatches().catch(() => []),
-      fetchListingTemplates(userId).catch(() => []),
+      fetchEbayOfferDashboard(userId),
+      fetchPlatformConfig(userId),
+      fetchStorageUnitBatches(),
+      fetchListingTemplates(userId),
     ]);
-    setClusters(c);
-    setListings(l);
-    setMarketplaces(m.marketplaces || []);
+
+    const [
+      clustersResult,
+      listingsResult,
+      marketplacesResult,
+      analyticsResult,
+      alertsResult,
+      autoConfigResult,
+      offerDataResult,
+      platformConfigResult,
+      batchesResult,
+      templatesResult,
+    ] = settled;
+
+    const c = clustersResult.status === "fulfilled" ? clustersResult.value : [];
+    const l = listingsResult.status === "fulfilled" ? listingsResult.value : [];
+    const m = marketplacesResult.status === "fulfilled" ? marketplacesResult.value : { marketplaces: [] };
+    const a = analyticsResult.status === "fulfilled" ? analyticsResult.value : null;
+    const al = alertsResult.status === "fulfilled" ? alertsResult.value : { alerts: [] };
+    const autoConfig = autoConfigResult.status === "fulfilled" ? autoConfigResult.value : {
+      autonomous_mode: true,
+      autonomous_dry_run: false,
+    };
+    const offerData = offerDataResult.status === "fulfilled" ? offerDataResult.value : {
+      active_offers: [],
+      decision_log: [],
+    };
+    const platformConfig = platformConfigResult.status === "fulfilled" ? platformConfigResult.value : { enabled_platforms: ["ebay"] };
+    const batches = batchesResult.status === "fulfilled" ? batchesResult.value : [];
+    const templates = templatesResult.status === "fulfilled" ? templatesResult.value : [];
+
+    setClusters(c || []);
+    setListings(l || []);
+    setMarketplaces(m?.marketplaces || []);
     setAnalytics(a);
-    setAlerts(al.alerts || []);
+    setAlerts(al?.alerts || []);
     setAutonomousConfig(autoConfig);
     setOfferDashboard(offerData);
-    setEnabledPlatforms(platformConfig.enabled_platforms || ["ebay"]);
+    setEnabledPlatforms(platformConfig?.enabled_platforms || ["ebay"]);
     setStorageBatches(batches || []);
     setListingTemplates(templates || []);
 
-    if (l?.length) {
+    if (includeLeadInsights && l?.length) {
       const listingId = l[0].id;
       const [rec, pred, opt] = await Promise.all([
         fetchPricingRecommendation(listingId),
@@ -87,7 +105,7 @@ export default function useDashboardData(userId) {
       setPrediction(pred);
       setOptimization(opt);
     }
-  }, [userId]);
+  }, [includeLeadInsights, userId]);
 
   useEffect(() => {
     reload();
