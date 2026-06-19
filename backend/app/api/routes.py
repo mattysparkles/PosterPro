@@ -70,6 +70,7 @@ from app.services.listing_review import (
 from app.services.media_lifecycle import purge_listing_media
 from app.services.listing_workspace import normalize_marketplace_data
 from app.services.marketplace_orchestrator import queue_publish
+from app.services.operator_command_service import OperatorCommandService
 from app.services.profit_service import ProfitService
 from app.services.storage import LocalStorage
 from app.services.pricing_service import PricingService
@@ -91,6 +92,7 @@ from app.workers.tasks import (
 router = APIRouter()
 inventory_service = InventoryService()
 photo_editor_service = PhotoEditorService()
+operator_command_service = OperatorCommandService()
 
 _DEFAULT_WORKFLOW_PREFERENCES = {
     "review_before_publish": True,
@@ -541,6 +543,13 @@ class AutonomousToggleRequest(BaseModel):
     crosspost_enabled: bool | None = None
 
 
+class DashboardOperatorCommandRequest(BaseModel):
+    prompt: str
+    dry_run: bool = True
+    apply_live: bool = False
+    confirmation_phrase: str | None = None
+
+
 @router.get("/listing-templates", response_model=list[ListingTemplateResponse])
 def get_listing_templates(
     user_id: int | None = None,
@@ -756,6 +765,31 @@ def backfill_vine_listing_images(
     bridge_failed = 0
     provider = AmazonProductMediaProvider(db, owner_user_id=current_user.id)
     discovery = AmazonProductDiscoveryService(provider)
+
+    def _trusted_amazon_listing_images(image_urls: list[str], *, source_page_url: str | None, asin: str | None, product_name: str | None) -> list[dict]:
+        cleaned_urls = [str(url).strip() for url in image_urls if str(url).strip()]
+        return normalize_listing_images(
+            listing_images=[
+                {
+                    "storage_path": url,
+                    "source_page_url": source_page_url,
+                    "source_platform": "amazon",
+                    "operator_state": "approved",
+                    "is_reference": False,
+                    "metadata": {
+                        "source": "amazon_vine",
+                        "asin": asin,
+                        "product_name": product_name,
+                        "trusted_catalog_match": True,
+                    },
+                }
+                for url in cleaned_urls
+            ],
+            source_page_url=source_page_url,
+            source_platform="amazon",
+            default_is_reference=False,
+            approved=True,
+        )
     processed = 0
 
     for listing in listings:
@@ -834,12 +868,11 @@ def backfill_vine_listing_images(
         gallery_urls = [str(url) for url in (cache.gallery_image_urls_json or []) if str(url).strip()]
         if gallery_urls:
             listing.image_urls = gallery_urls
-            listing.listing_images = normalize_listing_images(
-                image_urls=gallery_urls,
+            listing.listing_images = _trusted_amazon_listing_images(
+                gallery_urls,
                 source_page_url=item_url,
-                source_platform="amazon",
-                default_is_reference=True,
-                approved=False,
+                asin=asin,
+                product_name=product_name,
             )
             source_meta = dict(listing.source_metadata or {})
             source_meta["asin"] = asin
@@ -865,12 +898,11 @@ def backfill_vine_listing_images(
             continue
         if cache.primary_image_url:
             listing.image_urls = [cache.primary_image_url]
-            listing.listing_images = normalize_listing_images(
-                image_urls=[cache.primary_image_url],
+            listing.listing_images = _trusted_amazon_listing_images(
+                [cache.primary_image_url],
                 source_page_url=item_url,
-                source_platform="amazon",
-                default_is_reference=True,
-                approved=False,
+                asin=asin,
+                product_name=product_name,
             )
             source_meta = dict(listing.source_metadata or {})
             source_meta["asin"] = asin
@@ -885,12 +917,11 @@ def backfill_vine_listing_images(
                 refreshed_gallery = [str(url) for url in (cache.gallery_image_urls_json or []) if str(url).strip()]
                 if refreshed_gallery:
                     listing.image_urls = refreshed_gallery
-                    listing.listing_images = normalize_listing_images(
-                        image_urls=refreshed_gallery,
+                    listing.listing_images = _trusted_amazon_listing_images(
+                        refreshed_gallery,
                         source_page_url=item_url,
-                        source_platform="amazon",
-                        default_is_reference=True,
-                        approved=False,
+                        asin=asin,
+                        product_name=product_name,
                     )
                     source_meta = dict(listing.source_metadata or {})
                     source_meta["asin"] = asin
@@ -901,12 +932,11 @@ def backfill_vine_listing_images(
                     continue
                 if cache.primary_image_url:
                     listing.image_urls = [cache.primary_image_url]
-                    listing.listing_images = normalize_listing_images(
-                        image_urls=[cache.primary_image_url],
+                    listing.listing_images = _trusted_amazon_listing_images(
+                        [cache.primary_image_url],
                         source_page_url=item_url,
-                        source_platform="amazon",
-                        default_is_reference=True,
-                        approved=False,
+                        asin=asin,
+                        product_name=product_name,
                     )
                     source_meta = dict(listing.source_metadata or {})
                     source_meta["asin"] = asin
@@ -1591,6 +1621,22 @@ def toggle_autonomous_mode(payload: AutonomousToggleRequest | None = None):
         "autonomous_dry_run": settings.autonomous_dry_run,
         "autonomous_crosspost_enabled": settings.autonomous_crosspost_enabled,
     }
+
+
+@router.post("/dashboard/operator-command")
+async def run_dashboard_operator_command(
+    payload: DashboardOperatorCommandRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return await operator_command_service.handle_prompt(
+        db,
+        user=current_user,
+        prompt=payload.prompt,
+        dry_run=payload.dry_run,
+        apply_live=payload.apply_live,
+        confirmation_phrase=payload.confirmation_phrase,
+    )
 
 
 

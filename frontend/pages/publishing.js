@@ -323,6 +323,8 @@ export default function PublishingPage() {
       subnav={publishingSubnav}
     >
       <PageHeader
+        eyebrow="Selling workflow"
+        breadcrumbs={[{ label: 'Selling' }, { label: 'Publishing', active: true }]}
         title="Publishing"
         description="Watch the publish queue, live marketplace listings, and sync health from one place."
         actions={

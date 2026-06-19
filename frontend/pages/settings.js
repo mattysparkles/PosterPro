@@ -1,3 +1,4 @@
+/* eslint-disable @next/next/no-html-link-for-pages */
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import { RefreshCcw } from 'lucide-react';
@@ -233,10 +234,11 @@ export default function SettingsPage() {
     amazon_paapi_partner_tag: '',
   });
   const selectTab = (nextTab) => {
+    if (nextTab === 'ebay') {
+      window.location.assign('/settings/ebay');
+      return;
+    }
     setActiveTab(nextTab);
-    if (!router.isReady) return;
-    const nextQuery = { ...router.query, tab: nextTab };
-    router.replace({ pathname: router.pathname, query: nextQuery }, undefined, { shallow: true });
   };
   const canManageServer = !!settingsPanels?.server?.can_manage;
   const visibleTabs = SETTINGS_TABS.filter((tab) => {
@@ -415,6 +417,10 @@ export default function SettingsPage() {
     if (!router.isReady) return;
     const tab = typeof router.query.tab === 'string' ? router.query.tab : '';
     const marketplace = typeof router.query.marketplace === 'string' ? router.query.marketplace : '';
+    if (tab === 'ebay') {
+      window.location.replace('/settings/ebay');
+      return;
+    }
     if (tab && SETTINGS_TABS.some((item) => item.value === tab)) {
       setActiveTab(tab);
     }
@@ -1020,6 +1026,8 @@ export default function SettingsPage() {
       }}
     >
       <PageHeader
+        eyebrow="Configuration"
+        breadcrumbs={[{ label: 'System' }, { label: 'Settings', active: true }]}
         title="Settings"
         description="Control account profile, marketplace connections, automation, and deployment-level credentials."
         actions={
@@ -1068,14 +1076,13 @@ export default function SettingsPage() {
                     <p className="text-sm font-semibold text-[#101828]">Workflow</p>
                     <p className="mt-1 text-sm text-[#667085]">Review-before-publish, bulk actions, and queue behavior.</p>
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => selectTab('ebay')}
-                    className="rounded-[14px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]"
-                  >
-                    <p className="text-sm font-semibold text-[#101828]">eBay setup</p>
-                    <p className="mt-1 text-sm text-[#667085]">Connect the account, sync policies, and verify merchant location.</p>
-                  </button>
+                    <a
+                      href="/settings/ebay"
+                      className="rounded-[14px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]"
+                    >
+                      <p className="text-sm font-semibold text-[#101828]">eBay setup</p>
+                      <p className="mt-1 text-sm text-[#667085]">Connect the account, sync policies, and verify merchant location.</p>
+                    </a>
                   <button
                     type="button"
                     onClick={() => selectTab('marketplaces')}
@@ -2519,17 +2526,15 @@ export default function SettingsPage() {
                         </div>
                       ) : null}
                       <div className="mt-4 flex flex-wrap gap-2">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => {
-                            if (marketplace.marketplace === 'ebay') {
-                              selectTab('ebay');
-                              return;
-                            }
-                            openMarketplaceDrawer(marketplace);
-                          }}
-                        >
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            href={marketplace.marketplace === 'ebay' ? '/settings/ebay' : undefined}
+                            onClick={() => {
+                              if (marketplace.marketplace === 'ebay') return;
+                              openMarketplaceDrawer(marketplace);
+                            }}
+                          >
                           {marketplace.marketplace === 'ebay'
                             ? 'Open eBay setup'
                             : supportsBrowserConnect

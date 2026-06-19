@@ -103,11 +103,34 @@ def repair_vine_images(
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
     ensure_user_owns_resource(current_user, batch.user_id)
+    listing_ids: list[int] | None = None
+    if payload.item_ids:
+        items = db.execute(
+            select(VineImportItem).where(
+                VineImportItem.batch_id == batch.id,
+                VineImportItem.id.in_(payload.item_ids),
+            )
+        ).scalars().all()
+        listing_ids = sorted({int(item.listing_id) for item in items if item.listing_id})
+        if not listing_ids:
+            return {
+                "updated": 0,
+                "removed_unsafe": 0,
+                "already_present": 0,
+                "missing_asin": 0,
+                "no_cache": 0,
+                "bridge_refetched": 0,
+                "bridge_failed": 0,
+                "total_vine_listings": 0,
+                "processed": 0,
+                "listing_ids": [],
+                "batch_id": batch.id,
+            }
     return service.repair_vine_listing_images(
         db,
         user_id=current_user.id,
         batch_id=batch.id,
-        listing_ids=payload.item_ids or None,
+        listing_ids=listing_ids,
         include_archived=False,
         force_refresh=True,
         use_bridge_session=True,
@@ -157,6 +180,27 @@ def create_vine_drafts(
         fetch_media_first=payload.fetch_media_first,
         require_media_for_asin=payload.require_media_for_asin,
         allow_drafts_without_media=payload.allow_drafts_without_media,
+    )
+
+
+@router.post("/batches/{batch_id}/auto-build")
+def auto_build_vine_drafts(
+    batch_id: int,
+    payload: VineImportActionRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ensure_vine_access(current_user)
+    batch = db.get(VineImportBatch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    ensure_user_owns_resource(current_user, batch.user_id)
+    return service.auto_build_batch_drafts(
+        db,
+        batch=batch,
+        item_ids=payload.item_ids,
+        new_only=payload.new_only,
+        include_cancelled=payload.include_cancelled,
     )
 
 

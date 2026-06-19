@@ -12,7 +12,7 @@ from fastapi import UploadFile
 
 from app.core.config import settings
 from app.api.schemas import VineImportActionRequest
-from app.api.vine_imports import create_vine_drafts, create_vine_inventory, list_vine_batches, upload_vine_report
+from app.api.vine_imports import create_vine_drafts, create_vine_inventory, list_vine_batches, repair_vine_images, upload_vine_report
 from app.models.models import Image, Listing, ProductMediaCache, User, VineImportItem
 from app.services.amazon_media import AmazonProductMediaProvider
 from app.services.amazon_product_discovery import AmazonProductDiscoveryService
@@ -461,6 +461,12 @@ def test_created_vine_records_keep_source_metadata_and_needs_photos(db_session):
     assert draft_previews.get("ebay", {}).get("marketplace") == "ebay"
     assert draft_previews.get("facebook", {}).get("marketplace") == "facebook"
     assert "Model" in (enriched.item_specifics or {})
+    assert (enriched.shipping_profile or {}).get("estimated") is True
+    assert (enriched.shipping_profile or {}).get("manual_measurement_needed") is False
+    provenance = marketplace_data.get("ebay_item_specifics_provenance") or {}
+    assert provenance
+    assert {"Brand", "Type", "Model"}.issubset(set(provenance))
+    assert draft_previews.get("ebay", {}).get("item_specifics_provenance") == provenance
 
 
 def test_create_listing_drafts_includes_locked_and_restricted_rows_for_review(db_session):
@@ -620,6 +626,12 @@ def test_create_listing_drafts_attaches_cached_amazon_images_and_is_idempotent(d
     assert created_listings
     assert all((listing.image_urls or []) for listing in created_listings)
     assert all("needs_photos" not in (listing.custom_labels or []) for listing in created_listings)
+    assert all((listing.listing_images or []) for listing in created_listings)
+    assert all(
+        image.get("operator_state") == "approved" and image.get("is_reference") is False
+        for listing in created_listings
+        for image in (listing.listing_images or [])
+    )
 
     second = service.create_listing_drafts(
         db_session,
@@ -675,6 +687,9 @@ def test_create_listing_drafts_uses_amazon_discovery_for_images_and_description(
     assert result["created"] == 1
     listing = db_session.query(Listing).filter(Listing.user_id == user.id, Listing.source_type == "amazon_vine", Listing.id == eligible_item.listing_id).one()
     assert listing.image_urls == ["/media/amazon-vine/good.jpg"]
+    assert listing.listing_images
+    assert listing.listing_images[0]["operator_state"] == "approved"
+    assert listing.listing_images[0]["is_reference"] is False
     assert "vine" not in (listing.description or "").lower()
     assert listing.condition == "New"
 
@@ -741,6 +756,9 @@ def test_repair_vine_listing_images_replaces_unsafe_sources_with_amazon_cache(db
     assert result["updated"] == 1
     assert all("vine-search" not in str(image.get("storage_path") or "") for image in (refreshed.listing_images or []))
     assert refreshed.image_urls and refreshed.image_urls[0] == "/media/amazon-vine/good.jpg"
+    assert refreshed.listing_images
+    assert all(image.get("operator_state") == "approved" for image in (refreshed.listing_images or []))
+    assert all(image.get("is_reference") is False for image in (refreshed.listing_images or []))
     assert "vine" not in (refreshed.description or "").lower()
     assert refreshed.condition == "New"
 
@@ -1033,6 +1051,136 @@ def test_vine_duplicate_import_rows_are_skipped_until_prior_listing_exists(db_se
     db_session.refresh(item_b)
     assert item_b.listing_id is None
     assert batch_b.stats_json and batch_b.stats_json.get("rows_duplicate") == 1
+
+
+def test_vine_auto_build_processes_only_new_rows(db_session, monkeypatch):
+    service = VineImportService()
+    user = User(email=f"vine-auto-build-{uuid4()}@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    first_csv = (
+        "Product Title,ASIN,Order Date,Order Number,Brand,Category,Status,Review Deadline,Item URL,Estimated Tax Value\n"
+        "Desk Lamp,B000CSV001,01/01/2025,123-1234567-1234567,Acme,Lighting,ordered,07/01/2025,https://www.amazon.com/dp/B000CSV001,19.99\n"
+    ).encode("utf-8")
+    second_csv = (
+        "Product Title,ASIN,Order Date,Order Number,Brand,Category,Status,Review Deadline,Item URL,Estimated Tax Value\n"
+        "Desk Lamp,B000CSV001,01/01/2025,123-1234567-1234567,Acme,Lighting,ordered,07/01/2025,https://www.amazon.com/dp/B000CSV001,19.99\n"
+        "Portable Fan,B000CSV002,01/02/2025,123-1234567-7654321,Breeze,Home,ordered,07/02/2025,https://www.amazon.com/dp/B000CSV002,24.99\n"
+    ).encode("utf-8")
+
+    batch_a = service.create_batch_from_upload(
+        db_session,
+        current_user=user,
+        filename="vine.csv",
+        file_bytes=first_csv,
+        reference_date=date(2026, 5, 5),
+    )
+    item_a = db_session.query(VineImportItem).filter(VineImportItem.batch_id == batch_a.id).first()
+    assert item_a is not None
+
+    def _fake_discover_for_vine_item(*args, **kwargs):  # noqa: ARG001
+        asin = str(kwargs.get("asin") or "").strip().upper()
+        title = "Desk Lamp" if asin == "B000CSV001" else "Portable Fan"
+        return {
+            "status": "matched",
+            "confidence": "high",
+            "asin": asin or "B000CSV001",
+            "title": title,
+            "source_page_url": f"https://www.amazon.com/dp/{asin or 'B000CSV001'}",
+            "images": [f"/media/amazon-vine/{(asin or 'B000CSV001').lower()}.jpg"],
+            "local_asset_ids": [],
+            "image_status": "fetched",
+            "description": f"{title} product page description.",
+        }
+
+    monkeypatch.setattr("app.services.amazon_product_discovery.AmazonProductDiscoveryService.discover_for_vine_item", _fake_discover_for_vine_item)
+    monkeypatch.setattr(
+        VineImportService,
+        "repair_vine_listing_images",
+        lambda self, db, **kwargs: {  # noqa: ARG005
+            "updated": 0,
+            "removed_unsafe": 0,
+            "already_present": len(kwargs.get("listing_ids") or []),
+            "missing_asin": 0,
+            "bridge_refetched": 0,
+            "bridge_failed": 0,
+            "listing_ids": kwargs.get("listing_ids") or [],
+            "batch_id": kwargs.get("batch_id"),
+        },
+    )
+
+    initial_result = service.create_listing_drafts(
+        db_session,
+        batch=batch_a,
+        item_ids=[item_a.id],
+        fetch_media_first=False,
+        allow_drafts_without_media=True,
+    )
+    assert initial_result["created"] == 1
+
+    batch_b = service.create_batch_from_upload(
+        db_session,
+        current_user=user,
+        filename="vine.csv",
+        file_bytes=second_csv,
+        reference_date=date(2026, 5, 5),
+    )
+    result = service.auto_build_batch_drafts(db_session, batch=batch_b, new_only=True, include_cancelled=True)
+
+    assert result["duplicates_skipped"] == 1
+    assert result["draft_result"]["created"] == 1
+    assert len(result["processed_item_ids"]) == 1
+    assert len(result["listing_ids"]) == 1
+
+    batch_b_items = db_session.query(VineImportItem).filter(VineImportItem.batch_id == batch_b.id).order_by(VineImportItem.id.asc()).all()
+    assert len(batch_b_items) == 2
+    duplicate_item = next(item for item in batch_b_items if item.asin == "B000CSV001")
+    new_item = next(item for item in batch_b_items if item.asin == "B000CSV002")
+    assert duplicate_item.listing_id is None
+    assert new_item.listing_id is not None
+
+
+def test_repair_vine_images_route_maps_item_ids_to_listing_ids(db_session, monkeypatch):
+    user = User(email=f"vine-route-repair-{uuid4()}@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    service = VineImportService()
+    batch = service.create_batch_from_upload(
+        db_session,
+        current_user=user,
+        filename="vine.xlsx",
+        file_bytes=build_sample_xlsx(),
+        reference_date=date(2026, 5, 5),
+    )
+    item = db_session.query(VineImportItem).filter(VineImportItem.batch_id == batch.id, VineImportItem.eligibility_status == "eligible").first()
+    assert item is not None
+    service.create_inventory_records(db_session, batch=batch, item_ids=[item.id], include_locked=True)
+    draft_result = service.create_listing_drafts(db_session, batch=batch, item_ids=[item.id], allow_drafts_without_media=True)
+    assert draft_result["created"] == 1
+    db_session.refresh(item)
+    assert item.listing_id is not None
+
+    captured = {}
+
+    def _fake_repair(*args, **kwargs):
+        captured["listing_ids"] = kwargs.get("listing_ids")
+        return {"updated": 1, "listing_ids": kwargs.get("listing_ids") or []}
+
+    monkeypatch.setattr("app.api.vine_imports.service.repair_vine_listing_images", _fake_repair)
+
+    result = repair_vine_images(
+        batch_id=batch.id,
+        payload=VineImportActionRequest(item_ids=[item.id]),
+        db=db_session,
+        current_user=user,
+    )
+
+    assert captured["listing_ids"] == [item.listing_id]
+    assert result["listing_ids"] == [item.listing_id]
 
 
 def test_upload_vine_report_returns_400_for_unexpected_parse_errors(monkeypatch, db_session):

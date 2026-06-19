@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
-from app.models.enums import ListingStatus, MarketplaceName
-from app.models.models import Listing, MarketplaceAccount, User
+from app.models.enums import ListingStatus, MarketplaceListingStatus, MarketplaceName
+from app.models.models import Listing, MarketplaceAccount, MarketplaceListing, MarketplaceMetadataCache, User
 from app.api.marketplaces import _bulk_preflight_response_to_csv
-from app.services.ebay_service import build_ebay_publish_plan
+from app.services.ebay_service import _cached_category_aspects, build_ebay_publish_plan
+from app.services.ebay_service import _sync_ebay_marketplace_listing
 from app.services.marketplace_error_translation import translate_marketplace_error
 from app.services.marketplace_preflight import MarketplacePreflightService
 from app.services.ebay_service import summarize_ebay_account_health
@@ -110,7 +111,272 @@ def test_build_ebay_publish_plan_maps_preview_and_account_summary(db_session, mo
     assert plan["payload_preview"]["condition"] == "USED_GOOD"
     assert plan["policy_settings"]["shipping_service_code"] == "USPSGroundAdvantage"
     assert plan["account_summary"]["external_account_id"] == "ebay-user-1"
+    assert plan["inventory_item_payload"]["packageWeightAndSize"] == {
+        "weight": {"value": 3.0, "unit": "POUND"},
+        "dimensions": {"length": 14, "width": 11, "height": 8, "unit": "INCH"},
+    }
     assert "account" not in plan
+
+
+def test_cached_marketplace_preflight_handles_mixed_timezone_datetimes(db_session):
+    user, listing = _seed_user_and_listing(db_session)
+    listing.marketplace_data = {
+        "marketplace_preflight": {
+            "by_marketplace": {
+                "ebay": {
+                    "status": "ready",
+                    "last_checked_at": datetime.now(UTC).isoformat(),
+                    "blockers": [],
+                    "warnings": [],
+                    "payload_preview": {},
+                }
+            }
+        }
+    }
+    listing.updated_at = datetime.now()
+    db_session.add(listing)
+    db_session.commit()
+    db_session.refresh(listing)
+
+    cached = MarketplacePreflightService()._cached_marketplace_preflight(listing, "ebay")
+
+    assert cached is not None
+    assert cached["cached"] is True
+
+
+def test_sync_ebay_marketplace_listing_tolerates_duplicate_rows(db_session):
+    user, listing = _seed_user_and_listing(db_session)
+    older = MarketplaceListing(
+        listing_id=listing.id,
+        marketplace=MarketplaceName.ebay,
+        status=MarketplaceListingStatus.PENDING,
+    )
+    newer = MarketplaceListing(
+        listing_id=listing.id,
+        marketplace=MarketplaceName.ebay,
+        status=MarketplaceListingStatus.PENDING,
+    )
+    db_session.add_all([older, newer])
+    db_session.commit()
+
+    _sync_ebay_marketplace_listing(
+        db_session,
+        listing_id=listing.id,
+        status=MarketplaceListingStatus.PUBLISHED,
+        response={"listing_id": "1234567890"},
+    )
+    db_session.commit()
+
+    rows = db_session.query(MarketplaceListing).filter(MarketplaceListing.listing_id == listing.id).all()
+    assert len(rows) == 2
+    assert any(row.status == MarketplaceListingStatus.PUBLISHED for row in rows)
+
+
+def test_build_ebay_publish_plan_preserves_draft_specific_provenance(db_session, monkeypatch):
+    user, listing = _seed_user_and_listing(db_session)
+    listing.marketplace_data = {
+        "ebay_item_specifics_provenance": {"Brand": "approximate", "Type": "derived"},
+        "ebay_item_specifics_approximate": ["Brand"],
+    }
+    db_session.add(listing)
+    db_session.commit()
+
+    account = MarketplaceAccount(
+        user_id=user.id,
+        marketplace=MarketplaceName.ebay,
+        external_account_id="ebay-user-2",
+        access_token="token",
+        refresh_token="refresh",
+    )
+    db_session.add(account)
+    db_session.commit()
+
+    async def fake_get_or_refresh_account(_user_id, _db):
+        return account
+
+    async def fake_suggest_ebay_category(_listing, _account, marketplace_id="EBAY_US"):
+        return {"categoryId": "30090", "categoryName": "Camera & Photo"}
+
+    async def fake_cached_category_aspects(_db, _account, category_id, *, marketplace_id="EBAY_US", force_refresh=False):
+        return (
+            {
+                "aspects": [
+                    {"localizedAspectName": "Brand", "aspectConstraint": {"aspectRequired": True}},
+                    {"localizedAspectName": "Model", "aspectConstraint": {"aspectRequired": True}},
+                ]
+            },
+            "live",
+            True,
+        )
+
+    async def fake_get_business_policy_ids(_access_token, marketplace_id="EBAY_US", create_if_missing=True):
+        return {
+            "paymentPolicyId": "payment-1",
+            "fulfillmentPolicyId": "fulfillment-1",
+            "returnPolicyId": "return-1",
+        }
+
+    monkeypatch.setattr("app.services.ebay_service.get_or_refresh_account", fake_get_or_refresh_account)
+    monkeypatch.setattr("app.services.ebay_service.suggest_ebay_category", fake_suggest_ebay_category)
+    monkeypatch.setattr("app.services.ebay_service._cached_category_aspects", fake_cached_category_aspects)
+    monkeypatch.setattr("app.services.ebay_service.get_business_policy_ids", fake_get_business_policy_ids)
+    monkeypatch.setattr("app.services.ebay_service._build_ebay_image_urls", lambda _listing: ["/media/uploads/camera-front.jpg"])
+
+    plan = asyncio.run(build_ebay_publish_plan(listing, db_session, allow_create_policies=False))
+
+    assert plan["payload_preview"]["item_specifics_provenance"]["Brand"] == "approximate"
+    assert "Brand" in plan["payload_preview"]["item_specifics_approximate"]
+
+
+def test_build_ebay_publish_plan_drops_placeholder_specifics_and_invalid_eprel(db_session, monkeypatch):
+    user, listing = _seed_user_and_listing(db_session, title="Bathroom Fan")
+    listing.item_specifics = {
+        "Brand": "Does Not Apply",
+        "Type": "Exhaust Fan",
+        "Compatible Model": "For ASIN",
+        "EPREL Registration Number": "ABC-123-TOO-LONG",
+        "Model": "B0TEST123",
+    }
+    db_session.add(listing)
+    db_session.commit()
+
+    account = MarketplaceAccount(
+        user_id=user.id,
+        marketplace=MarketplaceName.ebay,
+        external_account_id="ebay-user-3",
+        access_token="token",
+        refresh_token="refresh",
+    )
+    db_session.add(account)
+    db_session.commit()
+
+    async def fake_get_or_refresh_account(_user_id, _db):
+        return account
+
+    async def fake_suggest_ebay_category(_listing, _account, marketplace_id="EBAY_US"):
+        return {"categoryId": "122909", "categoryName": "Bathroom Exhaust Fans"}
+
+    async def fake_cached_category_aspects(_db, _account, category_id, *, marketplace_id="EBAY_US", force_refresh=False):
+        return (
+            {
+                "aspects": [
+                    {"localizedAspectName": "Brand", "aspectConstraint": {"aspectRequired": True}},
+                    {"localizedAspectName": "Type", "aspectConstraint": {"aspectRequired": True}},
+                    {"localizedAspectName": "Model", "aspectConstraint": {"aspectRequired": False}},
+                    {"localizedAspectName": "Compatible Model", "aspectConstraint": {"aspectRequired": False}},
+                    {"localizedAspectName": "EPREL Registration Number", "aspectConstraint": {"aspectRequired": False}},
+                ]
+            },
+            "live",
+            True,
+        )
+
+    async def fake_get_business_policy_ids(_access_token, marketplace_id="EBAY_US", create_if_missing=True):
+        return {
+            "paymentPolicyId": "payment-1",
+            "fulfillmentPolicyId": "fulfillment-1",
+            "returnPolicyId": "return-1",
+        }
+
+    monkeypatch.setattr("app.services.ebay_service.get_or_refresh_account", fake_get_or_refresh_account)
+    monkeypatch.setattr("app.services.ebay_service.suggest_ebay_category", fake_suggest_ebay_category)
+    monkeypatch.setattr("app.services.ebay_service._cached_category_aspects", fake_cached_category_aspects)
+    monkeypatch.setattr("app.services.ebay_service.get_business_policy_ids", fake_get_business_policy_ids)
+    monkeypatch.setattr("app.services.ebay_service._build_ebay_image_urls", lambda _listing: ["/media/uploads/fan.jpg"])
+
+    plan = asyncio.run(build_ebay_publish_plan(listing, db_session, allow_create_policies=False))
+
+    specifics = plan["payload_preview"]["item_specifics"]
+    assert specifics["Type"] == ["Exhaust Fan"]
+    assert "Compatible Model" not in specifics
+    assert "EPREL Registration Number" not in specifics
+    assert specifics["Brand"] == ["Bathroom Fan"]
+
+
+def test_build_ebay_publish_plan_uses_numeric_category_fallback_when_suggestion_is_text(db_session, monkeypatch):
+    user, listing = _seed_user_and_listing(db_session, title="Marine Starter")
+    listing.category_suggestion = "Starters, Alternators & ECU"
+    db_session.add(listing)
+    db_session.commit()
+
+    account = MarketplaceAccount(
+        user_id=user.id,
+        marketplace=MarketplaceName.ebay,
+        external_account_id="ebay-user-4",
+        access_token="token",
+        refresh_token="refresh",
+    )
+    db_session.add(account)
+    db_session.commit()
+
+    async def fake_get_or_refresh_account(_user_id, _db):
+        return account
+
+    async def fake_suggest_ebay_category(_listing, _account, marketplace_id="EBAY_US"):
+        return {"categoryId": "171485", "categoryName": "Parts & Accessories"}
+
+    async def fake_cached_category_aspects(_db, _account, category_id, *, marketplace_id="EBAY_US", force_refresh=False):
+        return ({"aspects": []}, "live", True)
+
+    async def fake_get_business_policy_ids(_access_token, marketplace_id="EBAY_US", create_if_missing=True):
+        return {
+            "paymentPolicyId": "payment-1",
+            "fulfillmentPolicyId": "fulfillment-1",
+            "returnPolicyId": "return-1",
+        }
+
+    monkeypatch.setattr("app.services.ebay_service.get_or_refresh_account", fake_get_or_refresh_account)
+    monkeypatch.setattr("app.services.ebay_service.suggest_ebay_category", fake_suggest_ebay_category)
+    monkeypatch.setattr("app.services.ebay_service._cached_category_aspects", fake_cached_category_aspects)
+    monkeypatch.setattr("app.services.ebay_service.get_business_policy_ids", fake_get_business_policy_ids)
+    monkeypatch.setattr("app.services.ebay_service._build_ebay_image_urls", lambda _listing: ["/media/uploads/starter.jpg"])
+
+    plan = asyncio.run(build_ebay_publish_plan(listing, db_session, allow_create_policies=False))
+
+    assert plan["category"]["category_id"] == "171485"
+
+
+def test_cached_category_aspects_uses_latest_duplicate_cache_row(db_session, monkeypatch):
+    user, _listing = _seed_user_and_listing(db_session)
+    account = MarketplaceAccount(
+        user_id=user.id,
+        marketplace=MarketplaceName.ebay,
+        external_account_id="ebay-user-dup-cache",
+        access_token="token",
+        refresh_token="refresh",
+    )
+    db_session.add(account)
+    db_session.flush()
+
+    older = MarketplaceMetadataCache(
+        marketplace="ebay",
+        cache_key="ebay:EBAY_US:42132:aspects",
+        payload={"aspects": [{"localizedAspectName": "Old"}]},
+        source_version="ebay_taxonomy_v1",
+        expires_at=datetime.utcnow() + timedelta(days=3),
+    )
+    newer = MarketplaceMetadataCache(
+        marketplace="ebay",
+        cache_key="ebay:EBAY_US:42132:aspects",
+        payload={"aspects": [{"localizedAspectName": "New"}]},
+        source_version="ebay_taxonomy_v1",
+        expires_at=datetime.utcnow() + timedelta(days=7),
+    )
+    db_session.add_all([older, newer])
+    db_session.commit()
+
+    async def fail_live_fetch(*_args, **_kwargs):
+        raise AssertionError("live taxonomy fetch should not run")
+
+    monkeypatch.setattr("app.services.ebay_service.get_required_item_specifics", fail_live_fetch)
+
+    payload, source, available = asyncio.run(
+        _cached_category_aspects(db_session, account, "42132", marketplace_id="EBAY_US")
+    )
+
+    assert available is True
+    assert source == "cache"
+    assert payload == newer.payload
 
 
 def test_ebay_preflight_reports_missing_policies_and_aspects(db_session, monkeypatch):

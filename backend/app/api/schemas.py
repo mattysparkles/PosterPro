@@ -1158,6 +1158,7 @@ class VineImportBatchResponse(BaseModel):
 
 class VineImportActionRequest(BaseModel):
     item_ids: list[int] = Field(default_factory=list)
+    new_only: bool = True
     include_locked: bool = True
     include_cancelled: bool = False
     fetch_media_first: bool = False

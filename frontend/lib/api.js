@@ -701,6 +701,14 @@ export async function toggleAutonomousMode(enabled) {
   });
 }
 
+export async function runDashboardOperatorCommand(body = {}) {
+  return jsonFetch(`${API_BASE}/dashboard/operator-command`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 export async function fetchEbayOfferDashboard(userId) {
   const url = new URL(`${API_BASE}/ebay/offers/dashboard`);
   if (userId) url.searchParams.set("user_id", String(userId));
@@ -851,6 +859,24 @@ export async function createVineDrafts(batchId, itemIds, options = {}) {
       fetch_media_first: !!fetchMediaFirst,
       require_media_for_asin: !!requireMediaForAsin,
       allow_drafts_without_media: !!allowDraftsWithoutMedia,
+      include_cancelled: !!includeCancelled,
+    }),
+  });
+}
+
+export async function autoBuildVineDrafts(batchId, options = {}) {
+  const {
+    itemIds = [],
+    newOnly = true,
+    includeCancelled = true,
+  } = options || {};
+  return jsonFetch(`${API_BASE}/imports/vine/batches/${batchId}/auto-build`, {
+    method: "POST",
+    timeoutMs: 0,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      item_ids: itemIds,
+      new_only: !!newOnly,
       include_cancelled: !!includeCancelled,
     }),
   });

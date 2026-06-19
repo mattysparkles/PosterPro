@@ -1,10 +1,8 @@
-import Link from 'next/link';
-
 import { cn } from '../../lib/utils';
 
 export default function QuickActionCard({ href, icon: Icon, eyebrow, title, description, meta, className }) {
   return (
-    <Link
+    <a
       href={href}
       className={cn(
         'group block rounded-[18px] border border-[var(--pp-border)] bg-white p-4 transition hover:-translate-y-[1px] hover:border-[#c6d6f5] hover:bg-[#f8fbff] hover:shadow-[0_10px_30px_rgba(15,23,42,0.06)]',
@@ -20,6 +18,6 @@ export default function QuickActionCard({ href, icon: Icon, eyebrow, title, desc
       {eyebrow ? <p className="mt-4 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--pp-shell-soft-copy)]">{eyebrow}</p> : null}
       <p className="font-[var(--pp-heading-font)] mt-2 text-sm font-semibold text-[var(--pp-text)]">{title}</p>
       <p className="mt-1 text-sm leading-6 text-[var(--pp-muted)]">{description}</p>
-    </Link>
+    </a>
   );
 }

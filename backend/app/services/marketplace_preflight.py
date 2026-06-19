@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import hashlib
@@ -54,6 +55,23 @@ def _parse_datetime(value: Any) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _normalize_datetime_for_compare(value: datetime | None) -> datetime | None:
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is not None:
+        return value.astimezone(UTC).replace(tzinfo=None)
+    return value
+
+
+def _run_async_sync(coro: Any) -> Any:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(lambda: asyncio.run(coro)).result()
 
 
 def _compact_preflight_issue(item: dict[str, Any]) -> dict[str, Any]:
@@ -433,7 +451,7 @@ class MarketplacePreflightService:
         pricing: dict[str, Any],
     ) -> dict[str, Any]:
         try:
-            plan = asyncio.run(build_ebay_publish_plan(listing, db, allow_create_policies=False))
+            plan = _run_async_sync(build_ebay_publish_plan(listing, db, allow_create_policies=False))
         except Exception as exc:
             translated = translate_marketplace_error("ebay", exc)
             return {
@@ -562,12 +580,13 @@ class MarketplacePreflightService:
         cached = by_marketplace.get(marketplace)
         if not isinstance(cached, dict):
             return None
-        last_checked_at = _parse_datetime(cached.get("last_checked_at"))
+        last_checked_at = _normalize_datetime_for_compare(_parse_datetime(cached.get("last_checked_at")))
         if not last_checked_at:
             return None
-        if listing.updated_at and last_checked_at < listing.updated_at:
+        listing_updated_at = _normalize_datetime_for_compare(listing.updated_at)
+        if listing_updated_at and last_checked_at < listing_updated_at:
             return None
-        if datetime.now(UTC) - last_checked_at > PRELIGHT_CACHE_TTL:
+        if datetime.now(UTC).replace(tzinfo=None) - last_checked_at > PRELIGHT_CACHE_TTL:
             return None
         cached_copy = dict(cached)
         cached_copy["cached"] = True

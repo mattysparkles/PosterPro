@@ -468,6 +468,16 @@ What you do here:
 Why it matters:
 - highest quality control point before going live.
 
+Daily operator notes for Listings:
+- Use the status/filter controls to move between `needs review`, `ready`, `posted`, and failure states.
+- The `ready` filter is the working queue for items that should be publishable after final review.
+- eBay bulk preflight from Listings now gives visible progress feedback:
+  - a loading/progress toast while the request is running,
+  - a completion toast with checked, ready, and blocked counts,
+  - updated marketplace readiness badges after the response returns.
+- If a row is truly `ready`, PosterPro will now treat it as publishable even if it still carries a stale older `FAILED` eBay badge from a prior publish attempt.
+- Use preflight before publish whenever the row has older eBay failure history.
+
 ### 3) Intake (`/intake`)
 Structured intake workflow for new source material.
 
@@ -626,6 +636,22 @@ Publishing:
 - pushes listing to eBay integration service,
 - status endpoint reports publish state and data.
 
+Operator publish checklist:
+1. Confirm the listing is in `ready` state and not already `POSTED`.
+2. Run eBay preflight from Listings.
+3. Review returned blockers and warnings.
+4. Fix category, item-specific, policy, shipping, or image issues.
+5. Publish only rows that return ready or approved warning-only state.
+
+Important defaults and safeguards:
+- New eBay publish plans default to `USPSGroundAdvantage` unless the operator saved another shipping service code in eBay settings.
+- PosterPro normalizes eBay package payloads before publish:
+  - positive package weight
+  - positive package dimensions
+  - sanitized item specifics with placeholder garbage removed
+- If a text category label is stored instead of a numeric eBay category id, PosterPro now falls back to a numeric-safe category path instead of sending the bad label to eBay.
+- If duplicate local `marketplace_listings` rows exist for the same listing/marketplace, PosterPro now resolves the newest row instead of crashing the eBay publish finalization path.
+
 Why you want it:
 - direct path to live market with inventory-aware lifecycle tracking.
 
@@ -698,6 +724,11 @@ Why you want it:
 - `POST /listings/sync_sold`
 - `GET /users/{user_id}/platform-config`
 - `PUT /users/{user_id}/platform-config`
+- `POST /marketplaces/preflight/bulk`
+- `POST /marketplaces/preflight/bulk/export`
+- `POST /marketplaces/publish-ready/bulk`
+- `POST /marketplaces/launch-drill/dry-run`
+- `GET /marketplaces/ebay/account-readiness`
 
 ### eBay-specific
 - `GET /ebay/auth/url`
@@ -830,6 +861,60 @@ Check:
 - backend startup logs for auto-added compatibility columns
 - `backend/app/main.py` bootstrap guards
 - whether the current release and database schema are actually aligned
+
+### “No publishable items selected” on Listings
+Likely cause:
+- the selected rows are already posted,
+- the selected rows are not actually in `ready`,
+- or they carry stale old failure state from an earlier eBay publish attempt.
+
+Check:
+- switch to the `ready` filter,
+- confirm the row is not already posted to eBay,
+- run eBay preflight,
+- then retry publish.
+
+Current behavior:
+- true `ready` rows count as publishable even if the row still shows an older stale `FAILED` eBay publish badge.
+
+### “eBay preflight looked like it did nothing”
+Likely cause:
+- operator expected visible progress/confirmation while the request ran.
+
+Current behavior:
+- Listings now shows a loading/progress toast when bulk preflight starts,
+- then a completion toast with checked/ready/blocked counts.
+
+Check:
+- browser toast/notification area,
+- browser network tab for the preflight request,
+- backend health at `http://127.0.0.1:8030/health`,
+- row-level marketplace readiness details after the response returns.
+
+### “eBay publish failed on item specifics”
+Likely cause:
+- the draft is still carrying placeholder values such as `Does Not Apply`,
+- the stored category does not match the actual item,
+- required eBay aspects for that category are still missing.
+
+Check:
+- rerun eBay preflight,
+- inspect the exact missing aspect names,
+- fix `item_specifics`,
+- rerun preflight,
+- republish.
+
+### “eBay publish failed on shipping/package validation”
+Likely cause:
+- missing or invalid package weight/dimensions,
+- invalid shipping policy linkage,
+- or stale placeholder shipping values.
+
+Check:
+- package weight > 0,
+- package length/width/height > 0,
+- eBay policy settings in `/settings`,
+- shipping service code (default is `USPSGroundAdvantage` unless explicitly overridden).
 
 ---
 

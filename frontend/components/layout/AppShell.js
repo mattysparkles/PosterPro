@@ -1,6 +1,6 @@
-import Link from 'next/link';
+/* eslint-disable @next/next/no-html-link-for-pages */
 import { useRouter } from 'next/router';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   BarChart3,
   Bot,
@@ -10,6 +10,8 @@ import {
   ListChecks,
   Menu,
   Package,
+  PanelLeftClose,
+  PanelLeftOpen,
   Rocket,
   Search,
   Settings2,
@@ -47,53 +49,66 @@ function buildNavGroups(user) {
         { href: '/offers', label: 'Offers', icon: Store },
       ],
     },
-    {
-      label: 'System',
-      description: 'Settings, jobs, and reporting.',
-      items: [
-        { href: '/analytics', label: 'Analytics', icon: BarChart3 },
-        { href: '/settings?tab=marketplaces', label: 'Marketplace setup', icon: Wrench },
-        { href: '/settings', label: 'Settings', icon: Settings2 },
-        { href: '/jobs', label: 'Jobs', icon: Briefcase },
-        ...(user?.can_access_vine_import ? [{ href: '/imports/vine', label: 'Vine Import', icon: ShieldCheck }] : []),
-      ],
-    },
+      {
+        label: 'System',
+        description: 'Settings, jobs, and reporting.',
+        items: [
+          { href: '/analytics', label: 'Analytics', icon: BarChart3 },
+        { href: '/settings/ebay', label: 'Marketplace setup', icon: Wrench },
+          { href: '/settings', label: 'Settings', icon: Settings2 },
+          { href: '/jobs', label: 'Jobs', icon: Briefcase },
+          ...(user?.can_access_vine_import ? [{ href: '/imports/vine', label: 'Vine Import', icon: ShieldCheck }] : []),
+        ],
+      },
   ];
 }
 
-function NavGroup({ title, description, items, isSelected, onNavigate }) {
+function findActiveNavItem(navGroups, isSelected) {
+  for (const group of navGroups) {
+    for (const item of Array.isArray(group?.items) ? group.items : []) {
+      if (isSelected(item.href)) {
+        return { group, item };
+      }
+    }
+  }
+  return null;
+}
+
+function NavGroup({ title, description, items, isSelected, onNavigate, collapsed = false }) {
   return (
-    <section className="rounded-[18px] border border-[var(--pp-border)] bg-white p-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
-      <p className="px-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--pp-shell-soft-copy)]">{title}</p>
-      {description ? <p className="px-2 pt-1 text-xs leading-5 text-[var(--pp-muted)]">{description}</p> : null}
-      <div className="space-y-1.5">
+    <section className="pp-sidebar-panel p-3.5">
+      {!collapsed ? <p className="pp-sidebar-label px-2">{title}</p> : null}
+      {!collapsed && description ? <p className="px-2 pt-1 text-xs leading-5 text-[var(--pp-shell-soft-copy)]">{description}</p> : null}
+      <div className="mt-3 space-y-2">
         {items.map((item) => {
           const Icon = item.icon;
           const selected = isSelected(item.href);
           return (
-            <Link
+            <a
               key={item.href}
               href={item.href}
               onClick={onNavigate}
+              title={collapsed ? item.label : undefined}
               className={[
-                'flex items-center gap-3 rounded-2xl border px-3 py-3 transition',
-                selected
-                  ? 'border-sky-200 bg-sky-50 text-[var(--pp-primary)]'
-                  : 'border-transparent text-[var(--pp-text)] hover:border-[var(--pp-border)] hover:bg-[var(--pp-shell-hover)] hover:text-[var(--pp-text)]',
+                'pp-sidebar-link flex items-center gap-3 rounded-[18px] px-3 py-3 transition',
+                collapsed ? 'justify-center' : '',
+                selected ? 'is-active' : '',
               ].join(' ')}
             >
               <span
                 className={[
-                  'inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border',
-                  selected ? 'border-sky-200 bg-white text-[var(--pp-primary)]' : 'border-[var(--pp-border)] bg-[var(--pp-shell-hover)] text-[var(--pp-muted)]',
+                  'pp-sidebar-icon inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-[14px]',
                 ].join(' ')}
               >
                 <Icon size={16} />
               </span>
-              <span className="min-w-0">
-                <span className="block text-sm font-semibold leading-5">{item.label}</span>
-              </span>
-            </Link>
+              {!collapsed ? (
+                <span className="min-w-0">
+                  <span className="block text-sm font-semibold leading-5">{item.label}</span>
+                  <span className="mt-0.5 block text-xs leading-5 text-[var(--pp-shell-soft-copy)]">{title}</span>
+                </span>
+              ) : null}
+            </a>
           );
         })}
       </div>
@@ -115,6 +130,7 @@ export default function AppShell({
   const router = useRouter();
   const [searchValue, setSearchValue] = useState('');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const navGroups = buildNavGroups(user);
   const activePath = active || router.pathname;
   const activeHref = router.asPath || activePath;
@@ -130,9 +146,42 @@ export default function AppShell({
       normalizedActive.startsWith(`${normalizedHref}?`)
     );
   };
+  const activeNav = findActiveNavItem(navGroups, isSelected);
+  const currentGroup = activeNav?.group || navGroups[0] || null;
+  const currentGroupItems = (Array.isArray(currentGroup?.items) ? currentGroup.items : []).filter(Boolean);
+  const subnavSections = Array.isArray(subnav?.sections)
+    ? subnav.sections
+        .filter((section) => section && Array.isArray(section.items))
+        .map((section) => ({
+          ...section,
+          items: section.items.filter(Boolean),
+        }))
+    : [];
 
   const contentWidthClass =
     contentWidth === 'narrow' ? 'max-w-[940px]' : contentWidth === 'wide' ? 'max-w-[1320px]' : 'max-w-[1180px]';
+
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem('posterpro.sidebar.collapsed');
+      if (saved === '1') setSidebarCollapsed(true);
+    } catch {
+      return undefined;
+    }
+    return undefined;
+  }, []);
+
+  const toggleSidebar = () => {
+    setSidebarCollapsed((current) => {
+      const next = !current;
+      try {
+        window.localStorage.setItem('posterpro.sidebar.collapsed', next ? '1' : '0');
+      } catch {
+        return next;
+      }
+      return next;
+    });
+  };
 
   const submitSearch = (event) => {
     event.preventDefault();
@@ -142,78 +191,93 @@ export default function AppShell({
 
   const renderNav = (onNavigate) => (
     <div className="space-y-4">
-      <section className="rounded-[24px] border border-[var(--pp-border)] bg-white p-4 text-[var(--pp-text)] shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
-        <Link href="/app" className="flex items-center gap-3">
-          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[var(--pp-shell-hover)] text-lg font-bold text-[var(--pp-primary)]">
-            P
+      <section className="pp-sidebar-brand-panel p-5 text-[var(--pp-shell-copy)]">
+        <a href="/app" className="flex items-center gap-3">
+          <div className="pp-sidebar-brand-mark flex h-12 w-12 items-center justify-center rounded-[18px] font-[var(--pp-heading-font)] text-xl font-bold text-white">
+            PP
           </div>
+          {!sidebarCollapsed ? (
           <div className="min-w-0">
-            <p className="text-lg font-semibold tracking-[-0.03em] text-[var(--pp-text)]">PosterPro</p>
-            <p className="text-sm text-[var(--pp-muted)]">Reseller operations workspace</p>
+            <p className="font-[var(--pp-heading-font)] text-xl font-semibold tracking-[-0.04em] text-white">PosterPro</p>
+            <p className="text-sm text-[var(--pp-shell-soft-copy)]">Reseller operations system</p>
           </div>
-        </Link>
+          ) : null}
+        </a>
+        {!sidebarCollapsed ? (
+        <div className="mt-5 grid gap-3">
+          <div className="rounded-[18px] border border-white/10 bg-white/5 px-3 py-3">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--pp-shell-soft-copy)]">Current lane</p>
+            <p className="mt-2 text-sm font-semibold text-white">{activeNav?.item?.label || title}</p>
+            <p className="mt-1 text-xs leading-5 text-[var(--pp-shell-soft-copy)]">
+              {activeNav?.group?.description || 'Navigate between intake, listings, publishing, and system setup.'}
+            </p>
+          </div>
+        </div>
+        ) : null}
         <div className="mt-4 flex flex-wrap gap-2">
           <StatusPill status={autonomousConfig?.autonomous_mode ? 'success' : 'default'} label={autonomousConfig?.autonomous_mode ? 'Automation on' : 'Automation off'} />
           <StatusPill status={user ? 'success' : 'warning'} label={user?.email ? 'Signed in' : 'Account pending'} />
         </div>
       </section>
 
-      {navGroups.map((group) => (
-        <NavGroup key={group.label} title={group.label} description={group.description} items={group.items} isSelected={isSelected} onNavigate={onNavigate} />
+      {navGroups.filter(Boolean).map((group) => (
+        <NavGroup key={group.label} title={group.label} description={group.description} items={group.items} isSelected={isSelected} onNavigate={onNavigate} collapsed={sidebarCollapsed} />
       ))}
 
-      <section className="rounded-[24px] border border-[var(--pp-border)] bg-white p-4 text-[var(--pp-text)] shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
-        <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--pp-shell-soft-copy)]">Account</p>
-        <div className="mt-3 flex items-center gap-3 rounded-2xl border border-[var(--pp-border)] bg-[var(--pp-shell-hover)] px-3 py-3">
-          <span className="inline-flex h-10 w-10 items-center justify-center rounded-xl bg-white text-[var(--pp-primary)]">
+      <section className="pp-sidebar-panel p-4 text-[var(--pp-shell-copy)]">
+        {!sidebarCollapsed ? <p className="pp-sidebar-label">Account</p> : null}
+        <div className={`mt-3 flex items-center gap-3 rounded-[18px] border border-white/10 bg-white/5 px-3 py-3 ${sidebarCollapsed ? 'justify-center' : ''}`}>
+          <span className="inline-flex h-10 w-10 items-center justify-center rounded-[14px] border border-white/10 bg-white/10 text-white">
             <User size={16} />
           </span>
+          {!sidebarCollapsed ? (
           <div className="min-w-0">
-            <p className="truncate text-sm font-semibold text-[var(--pp-text)]">{user?.full_name || user?.email || 'Account'}</p>
-            <p className="truncate text-xs text-[var(--pp-muted)]">{user?.email || 'Not signed in'}</p>
+            <p className="truncate text-sm font-semibold text-white">{user?.full_name || user?.email || 'Account'}</p>
+            <p className="truncate text-xs text-[var(--pp-shell-soft-copy)]">{user?.email || 'Not signed in'}</p>
           </div>
+          ) : null}
         </div>
         <Button
           variant="secondary"
           size="sm"
-          className="mt-3 w-full justify-center"
+          className={`mt-3 justify-center border-white/10 bg-white/10 text-white hover:bg-white hover:text-[var(--pp-primary)] ${sidebarCollapsed ? 'w-full px-0' : 'w-full'}`}
           onClick={async () => {
             await logout();
             window.location.href = '/login';
           }}
         >
-          Sign out
+          {sidebarCollapsed ? 'Out' : 'Sign out'}
         </Button>
       </section>
     </div>
   );
 
   const sectionBadge = subnav ? (
-    <div className="rounded-[24px] border border-[var(--pp-border)] bg-white p-4 shadow-[0_8px_18px_rgba(15,23,42,0.04)]">
+    <div className="pp-surface-panel p-5">
       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
         <div>
-          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--pp-shell-soft-copy)]">{subnav.eyebrow || 'Section'}</p>
-          <h2 className="mt-2 text-lg font-semibold tracking-[-0.03em] text-[var(--pp-text)]">{subnav.title}</h2>
-          {subnav.description ? <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--pp-muted)]">{subnav.description}</p> : null}
+          <p className="pp-topbar-kicker">{subnav.eyebrow || 'Section'}</p>
+          <h2 className="pp-topbar-title mt-2 text-[1.4rem]">{subnav.title}</h2>
+          {subnav.description ? <p className="pp-topbar-subtitle mt-2 max-w-3xl text-sm leading-6">{subnav.description}</p> : null}
         </div>
         <div className="flex flex-wrap gap-2">
           <StatusPill status={autonomousConfig?.autonomous_mode ? 'success' : 'default'} label={autonomousConfig?.autonomous_mode ? 'Automation on' : 'Automation off'} />
           <StatusPill status={user ? 'success' : 'warning'} label={user?.email ? 'Signed in' : 'Not signed in'} />
         </div>
       </div>
-      {subnav.sections?.length ? (
+      {subnavSections.length ? (
       <div className="mt-4 flex flex-wrap gap-2">
-          {subnav.sections.flatMap((section) =>
+          {subnavSections.flatMap((section) =>
             section.items.map((item) => (
               <button
                 key={item.key || item.label}
                 type="button"
-                onClick={item.onClick}
+                onClick={typeof item.onClick === 'function' ? item.onClick : undefined}
                 className={[
-                  'rounded-full border px-3 py-2 text-sm font-medium transition',
+                  'rounded-full border px-3 py-2 text-sm font-semibold transition',
                   item.active
-                    ? 'border-sky-200 bg-sky-50 text-[var(--pp-primary)]'
-                    : 'border-[var(--pp-border)] bg-[var(--pp-shell-hover)] text-[var(--pp-muted)] hover:border-[#b8c6dd] hover:bg-white hover:text-[var(--pp-text)]',
+                    ? 'border-[#bfd4ef] bg-[var(--pp-primary)] text-white'
+                    : 'border-[var(--pp-border)] bg-[var(--pp-surface-strong)] text-[var(--pp-muted)] hover:border-[#b8a98d] hover:bg-white hover:text-[var(--pp-text)]',
                 ].join(' ')}
               >
                 {item.label}
@@ -227,47 +291,66 @@ export default function AppShell({
 
   return (
     <div className="posterpro-app-shell min-h-screen bg-[var(--pp-bg)] text-[var(--pp-text)]">
-      <div className="grid min-h-screen md:grid-cols-[288px_minmax(0,1fr)]">
-        <aside className="hidden border-r border-[var(--pp-border)] bg-white md:block">
+      <div className={`grid min-h-screen ${sidebarCollapsed ? 'md:grid-cols-[104px_minmax(0,1fr)]' : 'md:grid-cols-[340px_minmax(0,1fr)]'}`}>
+        <aside className="pp-shell-sidebar-surface hidden md:block">
           <div className="sticky top-0 h-screen overflow-y-auto px-4 py-5">{renderNav()}</div>
         </aside>
 
-        <div className="min-w-0">
-          <header className="sticky top-0 z-30 border-b border-[var(--pp-border)] bg-white/90 backdrop-blur-xl">
-            <div className="mx-auto flex w-full max-w-[1440px] items-center gap-3 px-4 py-3 md:px-6">
-              <Button variant="ghost" size="sm" className="md:hidden gap-2 px-3" onClick={() => setMobileMenuOpen(true)} aria-label="Open navigation">
+        <div className="pp-shell-content-wrap min-w-0">
+          <header className="pp-shell-header-surface sticky top-0 z-30 backdrop-blur-xl">
+            <div className="mx-auto flex w-full max-w-[1520px] items-center gap-3 px-4 py-3 md:px-6">
+              <Button variant="secondary" size="sm" className="gap-2 px-3 shadow-none md:hidden" onClick={() => setMobileMenuOpen(true)} aria-label="Open navigation">
                 <Menu size={18} />
                 Menu
               </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                className="hidden gap-2 px-3 shadow-none md:inline-flex"
+                onClick={toggleSidebar}
+                aria-label={sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'}
+                title={sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'}
+              >
+                {sidebarCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
+                {sidebarCollapsed ? 'Expand' : 'Collapse'}
+              </Button>
 
               <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-3">
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--pp-shell-soft-copy)]">PosterPro</p>
-                  <span className="hidden h-1 w-1 rounded-full bg-[var(--pp-shell-soft-copy)] sm:inline-flex" />
-                  <h1 className="truncate text-[15px] font-semibold tracking-[-0.02em] text-[var(--pp-text)]">{title}</h1>
+                <div className="flex min-w-0 items-center gap-3">
+                  <p className="pp-topbar-kicker">
+                    {activeNav?.group?.label || 'PosterPro'}
+                  </p>
+                  <span className="hidden h-1.5 w-1.5 rounded-full bg-[#c3ac89] sm:inline-flex" />
+                  <h1 className="pp-topbar-title truncate text-[1.02rem]">{title}</h1>
                 </div>
-                <p className="hidden text-xs text-[var(--pp-muted)] sm:block">One workspace for intake, listings, publishing, and sold-item tracking.</p>
+                <p className="pp-topbar-subtitle hidden text-xs sm:block">
+                  {activeNav?.item?.label
+                    ? `${activeNav.item.label} is active. Navigation, search, and task context stay fixed above the fold.`
+                    : 'One workspace for intake, listings, publishing, and sold-item tracking.'}
+                </p>
               </div>
 
-              <form onSubmit={submitSearch} className="relative hidden lg:block">
+              <form onSubmit={submitSearch} className="relative hidden xl:block">
                 <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--pp-shell-soft-copy)]" size={16} />
                 <Input
                   aria-label="Global search"
                   value={searchValue}
                   onChange={(event) => setSearchValue(event.target.value)}
                   placeholder="Search listings"
-                  className="w-[260px] rounded-2xl border-[var(--pp-border)] bg-white pl-9"
+                  className="w-[280px] rounded-2xl border-[var(--pp-border)] bg-white pl-9"
                 />
               </form>
 
-              <Button href="/intake" variant="secondary" size="sm" className="hidden sm:inline-flex">
-                Quick import
-              </Button>
+              <a href="/intake" className="hidden lg:inline-flex">
+                <Button variant="outline" size="sm">
+                  Quick import
+                </Button>
+              </a>
 
               <button
                 type="button"
                 onClick={onToggleAutonomous}
-                className="hidden items-center gap-2 rounded-2xl border border-[var(--pp-border)] bg-white px-3 py-2 text-xs font-medium text-[var(--pp-text)] md:inline-flex"
+                className="hidden items-center gap-2 rounded-2xl border border-[var(--pp-border)] bg-[var(--pp-surface)] px-3 py-2 text-xs font-semibold text-[var(--pp-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.7)] md:inline-flex"
                 aria-label="Toggle automation mode"
               >
                 <Bot size={14} className="text-[var(--pp-primary)]" />
@@ -276,10 +359,41 @@ export default function AppShell({
             </div>
           </header>
 
-          <main className="mx-auto w-full max-w-[1440px] px-4 py-6 pb-24 md:px-6">
-            <div className="space-y-5">
+          <main className="mx-auto w-full max-w-[1520px] px-4 py-6 pb-24 md:px-6">
+            <div className="space-y-6">
+              <div className="pp-shell-lane-strip px-1">
+                <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+                  <div className="min-w-0">
+                    <p className="pp-topbar-kicker">{currentGroup?.label || 'Workspace lane'}</p>
+                    <p className="mt-2 text-sm leading-6 text-[var(--pp-muted)]">
+                      {currentGroup?.description || 'Move between related tools without hunting through a single long page.'}
+                    </p>
+                  </div>
+                  <div className="grid min-w-0 flex-1 gap-2 sm:grid-cols-2 xl:max-w-[760px] xl:grid-cols-4">
+                    {currentGroupItems.map((item) => {
+                      const Icon = item.icon || Settings2;
+                      const selected = isSelected(item.href);
+                      return (
+                        <a
+                          key={item.href}
+                          href={item.href}
+                          className={`pp-shell-lane-link ${selected ? 'is-active' : ''}`}
+                        >
+                          <span className="pp-shell-lane-icon">
+                            <Icon size={16} />
+                          </span>
+                          <span className="min-w-0">
+                            <span className="block truncate text-sm font-semibold">{item.label}</span>
+                            <span className="mt-1 block text-xs text-[var(--pp-muted)]">{currentGroup.label}</span>
+                          </span>
+                        </a>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
               {sectionBadge}
-              <div className={`mx-auto w-full ${contentWidthClass} min-w-0 space-y-5 ${contentClassName}`}>{children}</div>
+              <div className={`mx-auto w-full ${contentWidthClass} min-w-0 space-y-6 ${contentClassName}`}>{children}</div>
             </div>
           </main>
         </div>

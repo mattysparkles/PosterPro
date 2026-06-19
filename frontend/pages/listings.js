@@ -1,27 +1,38 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ChevronDown, Grid2X2, List, Search } from 'lucide-react';
+import { BriefcaseBusiness, ListChecks, Rocket, ShieldAlert, Sparkles } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useRouter } from 'next/router';
 
 import AppShell from '../components/layout/AppShell';
-import ActionBar from '../components/ui/action-bar';
+import { PageAside, PageBand, PageFrame, PageMain, PageSplit } from '../components/layout/PageFrame';
 import ListingEditor from '../components/ListingEditor';
 import Button from '../components/ui/button';
+import MetricCard from '../components/ui/metric-card';
 import DataTable from '../components/ui/data-table';
 import Drawer from '../components/ui/drawer';
-import EmptyState from '../components/ui/empty-state';
-import MetricCard from '../components/ui/metric-card';
-import { Tabs } from '../components/ui/tabs';
-import Input from '../components/ui/input';
 import PageHeader from '../components/ui/page-header';
 import SectionPanel from '../components/ui/section-panel';
-import StatusPill from '../components/ui/status-pill';
-import Toolbar from '../components/ui/toolbar';
+import ListingsReportPanel from '../components/listings/panels/ListingsReportPanel';
+import ListingsStatusCell from '../components/listings/table/ListingsStatusCell';
+import ListingsCollapsibleSection from '../components/listings/workspace/ListingsCollapsibleSection';
+import ListingsTitleCell from '../components/listings/table/ListingsTitleCell';
+import ListingsBulkActionBar from '../components/listings/workspace/ListingsBulkActionBar';
+import ListingsGridCard from '../components/listings/workspace/ListingsGridCard';
+import ListingsOverviewBand from '../components/listings/workspace/ListingsOverviewBand';
+import ListingsThumbnail from '../components/listings/workspace/ListingsThumbnail';
+import ListingsWorkspaceEmptyState from '../components/listings/workspace/ListingsWorkspaceEmptyState';
+import ListingsWorkspaceErrorBoundary from '../components/listings/workspace/ListingsWorkspaceErrorBoundary';
+import ListingsLaunchCandidatesPanel from '../components/listings/panels/ListingsLaunchCandidatesPanel';
+import ListingsPreflightPanel from '../components/listings/panels/ListingsPreflightPanel';
+import ListingsRepairQueuePanel from '../components/listings/panels/ListingsRepairQueuePanel';
+import ListingsStatusGrid from '../components/listings/panels/ListingsStatusGrid';
+import ListingsToolbar from '../components/listings/toolbar/ListingsToolbar';
+import ListingsQueueTabs from '../components/listings/workspace/ListingsQueueTabs';
 import { useAuth } from '../contexts/AuthContext';
 import { useMarketplacePublish } from '../hooks/useMarketplacePublish';
 import useDashboardData from '../hooks/useDashboardData';
-import { formatPublishFailureMessage, isEbayReconnectRequiredError } from '../lib/publish-status';
+import { formatPublishFailureMessage } from '../lib/publish-status';
 import {
   applyListingTemplate,
   applyPricingRecommendation,
@@ -40,7 +51,6 @@ import {
   deleteListingsBulk as deleteListingsBulkApi,
   generateListing,
   processListingPhoto,
-  toPublicImageUrl,
   approveListing as approveListingApi,
   approveListingsBulk,
   exportMarketplacePreflightCsv,
@@ -419,6 +429,7 @@ export default function ListingsPage() {
   const [selectedIds, setSelectedIds] = useState([]);
   const [selectedListingId, setSelectedListingId] = useState(null);
   const [viewMode, setViewMode] = useState('table');
+  const [workspaceMode, setWorkspaceMode] = useState('results');
   const [pricingRecommendation, setPricingRecommendation] = useState(null);
   const [listingIntelligence, setListingIntelligence] = useState(null);
   const [crosspostPreview, setCrosspostPreview] = useState([]);
@@ -551,6 +562,11 @@ export default function ListingsPage() {
     [listings, selectedIds],
   );
 
+  const isAlreadyPostedToEbay = useCallback(
+    (listing) => listing?.ebay_publish_status === 'POSTED' || Boolean(listing?.ebay_listing_id),
+    [],
+  );
+
   const selectedReviewRows = useMemo(
     () => selectedRows.filter((listing) => getListingBucket(listing) === 'review' || listing.status === 'draft'),
     [selectedRows],
@@ -559,12 +575,14 @@ export default function ListingsPage() {
   const selectedPublishableRows = useMemo(() => {
     return selectedRows.filter((listing) => {
       const bucket = getListingBucket(listing);
+      const isReadyRow = listing?.status === 'ready';
+      const isDraftRow = bucket === 'drafts' || listing?.status === 'draft';
       if (workflowPreferences.review_before_publish) {
-        return bucket === 'ready' && !(listing.ebay_publish_status === 'POSTED' || listing.ebay_listing_id);
+        return isReadyRow && !isAlreadyPostedToEbay(listing);
       }
-      return bucket === 'drafts' || bucket === 'ready';
+      return (isDraftRow || isReadyRow) && !isAlreadyPostedToEbay(listing);
     });
-  }, [selectedRows, workflowPreferences.review_before_publish]);
+  }, [isAlreadyPostedToEbay, selectedRows, workflowPreferences.review_before_publish]);
 
   const selectedNeedsApprovalRows = useMemo(() => {
     return selectedRows.filter((listing) => getListingBucket(listing) === 'review' || listing.status === 'draft');
@@ -575,6 +593,7 @@ export default function ListingsPage() {
       Object.fromEntries(LISTING_TABS.map((tab) => [tab.value, listings.filter((listing) => matchesTab(listing, tab.value)).length])),
     [listings],
   );
+  const activeTabLabel = LISTING_TABS.find((tab) => tab.value === activeTab)?.label || 'Listings';
 
   const listingMetrics = useMemo(() => {
     const visibleDrafts = baseFilteredListings.filter((listing) => !isArchivedListing(listing) && matchesTab(listing, 'drafts'));
@@ -651,6 +670,51 @@ export default function ListingsPage() {
     const progress = total ? Math.round((completed / total) * 100) : 0;
     return { queued, completed, failed, total, progress };
   }, [jobsOverview]);
+
+  const workspaceModes = useMemo(() => ([
+    {
+      key: 'results',
+      label: 'Results',
+      description: 'Focus on the active queue first.',
+      icon: ListChecks,
+      count: filteredListings.length,
+    },
+    {
+      key: 'repair',
+      label: 'Repair',
+      description: 'Preflight blockers, readiness, and fix queues.',
+      icon: ShieldAlert,
+      count: listingMetrics.blockedCount,
+    },
+    {
+      key: 'launch',
+      label: 'Launch',
+      description: 'Dry-run launch QA and publish readiness.',
+      icon: Rocket,
+      count: launchCandidatesReport?.candidates?.length || 0,
+    },
+    {
+      key: 'queue',
+      label: 'Queue',
+      description: 'Queued jobs and publish progress.',
+      icon: BriefcaseBusiness,
+      count: publishJobStats.queued,
+    },
+    {
+      key: 'all',
+      label: 'All',
+      description: 'Open the full operator workspace.',
+      icon: Sparkles,
+      count: tabCounts[activeTab] || 0,
+    },
+  ]), [
+    activeTab,
+    filteredListings.length,
+    launchCandidatesReport?.candidates?.length,
+    listingMetrics.blockedCount,
+    publishJobStats.queued,
+    tabCounts,
+  ]);
 
   useEffect(() => {
     if (!selectedListingId) return;
@@ -935,7 +999,7 @@ export default function ListingsPage() {
     }
     const publishable = selectedRows.filter((listing) => {
       const bucket = getListingBucket(listing);
-      return bucket === 'ready' || bucket === 'drafts' || bucket === 'review' || listing.status === 'draft';
+      return listing.status === 'ready' || bucket === 'drafts' || bucket === 'review' || listing.status === 'draft';
     });
     if (!publishable.length) {
       toast.error('Select at least one listing that can move to publish.');
@@ -1116,6 +1180,8 @@ export default function ListingsPage() {
       return null;
     }
     setBulkPreflightLoading(true);
+    const marketLabel = (marketplaces || []).map((market) => formatMarketplace(market)).join(', ') || 'Marketplace';
+    const loadingToastId = toast.loading(`Running ${marketLabel} preflight for ${targetIds.length} listing${targetIds.length === 1 ? '' : 's'}...`);
     try {
       const report = await fetchMarketplacePreflightBulk({
         listing_ids: targetIds,
@@ -1130,7 +1196,15 @@ export default function ListingsPage() {
       });
       setBulkPreflightReport(report);
       await reload();
+      const summary = report?.summary || {};
+      toast.success(
+        `${marketLabel} preflight finished. ${summary.ready_listings || 0} ready, ${summary.warning_only_listings || 0} warning-only, ${summary.blocked_listings || 0} blocked.`,
+        { id: loadingToastId },
+      );
       return report;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Bulk marketplace preflight failed.', { id: loadingToastId });
+      return null;
     } finally {
       setBulkPreflightLoading(false);
     }
@@ -1289,6 +1363,38 @@ export default function ListingsPage() {
     }
   };
 
+  const exportRepairQueueCsv = async () => {
+    const report = repairQueueReport || await refreshRepairQueue();
+    const rows = report?.items || [];
+    if (!rows.length) {
+      toast.error('Repair queue is empty.');
+      return;
+    }
+    const header = ['listing_id', 'title', 'price', 'blockers', 'suggested_category', 'image_status', 'recommended_action'];
+    const csv = [
+      header.join(','),
+      ...rows.map((item) => [
+        item.listing_id,
+        `"${String(item.title || '').replaceAll('"', '""')}"`,
+        Number(item.price || 0).toFixed(2),
+        `"${(item.blocker_codes || []).join('|')}"`,
+        `"${String(item.suggested_category?.label || '').replaceAll('"', '""')}"`,
+        item.image_status || '',
+        `"${String(item.recommended_next_repair_action || '').replaceAll('"', '""')}"`,
+      ].join(',')),
+    ].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'posterpro-ebay-launch-repair-queue.csv';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    toast.success('Downloaded eBay repair queue CSV.');
+  };
+
   const uploadActualPhotosToListing = async (listingId, files) => {
     if (!files?.length) return null;
     try {
@@ -1356,6 +1462,15 @@ export default function ListingsPage() {
     }
   };
 
+  const approvePendingRepairQueuePhotos = async (listingId) => {
+    const targetListing = listings.find((row) => row.id === listingId);
+    const pendingPaths = (targetListing?.listing_images || [])
+      .filter((image) => !image?.is_reference && image?.operator_state !== 'approved' && image?.operator_state !== 'rejected')
+      .map((image) => image.storage_path)
+      .filter(Boolean);
+    await approvePhotosForListing(listingId, pendingPaths);
+  };
+
   const runLaunchDrillForCandidates = async () => {
     const report = launchCandidatesReport || await refreshLaunchCandidates();
     const candidateIds = (report?.candidates || []).slice(0, 5).map((item) => item.listing_id);
@@ -1378,6 +1493,54 @@ export default function ListingsPage() {
     }
   };
 
+  const runPreflightOnLaunchCandidates = async () => {
+    const candidateIds = (launchCandidatesReport?.candidates || []).map((item) => item.listing_id);
+    if (!candidateIds.length) {
+      toast.error('Run the candidate selector first.');
+      return;
+    }
+    setSelectedIds(candidateIds);
+    await runBulkMarketplacePreflight(['ebay', 'facebook'], { forceRefresh: true, targetIds: candidateIds });
+  };
+
+  const openFirstLaunchCandidate = () => {
+    const first = launchCandidatesReport?.candidates?.[0];
+    if (!first?.listing_id) {
+      toast.error('Run the candidate selector first.');
+      return;
+    }
+    setSelectedListingId(first.listing_id);
+    document.getElementById('listing-results')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
+  const exportLaunchCandidatesCsv = async () => {
+    const candidateIds = (launchCandidatesReport?.candidates || []).map((item) => item.listing_id);
+    if (!candidateIds.length) {
+      toast.error('Run the candidate selector first.');
+      return;
+    }
+    try {
+      const csv = await exportMarketplacePreflightCsv({
+        listing_ids: candidateIds,
+        marketplaces: ['ebay'],
+        force_refresh: false,
+        only_drafts: false,
+      });
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = 'posterpro-launch-candidates.csv';
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      toast.success('Downloaded launch candidate QA CSV.');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Launch candidate CSV export failed.');
+    }
+  };
+
   return (
     <AppShell
       active="/listings"
@@ -1387,9 +1550,10 @@ export default function ListingsPage() {
         await toggleAutonomousMode(!autonomousConfig.autonomous_mode);
         await reload();
       }}
-      subnav={listingsSubnav}
     >
       <PageHeader
+        eyebrow="Listings workspace"
+        breadcrumbs={[{ label: 'Workspace' }, { label: 'Listings', active: true }]}
         title="Listings"
         description="Manage all listing drafts in one workspace: create, import, intake photos, preview per marketplace, approve, and publish."
         actions={
@@ -1412,607 +1576,129 @@ export default function ListingsPage() {
         }
       />
 
-      <div id="listing-toolbar">
-      <Toolbar
-        left={
-          <>
-            <div className="relative w-full sm:max-w-[320px]">
-              <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#98a2b3]" size={16} />
-              <Input placeholder="Search listings" className="pl-9" value={search} onChange={(event) => setSearch(event.target.value)} />
-            </div>
-            <div className="relative w-full sm:w-[220px]">
-              <select
-                value={marketFilter}
-                onChange={(event) => setMarketFilter(event.target.value)}
-                className="pp-input h-10 w-full appearance-none rounded-[10px] border border-[#e5e7eb] bg-white px-3 pr-10 text-sm text-[#101828] outline-none focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
-              >
-                {FILTER_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown size={16} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[#98a2b3]" />
-            </div>
-            <div className="relative w-full sm:w-[180px]">
-              <select
-                value={sourceFilter}
-                onChange={(event) => setSourceFilter(event.target.value)}
-                className="pp-input h-10 w-full appearance-none rounded-[10px] border border-[#e5e7eb] bg-white px-3 pr-10 text-sm text-[#101828] outline-none focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
-              >
-                {SOURCE_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown size={16} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[#98a2b3]" />
-            </div>
-            <div className="relative w-full sm:w-[220px]">
-              <select
-                value={readinessFilter}
-                onChange={(event) => setReadinessFilter(event.target.value)}
-                className="pp-input h-10 w-full appearance-none rounded-[10px] border border-[#e5e7eb] bg-white px-3 pr-10 text-sm text-[#101828] outline-none focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
-              >
-                {READINESS_FILTER_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown size={16} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[#98a2b3]" />
-            </div>
-            <div className="relative w-full sm:w-[180px]">
-              <select
-                value={activeTab}
-                onChange={(event) => {
-                  setActiveTab(event.target.value);
-                  setSelectedIds([]);
-                }}
-                className="pp-input h-10 w-full appearance-none rounded-[10px] border border-[#e5e7eb] bg-white px-3 pr-10 text-sm text-[#101828] outline-none focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12 md:hidden"
-              >
-                {LISTING_TABS.map((tab) => (
-                  <option key={tab.value} value={tab.value}>
-                    {tab.label}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown size={16} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[#98a2b3] md:hidden" />
-            </div>
-          </>
-        }
-        right={
-          <div className="flex items-center gap-2">
-            <span>{filteredListings.length} visible</span>
-            {sourceFilter === 'amazon_vine' ? (
-              <>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={async () => {
-                    const result = await backfillVineListingImages({
-                      includeArchived: false,
-                      forceRefresh: true,
-                      strictMatch: true,
-                    });
-                    await reload();
-                    toast.success(
-                      `Vine image retry complete: ${Number(result?.updated || 0)} updated across ${Number(result?.processed || 0)} drafts, ${Number(result?.discovered || 0)} discovered, ${Number(result?.no_cache || 0)} still missing.`,
-                    );
-                  }}
-                >
-                  Bulk retry fetch images
-                </Button>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  onClick={async () => {
-                    const result = await backfillVineListingImages({
-                      includeArchived: false,
-                      forceRefresh: true,
-                      strictMatch: true,
-                      onlyMissingImages: true,
-                    });
-                    await reload();
-                    toast.success(
-                      `Missing-image retry complete: ${Number(result?.updated || 0)} updated across ${Number(result?.processed || 0)} drafts, ${Number(result?.no_cache || 0)} still missing.`,
-                    );
-                  }}
-                >
-                  Retry missing Vine images
-                </Button>
-              </>
-            ) : null}
-            <div className="hidden rounded-[10px] border border-[#e5e7eb] bg-white p-1 md:flex">
-              <button
-                type="button"
-                onClick={() => setViewMode('table')}
-                className={`inline-flex h-8 items-center gap-2 rounded-[8px] px-3 text-xs font-medium ${
-                  viewMode === 'table' ? 'bg-[#eef4ff] text-[#2563eb]' : 'text-[#667085]'
-                }`}
-              >
-                <List size={14} />
-                Table
-              </button>
-              <button
-                type="button"
-                onClick={() => setViewMode('grid')}
-                className={`inline-flex h-8 items-center gap-2 rounded-[8px] px-3 text-xs font-medium ${
-                  viewMode === 'grid' ? 'bg-[#eef4ff] text-[#2563eb]' : 'text-[#667085]'
-                }`}
-              >
-                <Grid2X2 size={14} />
-                Grid
-              </button>
-            </div>
-          </div>
-        }
+      <ListingsWorkspaceErrorBoundary
+        resetKey={[
+          activeTab,
+          viewMode,
+          filteredListings.length,
+          selectedListingId || 'none',
+          selectedIds.length,
+          workspaceMode,
+        ].join(':')}
+      >
+      <PageFrame>
+      <PageBand id="listing-toolbar" className="overflow-hidden bg-[radial-gradient(circle_at_top_left,#fff1e6_0%,#ffffff_42%,#eef4ff_100%)]">
+      <ListingsOverviewBand
+        activeTabLabel={activeTabLabel}
+        filteredCount={filteredListings.length}
+        selectedCount={selectedIds.length}
+        viewMode={viewMode}
+        listingMetrics={listingMetrics}
+        bulkPreflightSummary={bulkPreflightSummary}
+        publishJobStats={publishJobStats}
+        tabs={<ListingsQueueTabs listingTabs={LISTING_TABS} tabCounts={tabCounts} activeTab={activeTab} selectTab={selectTab} />}
+        toolbar={(
+          <ListingsToolbar
+            search={search}
+            setSearch={setSearch}
+            marketFilter={marketFilter}
+            setMarketFilter={setMarketFilter}
+            sourceFilter={sourceFilter}
+            setSourceFilter={setSourceFilter}
+            readinessFilter={readinessFilter}
+            setReadinessFilter={setReadinessFilter}
+            activeTab={activeTab}
+            setActiveTab={setActiveTab}
+            setSelectedIds={setSelectedIds}
+            filteredListingsLength={filteredListings.length}
+            viewMode={viewMode}
+            setViewMode={setViewMode}
+            onBulkRetryFetchImages={async () => {
+              const result = await backfillVineListingImages({
+                includeArchived: false,
+                forceRefresh: true,
+                strictMatch: true,
+              });
+              await reload();
+              toast.success(
+                `Vine image retry complete: ${Number(result?.updated || 0)} updated across ${Number(result?.processed || 0)} drafts, ${Number(result?.discovered || 0)} discovered, ${Number(result?.no_cache || 0)} still missing.`,
+              );
+            }}
+            onRetryMissingVineImages={async () => {
+              const result = await backfillVineListingImages({
+                includeArchived: false,
+                forceRefresh: true,
+                strictMatch: true,
+                onlyMissingImages: true,
+              });
+              await reload();
+              toast.success(
+                `Missing-image retry complete: ${Number(result?.updated || 0)} updated across ${Number(result?.processed || 0)} drafts, ${Number(result?.no_cache || 0)} still missing.`,
+              );
+            }}
+            filterOptions={FILTER_OPTIONS}
+            sourceOptions={SOURCE_OPTIONS}
+            readinessFilterOptions={READINESS_FILTER_OPTIONS}
+            listingTabs={LISTING_TABS}
+          />
+        )}
       />
+      <div className="border-t border-[#e5e7eb] bg-white/82 px-5 py-5 lg:px-6">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#667085]">Workspace mode</p>
+            <h3 className="mt-2 text-xl font-semibold tracking-[-0.03em] text-[#101828]">Choose one job instead of staring at everything</h3>
+            <p className="mt-1 max-w-2xl text-sm leading-6 text-[#667085]">
+              Results, repair work, launch QA, and queue follow-up are now separated. Switch modes to keep the page focused.
+            </p>
+          </div>
+          <div className="rounded-full border border-[#dbe5f5] bg-white px-3 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-[#2563eb]">
+            Current mode: {workspaceModes.find((mode) => mode.key === workspaceMode)?.label}
+          </div>
+        </div>
+        <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+          {workspaceModes.map((mode) => {
+            const Icon = mode.icon;
+            const active = workspaceMode === mode.key;
+            return (
+              <button
+                key={mode.key}
+                type="button"
+                onClick={() => setWorkspaceMode(mode.key)}
+                className={[
+                  'rounded-[20px] border p-4 text-left transition',
+                  active
+                    ? 'border-[#bfd2ff] bg-[#f4f8ff] shadow-[0_14px_40px_rgba(37,99,235,0.12)]'
+                    : 'border-[#e5e7eb] bg-white hover:border-[#cdd8ea] hover:bg-[#fbfcff]',
+                ].join(' ')}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <span className={`inline-flex h-11 w-11 items-center justify-center rounded-2xl border ${active ? 'border-[#bfd2ff] bg-white text-[#2563eb]' : 'border-[#e5e7eb] bg-[#f8fafc] text-[#667085]'}`}>
+                    <Icon size={18} />
+                  </span>
+                  <span className="text-2xl font-semibold tracking-[-0.03em] text-[#101828]">{mode.count}</span>
+                </div>
+                <p className="mt-4 text-sm font-semibold text-[#101828]">{mode.label}</p>
+                <p className="mt-1 text-sm leading-6 text-[#667085]">{mode.description}</p>
+              </button>
+            );
+          })}
+        </div>
       </div>
+      </PageBand>
 
-      <section aria-label="Listing queues">
-        <div className="mb-2 flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-[#101828]">Listing Queues</h2>
-          <p className="text-xs text-[#667085]">Review, draft, ready, published, failed, and Vine workflows.</p>
-        </div>
-        <Tabs
-        className="hidden md:flex"
-        items={LISTING_TABS.map((tab) => ({ ...tab, count: tabCounts[tab.value] || 0 }))}
-        value={activeTab}
-        onChange={selectTab}
-        />
-      </section>
-
-      <section id="listing-status" className="grid gap-4 xl:grid-cols-3">
-        <div className="rounded-[14px] border border-[#e5e7eb] bg-white p-4">
-          <p className="text-sm font-semibold text-[#101828]">Approval mode</p>
-          <p className="mt-2 text-sm text-[#667085]">
-            {workflowPreferences.review_before_publish
-              ? 'Drafts must be approved before they can be published.'
-              : 'Direct draft publishing is allowed for this workspace.'}
-          </p>
-        </div>
-        <div className="rounded-[14px] border border-[#e5e7eb] bg-white p-4">
-          <p className="text-sm font-semibold text-[#101828]">Bulk review</p>
-          <p className="mt-2 text-sm text-[#667085]">
-            {workflowPreferences.bulk_approval_enabled
-              ? 'Use row selection to approve many reviewed drafts together.'
-              : 'Operators should approve listings one at a time.'}
-          </p>
-        </div>
-        <div className="rounded-[14px] border border-[#e5e7eb] bg-white p-4">
-          <p className="text-sm font-semibold text-[#101828]">Preview layout</p>
-          <p className="mt-2 text-sm text-[#667085]">
-            {workflowPreferences.listing_preview_mode === 'marketplace'
-              ? 'Review opens in a marketplace-style preview first.'
-              : 'Review opens in editor-first mode.'}
-          </p>
-        </div>
-      </section>
-
-      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <MetricCard label="Draft value" value={`$${Math.round(listingMetrics.draftAmount).toLocaleString()}`} detail={`${listingMetrics.draftCount} drafts pending review/publish`} />
-        <MetricCard label="Review queue value" value={`$${Math.round(listingMetrics.reviewAmount).toLocaleString()}`} detail={`${listingMetrics.reviewCount} listings needing approval`} />
-        <MetricCard label="Ready value" value={`$${Math.round(listingMetrics.readyAmount).toLocaleString()}`} detail={`${listingMetrics.readyCount} listings ready to publish`} />
-        <MetricCard
-          label="Marketplace split"
-          value={Object.keys(listingMetrics.byMarket).length || 0}
-          detail={Object.entries(listingMetrics.byMarket)
-            .sort((a, b) => b[1].count - a[1].count)
-            .slice(0, 2)
-            .map(([market, stats]) => `${formatMarketplace(market)} ${stats.count} · $${Math.round(stats.amount).toLocaleString()}`)
-            .join(' | ') || 'No market targets yet'}
-        />
-      </section>
-
+      {(workspaceMode === 'results' || workspaceMode === 'all') ? (
       <SectionPanel
-        title="Listing pipeline triage"
-        description="Use these counts to push high-volume draft review toward pricing, shipping, and publish readiness."
+        id="listing-results"
+        title={`${activeTabLabel} workspace`}
+        description={`Showing ${filteredListings.length} ${filteredListings.length === 1 ? 'listing' : 'listings'} in the current queue. This mode keeps the working list primary and pushes everything else out of the way.`}
+        className="overflow-hidden"
       >
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-          <MetricCard label="Blocked" value={listingMetrics.blockedCount} detail="Drafts with publish blockers still unresolved." />
-          <MetricCard label="Weak pricing" value={listingMetrics.weakPricingCount} detail="Drafts with low confidence or weak comps." />
-          <MetricCard label="Stale pricing" value={listingMetrics.stalePricingCount} detail="Drafts that should be repriced before publish." />
-          <MetricCard label="Ready for eBay" value={listingMetrics.readyForEbayCount} detail="Drafts with pricing and shipping ready for eBay queueing." />
-        </div>
-      </SectionPanel>
-
-      <SectionPanel
-        title="Bulk marketplace preflight"
-        description="Run preflight across selected drafts, read exact blockers, and queue only items that are safe to publish."
-      >
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-          <MetricCard label="Selected / scoped" value={bulkPreflightSummary.selectedCount} detail={selectedRows.length ? 'Selected rows in the action bar.' : 'Visible filtered rows in the current view.'} />
-          <MetricCard label="Checked" value={bulkPreflightSummary.checkedCount} detail="Rows with cached or freshly generated marketplace preflight summaries." />
-          <MetricCard label="eBay ready" value={bulkPreflightSummary.ebayReadyCount} detail="Rows that can move to the eBay queue." />
-          <MetricCard label="Facebook ready" value={bulkPreflightSummary.facebookReadyCount} detail="Rows that can be handed off to the Facebook assisted workflow." />
-          <MetricCard label="Blocked" value={bulkPreflightSummary.blockedCount} detail="Rows with at least one marketplace blocker." />
-          <MetricCard label="Warning only" value={bulkPreflightSummary.warningOnlyCount} detail="Rows that are ready but still need operator confirmation or review." />
-          <MetricCard label="Ready to queue" value={bulkPreflightSummary.readyToQueueCount} detail="Rows with sufficient quality/readiness to queue once you choose live mode." />
-          <MetricCard label="Most common blocker" value={bulkPreflightSummary.mostCommonBlocker || 'None'} detail={bulkPreflightSummary.mostCommonBlocker ? `${bulkPreflightSummary.mostCommonBlockerCount} occurrences in scope` : 'No blocker codes found in the current scope.'} />
-        </div>
-      </SectionPanel>
-
-      <SectionPanel
-        title="eBay launch repair queue"
-        description="Unpublished eBay drafts under the launch threshold, grouped by actionable blockers so you can create the first safe live queue."
-        action={
-          <div className="flex flex-wrap gap-2">
-            <select
-              value={repairQueueImageStatusFilter}
-              onChange={(event) => setRepairQueueImageStatusFilter(event.target.value)}
-              className="h-9 rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]"
-            >
-              <option value="all">All image states</option>
-              <option value="no_images">No images</option>
-              <option value="reference_only">Reference only</option>
-              <option value="actual_pending_review">Actual pending review</option>
-              <option value="actual_approved">Actual approved</option>
-              <option value="actual_file_invalid">Actual file invalid</option>
-            </select>
-            <Button variant="outline" size="sm" onClick={refreshRepairQueue} disabled={repairQueueLoading}>
-              {repairQueueLoading ? 'Refreshing…' : 'Refresh repair queue'}
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={async () => {
-                const report = repairQueueReport || await refreshRepairQueue();
-                const rows = report?.items || [];
-                if (!rows.length) {
-                  toast.error('Repair queue is empty.');
-                  return;
-                }
-                const header = ['listing_id', 'title', 'price', 'blockers', 'suggested_category', 'image_status', 'recommended_action'];
-                const csv = [
-                  header.join(','),
-                  ...rows.map((item) => [
-                    item.listing_id,
-                    `"${String(item.title || '').replaceAll('"', '""')}"`,
-                    Number(item.price || 0).toFixed(2),
-                    `"${(item.blocker_codes || []).join('|')}"`,
-                    `"${String(item.suggested_category?.label || '').replaceAll('"', '""')}"`,
-                    item.image_status || '',
-                    `"${String(item.recommended_next_repair_action || '').replaceAll('"', '""')}"`,
-                  ].join(',')),
-                ].join('\n');
-                const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
-                const url = URL.createObjectURL(blob);
-                const anchor = document.createElement('a');
-                anchor.href = url;
-                anchor.download = 'posterpro-ebay-launch-repair-queue.csv';
-                document.body.appendChild(anchor);
-                anchor.click();
-                anchor.remove();
-                URL.revokeObjectURL(url);
-                toast.success('Downloaded eBay repair queue CSV.');
-              }}
-              disabled={repairQueueLoading}
-            >
-              Export repair CSV
-            </Button>
-          </div>
-        }
-      >
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-          <MetricCard label="Repair rows" value={repairQueueReport?.summary?.included || 0} detail="Unpublished eBay drafts with actionable blockers under the current launch threshold." />
-          <MetricCard label="No images" value={repairQueueReport?.summary?.no_images || 0} detail="Drafts with no saved image metadata at all." />
-          <MetricCard label="Missing actual photos" value={repairQueueReport?.summary?.missing_actual_photos || 0} detail="Drafts that still need operator-approved actual item photos." />
-          <MetricCard label="Reference only" value={repairQueueReport?.summary?.reference_only_images || 0} detail="Drafts with source images but no actual approved item photos." />
-          <MetricCard label="Actual pending" value={repairQueueReport?.summary?.actual_pending_review || 0} detail="Drafts with uploaded actual photos still waiting for operator approval." />
-          <MetricCard label="Actual approved" value={repairQueueReport?.summary?.actual_approved || 0} detail="Drafts with approved actual photos already attached." />
-          <MetricCard label="Image URL invalid" value={repairQueueReport?.summary?.invalid_image_url || 0} detail="Drafts whose actual item image files or publish URLs still fail validation." />
-          <MetricCard label="Missing category" value={repairQueueReport?.summary?.missing_category || 0} detail="Drafts that still need an eBay category suggestion or operator category review." />
-          <MetricCard label="Missing aspects" value={repairQueueReport?.summary?.missing_required_aspects || 0} detail="Drafts missing required eBay item specifics for their current category." />
-          <MetricCard label="Most common blocker" value={repairQueueReport?.summary?.most_common_blocker || 'None'} detail="Top issue in the current repair queue." />
-          <MetricCard label="Ready for image preflight" value={repairQueueReport?.summary?.ready_for_image_preflight || 0} detail="Drafts whose actual photos are approved and can move to full eBay preflight." />
-        </div>
-        <div className="mt-4 grid gap-3 md:grid-cols-2">
-          {(repairQueueReport?.items || []).slice(0, 8).map((item) => (
-            <div key={`repair-queue-${item.listing_id}`} className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
-              <p className="text-sm font-semibold text-[#101828]">{item.title || `Listing #${item.listing_id}`}</p>
-              <p className="mt-1 text-xs text-[#667085]">#{item.listing_id} · ${Number(item.price || 0).toFixed(2)} · {String(item.current_preflight_status || 'unknown').replaceAll('_', ' ')}</p>
-              <div className="mt-2 flex flex-wrap gap-2">
-                {(item.blocker_codes || []).slice(0, 4).map((code) => (
-                  <span key={`${item.listing_id}-${code}`} className="pp-chip">{code}</span>
-                ))}
-              </div>
-              <div className="mt-2 flex flex-wrap gap-2 text-xs text-[#475467]">
-                <span className="pp-chip">Image status: {String(item.image_status || 'unknown').replaceAll('_', ' ')}</span>
-                <span className="pp-chip">Approved actual: {Number(item.photo_counts?.actual_approved_images || 0)}</span>
-                <span className="pp-chip">Pending actual: {Number(item.photo_counts?.actual_pending_images || 0)}</span>
-                <span className="pp-chip">Reference: {Number(item.photo_counts?.reference_source_images || 0)}</span>
-              </div>
-              {item.suggested_category?.label ? (
-                <p className="mt-2 text-xs text-[#475467]">Suggested category: {item.suggested_category.label}</p>
-              ) : null}
-              <p className="mt-2 text-xs text-[#475467]">Recommended repair: {item.recommended_next_repair_action || 'Review blockers'}</p>
-              <div className="mt-3 flex flex-wrap gap-2">
-                <Button variant="outline" size="sm" onClick={() => setSelectedListingId(item.listing_id)}>
-                  Open editor
-                </Button>
-                <Button variant="outline" size="sm" onClick={() => runBulkMarketplacePreflight(['ebay'], { forceRefresh: true, targetIds: [item.listing_id] })}>
-                  Run preflight
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => applyRepairAction(item.listing_id, 'category')}
-                  disabled={!item.suggested_category?.can_apply}
-                >
-                  Apply suggested category
-                </Button>
-                <label className="inline-flex cursor-pointer items-center rounded-[10px] border border-[#d0d5dd] bg-white px-3 py-2 text-sm font-medium text-[#101828]">
-                  Upload actual photos
-                  <input
-                    type="file"
-                    accept="image/jpeg,image/png,image/webp"
-                    multiple
-                    className="hidden"
-                    onChange={async (event) => {
-                      const files = Array.from(event.target.files || []);
-                      if (files.length) {
-                        await uploadActualPhotosToListing(item.listing_id, files);
-                      }
-                      event.target.value = '';
-                    }}
-                  />
-                </label>
-                {Number(item.photo_counts?.actual_pending_images || 0) > 0 ? (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={async () => {
-                      const targetListing = listings.find((row) => row.id === item.listing_id);
-                      const pendingPaths = (targetListing?.listing_images || [])
-                        .filter((image) => !image?.is_reference && image?.operator_state !== 'approved' && image?.operator_state !== 'rejected')
-                        .map((image) => image.storage_path)
-                        .filter(Boolean);
-                      await approvePhotosForListing(item.listing_id, pendingPaths);
-                    }}
-                  >
-                    Approve actual photos
-                  </Button>
-                ) : null}
-                <Button variant="outline" size="sm" onClick={() => applyRepairAction(item.listing_id, 'images')}>
-                  Validate images
-                </Button>
-              </div>
-            </div>
-          ))}
-          {!(repairQueueReport?.items || []).length ? (
-            <div className="rounded-[12px] border border-dashed border-[#d0d5dd] bg-white p-4 text-sm text-[#667085]">
-              Refresh the repair queue to find unpublished eBay drafts that are closest to launch-ready.
-            </div>
-          ) : null}
-        </div>
-      </SectionPanel>
-
-      <SectionPanel
-        title="Launch QA candidates"
-        description="Small low-risk eBay launch set for safe production acceptance and drill testing."
-        action={
-          <div className="flex flex-wrap gap-2">
-            <Button variant="outline" size="sm" onClick={refreshLaunchCandidates} disabled={launchCandidatesLoading}>
-              {launchCandidatesLoading ? 'Refreshing…' : 'Run candidate selector'}
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={async () => {
-                const candidateIds = (launchCandidatesReport?.candidates || []).map((item) => item.listing_id);
-                if (!candidateIds.length) {
-                  toast.error('Run the candidate selector first.');
-                  return;
-                }
-                setSelectedIds(candidateIds);
-                await runBulkMarketplacePreflight(['ebay', 'facebook'], { forceRefresh: true, targetIds: candidateIds });
-              }}
-              disabled={launchCandidatesLoading}
-            >
-              Run preflight on candidates
-            </Button>
-            <Button variant="outline" size="sm" onClick={runLaunchDrillForCandidates} disabled={launchCandidatesLoading}>
-              Dry-run launch drill
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                const first = launchCandidatesReport?.candidates?.[0];
-                if (!first?.listing_id) {
-                  toast.error('Run the candidate selector first.');
-                  return;
-                }
-                setSelectedListingId(first.listing_id);
-                document.getElementById('listing-results')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-              }}
-              disabled={launchCandidatesLoading}
-            >
-              Open first candidate
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={async () => {
-                const candidateIds = (launchCandidatesReport?.candidates || []).map((item) => item.listing_id);
-                if (!candidateIds.length) {
-                  toast.error('Run the candidate selector first.');
-                  return;
-                }
-                try {
-                  const csv = await exportMarketplacePreflightCsv({
-                    listing_ids: candidateIds,
-                    marketplaces: ['ebay'],
-                    force_refresh: false,
-                    only_drafts: false,
-                  });
-                  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
-                  const url = URL.createObjectURL(blob);
-                  const anchor = document.createElement('a');
-                  anchor.href = url;
-                  anchor.download = 'posterpro-launch-candidates.csv';
-                  document.body.appendChild(anchor);
-                  anchor.click();
-                  anchor.remove();
-                  URL.revokeObjectURL(url);
-                  toast.success('Downloaded launch candidate QA CSV.');
-                } catch (error) {
-                  toast.error(error instanceof Error ? error.message : 'Launch candidate CSV export failed.');
-                }
-              }}
-              disabled={launchCandidatesLoading}
-            >
-              Export candidate QA CSV
-            </Button>
-          </div>
-        }
-      >
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-          <MetricCard label="eBay readiness" value={ebayAccountReadiness?.publish_ready ? 'Ready' : 'Needs setup'} detail={ebayAccountReadiness?.status_note || 'Account readiness unavailable.'} />
-          <MetricCard label="Policies present" value={ebayAccountReadiness?.policies_present ? 'Yes' : 'No'} detail="Payment, fulfillment, and return policies." />
-          <MetricCard label="Location key" value={ebayAccountReadiness?.location_present ? 'Yes' : 'No'} detail="Merchant location configured for eBay inventory." />
-          <MetricCard label="Candidates" value={(launchCandidatesReport?.candidates || []).length || 0} detail="Low-risk listings selected for a controlled drill." />
-        </div>
-        <div className="mt-4 grid gap-3 md:grid-cols-2">
-          {(launchCandidatesReport?.candidates || []).slice(0, 6).map((item) => (
-            <div key={`launch-candidate-${item.listing_id}`} className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
-              <p className="text-sm font-semibold text-[#101828]">{item.title || `Listing #${item.listing_id}`}</p>
-              <p className="mt-1 text-xs text-[#667085]">#{item.listing_id} · ${Number(item.price || 0).toFixed(2)} · {String(item.preflight_status || 'unknown').replaceAll('_', ' ')}</p>
-              <div className="mt-2 flex flex-wrap gap-2">
-                {(item.top_warnings || []).slice(0, 3).map((warning) => (
-                  <span key={`${item.listing_id}-${warning}`} className="pp-chip">{warning}</span>
-                ))}
-              </div>
-              <p className="mt-2 text-xs text-[#475467]">{item.reason_selected || 'Selected for launch drill.'}</p>
-            </div>
-          ))}
-          {!(launchCandidatesReport?.candidates || []).length ? (
-            <div className="rounded-[12px] border border-dashed border-[#d0d5dd] bg-white p-4 text-sm text-[#667085]">
-              Run the candidate selector to identify 5-10 low-risk eBay drafts for the launch drill.
-            </div>
-          ) : null}
-        </div>
-      </SectionPanel>
-
-      {bulkPreflightReport ? (
-        <SectionPanel
-          title="Last bulk preflight report"
-          description="Review the latest bulk run without opening every listing."
-        >
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-            <MetricCard label="Ready for eBay" value={bulkPreflightReport?.summary?.ready_for_ebay || 0} detail="Rows whose current preflight is ready for eBay queueing." />
-            <MetricCard label="Ready for Facebook" value={bulkPreflightReport?.summary?.ready_for_facebook || 0} detail="Rows whose current preflight is ready for Facebook assisted handoff." />
-            <MetricCard label="Blocked" value={bulkPreflightReport?.summary?.blocked || 0} detail="Rows blocked by at least one marketplace." />
-            <MetricCard label="Preflight failed" value={bulkPreflightReport?.summary?.preflight_failed || 0} detail="Rows that returned a backend validation or provider failure." />
-          </div>
-          <div className="mt-4 grid gap-3 md:grid-cols-2">
-            {(bulkPreflightReport?.items || []).slice(0, 6).map((item) => (
-              <div key={`bulk-preflight-${item.listing_id}`} className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
-                <p className="text-sm font-semibold text-[#101828]">{item.title || `Listing #${item.listing_id}`}</p>
-                <p className="mt-1 text-xs text-[#667085]">#{item.listing_id}</p>
-                <div className="mt-2 flex flex-wrap gap-2">
-                  {(Object.entries(item.marketplaces || {})).map(([market, data]) => (
-                    <span key={`${item.listing_id}-${market}`} className="pp-chip">
-                      {market.toUpperCase()}: {String(data?.status || 'unknown').replaceAll('_', ' ')}
-                    </span>
-                  ))}
-                </div>
-                {item.top_blocker_code ? <p className="mt-2 text-xs text-[#b42318]">Top blocker: {item.top_blocker_code}</p> : null}
-              </div>
-            ))}
-          </div>
-        </SectionPanel>
-      ) : null}
-
-      {bulkPublishReport ? (
-        <SectionPanel
-          title="Last bulk publish-ready run"
-          description={`Dry-run ${bulkPublishReport?.dry_run ? 'preview' : 'live queue'} for ready-only marketplace publishing.`}
-        >
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-            <MetricCard label="Queued" value={bulkPublishReport?.summary?.queued || 0} detail="Listings queued successfully in live mode." />
-            <MetricCard label="Skipped blocked" value={bulkPublishReport?.summary?.skipped_blocked || 0} detail="Listings blocked by a marketplace preflight issue." />
-            <MetricCard label="Warnings need confirm" value={bulkPublishReport?.summary?.skipped_warning_requires_confirmation || 0} detail="Warning-only listings that were not allowed into live mode." />
-            <MetricCard label="Already queued" value={bulkPublishReport?.summary?.skipped_already_queued || 0} detail="Listings already had pending marketplace work." />
-          </div>
-          <div className="mt-4 grid gap-3 md:grid-cols-2">
-            {(bulkPublishReport?.items || []).slice(0, 6).map((item) => (
-              <div key={`bulk-publish-${item.listing_id}`} className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
-                <p className="text-sm font-semibold text-[#101828]">{item.title || `Listing #${item.listing_id}`}</p>
-                <p className="mt-1 text-xs text-[#667085]">#{item.listing_id}</p>
-                <div className="mt-2 flex flex-wrap gap-2">
-                  {(Object.entries(item.marketplaces || {})).map(([market, data]) => (
-                    <span key={`${item.listing_id}-${market}`} className="pp-chip">
-                      {market.toUpperCase()}: {String(data?.status || 'unknown').replaceAll('_', ' ')}
-                    </span>
-                  ))}
-                </div>
-                {item.blocked_marketplaces?.length ? (
-                  <p className="mt-2 text-xs text-[#b42318]">Blocked: {item.blocked_marketplaces.join(', ')}</p>
-                ) : null}
-                {item.warning_marketplaces?.length ? (
-                  <p className="mt-1 text-xs text-[#8a4b10]">Warnings: {item.warning_marketplaces.join(', ')}</p>
-                ) : null}
-              </div>
-            ))}
-          </div>
-        </SectionPanel>
-      ) : null}
-
-      <SectionPanel
-        title="Launch QA checklist"
-        description="Operator-safe production drill steps for a tiny controlled eBay launch set."
-      >
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {[
-            'Confirm eBay account is connected.',
-            'Confirm policy IDs are present.',
-            'Confirm merchant location key.',
-            'Confirm selected draft titles and prices.',
-            'Confirm condition and notes.',
-            'Confirm photos are actual item photos.',
-            'Confirm shipping weight and dimensions.',
-            'Confirm category and required aspects.',
-            'Confirm no source/reference-only image warning.',
-            'Run dry-run publish-ready or launch drill.',
-            'Queue only ready eBay listings with explicit confirmation.',
-            'Inspect translated errors and retry only retryable failures.',
-          ].map((item) => (
-            <div key={item} className="rounded-[12px] border border-[#e5e7eb] bg-white p-3 text-sm text-[#475467]">{item}</div>
-          ))}
-        </div>
-        {bulkPublishReport?.launch_drill ? (
-          <div className="mt-4 rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-4">
-            <p className="text-sm font-semibold text-[#101828]">Latest launch drill result</p>
-            <div className="mt-3 grid gap-3 md:grid-cols-3">
-              <MetricCard label="Checked" value={bulkPublishReport.launch_drill.summary?.checked || 0} detail="Listings inspected in the drill." />
-              <MetricCard label="Ready" value={bulkPublishReport.launch_drill.summary?.ready || 0} detail="Listings that passed the dry-run drill." />
-              <MetricCard label="Blocked" value={bulkPublishReport.launch_drill.summary?.blocked || 0} detail="Listings that still need operator fixes." />
-            </div>
-          </div>
-        ) : null}
-      </SectionPanel>
-
-      <SectionPanel
-        id="listing-publish-queue"
-        title="Publish queue progress"
-        description="Live worker state for queued, running, completed, and failed publish jobs."
-        action={<Link href="/jobs" className="text-sm font-medium text-[#2563eb]">Open jobs console</Link>}
-      >
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-          <MetricCard label="Queued / running" value={publishJobStats.queued} detail="Jobs still moving through the worker." />
-          <MetricCard label="Completed" value={publishJobStats.completed} detail="Publish jobs that finished successfully." />
-          <MetricCard label="Failed" value={publishJobStats.failed} detail="Jobs that need attention or retry." />
-          <MetricCard label="Progress" value={`${publishJobStats.progress}%`} detail={`${publishJobStats.completed} of ${publishJobStats.total} publish jobs completed`} />
-        </div>
-      </SectionPanel>
-
-      {selectedIds.length ? (
-        <ActionBar
-          left={<p className="text-sm font-medium text-[#101828]">{selectedIds.length} selected</p>}
-          right={
-            <div className="flex flex-wrap gap-2">
+      <ListingsBulkActionBar
+        selectedCount={selectedIds.length}
+        left={<p className="text-sm font-medium text-[#101828]">{selectedIds.length} selected</p>}
+        actions={
+          <>
               {workflowPreferences.bulk_approval_enabled ? (
                 <Button variant="outline" size="sm" onClick={approveSelected}>
                   Approve selected
@@ -2161,12 +1847,11 @@ export default function ListingsPage() {
               <Button size="sm" onClick={publishSelected}>
                 Publish selected
               </Button>
-            </div>
-          }
-        />
-      ) : null}
+          </>
+        }
+      />
 
-      <div id="listing-results" className={`grid gap-5 ${selectedListing ? 'xl:grid-cols-[minmax(0,1fr)_480px]' : 'grid-cols-1'}`}>
+      <div className={`grid gap-5 ${selectedListing ? 'xl:grid-cols-[minmax(0,1fr)_480px]' : 'grid-cols-1'}`}>
         {viewMode === 'table' ? (
           <DataTable
           columns={[
@@ -2174,11 +1859,7 @@ export default function ListingsPage() {
               key: 'thumbnail',
               label: 'Thumbnail',
               render: (listing) => (
-                <div className="h-10 w-10 overflow-hidden rounded-[10px] bg-[#f2f4f7]">
-                  {getListingThumbnail(listing) ? (
-                    <img src={toPublicImageUrl(getListingThumbnail(listing))} alt={getListingTitle(listing)} className="h-full w-full object-cover" />
-                  ) : null}
-                </div>
+                <ListingsThumbnail src={getListingThumbnail(listing)} alt={getListingTitle(listing)} />
               ),
             },
             {
@@ -2186,123 +1867,27 @@ export default function ListingsPage() {
               label: 'Title',
               cellClassName: 'min-w-[280px]',
               render: (listing) => (
-                <div>
-                  <p className="truncate font-medium text-[#101828]">{getListingTitle(listing)}</p>
-                  {getReadinessSummary(listing).blockers?.length ? (
-                    <p className="mt-1 text-xs text-[#b42318]">{getReadinessSummary(listing).blockers[0]}</p>
-                  ) : null}
-                  <div className="mt-1 flex flex-wrap items-center gap-2">
-                    <p className="text-xs text-[#667085]">#{listing.id}</p>
-                    {listing.sku ? <span className="pp-chip">SKU {listing.sku}</span> : null}
-                    {isAmazonVineSource(listing) ? <span className="pp-chip">Vine</span> : null}
-                    <span className="pp-chip">{getListingImageCount(listing)} image{getListingImageCount(listing) === 1 ? '' : 's'}</span>
-                    {listing?.quality_summary?.score != null ? <span className="pp-chip">Quality {listing.quality_summary.score}</span> : null}
-                    {listing?.marketplace_data?.pricing_analysis?.price_confidence ? <span className="pp-chip">{Math.round(listing.marketplace_data.pricing_analysis.price_confidence * 100)}% pricing</span> : null}
-                    {listing.needs_review ? <span className="pp-chip">Needs Review</span> : null}
-                    {listing.restricted_review_required ? <span className="pp-chip">Restricted Review</span> : null}
-                    {listing.custom_labels?.includes('needs_photos') ? <span className="pp-chip">Image Missing</span> : null}
-                  </div>
-                  <div className="mt-2 flex flex-wrap gap-1.5">
-                    {['ebay', 'facebook'].map((market) => {
-                      const summary = getMarketplacePreflightSummary(listing, market);
-                      const status = getMarketplacePreflightStatus(listing, market);
-                      const label = `${market.toUpperCase()}: ${status.replaceAll('_', ' ')}`;
-                      return (
-                        <span
-                          key={`${listing.id}-${market}-preflight`}
-                          className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold ${
-                            getMarketplacePreflightTone(summary) === 'danger'
-                              ? 'border-[#fecdca] bg-[#fff6ed] text-[#b54708]'
-                              : getMarketplacePreflightTone(summary) === 'warning'
-                              ? 'border-[#fef0c7] bg-[#fffaeb] text-[#8a4b10]'
-                              : getMarketplacePreflightTone(summary) === 'success'
-                              ? 'border-[#abefc6] bg-[#ecfdf3] text-[#027a48]'
-                              : 'border-[#d0d5dd] bg-[#f9fafb] text-[#475467]'
-                          }`}
-                        >
-                          {label}
-                        </span>
-                      );
-                    })}
-                    {(() => {
-                      const ebaySummary = getMarketplacePreflightSummary(listing, 'ebay');
-                      const blocker = getMarketplaceTopBlocker(ebaySummary) || getMarketplaceTopBlocker(getMarketplacePreflightSummary(listing, 'facebook'));
-                      return blocker ? <span className="pp-chip">Top blocker: {blocker}</span> : null;
-                    })()}
-                    {(() => {
-                      const summary = getMarketplacePreflightSummary(listing, 'ebay') || getMarketplacePreflightSummary(listing, 'facebook');
-                      return summary?.last_checked_at ? <span className="pp-chip">Checked {getMarketplacePreflightAgeLabel(summary)}</span> : null;
-                    })()}
-                  </div>
-                  <div className="mt-2 flex flex-wrap gap-1.5">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        router.push(`/listings/${listing.id}?mode=preview`);
-                      }}
-                    >
-                      Preview/Edit
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        router.push(`/listings/${listing.id}`);
-                      }}
-                    >
-                      Full page
-                    </Button>
-                    {(getListingBucket(listing) === 'ready' || getListingBucket(listing) === 'drafts' || listing.status === 'draft') ? (
-                      <Button
-                        size="sm"
-                        onClick={(event) => {
-                          publishSingleListing(listing, event);
-                        }}
-                        disabled={publishing[listing.id]}
-                      >
-                        {publishing[listing.id] ? 'Publishing…' : 'Publish'}
-                      </Button>
-                    ) : null}
-                    {getListingBucket(listing) === 'review' || listing.status === 'draft' ? (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={async (event) => {
-                          event.stopPropagation();
-                          await approveListing(listing.id);
-                        }}
-                      >
-                        Approve
-                      </Button>
-                    ) : null}
-                    <Button
-                      variant="danger"
-                      size="sm"
-                      onClick={async (event) => {
-                        event.stopPropagation();
-                        if (!confirmDeleteListings(1)) return;
-                        await deleteListing(listing.id);
-                      }}
-                    >
-                      Delete
-                    </Button>
-                    {isAmazonVineSource(listing) && !isArchivedListing(listing) ? (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={async (event) => {
-                          event.stopPropagation();
-                          await archiveListing(listing.id);
-                        }}
-                      >
-                        Archive
-                      </Button>
-                    ) : null}
-                  </div>
-                </div>
+                <ListingsTitleCell
+                  listing={listing}
+                  getListingTitle={getListingTitle}
+                  getReadinessSummary={getReadinessSummary}
+                  getListingImageCount={getListingImageCount}
+                  isAmazonVineSource={isAmazonVineSource}
+                  getListingBucket={getListingBucket}
+                  publishSingleListing={publishSingleListing}
+                  publishing={publishing}
+                  approveListing={approveListing}
+                  deleteListing={deleteListing}
+                  confirmDeleteListings={confirmDeleteListings}
+                  archiveListing={archiveListing}
+                  isArchivedListing={isArchivedListing}
+                  router={router}
+                  getMarketplacePreflightSummary={getMarketplacePreflightSummary}
+                  getMarketplacePreflightStatus={getMarketplacePreflightStatus}
+                  getMarketplacePreflightTone={getMarketplacePreflightTone}
+                  getMarketplaceTopBlocker={getMarketplaceTopBlocker}
+                  getMarketplacePreflightAgeLabel={getMarketplacePreflightAgeLabel}
+                />
               ),
             },
             {
@@ -2338,23 +1923,14 @@ export default function ListingsPage() {
             {
               key: 'status',
               label: 'Status',
-              render: (listing) => {
-                const bucket = getListingBucket(listing);
-                return (
-                  <div>
-                    <StatusPill status={bucket} label={bucket.charAt(0).toUpperCase() + bucket.slice(1)} />
-                    {errors[listing.id] ? (
-                      <p className="mt-1 text-xs text-[#b42318]">
-                        {isEbayReconnectRequiredError(errors[listing.id])
-                          ? 'eBay token invalid. Reconnect eBay in Settings, then retry publish.'
-                          : errors[listing.id]}
-                      </p>
-                    ) : getListingFailureMessage(listing) ? (
-                      <p className="mt-1 text-xs text-[#b42318]">{getListingFailureMessage(listing)}</p>
-                    ) : null}
-                  </div>
-                );
-              },
+              render: (listing) => (
+                <ListingsStatusCell
+                  listing={listing}
+                  getListingBucket={getListingBucket}
+                  errors={errors}
+                  getListingFailureMessage={getListingFailureMessage}
+                />
+              ),
             },
             {
               key: 'updated',
@@ -2369,192 +1945,51 @@ export default function ListingsPage() {
           allSelected={filteredListings.length > 0 && selectedIds.length === filteredListings.length}
           onToggleAll={() => setSelectedIds(selectedIds.length === filteredListings.length ? [] : filteredListings.map((listing) => listing.id))}
           onRowClick={(listing) => setSelectedListingId(listing.id)}
-          emptyState={<EmptyState title={`No ${LISTING_TABS.find((t) => t.value === activeTab)?.label || 'listings'} found`} description="Adjust the current filters or import new inventory to create drafts." className="border-0 p-0 py-6" />}
+          emptyState={<ListingsWorkspaceEmptyState activeTabLabel={LISTING_TABS.find((t) => t.value === activeTab)?.label} compact />}
           />
         ) : (
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
             {filteredListings.length ? (
               filteredListings.map((listing) => {
-                const bucket = getListingBucket(listing);
-                const explicitMarketplaces = getListingMarketplaces(listing, enabledPlatforms, { allowFallback: false });
-                const canPublish = workflowPreferences.review_before_publish ? bucket === 'ready' : bucket === 'drafts' || bucket === 'ready';
                 const selected = selectedIds.includes(listing.id);
                 return (
-                  <div
+                  <ListingsGridCard
                     key={listing.id}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => setSelectedListingId(listing.id)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter' || event.key === ' ') {
-                        event.preventDefault();
-                        setSelectedListingId(listing.id);
-                      }
-                    }}
-                    className={`rounded-[16px] border bg-white p-4 text-left transition hover:border-[#bfd2ff] hover:bg-[#f8fbff] ${
-                      selected ? 'border-[#bfd2ff] ring-2 ring-[#dbe7ff]' : 'border-[#e5e7eb]'
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex min-w-0 items-center gap-3">
-                        <div className="h-16 w-16 overflow-hidden rounded-[14px] bg-[#f2f4f7]">
-                          {getListingThumbnail(listing) ? <img src={toPublicImageUrl(getListingThumbnail(listing))} alt={getListingTitle(listing)} className="h-full w-full object-cover" /> : null}
-                        </div>
-                        <div className="min-w-0">
-                          <p className="truncate text-sm font-semibold text-[#101828]">{getListingTitle(listing)}</p>
-                          {getReadinessSummary(listing).blockers?.length ? (
-                            <p className="mt-1 text-xs text-[#b42318]">{getReadinessSummary(listing).blockers[0]}</p>
-                          ) : null}
-                          <p className="mt-1 text-xs text-[#667085]">#{listing.id}{listing.sku ? ` · SKU ${listing.sku}` : ''}</p>
-                          <p className="mt-1 text-xs text-[#667085]">{getListingImageCount(listing)} image{getListingImageCount(listing) === 1 ? '' : 's'}</p>
-                          <div className="mt-2 flex flex-wrap gap-1.5">
-                            {['ebay', 'facebook'].map((market) => {
-                              const summary = getMarketplacePreflightSummary(listing, market);
-                              const status = getMarketplacePreflightStatus(listing, market);
-                              const tone = getMarketplacePreflightTone(summary);
-                              return (
-                                <span
-                                  key={`${listing.id}-${market}-preflight-grid`}
-                                  className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold ${
-                                    tone === 'danger'
-                                      ? 'border-[#fecdca] bg-[#fff6ed] text-[#b54708]'
-                                      : tone === 'warning'
-                                      ? 'border-[#fef0c7] bg-[#fffaeb] text-[#8a4b10]'
-                                      : tone === 'success'
-                                      ? 'border-[#abefc6] bg-[#ecfdf3] text-[#027a48]'
-                                      : 'border-[#d0d5dd] bg-[#f9fafb] text-[#475467]'
-                                  }`}
-                                >
-                                  {market.toUpperCase()}: {status.replaceAll('_', ' ')}
-                                </span>
-                              );
-                            })}
-                            {(() => {
-                              const summary = getMarketplacePreflightSummary(listing, 'ebay') || getMarketplacePreflightSummary(listing, 'facebook');
-                              const blocker = getMarketplaceTopBlocker(summary);
-                              return blocker ? <span className="pp-chip">Top blocker: {blocker}</span> : null;
-                            })()}
-                            {(() => {
-                              const summary = getMarketplacePreflightSummary(listing, 'ebay') || getMarketplacePreflightSummary(listing, 'facebook');
-                              return summary?.last_checked_at ? <span className="pp-chip">Checked {getMarketplacePreflightAgeLabel(summary)}</span> : null;
-                            })()}
-                          </div>
-                        </div>
-                      </div>
-                      <input
-                        type="checkbox"
-                        checked={selected}
-                        onChange={(event) => {
-                          event.stopPropagation();
-                          toggleRow(listing.id);
-                        }}
-                        onClick={(event) => event.stopPropagation()}
-                        className="mt-1 h-4 w-4 rounded border-[#cbd5e1] text-[#2563eb]"
-                      />
-                    </div>
-                    <div className="mt-4 flex flex-wrap gap-2">
-                      <StatusPill status={bucket} label={bucket.charAt(0).toUpperCase() + bucket.slice(1)} />
-                      {listing?.quality_summary?.status ? <span className="pp-chip">{String(listing.quality_summary.status).replaceAll('_', ' ')}</span> : null}
-                      {(explicitMarketplaces.length ? explicitMarketplaces : ['unassigned']).map((marketplace) => (
-                        <span key={`${listing.id}-${marketplace}`} className="pp-chip">
-                          {formatMarketplace(marketplace)}
-                        </span>
-                      ))}
-                    </div>
-                    <div className="mt-4 grid grid-cols-3 gap-3">
-                      <div>
-                        <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[#667085]">Price</p>
-                        <p className="mt-1 text-sm font-semibold text-[#101828]">${getListingPrice(listing)}</p>
-                      </div>
-                      <div>
-                        <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[#667085]">Qty</p>
-                        <p className="mt-1 text-sm font-semibold text-[#101828]">{listing.quantity ?? 1}</p>
-                      </div>
-                      <div>
-                        <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[#667085]">Updated</p>
-                        <p className="mt-1 text-sm font-semibold text-[#101828]">
-                          {new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(new Date(listing.updated_at || listing.created_at || Date.now()))}
-                        </p>
-                      </div>
-                    </div>
-                    <div className="mt-4 flex flex-wrap gap-2">
-                      {(bucket === 'review' || listing.status === 'draft') ? (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={async (event) => {
-                            event.stopPropagation();
-                            await approveListing(listing.id);
-                          }}
-                        >
-                          Approve
-                        </Button>
-                      ) : null}
-                      {isAmazonVineSource(listing) && !isArchivedListing(listing) ? (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={async (event) => {
-                            event.stopPropagation();
-                            await archiveListing(listing.id);
-                          }}
-                        >
-                          Archive
-                        </Button>
-                      ) : null}
-                      <Button
-                        variant="danger"
-                        size="sm"
-                        onClick={async (event) => {
-                          event.stopPropagation();
-                          if (!confirmDeleteListings(1)) return;
-                          await deleteListing(listing.id);
-                        }}
-                      >
-                        Delete
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          router.push(`/listings/${listing.id}?mode=preview`);
-                        }}
-                      >
-                        Preview/Edit
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          router.push(`/listings/${listing.id}`);
-                        }}
-                      >
-                        Full page
-                      </Button>
-                      {canPublish ? (
-                        <Button
-                          size="sm"
-                          onClick={async (event) => {
-                            publishSingleListing(listing, event);
-                          }}
-                          disabled={publishing[listing.id]}
-                        >
-                          {publishing[listing.id] ? 'Publishing…' : 'Publish'}
-                        </Button>
-                      ) : null}
-                      {getListingBucket(listing) === 'failed' ? (
-                        <p className="mt-1 text-xs text-[#b42318]">
-                          {getListingFailureMessage(listing) || errors[listing.id] || 'Publish failed'}
-                        </p>
-                      ) : null}
-                    </div>
-                  </div>
+                    listing={listing}
+                    selected={selected}
+                    setSelectedListingId={setSelectedListingId}
+                    toggleRow={toggleRow}
+                    getListingThumbnail={getListingThumbnail}
+                    getListingTitle={getListingTitle}
+                    getReadinessSummary={getReadinessSummary}
+                    getListingImageCount={getListingImageCount}
+                    getMarketplacePreflightSummary={getMarketplacePreflightSummary}
+                    getMarketplacePreflightStatus={getMarketplacePreflightStatus}
+                    getMarketplacePreflightTone={getMarketplacePreflightTone}
+                    getMarketplaceTopBlocker={getMarketplaceTopBlocker}
+                    getMarketplacePreflightAgeLabel={getMarketplacePreflightAgeLabel}
+                    getListingBucket={getListingBucket}
+                    getListingMarketplaces={getListingMarketplaces}
+                    enabledPlatforms={enabledPlatforms}
+                    formatMarketplace={formatMarketplace}
+                    workflowPreferences={workflowPreferences}
+                    publishSingleListing={publishSingleListing}
+                    publishing={publishing}
+                    approveListing={approveListing}
+                    isAmazonVineSource={isAmazonVineSource}
+                    isArchivedListing={isArchivedListing}
+                    archiveListing={archiveListing}
+                    deleteListing={deleteListing}
+                    confirmDeleteListings={confirmDeleteListings}
+                    router={router}
+                    errors={errors}
+                    getListingFailureMessage={getListingFailureMessage}
+                    getListingPrice={getListingPrice}
+                  />
                 );
               })
             ) : (
-              <EmptyState title={`No ${LISTING_TABS.find((t) => t.value === activeTab)?.label || 'listings'} found`} description="Adjust the current filters or import new inventory to create drafts." />
+              <ListingsWorkspaceEmptyState activeTabLabel={LISTING_TABS.find((t) => t.value === activeTab)?.label} />
             )}
           </div>
         )}
@@ -2640,6 +2075,173 @@ export default function ListingsPage() {
           ) : null}
         </Drawer>
       </div>
+      </SectionPanel>
+      ) : null}
+
+      {(workspaceMode === 'repair' || workspaceMode === 'all') ? (
+      <ListingsCollapsibleSection
+        id="listing-status"
+        title="Workspace signals and repair tools"
+        description="Pricing posture, readiness counts, eBay preflight summary, and the repair queue live together here instead of crowding the first screen."
+        badge={`${listingMetrics.blockedCount} blocked`}
+        defaultOpen
+      >
+        <PageSplit columnsClassName="xl:grid-cols-[minmax(0,1fr)_380px]">
+          <PageMain>
+            <ListingsStatusGrid workflowPreferences={workflowPreferences} listingMetrics={listingMetrics} formatMarketplace={formatMarketplace} />
+          </PageMain>
+
+          <PageAside>
+            <ListingsPreflightPanel bulkPreflightSummary={bulkPreflightSummary} selectedRowsLength={selectedRows.length} />
+            <ListingsRepairQueuePanel
+              repairQueueImageStatusFilter={repairQueueImageStatusFilter}
+              setRepairQueueImageStatusFilter={setRepairQueueImageStatusFilter}
+              refreshRepairQueue={refreshRepairQueue}
+              repairQueueLoading={repairQueueLoading}
+              exportRepairQueueCsv={exportRepairQueueCsv}
+              repairQueueReport={repairQueueReport}
+              setSelectedListingId={setSelectedListingId}
+              runSingleListingPreflight={(listingId) => runBulkMarketplacePreflight(['ebay'], { forceRefresh: true, targetIds: [listingId] })}
+              applyRepairAction={applyRepairAction}
+              uploadActualPhotosToListing={uploadActualPhotosToListing}
+              approvePendingPhotos={approvePendingRepairQueuePhotos}
+            />
+          </PageAside>
+        </PageSplit>
+      </ListingsCollapsibleSection>
+      ) : null}
+
+      {(workspaceMode === 'launch' || workspaceMode === 'all') ? (
+      <ListingsCollapsibleSection
+        title="Launch drill and publish readiness"
+        description="Candidate selection, dry-run launch QA, and the latest publish-ready reports are grouped here so they stay available without owning the first screen."
+        badge={launchCandidatesReport?.candidates?.length ? `${launchCandidatesReport.candidates.length} launch candidates` : 'Launch QA'}
+        defaultOpen
+      >
+        <div className="space-y-6">
+          <ListingsLaunchCandidatesPanel
+            launchCandidatesLoading={launchCandidatesLoading}
+            refreshLaunchCandidates={refreshLaunchCandidates}
+            runPreflightOnCandidates={runPreflightOnLaunchCandidates}
+            runLaunchDrillForCandidates={runLaunchDrillForCandidates}
+            openFirstCandidate={openFirstLaunchCandidate}
+            exportLaunchCandidatesCsv={exportLaunchCandidatesCsv}
+            ebayAccountReadiness={ebayAccountReadiness}
+            launchCandidatesReport={launchCandidatesReport}
+          />
+          {bulkPreflightReport ? (
+            <ListingsReportPanel
+              title="Last bulk preflight report"
+              description="Review the latest bulk run without opening every listing."
+              metrics={[
+                { label: 'Ready for eBay', value: bulkPreflightReport?.summary?.ready_for_ebay || 0, detail: 'Rows whose current preflight is ready for eBay queueing.' },
+                { label: 'Ready for Facebook', value: bulkPreflightReport?.summary?.ready_for_facebook || 0, detail: 'Rows whose current preflight is ready for Facebook assisted handoff.' },
+                { label: 'Blocked', value: bulkPreflightReport?.summary?.blocked || 0, detail: 'Rows blocked by at least one marketplace.' },
+                { label: 'Preflight failed', value: bulkPreflightReport?.summary?.preflight_failed || 0, detail: 'Rows that returned a backend validation or provider failure.' },
+              ]}
+              items={(bulkPreflightReport?.items || []).slice(0, 6)}
+              itemKeyPrefix="bulk-preflight"
+              renderMarketStatus={(item, market, data) => (
+                <span key={`${item.listing_id}-${market}`} className="pp-chip">
+                  {market.toUpperCase()}: {String(data?.status || 'unknown').replaceAll('_', ' ')}
+                </span>
+              )}
+              renderFooter={(item) => (
+                item.top_blocker_code ? <p className="mt-2 text-xs text-[#b42318]">Top blocker: {item.top_blocker_code}</p> : null
+              )}
+            />
+          ) : null}
+
+          {bulkPublishReport ? (
+            <ListingsReportPanel
+              title="Last bulk publish-ready run"
+              description={`Dry-run ${bulkPublishReport?.dry_run ? 'preview' : 'live queue'} for ready-only marketplace publishing.`}
+              metrics={[
+                { label: 'Queued', value: bulkPublishReport?.summary?.queued || 0, detail: 'Listings queued successfully in live mode.' },
+                { label: 'Skipped blocked', value: bulkPublishReport?.summary?.skipped_blocked || 0, detail: 'Listings blocked by a marketplace preflight issue.' },
+                { label: 'Warnings need confirm', value: bulkPublishReport?.summary?.skipped_warning_requires_confirmation || 0, detail: 'Warning-only listings that were not allowed into live mode.' },
+                { label: 'Already queued', value: bulkPublishReport?.summary?.skipped_already_queued || 0, detail: 'Listings already had pending marketplace work.' },
+              ]}
+              items={(bulkPublishReport?.items || []).slice(0, 6)}
+              itemKeyPrefix="bulk-publish"
+              renderMarketStatus={(item, market, data) => (
+                <span key={`${item.listing_id}-${market}`} className="pp-chip">
+                  {market.toUpperCase()}: {String(data?.status || 'unknown').replaceAll('_', ' ')}
+                </span>
+              )}
+              renderFooter={(item) => (
+                <>
+                  {item.blocked_marketplaces?.length ? (
+                    <p className="mt-2 text-xs text-[#b42318]">Blocked: {item.blocked_marketplaces.join(', ')}</p>
+                  ) : null}
+                  {item.warning_marketplaces?.length ? (
+                    <p className="mt-1 text-xs text-[#8a4b10]">Warnings: {item.warning_marketplaces.join(', ')}</p>
+                  ) : null}
+                </>
+              )}
+            />
+          ) : null}
+
+          <SectionPanel
+            title="Launch QA checklist"
+            description="Operator-safe production drill steps for a tiny controlled eBay launch set."
+          >
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              {[
+                'Confirm eBay account is connected.',
+                'Confirm policy IDs are present.',
+                'Confirm merchant location key.',
+                'Confirm selected draft titles and prices.',
+                'Confirm condition and notes.',
+                'Confirm photos are actual item photos.',
+                'Confirm shipping weight and dimensions.',
+                'Confirm category and required aspects.',
+                'Confirm no source/reference-only image warning.',
+                'Run dry-run publish-ready or launch drill.',
+                'Queue only ready eBay listings with explicit confirmation.',
+                'Inspect translated errors and retry only retryable failures.',
+              ].map((item) => (
+                <div key={item} className="rounded-[12px] border border-[#e5e7eb] bg-white p-3 text-sm text-[#475467]">{item}</div>
+              ))}
+            </div>
+            {bulkPublishReport?.launch_drill ? (
+              <div className="mt-4 rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-4">
+                <p className="text-sm font-semibold text-[#101828]">Latest launch drill result</p>
+                <div className="mt-3 grid gap-3 md:grid-cols-3">
+                  <MetricCard label="Checked" value={bulkPublishReport.launch_drill.summary?.checked || 0} detail="Listings inspected in the drill." />
+                  <MetricCard label="Ready" value={bulkPublishReport.launch_drill.summary?.ready || 0} detail="Listings that passed the dry-run drill." />
+                  <MetricCard label="Blocked" value={bulkPublishReport.launch_drill.summary?.blocked || 0} detail="Listings that still need operator fixes." />
+                </div>
+              </div>
+            ) : null}
+          </SectionPanel>
+        </div>
+      </ListingsCollapsibleSection>
+      ) : null}
+
+      {(workspaceMode === 'queue' || workspaceMode === 'all') ? (
+      <ListingsCollapsibleSection
+        id="listing-publish-queue"
+        title="Queue monitoring"
+        description="Live worker progress and a direct handoff into the jobs console."
+        badge={`${publishJobStats.queued} queued`}
+        defaultOpen
+      >
+        <SectionPanel
+          noPadding
+          action={<Link href="/jobs" className="text-sm font-medium text-[#2563eb]">Open jobs console</Link>}
+        >
+          <div className="grid gap-3 p-5 md:grid-cols-2 xl:grid-cols-4">
+            <MetricCard label="Queued / running" value={publishJobStats.queued} detail="Jobs still moving through the worker." />
+            <MetricCard label="Completed" value={publishJobStats.completed} detail="Publish jobs that finished successfully." />
+            <MetricCard label="Failed" value={publishJobStats.failed} detail="Jobs that need attention or retry." />
+            <MetricCard label="Progress" value={`${publishJobStats.progress}%`} detail={`${publishJobStats.completed} of ${publishJobStats.total} publish jobs completed`} />
+          </div>
+        </SectionPanel>
+      </ListingsCollapsibleSection>
+      ) : null}
+      </PageFrame>
+      </ListingsWorkspaceErrorBoundary>
     </AppShell>
   );
 }

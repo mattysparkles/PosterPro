@@ -17,6 +17,7 @@ from app.models.models import Listing, ProductMediaCache, VineImportBatch, VineI
 from app.services.automation_bridge import submit_bridge_job, wait_for_bridge_job
 from app.services.amazon_media import AmazonProductMediaProvider
 from app.services.amazon_product_discovery import AmazonProductDiscoveryService
+from app.services.ebay_service import _clip_specific_value, _derive_color, _derive_item_type, _fallback_aspect_value
 from app.services.listing_review import derive_condition_data, derive_shipping_profile, normalize_listing_images
 from app.services.listing_workspace import normalize_marketplace_data
 from app.services.marketplace_field_mapper import build_marketplace_payload
@@ -246,6 +247,7 @@ class VineImportService:
                 db.add(item)
                 continue
             cached_urls = self._lookup_cached_media_urls(db, item.asin)
+            inventory_specifics, inventory_provenance = self._build_item_specifics(item, title=item.product_name)
             listing = Listing(
                 user_id=item.user_id,
                 status=ListingStatus.draft,
@@ -263,10 +265,7 @@ class VineImportService:
                 purchase_cost=item.estimated_tax_value,
                 suggested_price=item.estimated_tax_value,
                 listing_price=item.estimated_tax_value,
-                shipping_profile=derive_shipping_profile(
-                    listing={"title": item.product_name},
-                    existing={"estimated": True, "manual_measurement_needed": True, "shipping_notes": "Review actual package weight and dimensions before publish."},
-                ),
+                shipping_profile=self._build_estimated_shipping_profile(item, title=item.product_name),
                 custom_labels=self._build_labels(item, has_photos=bool(cached_urls)),
                 needs_review=True,
                 restricted_review_required=item.restricted_review_required,
@@ -274,14 +273,20 @@ class VineImportService:
                 detected_category_guess=item.detected_category_guess,
                 marketplace_allowed_status=item.marketplace_allowed_status,
                 image_urls=cached_urls,
-                listing_images=normalize_listing_images(
+                listing_images=self._build_trusted_amazon_listing_images(
                     image_urls=cached_urls,
                     source_page_url=item.amazon_source_page_url or item.item_url or item.manual_amazon_url,
-                    source_platform="amazon",
-                    default_is_reference=True,
-                    approved=False,
+                    asin=item.asin,
+                    product_name=item.product_name,
                 ),
+                item_specifics=inventory_specifics,
             )
+            inventory_marketplace_data = normalize_marketplace_data(dict(listing.marketplace_data or {}))
+            inventory_marketplace_data["ebay_item_specifics_provenance"] = inventory_provenance
+            inventory_marketplace_data["ebay_item_specifics_approximate"] = [
+                field for field, source in inventory_provenance.items() if source in {"derived", "approximate", "default"}
+            ]
+            listing.marketplace_data = inventory_marketplace_data
             db.add(listing)
             db.flush()
             item.inventory_item_id = listing.id
@@ -388,12 +393,16 @@ class VineImportService:
             )
             listing.source_type = "amazon_vine"
             listing.source_metadata = self._source_metadata(item, batch.id)
+            shipping_estimate = self._build_estimated_shipping_profile(item, title=listing.title, description=listing.description, existing=listing.shipping_profile or {})
             listing.shipping_profile = derive_shipping_profile(
                 listing={"title": listing.title, "description": listing.description},
-                existing=listing.shipping_profile or {"estimated": True, "manual_measurement_needed": True},
+                existing=shipping_estimate,
             )
+            listing.shipping_profile["estimated_fields"] = shipping_estimate.get("estimated_fields") or []
+            listing.shipping_profile["provenance"] = shipping_estimate.get("provenance") or {}
             listing.category_suggestion = item.category or item.detected_category_guess or listing.category_suggestion
-            listing.item_specifics = self._build_item_specifics(item, listing.item_specifics)
+            specifics, provenance = self._build_item_specifics(item, listing.title, listing.description, listing.item_specifics)
+            listing.item_specifics = specifics
             listing.tags = self._build_tags(item, listing.tags)
             marketplace_data = normalize_marketplace_data(dict(listing.marketplace_data or {}))
             existing_targets = marketplace_data.get("targets")
@@ -419,6 +428,10 @@ class VineImportService:
             channels[MarketplaceName.ebay.value] = ebay_channel
             channels[MarketplaceName.facebook.value] = facebook_channel
             marketplace_data["channels"] = channels
+            marketplace_data["ebay_item_specifics_provenance"] = provenance
+            marketplace_data["ebay_item_specifics_approximate"] = [
+                field for field, source in provenance.items() if source in {"derived", "approximate", "default"}
+            ]
             listing.marketplace_data = marketplace_data
             listing.marketplace_data["draft_previews"] = {
                 MarketplaceName.ebay.value: build_marketplace_payload(listing, MarketplaceName.ebay.value),
@@ -429,12 +442,11 @@ class VineImportService:
                 image_urls_to_use = cached_urls or discovered_urls
                 if image_urls_to_use:
                     listing.image_urls = image_urls_to_use
-                    listing.listing_images = normalize_listing_images(
+                    listing.listing_images = self._build_trusted_amazon_listing_images(
                         image_urls=image_urls_to_use,
                         source_page_url=result.get("source_page_url") or item.amazon_source_page_url or item.item_url or item.manual_amazon_url,
-                        source_platform="amazon",
-                        default_is_reference=True,
-                        approved=False,
+                        asin=item.asin,
+                        product_name=item.product_name,
                     )
                 else:
                     listing.custom_labels = list(dict.fromkeys([*(listing.custom_labels or []), "needs_photos"]))
@@ -465,6 +477,86 @@ class VineImportService:
             commit=True,
         )
         return {"created": created, "updated": updated, "skipped": skipped, "created_listing_ids": created_listing_ids}
+
+    def auto_build_batch_drafts(
+        self,
+        db: Session,
+        *,
+        batch: VineImportBatch,
+        item_ids: list[int] | None = None,
+        new_only: bool = True,
+        include_cancelled: bool = True,
+    ) -> dict:
+        query = select(VineImportItem).where(VineImportItem.batch_id == batch.id).order_by(VineImportItem.id.asc())
+        if item_ids:
+            query = query.where(VineImportItem.id.in_(item_ids))
+        items = db.execute(query).scalars().all()
+        target_items = [
+            item
+            for item in items
+            if (not new_only or not self._is_duplicate_vine_item(item))
+        ]
+        target_item_ids = [item.id for item in target_items]
+        duplicate_count = sum(1 for item in items if self._is_duplicate_vine_item(item))
+        if not target_item_ids:
+            return {
+                "batch_id": batch.id,
+                "processed_item_ids": [],
+                "listing_ids": [],
+                "new_only": new_only,
+                "duplicates_skipped": duplicate_count,
+                "draft_result": {"created": 0, "updated": 0, "skipped": 0, "created_listing_ids": []},
+                "repair_result": {"updated": 0, "removed_unsafe": 0, "already_present": 0, "missing_asin": 0, "bridge_refetched": 0, "bridge_failed": 0},
+            }
+
+        draft_result = self.create_listing_drafts(
+            db,
+            batch=batch,
+            item_ids=target_item_ids,
+            include_cancelled=include_cancelled,
+            fetch_media_first=False,
+            require_media_for_asin=False,
+            allow_drafts_without_media=True,
+        )
+
+        refreshed_items = db.execute(
+            select(VineImportItem).where(VineImportItem.id.in_(target_item_ids)).order_by(VineImportItem.id.asc())
+        ).scalars().all()
+        draft_listing_ids = sorted({item.listing_id for item in refreshed_items if item.listing_id})
+        repair_result = self.repair_vine_listing_images(
+            db,
+            user_id=batch.user_id,
+            batch_id=batch.id,
+            listing_ids=draft_listing_ids,
+            include_archived=False,
+            force_refresh=False,
+            use_bridge_session=True,
+            only_missing_images=True,
+            limit=None,
+        ) if draft_listing_ids else {
+            "updated": 0,
+            "removed_unsafe": 0,
+            "already_present": 0,
+            "missing_asin": 0,
+            "bridge_refetched": 0,
+            "bridge_failed": 0,
+            "total_vine_listings": 0,
+            "processed": 0,
+            "include_archived": False,
+            "force_refresh": False,
+            "listing_ids": [],
+            "batch_id": batch.id,
+        }
+
+        return {
+            "batch_id": batch.id,
+            "processed_item_ids": target_item_ids,
+            "listing_ids": draft_listing_ids,
+            "new_only": new_only,
+            "duplicates_skipped": duplicate_count,
+            "draft_result": draft_result,
+            "repair_result": repair_result,
+        }
 
     def export_problem_rows_csv(self, items: list[VineImportItem]) -> str:
         output = io.StringIO()
@@ -533,6 +625,40 @@ class VineImportService:
             return [cache.primary_image_url]
 
         return []
+
+    def _build_trusted_amazon_listing_images(
+        self,
+        *,
+        image_urls: list[str] | None,
+        source_page_url: str | None,
+        asin: str | None,
+        product_name: str | None,
+    ) -> list[dict]:
+        cleaned_urls = [str(url).strip() for url in (image_urls or []) if str(url).strip()]
+        if not cleaned_urls:
+            return []
+        return normalize_listing_images(
+            listing_images=[
+                {
+                    "storage_path": url,
+                    "source_page_url": source_page_url,
+                    "source_platform": "amazon",
+                    "operator_state": "approved",
+                    "is_reference": False,
+                    "metadata": {
+                        "source": "amazon_vine",
+                        "asin": asin,
+                        "product_name": product_name,
+                        "trusted_catalog_match": True,
+                    },
+                }
+                for url in cleaned_urls
+            ],
+            source_page_url=source_page_url,
+            source_platform="amazon",
+            default_is_reference=False,
+            approved=True,
+        )
 
     def _to_public_media_path(self, path: str) -> str:
         marker = "/storage/"
@@ -676,31 +802,30 @@ class VineImportService:
                 else:
                     bridge_failed += 1
 
-            safe_reference_images = normalize_listing_images(
+            trusted_catalog_images = self._build_trusted_amazon_listing_images(
                 image_urls=gallery_urls,
                 source_page_url=item.item_url if item else source_metadata.get("item_url"),
-                source_platform="amazon",
-                default_is_reference=True,
-                approved=False,
+                asin=asin,
+                product_name=product_name,
             ) if gallery_urls else []
             refreshed_images = [image for image in normalized_images if not _is_unsafe_vine_image(image)]
             discovered_description = _sanitize_vine_text((result or {}).get("description") or (listing.description or ""))
             if has_approved_actual:
                 merged_images = refreshed_images
-                if safe_reference_images:
+                if trusted_catalog_images:
                     existing_keys = {
                         f"{str(img.get('storage_path') or '')}|{str(img.get('source_url') or '')}"
                         for img in merged_images
                     }
-                    for image in safe_reference_images:
+                    for image in trusted_catalog_images:
                         key = f"{str(image.get('storage_path') or '')}|{str(image.get('source_url') or '')}"
                         if key not in existing_keys:
                             merged_images.append(image)
                             existing_keys.add(key)
                 listing.listing_images = normalize_listing_images(listing_images=merged_images)
                 listing.image_urls = [image["storage_path"] for image in (listing.listing_images or []) if image.get("operator_state") != "rejected"]
-            elif safe_reference_images:
-                listing.listing_images = normalize_listing_images(listing_images=safe_reference_images)
+            elif trusted_catalog_images:
+                listing.listing_images = normalize_listing_images(listing_images=trusted_catalog_images)
                 listing.image_urls = [image["storage_path"] for image in (listing.listing_images or []) if image.get("operator_state") != "rejected"]
             else:
                 listing.listing_images = refreshed_images
@@ -856,15 +981,140 @@ class VineImportService:
         body_lines.append("Draft is prepared for manual approval and marketplace handoff.")
         return _sanitize_vine_text("\n".join(body_lines))
 
-    def _build_item_specifics(self, item: VineImportItem, existing: dict | None) -> dict:
+    def _build_item_specifics(
+        self,
+        item: VineImportItem,
+        title: str | None,
+        description: str | None = None,
+        existing: dict | None = None,
+    ) -> tuple[dict, dict[str, str]]:
         specifics = dict(existing or {})
-        if item.brand and "Brand" not in specifics:
-            specifics["Brand"] = item.brand
-        if item.category and "Type" not in specifics:
-            specifics["Type"] = item.category
-        if item.asin and "Model" not in specifics:
-            specifics["Model"] = item.asin
-        return specifics
+        provenance: dict[str, str] = {}
+        title_text = str(title or item.product_name or "").strip()
+        description_text = str(description or "").strip()
+        title_context = " ".join(part for part in (title_text, description_text) if part)
+
+        for key, value in list(specifics.items()):
+            if str(value or "").strip():
+                provenance[str(key)] = provenance.get(str(key), "existing")
+
+        def set_specific(name: str, value: str | None, source: str) -> None:
+            text = str(value or "").strip()
+            if not text:
+                return
+            if str(specifics.get(name) or "").strip():
+                provenance.setdefault(name, "existing")
+                return
+            specifics[name] = _clip_specific_value(text)
+            provenance[name] = source
+
+        set_specific("Brand", item.brand, "existing")
+        set_specific("Type", item.category or item.detected_category_guess or _derive_item_type(title_text), "derived")
+        set_specific("Model", item.asin or None, "derived")
+
+        if not str(specifics.get("Brand") or "").strip():
+            specifics["Brand"] = "Does Not Apply"
+            provenance["Brand"] = "approximate"
+
+        if not str(specifics.get("Type") or "").strip():
+            specifics["Type"] = _derive_item_type(title_context) or "Does Not Apply"
+            provenance["Type"] = "approximate"
+
+        if not str(specifics.get("Model") or "").strip():
+            specifics["Model"] = "Does Not Apply"
+            provenance["Model"] = "approximate"
+
+        for aspect_name in [
+            "MPN",
+            "UPC",
+            "EAN",
+            "ISBN",
+            "Color",
+            "Size",
+            "Material",
+            "Compatible Brand",
+            "Compatible Model",
+            "Style",
+            "Capacity",
+            "Voltage",
+            "Wattage",
+            "Amperage",
+            "Department",
+            "Pattern",
+            "Product Line",
+            "Country/Region of Manufacture",
+            "Features",
+        ]:
+            if str(specifics.get(aspect_name) or "").strip():
+                provenance.setdefault(aspect_name, "existing")
+                continue
+            fallback = _fallback_aspect_value(
+                type("DraftListing", (), {"title": title_text, "description": description_text, "source_type": "amazon_vine", "source_metadata": {"asin": item.asin or "", "brand": item.brand or "", "category": item.category or item.detected_category_guess or ""}, "item_specifics": specifics, "condition": "New"})(),
+                aspect_name,
+                title_context,
+            )
+            if fallback:
+                specifics[aspect_name] = _clip_specific_value(fallback)
+                provenance[aspect_name] = "approximate"
+
+        return specifics, provenance
+
+    def _build_estimated_shipping_profile(
+        self,
+        item: VineImportItem,
+        *,
+        title: str | None,
+        description: str | None = None,
+        existing: dict | None = None,
+    ) -> dict:
+        shipping = dict(existing or {})
+        title_text = " ".join(part for part in (str(title or item.product_name or "").strip(), str(description or "").strip()) if part).lower()
+        category_text = str(item.category or item.detected_category_guess or "").lower()
+        tokens = f"{title_text} {category_text}".strip()
+
+        def set_if_missing(key: str, value):
+            if shipping.get(key) in (None, "", {}, []):
+                shipping[key] = value
+
+        if any(word in tokens for word in ("charger", "adapter", "cable", "kvm", "controller", "mouse", "keyboard", "dock", "hub", "sensor")):
+            weight = 1.0
+            dimensions = {"length": 10, "width": 8, "height": 4}
+        elif any(word in tokens for word in ("bag", "backpack", "duffel", "purse", "wallet", "shoes", "heels", "sandal", "boot", "skate")):
+            weight = 2.5
+            dimensions = {"length": 14, "width": 12, "height": 6}
+        elif any(word in tokens for word in ("laptop", "tablet", "monitor", "screen", "printer", "router", "wifi", "wifi extender")):
+            weight = 3.5
+            dimensions = {"length": 16, "width": 12, "height": 6}
+        elif any(word in tokens for word in ("bottle", "spray", "liquid", "soap", "cleaner")):
+            weight = 1.5
+            dimensions = {"length": 10, "width": 6, "height": 4}
+        else:
+            weight = 2.0
+            dimensions = {"length": 12, "width": 10, "height": 6}
+
+        set_if_missing("package_weight", weight)
+        if not isinstance(shipping.get("package_dimensions"), dict):
+            shipping["package_dimensions"] = {}
+        package_dimensions = dict(shipping.get("package_dimensions") or {})
+        for key, value in dimensions.items():
+            if package_dimensions.get(key) in (None, "", 0):
+                package_dimensions[key] = value
+        shipping["package_dimensions"] = package_dimensions
+        set_if_missing("shipping_class_suggestion", "usps_ground_advantage")
+        shipping["estimated"] = True
+        shipping["manual_measurement_needed"] = False
+        shipping["shipping_notes"] = str(
+            shipping.get("shipping_notes")
+            or "Estimated from Vine title/category for draft readiness. Verify the packed item before final publish."
+        ).strip()
+        shipping["estimated_fields"] = list(dict.fromkeys([*(shipping.get("estimated_fields") or []), "package_weight", "package_dimensions"]))
+        shipping["provenance"] = {
+            **(shipping.get("provenance") if isinstance(shipping.get("provenance"), dict) else {}),
+            "package_weight": "approximate",
+            "package_dimensions": "approximate",
+            "shipping_class_suggestion": "default",
+        }
+        return shipping
 
     def _build_tags(self, item: VineImportItem, existing: list[str] | None) -> list[str]:
         tags = [str(tag).strip() for tag in (existing or []) if str(tag).strip()]

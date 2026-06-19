@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
 
 import AppShell from '../../components/layout/AppShell';
+import { PageAside, PageBand, PageFrame, PageMain, PageSplit } from '../../components/layout/PageFrame';
 import ActionBar from '../../components/ui/action-bar';
 import Button from '../../components/ui/button';
 import DataTable from '../../components/ui/data-table';
@@ -16,6 +17,7 @@ import StatusPill from '../../components/ui/status-pill';
 import { useAuth } from '../../contexts/AuthContext';
 import useDashboardData from '../../hooks/useDashboardData';
 import {
+  autoBuildVineDrafts,
   createVineDrafts,
   createVineInventory,
   fetchVineBatch,
@@ -79,6 +81,32 @@ export default function VineImportPage() {
   const [enforceSixMonthLock, setEnforceSixMonthLock] = useState(true);
   const [draftProgress, setDraftProgress] = useState(null);
   const [filterMode, setFilterMode] = useState('all');
+
+  const runAutoBuild = async (batchId, options = {}) => {
+    setBusyAction('auto-build');
+    try {
+      const result = await autoBuildVineDrafts(batchId, options);
+      const listingIds = Array.isArray(result?.listing_ids) ? result.listing_ids : [];
+      setLastDraftListingIds(listingIds);
+      setFilterMode('new');
+      await loadBatches(batchId);
+      const created = Number(result?.draft_result?.created || 0);
+      const updated = Number(result?.draft_result?.updated || 0);
+      const skipped = Number(result?.draft_result?.skipped || 0);
+      const duplicates = Number(result?.duplicates_skipped || 0);
+      const bridgeRefetched = Number(result?.repair_result?.bridge_refetched || 0);
+      const bridgeFailed = Number(result?.repair_result?.bridge_failed || 0);
+      toast.success(
+        `Auto-build finished (${created} created, ${updated} updated, ${skipped} skipped, ${duplicates} duplicates ignored, ${bridgeRefetched} image repairs, ${bridgeFailed} image gaps).`,
+      );
+      return result;
+    } catch (error) {
+      toast.error(error.message || 'Auto-build failed.');
+      throw error;
+    } finally {
+      setBusyAction('');
+    }
+  };
 
   const canAccess = !!user?.can_access_vine_import;
 
@@ -177,6 +205,8 @@ export default function VineImportPage() {
       }}
     >
       <PageHeader
+        eyebrow="Imports"
+        breadcrumbs={[{ label: 'Imports' }, { label: 'Amazon Vine', active: true }]}
         title="Amazon Vine Import"
         description="Import Amazon Vine itemized reports and create robust draft listings, including rows marked locked/cancelled when needed."
         actions={
@@ -191,6 +221,9 @@ export default function VineImportPage() {
         }
       />
 
+      <PageFrame>
+      <PageSplit columnsClassName="xl:grid-cols-[minmax(0,1fr)_340px]">
+      <PageMain>
       <SectionPanel title="Upload" description="Accepted formats: .xlsx and .csv preferred, .pdf supported with required preflight review.">
         <div className="mb-3 rounded-[12px] border border-[#e4e7ec] bg-[#f9fafb] px-4 py-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -232,22 +265,22 @@ export default function VineImportPage() {
               if (!file) return;
               setUploading(true);
               try {
-              const batch = await uploadVineReport(file);
-              setActiveBatch(batch);
-              setSelectedIds([]);
-              await loadBatches(batch.id);
-              const duplicateRows = Number(batch?.stats_json?.rows_duplicate || 0);
-              const newRows = Number(batch?.stats_json?.rows_new || 0);
-              toast.success(
-                duplicateRows
-                  ? `Vine report parsed (${newRows} new, ${duplicateRows} duplicate row${duplicateRows === 1 ? '' : 's'} ignored).`
-                  : 'Vine report parsed.',
-              );
-            } catch (error) {
-              toast.error(error.message);
-            } finally {
-              setUploading(false);
-              event.target.value = '';
+                const batch = await uploadVineReport(file);
+                setActiveBatch(batch);
+                setSelectedIds([]);
+                const duplicateRows = Number(batch?.stats_json?.rows_duplicate || 0);
+                const newRows = Number(batch?.stats_json?.rows_new || 0);
+                toast.success(
+                  duplicateRows
+                    ? `Vine report parsed (${newRows} new, ${duplicateRows} duplicate row${duplicateRows === 1 ? '' : 's'} ignored).`
+                    : 'Vine report parsed.',
+                );
+                await runAutoBuild(batch.id, { newOnly: true, includeCancelled: true });
+              } catch (error) {
+                toast.error(error.message);
+              } finally {
+                setUploading(false);
+                event.target.value = '';
               }
             }}
           />
@@ -259,6 +292,25 @@ export default function VineImportPage() {
       </SectionPanel>
       {loadError ? <ErrorState title="Could not load Vine imports" description={loadError} action={<Button variant="outline" onClick={() => loadBatches(activeBatch?.id || null)}>Retry</Button>} /> : null}
       {loading ? <LoadingSkeleton lines={4} className="mb-4" /> : null}
+
+      </PageMain>
+
+      <PageAside>
+      <PageBand className="space-y-3">
+        <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--pp-shell-soft-copy)]">Batch context</p>
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
+          <div className="rounded-[16px] border border-[var(--pp-border)] bg-white p-4">
+            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--pp-shell-soft-copy)]">Active batch</p>
+            <p className="mt-2 text-sm font-semibold text-[var(--pp-text)]">{activeBatch ? `Batch #${activeBatch.id}` : 'No batch selected'}</p>
+            <p className="mt-1 text-sm text-[var(--pp-muted)]">{activeBatch?.filename || 'Upload or open a batch to continue.'}</p>
+          </div>
+          <div className="rounded-[16px] border border-[var(--pp-border)] bg-white p-4">
+            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--pp-shell-soft-copy)]">Review scope</p>
+            <p className="mt-2 text-sm font-semibold text-[var(--pp-text)]">{String(filterMode || 'all').replaceAll('_', ' ')}</p>
+            <p className="mt-1 text-sm text-[var(--pp-muted)]">{filteredItems.length} visible row{filteredItems.length === 1 ? '' : 's'} in the current filter.</p>
+          </div>
+        </div>
+      </PageBand>
 
       <SectionPanel title="Import History" description="Recent private Vine imports for this account.">
         <DataTable
@@ -286,6 +338,9 @@ export default function VineImportPage() {
           emptyState={<EmptyState title="No imports yet" description="Upload your first Vine report to begin the preflight review." className="border-0 p-0 py-6" />}
         />
       </SectionPanel>
+      </PageAside>
+      </PageSplit>
+      </PageFrame>
 
       <SectionPanel title="Preflight Review" description="Review parsed rows before creating inventory or drafts. For this workflow, locked/cancelled rows can still be drafted so nothing gets stranded.">
         {activeBatch ? (
@@ -455,6 +510,17 @@ export default function VineImportPage() {
                   }}
                 >
                   Create inventory records
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!!busyAction || !activeBatch}
+                  onClick={async () => {
+                    if (!activeBatch) return;
+                    await runAutoBuild(activeBatch.id, { newOnly: true, includeCancelled: true });
+                  }}
+                >
+                  Auto-build new drafts
                 </Button>
                 <Button
                   size="sm"

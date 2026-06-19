@@ -99,6 +99,24 @@ def _safe_json(response: httpx.Response) -> dict[str, Any]:
         return {"raw": response.text}
 
 
+def _coerce_positive_float(value: Any) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if numeric <= 0:
+        return None
+    return round(numeric, 3)
+
+
+def _coerce_positive_int(value: Any) -> int | None:
+    try:
+        numeric = int(round(float(value)))
+    except (TypeError, ValueError):
+        return None
+    return numeric if numeric > 0 else None
+
+
 def _to_public_image_url(path: str) -> str:
     raw = str(path or "").strip()
     if not raw:
@@ -201,7 +219,8 @@ def _sync_ebay_marketplace_listing(
             MarketplaceListing.listing_id == listing_id,
             MarketplaceListing.marketplace == MarketplaceName.ebay,
         )
-    ).scalar_one_or_none()
+        .order_by(MarketplaceListing.updated_at.desc(), MarketplaceListing.id.desc())
+    ).scalars().first()
     if not row:
         row = MarketplaceListing(
             listing_id=listing_id,
@@ -770,7 +789,10 @@ async def suggest_ebay_category(listing: Listing, account: MarketplaceAccount, m
     category = first.get("category") or {}
     category_id = str(category.get("categoryId") or "").strip()
     if not category_id:
-        fallback_category_id = str(listing.category_suggestion or "171485").strip() or "171485"
+        fallback_category_id = str(listing.category_id or "").strip() if str(listing.category_id or "").strip().isdigit() else ""
+        if not fallback_category_id:
+            fallback_category_id = str(listing.category_suggestion or "").strip() if str(listing.category_suggestion or "").strip().isdigit() else ""
+        fallback_category_id = fallback_category_id or "171485"
         return {"categoryId": fallback_category_id, "categoryName": fallback_category_id}
     return {
         "categoryId": category_id,
@@ -1351,12 +1373,14 @@ async def _cached_category_aspects(
     force_refresh: bool = False,
 ) -> tuple[dict[str, Any] | None, str, bool]:
     cache_key = f"ebay:{marketplace_id}:{category_id}:aspects"
-    cached = db.execute(
+    cached_rows = db.execute(
         select(MarketplaceMetadataCache).where(
             MarketplaceMetadataCache.marketplace == "ebay",
             MarketplaceMetadataCache.cache_key == cache_key,
         )
-    ).scalar_one_or_none()
+        .order_by(MarketplaceMetadataCache.updated_at.desc(), MarketplaceMetadataCache.id.desc())
+    ).scalars().all()
+    cached = cached_rows[0] if cached_rows else None
     if cached and cached.payload and cached.expires_at and cached.expires_at > datetime.utcnow() and not force_refresh:
         return cached.payload, "cache", True
     try:
@@ -1427,10 +1451,90 @@ def _ebay_condition_value(listing: Listing) -> str:
     return "USED_GOOD"
 
 
+def _is_placeholder_specific_value(name: str, values: list[str]) -> bool:
+    normalized_name = str(name or "").strip().lower()
+    normalized_values = [str(value or "").strip().lower() for value in values if str(value or "").strip()]
+    if not normalized_values:
+        return True
+    placeholders = {"does not apply", "n/a", "na", "unknown", "not applicable"}
+    if all(value in placeholders for value in normalized_values):
+        return True
+    if normalized_name == "compatible model" and all(value in {"for asin", "universal"} for value in normalized_values):
+        return True
+    return False
+
+
+def _sanitize_ebay_specific_values(name: str, values: list[str]) -> list[str]:
+    normalized_name = str(name or "").strip().lower()
+    cleaned: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        if normalized_name == "eprel registration number" and not re.fullmatch(r"\d{1,19}", text):
+            continue
+        cleaned.append(_clip_specific_value(text))
+    return cleaned
+
+
+def _cap_ebay_item_specifics(
+    mapped: dict[str, list[str]],
+    required_aspects: list[dict[str, Any]],
+    recommended_aspects: list[dict[str, Any]],
+) -> dict[str, list[str]]:
+    max_specifics = 45
+    if len(mapped) <= max_specifics:
+        return mapped
+
+    required_names = [str(item.get("localizedAspectName") or "").strip() for item in required_aspects if str(item.get("localizedAspectName") or "").strip()]
+    recommended_names = [str(item.get("localizedAspectName") or "").strip() for item in recommended_aspects if str(item.get("localizedAspectName") or "").strip()]
+    priority_names = []
+    seen: set[str] = set()
+    for name in [*required_names, *recommended_names, "Brand", "Type", "Model", "MPN", "Color", "Size", "Material"]:
+        if name and name in mapped and name not in seen:
+            seen.add(name)
+            priority_names.append(name)
+
+    capped: dict[str, list[str]] = {}
+    for name in priority_names:
+        capped[name] = mapped[name]
+        if len(capped) >= max_specifics:
+            return capped
+
+    for name, values in mapped.items():
+        if name in capped:
+            continue
+        capped[name] = values
+        if len(capped) >= max_specifics:
+            break
+    return capped
+
+
+def _build_ebay_package_weight_and_size(listing: Listing) -> dict[str, Any] | None:
+    shipping = listing.shipping_profile if isinstance(listing.shipping_profile, dict) else {}
+    weight_value = _coerce_positive_float(shipping.get("package_weight") or shipping.get("item_weight"))
+    dimensions = shipping.get("package_dimensions") if isinstance(shipping.get("package_dimensions"), dict) else {}
+    length = _coerce_positive_int(dimensions.get("length"))
+    width = _coerce_positive_int(dimensions.get("width"))
+    height = _coerce_positive_int(dimensions.get("height"))
+
+    payload: dict[str, Any] = {}
+    if weight_value is not None:
+        payload["weight"] = {"value": weight_value, "unit": "POUND"}
+    if length and width and height:
+        payload["dimensions"] = {
+            "length": length,
+            "width": width,
+            "height": height,
+            "unit": "INCH",
+        }
+    return payload or None
+
+
 def _map_ebay_item_specifics(
     listing: Listing,
     aspects: dict[str, Any] | None,
-) -> tuple[dict[str, list[str]], list[dict[str, Any]], list[dict[str, Any]], list[str], list[str]]:
+) -> tuple[dict[str, list[str]], list[dict[str, Any]], list[dict[str, Any]], list[str], list[str], dict[str, str]]:
     raw_aspects = (aspects or {}).get("aspects") or []
     allowed: dict[str, dict[str, Any]] = {}
     required: list[dict[str, Any]] = []
@@ -1452,17 +1556,27 @@ def _map_ebay_item_specifics(
             optional.append(aspect)
 
     existing_specifics = listing.item_specifics if isinstance(listing.item_specifics, dict) else {}
+    draft_provenance = {}
+    if isinstance(listing.marketplace_data, dict):
+        raw_provenance = listing.marketplace_data.get("ebay_item_specifics_provenance")
+        if isinstance(raw_provenance, dict):
+            draft_provenance = {str(key): str(value) for key, value in raw_provenance.items() if str(key).strip()}
     candidate_values = _ebay_candidate_aspect_values(listing)
     mapped: dict[str, list[str]] = {}
     missing_required: list[str] = []
     unsupported: list[str] = []
+    provenance: dict[str, str] = {}
 
     for key, value in existing_specifics.items():
         normalized = str(key).strip().lower()
         if normalized and normalized not in allowed:
             unsupported.append(str(key))
         if normalized in allowed and value not in (None, "", []):
-            mapped[str(key)] = _flatten_aspect_values(value)
+            flattened = _sanitize_ebay_specific_values(str(key), _flatten_aspect_values(value))
+            if not flattened or _is_placeholder_specific_value(str(key), flattened):
+                continue
+            mapped[str(key)] = flattened
+            provenance[str(key)] = draft_provenance.get(str(key), "existing")
 
     for aspect in [*required, *recommended, *optional]:
         name = str(aspect.get("localizedAspectName") or "").strip()
@@ -1473,17 +1587,38 @@ def _map_ebay_item_specifics(
             continue
         candidate = candidate_values.get(normalized)
         if candidate:
-            mapped[name] = [candidate[:80]]
+            cleaned_candidate = _sanitize_ebay_specific_values(name, [candidate[:80]])
+            if not cleaned_candidate or _is_placeholder_specific_value(name, cleaned_candidate):
+                if required_value:
+                    missing_required.append(name)
+                continue
+            mapped[name] = cleaned_candidate
+            provenance[name] = "derived"
+            continue
+        fallback = _fallback_aspect_value(listing, name, str(listing.title or ""))
+        if fallback:
+            cleaned_fallback = _sanitize_ebay_specific_values(name, [_clip_specific_value(fallback)])
+            if not cleaned_fallback or _is_placeholder_specific_value(name, cleaned_fallback):
+                if required_value:
+                    missing_required.append(name)
+                continue
+            mapped[name] = cleaned_fallback
+            provenance[name] = "approximate"
             continue
         if required_value:
             missing_required.append(name)
 
     if "Brand" not in mapped and candidate_values.get("brand"):
-        mapped["Brand"] = [candidate_values["brand"][:80]]
+        cleaned_brand = _sanitize_ebay_specific_values("Brand", [candidate_values["brand"][:80]])
+        if cleaned_brand and not _is_placeholder_specific_value("Brand", cleaned_brand):
+            mapped["Brand"] = cleaned_brand
+            provenance["Brand"] = "derived"
     if "Brand" not in mapped:
         mapped["Brand"] = [_derive_brand(listing)]
+        provenance["Brand"] = draft_provenance.get("Brand", "default")
 
-    return mapped, required, recommended, missing_required, unsupported
+    mapped = _cap_ebay_item_specifics(mapped, required, recommended)
+    return mapped, required, recommended, missing_required, unsupported, provenance
 
 
 async def build_ebay_publish_plan(
@@ -1504,7 +1639,7 @@ async def build_ebay_publish_plan(
         category_id,
         marketplace_id=marketplace_id,
     ) if category_id else (None, "unavailable", False)
-    mapped_specifics, required_aspects, recommended_aspects, missing_required, unsupported = _map_ebay_item_specifics(
+    mapped_specifics, required_aspects, recommended_aspects, missing_required, unsupported, provenance = _map_ebay_item_specifics(
         listing,
         aspect_payload,
     )
@@ -1532,6 +1667,7 @@ async def build_ebay_publish_plan(
 
     sku = f"posterpro-{listing.user_id}-{listing.id}"
     price = listing.suggested_price or listing.listing_price or listing.buy_it_now_price or listing.estimated_value or 19.99
+    package_weight_and_size = _build_ebay_package_weight_and_size(listing)
     inventory_payload = {
         "sku": sku,
         "availability": {"shipToLocationAvailability": {"quantity": max(1, int(listing.quantity or 1))}},
@@ -1543,6 +1679,8 @@ async def build_ebay_publish_plan(
             "imageUrls": image_urls,
         },
     }
+    if package_weight_and_size:
+        inventory_payload["packageWeightAndSize"] = package_weight_and_size
     offer_payload = {
         "sku": sku,
         "marketplaceId": marketplace_id,
@@ -1610,8 +1748,10 @@ async def build_ebay_publish_plan(
                 if value
             },
             "item_specifics": mapped_specifics,
+            "item_specifics_provenance": provenance,
+            "item_specifics_approximate": [field for field, source in provenance.items() if source in {"derived", "approximate", "default"}],
             "image_urls": image_urls,
-            "packageWeightAndSize": listing.shipping_profile or {},
+            "packageWeightAndSize": package_weight_and_size or {},
             "shipping_policy": shipping_policy,
             "marketplaceId": marketplace_id,
             "listing_format": "FIXED_PRICE",

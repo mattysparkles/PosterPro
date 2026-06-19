@@ -38,6 +38,7 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
     shipping = shared["shipping"]
 
     if market == "ebay":
+        marketplace_data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}
         return {
             "marketplace": market,
             "title": shared["title"],
@@ -47,6 +48,8 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
             "quantity": shared["quantity"],
             "category_id": listing.category_id,
             "item_specifics": shared["item_specifics"],
+            "item_specifics_provenance": marketplace_data.get("ebay_item_specifics_provenance") or {},
+            "item_specifics_approximate": marketplace_data.get("ebay_item_specifics_approximate") or [],
             "image_urls": shared["image_urls"],
             "shipping_policy": {
                 "service": shipping.get("domestic_service"),

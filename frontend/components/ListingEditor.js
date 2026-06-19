@@ -75,6 +75,35 @@ function sourceTone(sourcePlatform) {
   }
 }
 
+function provenanceTone(source) {
+  switch (String(source || "").toLowerCase()) {
+    case "approximate":
+    case "default":
+      return "bg-[#fff7ed] text-[#b54708]";
+    case "derived":
+      return "bg-[#eff6ff] text-[#175cd3]";
+    case "existing":
+      return "bg-[#ecfdf3] text-[#027a48]";
+    default:
+      return "bg-[#f2f4f7] text-[#475467]";
+  }
+}
+
+function provenanceLabel(source) {
+  switch (String(source || "").toLowerCase()) {
+    case "approximate":
+      return "Approximate";
+    case "default":
+      return "Fallback";
+    case "derived":
+      return "Derived";
+    case "existing":
+      return "Exact";
+    default:
+      return "Unknown";
+  }
+}
+
 function MarketplacePreviewFrame({ market, listing, previewEntry, previewImages, statusMap, crosspostPreviewLoading }) {
   const title = listing.title || "Draft title pending";
   const price = listing.suggested_price || listing.listing_price || previewEntry?.price || 0;
@@ -280,6 +309,22 @@ export default function ListingEditor({
   const latestPublishAttempt = listing.latest_publish_attempt || null;
   const preflightMap = marketplacePreflights || {};
   const payloadPreviewMap = marketplacePayloadPreviews || {};
+  const ebaySpecificsProvenance = useMemo(
+    () => ({
+      ...((latestPublishAttempt?.payload_snapshot && latestPublishAttempt.payload_snapshot.item_specifics_provenance) || {}),
+      ...((listing?.marketplace_data && listing.marketplace_data.ebay_item_specifics_provenance) || {}),
+      ...((payloadPreviewMap?.ebay && payloadPreviewMap.ebay.item_specifics_provenance) || {}),
+    }),
+    [latestPublishAttempt?.payload_snapshot, listing?.marketplace_data, payloadPreviewMap],
+  );
+  const approximateSpecificFields = useMemo(
+    () => new Set([
+      ...((latestPublishAttempt?.payload_snapshot && latestPublishAttempt.payload_snapshot.item_specifics_approximate) || []),
+      ...((listing?.marketplace_data && listing.marketplace_data.ebay_item_specifics_approximate) || []),
+      ...((payloadPreviewMap?.ebay && payloadPreviewMap.ebay.item_specifics_approximate) || []),
+    ].filter(Boolean)),
+    [latestPublishAttempt?.payload_snapshot, listing?.marketplace_data, payloadPreviewMap],
+  );
 
   const statusMap = useMemo(() => {
     const map = {};
@@ -850,8 +895,19 @@ export default function ListingEditor({
               <p className="text-sm font-semibold text-[#101828]">Shipping readiness</p>
               <p className="mt-1 text-sm text-[#667085]">Track estimated versus verified package data before eBay publish.</p>
             </div>
-            <span className="pp-chip">{shippingProfile.manual_measurement_needed ? "Needs measurement" : "Measurements present"}</span>
+            <span className="pp-chip">
+              {shippingProfile.estimated
+                ? "Estimated shipping"
+                : shippingProfile.manual_measurement_needed
+                  ? "Needs measurement"
+                  : "Measurements present"}
+            </span>
           </div>
+          {shippingProfile.estimated ? (
+            <div className="mt-3 rounded-[12px] border border-[#fecdca] bg-[#fff6ed] px-3 py-2 text-xs text-[#b54708]">
+              Shipping values are estimated from Vine draft data and should be reviewed before final publish.
+            </div>
+          ) : null}
           <div className="mt-4 grid gap-3 md:grid-cols-2">
             <div>
               <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Package weight</label>
@@ -859,9 +915,9 @@ export default function ListingEditor({
             </div>
             <div>
               <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Shipping class</label>
-              <select className="pp-input mt-1 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]" value={shippingProfile.shipping_class_suggestion || "standard_ground"} onChange={(e) => updateShippingField("shipping_class_suggestion", e.target.value)}>
-                {["standard_ground","priority_mail","ups_ground","local_pickup_only","manual_review"].map((option) => (
-                  <option key={option} value={option}>{option.replaceAll("_", " ")}</option>
+              <select className="pp-input mt-1 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]" value={shippingProfile.shipping_class_suggestion || "usps_ground_advantage"} onChange={(e) => updateShippingField("shipping_class_suggestion", e.target.value)}>
+                {["usps_ground_advantage","standard_ground","priority_mail","ups_ground","local_pickup_only","manual_review"].map((option) => (
+                  <option key={option} value={option}>{option === "usps_ground_advantage" ? "USPS Ground Advantage" : option.replaceAll("_", " ")}</option>
                 ))}
               </select>
             </div>
@@ -1053,13 +1109,19 @@ export default function ListingEditor({
 
         <div id="listing-item-specifics-section" className="mt-4 rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
           <p className="text-sm font-semibold text-[#101828]">Suggested item specifics</p>
-          <p className="mt-1 text-xs text-[#667085]">Edit the actual values here so the eBay preflight can clear required aspects.</p>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[#667085]">
+            <span>Edit the actual values here so the eBay preflight can clear required aspects.</span>
+            {approximateSpecificFields.size ? <span className="pp-chip">{approximateSpecificFields.size} approximated</span> : null}
+          </div>
           <div className="mt-3 grid gap-2 md:grid-cols-2">
             {Object.entries(listing.item_specifics || {}).length ? (
               Object.entries(listing.item_specifics || {}).map(([key, value]) => (
                 <div key={key} className="rounded-[10px] border border-[#e5e7eb] bg-white px-3 py-2">
                   <div className="flex items-center justify-between gap-2">
                     <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">{key}</p>
+                    <span className={`rounded-full px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] ${provenanceTone(ebaySpecificsProvenance[key] || (approximateSpecificFields.has(key) ? "approximate" : ""))}`}>
+                      {provenanceLabel(ebaySpecificsProvenance[key] || (approximateSpecificFields.has(key) ? "approximate" : ""))}
+                    </span>
                     <Button size="sm" variant="ghost" onClick={() => updateItemSpecificField(key, "")}>Clear</Button>
                   </div>
                   <Input

@@ -34,11 +34,15 @@ import useDashboardData from '../hooks/useDashboardData';
 import {
   fetchAccountSetupSummary,
   fetchMarketplaceJobsOverview,
+  runDashboardOperatorCommand,
   fetchSalesDashboard,
   toggleAutonomousMode,
   uploadVineReport,
 } from '../lib/api';
 import { formatPublishFailureMessage } from '../lib/publish-status';
+
+const DEFAULT_OPERATOR_PROMPT =
+  'Lower all item prices by ten percent if they have been posted for more than 1 week on eBay.';
 
 function formatTime(value) {
   if (!value) return 'Pending';
@@ -54,40 +58,16 @@ function formatTime(value) {
   }
 }
 
+function formatMoney(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return 'n/a';
+  return `$${amount.toFixed(2)}`;
+}
+
 function toStatusTone(connected, warning = false) {
   if (connected) return 'success';
   if (warning) return 'warning';
   return 'default';
-}
-
-function SectionSwitcher({ sections, activeSection, onSelect }) {
-  return (
-    <SectionPanel
-      title="Workspace sections"
-      description="Switch between the main operator views without carrying a second sidebar around the page."
-    >
-      <div className="flex flex-wrap gap-2">
-        {sections.map((section) => {
-          const active = activeSection === section.key;
-          return (
-            <button
-              key={section.key}
-              type="button"
-              onClick={() => onSelect(section.key)}
-              className={[
-                'inline-flex items-center rounded-full border px-4 py-2 text-sm font-medium transition',
-                active
-                  ? 'border-[#2563eb] bg-[#eff6ff] text-[#1d4ed8]'
-                  : 'border-[#d0d5dd] bg-white text-[#344054] hover:border-[#98a2b3] hover:bg-[#f9fafb]',
-              ].join(' ')}
-            >
-              {section.label}
-            </button>
-          );
-        })}
-      </div>
-    </SectionPanel>
-  );
 }
 
 export default function Dashboard() {
@@ -101,6 +81,10 @@ export default function Dashboard() {
   const [activeSection, setActiveSection] = useState('overview');
   const [vineUploading, setVineUploading] = useState(false);
   const [loadingPanels, setLoadingPanels] = useState(false);
+  const [operatorPrompt, setOperatorPrompt] = useState(DEFAULT_OPERATOR_PROMPT);
+  const [operatorConfirmation, setOperatorConfirmation] = useState('');
+  const [operatorCommandResult, setOperatorCommandResult] = useState(null);
+  const [operatorCommandRunning, setOperatorCommandRunning] = useState(false);
 
   const draftCount = useMemo(
     () => listings.filter((listing) => listing.status !== 'ready' && listing.ebay_publish_status !== 'POSTED' && !listing.ebay_listing_id).length,
@@ -237,7 +221,32 @@ export default function Dashboard() {
     );
   };
 
-  const activeSectionMeta = dashboardSections.find((section) => section.key === activeSection) || dashboardSections[0];
+  const runOperatorCommand = async ({ applyLive = false } = {}) => {
+    if (!operatorPrompt.trim()) {
+      toast.error('Enter an operator command first.');
+      return;
+    }
+    setOperatorCommandRunning(true);
+    try {
+      const result = await runDashboardOperatorCommand({
+        prompt: operatorPrompt,
+        dry_run: !applyLive,
+        apply_live: applyLive,
+        confirmation_phrase: applyLive ? operatorConfirmation : undefined,
+      });
+      setOperatorCommandResult(result);
+      if (applyLive) {
+        toast.success(result?.message || 'Live operator command finished.');
+        await reload();
+      } else {
+        toast.success(result?.message || 'Operator command preview ready.');
+      }
+    } catch (error) {
+      toast.error(error.message || 'Operator command failed.');
+    } finally {
+      setOperatorCommandRunning(false);
+    }
+  };
 
   const renderOverview = () => (
     <div className="space-y-5">
@@ -255,18 +264,146 @@ export default function Dashboard() {
           </Link>
         }
       >
-        <div className="space-y-4">
-          <div className="rounded-[20px] border border-[#dbe4ff] bg-gradient-to-br from-[#f8fbff] via-white to-[#f3f7ff] p-5 shadow-[0_1px_0_rgba(16,24,40,0.02)]">
-            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">Control room</p>
-            <h2 className="mt-3 text-2xl font-semibold tracking-[-0.03em] text-[#101828]">Run intake, publishing, jobs, and account readiness from one screen.</h2>
-            <p className="mt-3 max-w-3xl text-sm leading-6 text-[#475467]">
-              The dashboard now keeps the shell simple: the top navigation stays fixed, and this page shows only one section at a time so the operator is not fighting a second menu.
-            </p>
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1.25fr)_360px]">
+          <div className="space-y-4">
+            <div className="rounded-[18px] border border-[#e5e7eb] bg-white p-5">
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">Control room</p>
+              <h2 className="mt-3 text-2xl font-semibold tracking-[-0.03em] text-[#101828]">Run the business without the page fighting you.</h2>
+              <p className="mt-3 max-w-2xl text-sm leading-6 text-[#475467]">
+                The dashboard now keeps the shell fixed and lets the section switcher change the operator view without dumping a second wall of controls above the fold.
+              </p>
+            </div>
+            <div className="rounded-[18px] border border-[#dbe7ff] bg-[#f8fbff] p-5">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">Operator prompt</p>
+                  <h3 className="mt-2 text-xl font-semibold tracking-[-0.03em] text-[#101828]">Type an operational request and preview it before it touches live eBay.</h3>
+                  <p className="mt-2 max-w-2xl text-sm leading-6 text-[#475467]">
+                    The first supported command is live eBay repricing by listing age. Example: lower all item prices by ten percent if they have been posted for more than 1 week on eBay.
+                  </p>
+                </div>
+                <StatusPill status={setupSummary?.server_readiness?.openai_configured ? 'success' : 'default'} label={setupSummary?.server_readiness?.openai_configured ? 'OpenAI configured' : 'Rule-backed command mode'} />
+              </div>
+              <div className="mt-4 space-y-3">
+                <textarea
+                  value={operatorPrompt}
+                  onChange={(event) => setOperatorPrompt(event.target.value)}
+                  rows={4}
+                  className="w-full rounded-[14px] border border-[#bfcce8] bg-white px-4 py-3 text-sm text-[#101828] shadow-sm outline-none transition focus:border-[#2563eb] focus:ring-2 focus:ring-[#bfdbfe]"
+                  placeholder={DEFAULT_OPERATOR_PROMPT}
+                />
+                <div className="flex flex-wrap gap-2">
+                  <Button onClick={() => runOperatorCommand({ applyLive: false })} disabled={operatorCommandRunning}>
+                    {operatorCommandRunning ? 'Running preview...' : 'Preview command'}
+                  </Button>
+                  <Button variant="outline" onClick={() => setOperatorPrompt(DEFAULT_OPERATOR_PROMPT)} disabled={operatorCommandRunning}>
+                    Load repricing example
+                  </Button>
+                </div>
+                {operatorCommandResult ? (
+                  <div className="rounded-[14px] border border-[#d0d5dd] bg-white p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-semibold text-[#101828]">
+                          {operatorCommandResult.parsed ? 'Command preview' : 'Command not recognized'}
+                        </p>
+                        <p className="mt-1 text-sm text-[#667085]">{operatorCommandResult.message || 'No additional detail returned.'}</p>
+                      </div>
+                      {operatorCommandResult.parsed ? (
+                        <StatusPill
+                          status={operatorCommandResult.dry_run ? 'warning' : 'success'}
+                          label={operatorCommandResult.dry_run ? 'Preview only' : 'Live applied'}
+                        />
+                      ) : null}
+                    </div>
+                    {operatorCommandResult.parsed ? (
+                      <>
+                        <div className="mt-4 grid gap-3 md:grid-cols-4">
+                          <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+                            <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Eligible</p>
+                            <p className="mt-2 text-2xl font-semibold text-[#101828]">{operatorCommandResult.summary?.eligible_count || 0}</p>
+                          </div>
+                          <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+                            <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Live eBay</p>
+                            <p className="mt-2 text-2xl font-semibold text-[#101828]">{operatorCommandResult.summary?.total_live_ebay_listings || 0}</p>
+                          </div>
+                          <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+                            <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Older than rule</p>
+                            <p className="mt-2 text-2xl font-semibold text-[#101828]">{operatorCommandResult.summary?.older_than_threshold || 0}</p>
+                          </div>
+                          <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+                            <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Updated</p>
+                            <p className="mt-2 text-2xl font-semibold text-[#101828]">{operatorCommandResult.summary?.updated_count || 0}</p>
+                          </div>
+                        </div>
+                        {operatorCommandResult.requires_confirmation ? (
+                          <div className="mt-4 rounded-[12px] border border-[#fecdca] bg-[#fff6f3] p-4">
+                            <p className="text-sm font-semibold text-[#912018]">Live eBay changes require explicit confirmation.</p>
+                            <p className="mt-1 text-sm text-[#7a271a]">Type <span className="font-mono">{operatorCommandResult.confirmation_phrase}</span> before applying live price revisions.</p>
+                            <div className="mt-3 flex flex-col gap-3 lg:flex-row">
+                              <input
+                                value={operatorConfirmation}
+                                onChange={(event) => setOperatorConfirmation(event.target.value)}
+                                className="min-w-0 flex-1 rounded-[12px] border border-[#fda29b] bg-white px-3 py-2 text-sm text-[#101828] outline-none focus:border-[#d92d20] focus:ring-2 focus:ring-[#fecdc9]"
+                                placeholder={operatorCommandResult.confirmation_phrase}
+                              />
+                              <Button
+                                onClick={() => runOperatorCommand({ applyLive: true })}
+                                disabled={operatorCommandRunning || !operatorCommandResult.summary?.eligible_count}
+                              >
+                                {operatorCommandRunning ? 'Applying...' : 'Apply live eBay changes'}
+                              </Button>
+                            </div>
+                          </div>
+                        ) : null}
+                        {operatorCommandResult.listings?.length ? (
+                          <div className="mt-4 space-y-2">
+                            {operatorCommandResult.listings.slice(0, 8).map((row) => (
+                              <div key={row.listing_id} className="flex flex-wrap items-center justify-between gap-3 rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] px-4 py-3">
+                                <div className="min-w-0">
+                                  <p className="truncate text-sm font-medium text-[#101828]">{row.title || `Listing #${row.listing_id}`}</p>
+                                  <p className="mt-1 text-xs text-[#667085]">#{row.listing_id}</p>
+                                </div>
+                                <div className="flex items-center gap-3 text-sm text-[#475467]">
+                                  <span>{formatMoney(row.current_price)} to {formatMoney(row.new_price)}</span>
+                                  <StatusPill status={row.status === 'failed' ? 'warning' : row.status === 'updated' ? 'success' : 'default'} label={row.status} />
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                      </>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            </div>
+            <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-4">
+              {topMetrics.map((card) => (
+                <MetricCard key={card.label} label={card.label} value={card.value} detail={card.detail} href={card.href} />
+              ))}
+            </div>
           </div>
-          <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-4">
-            {topMetrics.map((card) => (
-              <MetricCard key={card.label} label={card.label} value={card.value} detail={card.detail} href={card.href} />
-            ))}
+          <div className="rounded-[18px] border border-[#e5e7eb] bg-[#fcfcfd] p-5">
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">Fast actions</p>
+            <div className="mt-4 space-y-2">
+              <Button href="/intake" variant="outline" className="w-full justify-between">
+                <span>Upload photos</span>
+                <ArrowRight size={14} />
+              </Button>
+              <Button href="/listings/new" className="w-full justify-between">
+                <span>Create listing</span>
+                <ArrowRight size={14} />
+              </Button>
+              <Button href="/publishing" variant="outline" className="w-full justify-between">
+                <span>Open publish queue</span>
+                <ArrowRight size={14} />
+              </Button>
+              <Button href="/settings?tab=ebay" variant="outline" className="w-full justify-between">
+                <span>eBay setup</span>
+                <ArrowRight size={14} />
+              </Button>
+            </div>
           </div>
         </div>
       </SectionPanel>
@@ -550,9 +687,11 @@ export default function Dashboard() {
         await toggleAutonomousMode(!autonomousConfig.autonomous_mode);
         await reload();
       }}
-      contentWidth="wide"
+      contentWidth="default"
     >
       <PageHeader
+        eyebrow="Operations overview"
+        breadcrumbs={[{ label: 'Workspace' }, { label: 'Dashboard', active: true }]}
         title="Reseller command center"
         description="One clean operator dashboard for intake, listing production, marketplace publishing, job flow, and account readiness."
         actions={
@@ -599,7 +738,32 @@ export default function Dashboard() {
       ) : null}
 
       <div className="space-y-5">
-        <SectionSwitcher sections={dashboardSections} activeSection={activeSection} onSelect={selectSection} />
+        <SectionPanel
+          title="Workspace sections"
+          description="Switch between the main operator views without carrying a second sidebar around the page."
+        >
+          <div className="grid gap-3 xl:grid-cols-4">
+            {dashboardSections.map((section) => {
+              const active = activeSection === section.key;
+              return (
+                <button
+                  key={section.key}
+                  type="button"
+                  onClick={() => selectSection(section.key)}
+                  className={[
+                    'rounded-[20px] border px-4 py-4 text-left transition',
+                    active
+                      ? 'border-[#bfd4ef] bg-[linear-gradient(135deg,#eef5ff_0%,#ffffff_100%)] text-[#173a63] shadow-[0_16px_32px_rgba(23,58,99,0.12)]'
+                      : 'border-[#d0d5dd] bg-white text-[#344054] hover:border-[#98a2b3] hover:bg-[#f9fafb]',
+                  ].join(' ')}
+                >
+                  <span className="block text-sm font-semibold">{section.label}</span>
+                  <span className="mt-2 block text-xs leading-5 text-[#667085]">{section.description}</span>
+                </button>
+              );
+            })}
+          </div>
+        </SectionPanel>
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
           <MetricCard label="Ready to publish" value={readyCount} detail="Listings that can move straight into marketplace publishing." href="/listings?tab=ready" />
           <MetricCard label="Pending review" value={reviewCount} detail="Drafts still waiting for operator approval." href="/listings?tab=review" />
