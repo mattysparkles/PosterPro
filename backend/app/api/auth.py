@@ -36,7 +36,7 @@ from app.core.auth import (
     user_has_vine_access,
     verify_password,
 )
-from app.core.config import settings
+from app.core.config import reload_settings, settings
 from app.core.database import get_db
 from app.core.secrets import encrypt_secret, mask_secret
 from app.models.enums import MarketplaceName
@@ -112,6 +112,7 @@ _DEFAULT_WORKFLOW_PREFERENCES = {
     "auto_publish_after_approval": False,
     "bulk_approval_enabled": True,
     "listing_preview_mode": "marketplace",
+    "default_preview_marketplace": "ebay",
 }
 _DEFAULT_VINE_PREFERENCES = {
     "enforce_six_month_lock": True,
@@ -189,6 +190,7 @@ def _workflow_preferences(user: User | None) -> dict:
         "auto_publish_after_approval": bool(stored.get("auto_publish_after_approval", _DEFAULT_WORKFLOW_PREFERENCES["auto_publish_after_approval"])),
         "bulk_approval_enabled": bool(stored.get("bulk_approval_enabled", _DEFAULT_WORKFLOW_PREFERENCES["bulk_approval_enabled"])),
         "listing_preview_mode": str(stored.get("listing_preview_mode") or _DEFAULT_WORKFLOW_PREFERENCES["listing_preview_mode"]),
+        "default_preview_marketplace": str(stored.get("default_preview_marketplace") or _DEFAULT_WORKFLOW_PREFERENCES["default_preview_marketplace"]),
     }
 
 
@@ -331,9 +333,10 @@ def _write_env_overrides(updates: dict[str, str | None]) -> None:
 
 
 def _build_settings_panel_response(current_user: User, *, ebay_account: MarketplaceAccount | None) -> dict:
+    runtime_settings = reload_settings()
     site_content = load_site_content()
-    page_urls = build_public_page_urls(settings.app_base_url)
-    runame = settings.ebay_runame or settings.ebay_redirect_uri or ""
+    page_urls = build_public_page_urls(runtime_settings.app_base_url)
+    runame = runtime_settings.ebay_runame or runtime_settings.ebay_redirect_uri or ""
     ebay_health = summarize_ebay_account_health(ebay_account)
     bridge_submit_policy = bridge_browser_submit_policy()
     return {
@@ -350,11 +353,11 @@ def _build_settings_panel_response(current_user: User, *, ebay_account: Marketpl
         "sold_sync_preferences": _sold_sync_preferences(current_user),
         "ebay_marketplace_policy_settings": _ebay_marketplace_policy_settings(current_user),
         "ebay": {
-            "client_id_configured": bool(settings.ebay_client_id),
-            "client_secret_configured": bool(settings.ebay_client_secret),
+            "client_id_configured": bool(runtime_settings.ebay_client_id),
+            "client_secret_configured": bool(runtime_settings.ebay_client_secret),
             "runame": runame,
-            "redirect_uri": settings.ebay_redirect_uri or "",
-            "oauth_ready": bool(settings.ebay_client_id and settings.ebay_client_secret and runame),
+            "redirect_uri": runtime_settings.ebay_redirect_uri or "",
+            "oauth_ready": bool(runtime_settings.ebay_client_id and runtime_settings.ebay_client_secret and runame),
             "connected": ebay_health["connected"],
             "external_account_id": ebay_account.external_account_id if ebay_account else None,
             "token_expires_at": ebay_account.token_expires_at.isoformat() if ebay_account and ebay_account.token_expires_at else None,
@@ -375,17 +378,17 @@ def _build_settings_panel_response(current_user: User, *, ebay_account: Marketpl
             "policy_settings": _ebay_marketplace_policy_settings(current_user),
         },
         "api_keys": {
-            "openai_configured": bool(settings.openai_api_key),
-            "photoroom_configured": bool(settings.photoroom_api_key),
+            "openai_configured": bool(runtime_settings.openai_api_key),
+            "photoroom_configured": bool(runtime_settings.photoroom_api_key),
         },
         "automation": {
-            "autonomous_mode": settings.autonomous_mode,
-            "autonomous_dry_run": settings.autonomous_dry_run,
-            "autonomous_crosspost_enabled": settings.autonomous_crosspost_enabled,
-            "automation_bridge_enabled": settings.automation_bridge_enabled,
-            "automation_bridge_url": settings.automation_bridge_url or "",
-            "automation_bridge_timeout_seconds": settings.automation_bridge_timeout_seconds,
-            "automation_bridge_configured": bool(settings.automation_bridge_enabled and settings.automation_bridge_url and settings.automation_bridge_api_key),
+            "autonomous_mode": runtime_settings.autonomous_mode,
+            "autonomous_dry_run": runtime_settings.autonomous_dry_run,
+            "autonomous_crosspost_enabled": runtime_settings.autonomous_crosspost_enabled,
+            "automation_bridge_enabled": runtime_settings.automation_bridge_enabled,
+            "automation_bridge_url": runtime_settings.automation_bridge_url or "",
+            "automation_bridge_timeout_seconds": runtime_settings.automation_bridge_timeout_seconds,
+            "automation_bridge_configured": bool(runtime_settings.automation_bridge_enabled and runtime_settings.automation_bridge_url and runtime_settings.automation_bridge_api_key),
             "bridge_browser_submit_enabled": bridge_submit_policy["browser_submit_enabled"],
             "bridge_browser_submit_policy_label": bridge_submit_policy["policy_label"],
             "bridge_browser_submit_policy_note": bridge_submit_policy["policy_note"],
@@ -395,37 +398,37 @@ def _build_settings_panel_response(current_user: User, *, ebay_account: Marketpl
             "sold_sync_enabled": settings.sold_sync_enabled,
         },
         "server": {
-            "app_base_url": settings.app_base_url or "",
-            "environment": settings.environment,
-            "storage_root": settings.storage_root,
-            "database_url_configured": bool(settings.database_url),
-            "redis_url_configured": bool(settings.redis_url),
-            "session_secret_configured": bool(settings.session_secret),
+            "app_base_url": runtime_settings.app_base_url or "",
+            "environment": runtime_settings.environment,
+            "storage_root": runtime_settings.storage_root,
+            "database_url_configured": bool(runtime_settings.database_url),
+            "redis_url_configured": bool(runtime_settings.redis_url),
+            "session_secret_configured": bool(runtime_settings.session_secret),
             "can_manage": is_effective_admin(current_user),
         },
         "email": {
             "configured": smtp_configured(),
-            "host": settings.smtp_host or "",
-            "port": settings.smtp_port,
-            "username": settings.smtp_username or "",
-            "from_email": settings.smtp_from_email or "",
-            "from_name": settings.smtp_from_name or "",
-            "use_tls": settings.smtp_use_tls,
-            "password_configured": bool(settings.smtp_password),
+            "host": runtime_settings.smtp_host or "",
+            "port": runtime_settings.smtp_port,
+            "username": runtime_settings.smtp_username or "",
+            "from_email": runtime_settings.smtp_from_email or "",
+            "from_name": runtime_settings.smtp_from_name or "",
+            "use_tls": runtime_settings.smtp_use_tls,
+            "password_configured": bool(runtime_settings.smtp_password),
         },
         "amazon": {
-            "vine_import_enabled": settings.amazon_vine_import_enabled,
-            "vine_import_premium_only": settings.amazon_vine_import_premium_only,
-            "media_lookup_enabled": settings.amazon_media_lookup_enabled,
-            "media_page_fallback_enabled": settings.amazon_media_page_fallback_enabled,
-            "marketplace_region": settings.amazon_marketplace_region,
-            "media_fetch_mode": settings.amazon_media_fetch_mode,
-            "media_rate_limit_per_minute": settings.amazon_media_rate_limit_per_minute,
-            "paapi_access_key_configured": bool(settings.amazon_paapi_access_key),
-            "paapi_secret_key_configured": bool(settings.amazon_paapi_secret_key),
-            "paapi_partner_tag_configured": bool(settings.amazon_paapi_partner_tag),
-            "paapi_access_key_masked": mask_secret(settings.amazon_paapi_access_key),
-            "paapi_partner_tag_masked": mask_secret(settings.amazon_paapi_partner_tag),
+            "vine_import_enabled": runtime_settings.amazon_vine_import_enabled,
+            "vine_import_premium_only": runtime_settings.amazon_vine_import_premium_only,
+            "media_lookup_enabled": runtime_settings.amazon_media_lookup_enabled,
+            "media_page_fallback_enabled": runtime_settings.amazon_media_page_fallback_enabled,
+            "marketplace_region": runtime_settings.amazon_marketplace_region,
+            "media_fetch_mode": runtime_settings.amazon_media_fetch_mode,
+            "media_rate_limit_per_minute": runtime_settings.amazon_media_rate_limit_per_minute,
+            "paapi_access_key_configured": bool(runtime_settings.amazon_paapi_access_key),
+            "paapi_secret_key_configured": bool(runtime_settings.amazon_paapi_secret_key),
+            "paapi_partner_tag_configured": bool(runtime_settings.amazon_paapi_partner_tag),
+            "paapi_access_key_masked": mask_secret(runtime_settings.amazon_paapi_access_key),
+            "paapi_partner_tag_masked": mask_secret(runtime_settings.amazon_paapi_partner_tag),
         },
         "hosted_pages": {
             "can_manage": is_effective_admin(current_user),
@@ -481,6 +484,8 @@ def update_me(
         workflow_updates["bulk_approval_enabled"] = payload.bulk_approval_enabled
     if payload.listing_preview_mode is not None:
         workflow_updates["listing_preview_mode"] = payload.listing_preview_mode.strip() or _DEFAULT_WORKFLOW_PREFERENCES["listing_preview_mode"]
+    if payload.default_preview_marketplace is not None:
+        workflow_updates["default_preview_marketplace"] = payload.default_preview_marketplace.strip().lower() or _DEFAULT_WORKFLOW_PREFERENCES["default_preview_marketplace"]
     if workflow_updates:
         _persist_workflow_preferences(current_user, workflow_updates)
     if payload.vine_enforce_six_month_lock is not None:
@@ -797,20 +802,21 @@ def forgot_password(
         "ok": True,
         "message": "If that account exists, a password reset email or token is now available.",
     }
-    if preview_token and settings.environment.lower() != "production":
+    runtime_settings = reload_settings()
+    if preview_token and runtime_settings.environment.lower() != "production":
         response["reset_token_preview"] = preview_token
     if user and preview_token and smtp_configured():
         try:
             reset_link = send_password_reset_email(user.email, preview_token)
             response["delivery"] = "email"
-            if settings.environment.lower() != "production":
+            if runtime_settings.environment.lower() != "production":
                 response["reset_link_preview"] = reset_link
         except EmailDeliveryError as exc:
             response["delivery"] = "error"
-            if settings.environment.lower() != "production":
+            if runtime_settings.environment.lower() != "production":
                 response["email_error"] = str(exc)
     elif user and preview_token:
-        response["delivery"] = "preview_token" if settings.environment.lower() != "production" else "token_only"
+        response["delivery"] = "preview_token" if runtime_settings.environment.lower() != "production" else "token_only"
     return response
 
 

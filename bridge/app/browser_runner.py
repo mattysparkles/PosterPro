@@ -6,6 +6,7 @@ import mimetypes
 import re
 import tempfile
 import time
+from datetime import datetime
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -368,15 +369,25 @@ class MarketplaceBrowserRunner:
         after_path = screenshot_dir / f"{job_id}-after-submit.png"
 
         temp_files: list[Path] = []
+        screenshot_errors: list[str] = []
+        listing_urls: list[str] = []
+        marketplace_listing_id: str | None = None
+        submission_visibility: dict[str, Any] | None = None
         with playwright as playwright_instance:
             browser = playwright_instance.chromium.launch(headless=self.config.headless)
+            page = None
             try:
                 context = self._new_context(browser, bridge_account)
                 page = context.new_page()
-                page.goto(self.spec.create_url, wait_until="domcontentloaded")
+                if self.spec.marketplace == "facebook":
+                    page.goto(self.spec.create_url, wait_until="commit", timeout=self.config.timeout_ms)
+                else:
+                    page.goto(self.spec.create_url, wait_until="domcontentloaded")
                 self._ensure_logged_in(page)
                 self._require_authenticated_page(page)
                 self._dismiss_optional_dialogs(page)
+                if self.spec.marketplace == "facebook":
+                    self._wait_for_facebook_marketplace_form(page)
 
                 uploaded_count = 0
                 if image_urls:
@@ -393,7 +404,10 @@ class MarketplaceBrowserRunner:
 
                 self._apply_marketplace_specific_fields(page, listing_payload)
                 self._apply_shipping_scope(page, shipping_scope)
-                page.screenshot(path=str(before_path), full_page=True)
+                try:
+                    page.screenshot(path=str(before_path), full_page=True, timeout=15000)
+                except Exception as exc:
+                    screenshot_errors.append(f"before_submit:{exc}")
 
                 submitted = False
                 if self.config.submit_enabled:
@@ -401,14 +415,57 @@ class MarketplaceBrowserRunner:
                     if not submitted:
                         raise BrowserRunnerError(f"Could not find a publish action on the {self.spec.label} listing flow")
                     page.wait_for_timeout(3000)
+                    try:
+                        page.goto(self.spec.auth_check_url, wait_until="domcontentloaded")
+                        self._ensure_logged_in(page)
+                        self._require_authenticated_page(page)
+                        self._dismiss_optional_dialogs(page)
+                        page.wait_for_timeout(1500)
+                        if self.spec.marketplace == "facebook":
+                            listing_cards = self._collect_facebook_selling_cards(page, expected_title=title)
+                            matching_cards = [card for card in listing_cards if card.get("title_matches") and card.get("looks_new")]
+                            if matching_cards:
+                                listing_urls = [str(card["url"]) for card in matching_cards]
+                                marketplace_listing_id = self._extract_listing_id(listing_urls[0])
+                                submission_visibility = {
+                                    "state": "visible_listing",
+                                    "listing_count": len(listing_urls),
+                                    "listing_urls": listing_urls,
+                                    "matched_title": matching_cards[0].get("title"),
+                                    "listing_cards": matching_cards[:3],
+                                }
+                            else:
+                                listing_urls = []
+                                submission_visibility = {
+                                    "state": "submitted_without_matching_new_listing",
+                                    "listing_count": len(listing_cards),
+                                    "listing_cards": listing_cards[:3],
+                                }
+                        else:
+                            listing_urls = self._collect_listing_urls(page, max_listings=1)
+                            if listing_urls:
+                                marketplace_listing_id = self._extract_listing_id(listing_urls[0])
+                            submission_visibility = {
+                                "state": "visible_listing",
+                                "listing_count": len(listing_urls),
+                                "listing_urls": listing_urls,
+                            }
+                    except Exception as exc:
+                        submission_visibility = {"state": "submitted_unverified", "error": str(exc)}
 
-                page.screenshot(path=str(after_path), full_page=True)
+                try:
+                    page.screenshot(path=str(after_path), full_page=True, timeout=15000)
+                except Exception as exc:
+                    screenshot_errors.append(f"after_submit:{exc}")
                 final_storage_state = context.storage_state()
                 return {
                     "job_id": job_id,
                     "marketplace": self.spec.marketplace,
                     "status": "submitted_to_marketplace" if submitted else "draft_form_filled",
                     "submitted": submitted,
+                    "marketplace_listing_id": marketplace_listing_id,
+                    "listing_urls": listing_urls,
+                    "submission_visibility": submission_visibility or {"state": "not_submitted"},
                     "bridge_account": self._bridge_account_summary(bridge_account),
                     "create_url": self.spec.create_url,
                     "uploaded_image_count": uploaded_count,
@@ -416,11 +473,30 @@ class MarketplaceBrowserRunner:
                         "before_submit": self._persist_generated_asset(before_path),
                         "after_submit": self._persist_generated_asset(after_path),
                     },
+                    "screenshot_errors": screenshot_errors,
                     "session_state": {
                         "session_state": "active",
                         "session_payload": final_storage_state,
                     },
                 }
+            except BrowserRunnerError as exc:
+                failure_context = {}
+                if page is not None:
+                    try:
+                        failure_context["page_url"] = page.url
+                    except Exception:
+                        pass
+                    try:
+                        failure_context["page_title"] = page.title()
+                    except Exception:
+                        pass
+                    try:
+                        failure_context["body_snippet"] = page.locator("body").inner_text(timeout=2000)[:2000]
+                    except Exception:
+                        pass
+                if failure_context:
+                    raise BrowserRunnerError(f"{exc} | context={json.dumps(failure_context, default=str, ensure_ascii=True)}") from exc
+                raise
             except playwright._timeout_error as exc:
                 raise BrowserRunnerError(f"{self.spec.label} browser automation timed out: {exc}") from exc
             finally:
@@ -496,6 +572,7 @@ class MarketplaceBrowserRunner:
         screenshot_dir.mkdir(parents=True, exist_ok=True)
         before_path = screenshot_dir / f"{account_key}-{self.spec.marketplace}-connect-start.png"
         after_path = screenshot_dir / f"{account_key}-{self.spec.marketplace}-connect-complete.png"
+        screenshot_errors: list[str] = []
 
         with playwright as playwright_instance:
             try:
@@ -515,7 +592,10 @@ class MarketplaceBrowserRunner:
                 self._emit_status(status_callback, "opening_marketplace", f"Opening {self.spec.label} in the bridge browser.")
                 page.goto(self.spec.connect_start_url, wait_until="domcontentloaded")
                 self._dismiss_optional_dialogs(page)
-                page.screenshot(path=str(before_path), full_page=True)
+                try:
+                    page.screenshot(path=str(before_path), full_page=True, timeout=15000)
+                except Exception as exc:
+                    screenshot_errors.append(f"before_submit:{exc}")
                 self._emit_status(
                     status_callback,
                     "waiting_for_login",
@@ -535,7 +615,10 @@ class MarketplaceBrowserRunner:
                 page.wait_for_timeout(1500)
                 final_storage_state = context.storage_state()
                 self._validate_storage_state(final_storage_state)
-                page.screenshot(path=str(after_path), full_page=True)
+                try:
+                    page.screenshot(path=str(after_path), full_page=True, timeout=15000)
+                except Exception as exc:
+                    screenshot_errors.append(f"after_submit:{exc}")
                 self._emit_status(status_callback, "completed", f"{self.spec.label} session captured successfully.")
                 return {
                     "marketplace": self.spec.marketplace,
@@ -547,6 +630,7 @@ class MarketplaceBrowserRunner:
                         "connect_start": self._persist_generated_asset(before_path),
                         "connect_complete": self._persist_generated_asset(after_path),
                     },
+                    "screenshot_errors": screenshot_errors,
                     "session_state": {
                         "session_state": "active",
                         "session_payload": final_storage_state,
@@ -602,6 +686,7 @@ class MarketplaceBrowserRunner:
         storage_state = self._optional_storage_state(bridge_account) if bridge_account else None
         context = browser.new_context(storage_state=storage_state) if storage_state else browser.new_context()
         context.set_default_timeout(self.config.timeout_ms)
+        context.set_default_navigation_timeout(self.config.timeout_ms)
         return context
 
     def _build_storage_state(self, bridge_account: dict[str, Any]) -> dict[str, Any]:
@@ -678,19 +763,32 @@ class MarketplaceBrowserRunner:
 
     def _fill_facebook_form(self, page: Any, *, title: str, price: str, description: str | None) -> None:
         page.wait_for_timeout(1000)
-        text_inputs = page.locator('input[type="text"]')
-        if text_inputs.count() >= 2:
-            title_input = text_inputs.nth(0)
-            price_input = text_inputs.nth(1)
-            title_input.click()
-            title_input.fill(title)
-            price_input.click()
-            price_input.fill(price)
+        if self._try_fill_first(page, list(self.spec.title_selectors), title):
+            pass
         else:
-            self._fill_facebook_labeled_field(page, "Title", title, "input")
-            self._fill_facebook_labeled_field(page, "Price", price, "input")
+            text_inputs = page.locator('input[type="text"]')
+            if text_inputs.count() >= 2:
+                title_input = text_inputs.nth(0)
+                price_input = text_inputs.nth(1)
+                title_input.click()
+                title_input.fill(title)
+            else:
+                self._fill_facebook_labeled_field(page, "Title", title, "input")
+
+        if self._try_fill_first(page, list(self.spec.price_selectors), price):
+            pass
+        else:
+            text_inputs = page.locator('input[type="text"]')
+            if text_inputs.count() >= 2:
+                price_input = text_inputs.nth(1)
+                price_input.click()
+                price_input.fill(price)
+            else:
+                self._fill_facebook_labeled_field(page, "Price", price, "input")
 
         if description:
+            if self._try_fill_first(page, list(self.spec.description_selectors), description):
+                return
             textareas = page.locator("textarea")
             if textareas.count():
                 description_input = textareas.nth(0)
@@ -698,6 +796,28 @@ class MarketplaceBrowserRunner:
                 description_input.fill(description)
             else:
                 self._fill_facebook_labeled_field(page, "Description", description, "textarea")
+
+    def _wait_for_facebook_marketplace_form(self, page: Any) -> None:
+        selectors = [
+            *self.spec.title_selectors,
+            *self.spec.price_selectors,
+            *self.spec.description_selectors,
+            'input[type="text"]',
+            'input[type="number"]',
+            'input[role="spinbutton"]',
+            'textarea',
+            'div[contenteditable="true"]',
+        ]
+        last_error: Exception | None = None
+        for selector in selectors:
+            try:
+                page.wait_for_selector(selector, state="visible", timeout=self.config.timeout_ms)
+                return
+            except Exception as exc:
+                last_error = exc
+        raise BrowserRunnerError(
+            "Could not locate a Facebook Marketplace listing form after waiting for the page to render"
+        ) from last_error
 
     def _fill_facebook_labeled_field(self, page: Any, label: str, value: str, preferred_tag: str = "input") -> None:
         normalized_label = str(label or "").strip().lower()
@@ -963,6 +1083,52 @@ class MarketplaceBrowserRunner:
             raise BrowserRunnerError("Could not find any Facebook Marketplace listing links on the selling page")
         return found[:max_listings]
 
+    def _collect_facebook_selling_cards(self, page: Any, *, expected_title: str) -> list[dict[str, Any]]:
+        expected = self._normalize_listing_title(expected_title)
+        try:
+            cards = page.eval_on_selector_all(
+                '[href*="/marketplace/item/"], [href*="/commerce/listing/"], [href*="listing_id="]',
+                """
+                (nodes) => nodes.map((node) => {
+                  const anchor = node.closest('a') || node;
+                  const href = anchor.href || anchor.getAttribute('href') || '';
+                  let card = anchor;
+                  for (let i = 0; i < 5 && card; i += 1) {
+                    const text = (card.innerText || '').replace(/\\s+/g, ' ').trim();
+                    if (text) {
+                      return { href, text };
+                    }
+                    card = card.parentElement;
+                  }
+                  return { href, text: '' };
+                }).filter((item) => item.href)
+                """,
+            )
+        except Exception:
+            cards = []
+
+        today = datetime.now().astimezone().strftime("%-m/%-d")
+        results: list[dict[str, Any]] = []
+        for card in cards or []:
+            href = self._normalize_listing_url(str(card.get("href") or ""))
+            if not href:
+                continue
+            text = str(card.get("text") or "").replace("\n", " ").strip()
+            normalized_text = self._normalize_listing_title(text)
+            title_matches = bool(expected) and expected in normalized_text
+            date_match = re.search(r"listed on\s+([0-9]{1,2}/[0-9]{1,2})", text, flags=re.IGNORECASE)
+            looks_new = bool(date_match and date_match.group(1).strip() == today)
+            results.append(
+                {
+                    "url": href,
+                    "title": text[:240],
+                    "title_matches": title_matches,
+                    "looks_new": looks_new,
+                    "listed_on": date_match.group(1).strip() if date_match else None,
+                }
+            )
+        return results
+
     def _collect_listing_urls_from_html(self, html: str) -> list[str]:
         if not html:
             return []
@@ -992,6 +1158,26 @@ class MarketplaceBrowserRunner:
         if not listing_id:
             return None
         return f"https://www.facebook.com/marketplace/item/{listing_id}"
+
+    def _normalize_listing_title(self, value: str | None) -> str:
+        normalized = str(value or "").strip().lower()
+        normalized = re.sub(r"[^a-z0-9]+", " ", normalized)
+        return re.sub(r"\s+", " ", normalized).strip()
+
+    def _extract_listing_id(self, listing_url: str | None) -> str | None:
+        if not listing_url:
+            return None
+        match = re.search(r"/marketplace/item/(\d+)", listing_url, flags=re.IGNORECASE)
+        if match:
+            return match.group(1)
+        match = re.search(r"/commerce/listing/(\d+)", listing_url, flags=re.IGNORECASE)
+        if match:
+            return match.group(1)
+        parsed = urlparse(listing_url)
+        query_listing_id = parse_qs(parsed.query or "").get("listing_id") or []
+        if query_listing_id:
+            return str(query_listing_id[0]).strip() or None
+        return None
 
     def _extract_listing(self, page: Any, listing_url: str) -> dict[str, Any]:
         page.goto(listing_url, wait_until="domcontentloaded")
@@ -1377,11 +1563,11 @@ class AmazonMarketplaceBrowserRunner(MarketplaceBrowserRunner):
                 ).strip()
                 for asin in normalized_asins:
                     try:
-                        capture = None
-                        if title_hint:
-                            capture = self._capture_amazon_product_by_title(context, title_hint=title_hint)
-                        if capture is None:
-                            capture = self._capture_amazon_product_by_asin(context, asin=asin)
+                        # A Vine row with an ASIN must be captured from that
+                        # exact product page.  A title search can select a
+                        # similarly named but different variation, so it is
+                        # only a fallback for imports that have no ASIN.
+                        capture = self._capture_amazon_product_by_asin(context, asin=asin)
                         product_url = capture["source_url"]
                         image_urls = capture["image_urls"]
                         title = capture.get("title")

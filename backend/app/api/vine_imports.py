@@ -45,6 +45,26 @@ async def upload_vine_report(
         db.rollback()
         logger.exception("Vine report upload parse failed", extra={"upload_filename": file.filename, "user_id": user_id})
         raise HTTPException(status_code=400, detail=f"Vine report upload failed: {exc}") from exc
+    try:
+        service.auto_build_batch_drafts(
+            db,
+            batch=batch,
+            item_ids=None,
+            new_only=True,
+            include_cancelled=False,
+        )
+        db.refresh(batch)
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Vine report auto-build failed", extra={"batch_id": batch.id, "user_id": user_id})
+        batch = db.get(VineImportBatch, batch.id)
+        if batch is not None:
+            current_stats = dict(batch.stats_json or {})
+            current_stats["auto_build_error"] = str(exc)
+            batch.stats_json = current_stats
+            db.add(batch)
+            db.commit()
+            db.refresh(batch)
     items = db.execute(select(VineImportItem).where(VineImportItem.batch_id == batch.id).order_by(VineImportItem.id.asc())).scalars().all()
     return VineImportBatchResponse.model_validate({**batch.__dict__, "items": items})
 

@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket
@@ -9,6 +10,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from sqlalchemy import inspect
+from sqlalchemy import select
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -17,6 +19,8 @@ from app.api.ebay import router as ebay_router
 from app.api.inventory import bulk_router as bulk_jobs_router
 from app.api.inventory import router as inventory_router
 from app.api.intelligence import router as intelligence_router
+from app.api.intake import router as intake_router
+from app.api.media import router as media_router
 from app.api.marketplaces import router as marketplaces_router
 from app.api.marketplace_jobs import router as marketplace_jobs_router
 from app.api.routes import router
@@ -221,6 +225,8 @@ app.include_router(ebay_router)
 app.include_router(marketplaces_router)
 app.include_router(marketplace_jobs_router)
 app.include_router(intelligence_router)
+app.include_router(intake_router)
+app.include_router(media_router)
 app.include_router(inventory_router)
 app.include_router(bulk_jobs_router)
 app.include_router(sales_router)
@@ -246,6 +252,88 @@ def startup() -> None:
             "legacy_schema_columns_applied": [],
             "vine_image_repair": {"ran": False, "reason": "bootstrap_failed"},
         }
+
+
+def _run_intake_monitor_for_user(user_id: int) -> None:
+    """Run blocking provider I/O off the ASGI event loop with a scoped session."""
+    from app.models.models import User
+    from app.services.intake_slate import IntakeSlateService
+
+    db = SessionLocal()
+    try:
+        user = db.get(User, user_id)
+        if user:
+            IntakeSlateService().monitor_google_album(db, user=user)
+    finally:
+        db.close()
+
+
+async def _intake_monitor_loop() -> None:
+    from app.models.models import User
+    from app.services.intake_slate import IntakeSlateService
+
+    service = IntakeSlateService()
+    while True:
+        await asyncio.sleep(60)
+        try:
+            db = SessionLocal()
+            users = db.execute(select(User.id).order_by(User.id.asc())).scalars().all()
+            now = datetime.now(UTC)
+            due_user_ids: list[int] = []
+            for user_id in users:
+                user = db.get(User, user_id)
+                if user is None:
+                    continue
+                settings_payload = service.settings_for_user(user)
+                if not settings_payload.get("enabled"):
+                    continue
+                if not str(settings_payload.get("album_url") or settings_payload.get("folder_id") or "").strip():
+                    continue
+                last_synced = service._parse_datetime(settings_payload.get("last_synced_at"))  # noqa: SLF001
+                poll_seconds = max(60, int(settings_payload.get("poll_interval_seconds") or 300))
+                if last_synced and (now - last_synced.astimezone(UTC)).total_seconds() < poll_seconds:
+                    continue
+                due_user_ids.append(user.id)
+            db.close()
+            for user_id in due_user_ids:
+                try:
+                    await asyncio.to_thread(_run_intake_monitor_for_user, user_id)
+                except Exception:
+                    logger.exception("PosterPro intake monitor failed for user %s", user_id)
+                    failure_db = SessionLocal()
+                    try:
+                        failed_user = failure_db.get(User, user_id)
+                        if failed_user:
+                            settings_payload = service.settings_for_user(failed_user)
+                            service.save_settings(
+                                db=failure_db,
+                                user=failed_user,
+                                payload={
+                                    **settings_payload,
+                                    "last_error": "Automatic intake monitor failed. Check backend logs.",
+                                },
+                            )
+                    finally:
+                        failure_db.close()
+        except Exception:
+            logger.exception("PosterPro intake monitor loop error")
+        finally:
+            with contextlib.suppress(UnboundLocalError):
+                db.close()
+
+
+@app.on_event("startup")
+async def startup_intake_monitor() -> None:
+    app.state.intake_monitor_task = asyncio.create_task(_intake_monitor_loop())
+
+
+@app.on_event("shutdown")
+async def shutdown_intake_monitor() -> None:
+    task = getattr(app.state, "intake_monitor_task", None)
+    if task:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 @app.get("/health")

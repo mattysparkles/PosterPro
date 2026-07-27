@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hmac
 import hashlib
 import html
 import json
 import re
 import secrets
+from xml.etree import ElementTree
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -17,8 +19,8 @@ from PIL import Image
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.config import settings
-from app.models.enums import EbayPublishStatus, MarketplaceListingStatus, MarketplaceName
+from app.core.config import reload_settings, settings
+from app.models.enums import EbayPublishStatus, ListingStatus, MarketplaceListingStatus, MarketplaceName
 from app.models.models import Listing, MarketplaceAccount, MarketplaceListing, MarketplaceMetadataCache, MarketplacePublishAttempt, User
 from app.services.marketplace_error_translation import translate_marketplace_error
 from app.services.rate_limiter import rate_limiter
@@ -27,6 +29,132 @@ from app.services.rate_limiter import rate_limiter
 
 class EbayIntegrationError(RuntimeError):
     """Raised for eBay API integration errors."""
+
+
+_EBAY_TRADING_NAMESPACE = "urn:ebay:apis:eBLBaseComponents"
+
+
+def _ebay_trading_value(element: ElementTree.Element | None, path: str) -> str:
+    """Read a Trading API XML field without leaking namespace details to callers."""
+    if element is None:
+        return ""
+    value = element.findtext(path, namespaces={"e": _EBAY_TRADING_NAMESPACE})
+    return str(value or "").strip()
+
+
+def _is_inventory_sku_catalog_error(error: EbayIntegrationError) -> bool:
+    message = str(error).lower()
+    return "25707" in message or "invalid value for a sku" in message
+
+
+async def _get_active_ebay_listings_via_trading_api(
+    account: MarketplaceAccount,
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Read active listings through eBay's seller API when Inventory rejects a legacy SKU.
+
+    Inventory API refuses to enumerate *any* offers for an account that contains a
+    historical SKU which violates its current character rules.  GetMyeBaySelling
+    remains able to enumerate those listings, so this is a read-only compatibility
+    path for imports and reconciliation.
+    """
+    runtime_settings = reload_settings()
+    endpoint = "https://api.ebay.com/ws/api.dll" if runtime_settings.environment == "production" else "https://api.sandbox.ebay.com/ws/api.dll"
+    requested_limit = max(1, int(limit or 1))
+    page_size = min(requested_limit, 200)
+    page_number = 1
+    imported: list[dict[str, Any]] = []
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30)) as client:
+        while len(imported) < requested_limit:
+            request_xml = f'''<?xml version="1.0" encoding="utf-8"?>
+<GetMyeBaySellingRequest xmlns="{_EBAY_TRADING_NAMESPACE}">
+  <DetailLevel>ReturnAll</DetailLevel>
+  <ActiveList>
+    <Include>true</Include>
+    <Pagination>
+      <EntriesPerPage>{min(page_size, requested_limit - len(imported))}</EntriesPerPage>
+      <PageNumber>{page_number}</PageNumber>
+    </Pagination>
+  </ActiveList>
+</GetMyeBaySellingRequest>'''
+            await rate_limiter.acquire_async("ebay")
+            response = await client.post(
+                endpoint,
+                content=request_xml.encode("utf-8"),
+                headers={
+                    "X-EBAY-API-CALL-NAME": "GetMyeBaySelling",
+                    "X-EBAY-API-SITEID": "0",
+                    "X-EBAY-API-COMPATIBILITY-LEVEL": "1231",
+                    "X-EBAY-API-IAF-TOKEN": account.access_token,
+                    "Content-Type": "text/xml",
+                },
+            )
+            if response.status_code >= 400:
+                raise EbayIntegrationError(f"eBay Trading API request failed ({response.status_code}) while listing active items")
+            try:
+                root = ElementTree.fromstring(response.content)
+            except ElementTree.ParseError as exc:
+                raise EbayIntegrationError("eBay Trading API returned an unreadable active-listing response") from exc
+
+            ack = _ebay_trading_value(root, "e:Ack")
+            if ack.lower() not in {"success", "warning"}:
+                errors = root.findall("e:Errors", {"e": _EBAY_TRADING_NAMESPACE})
+                detail = "; ".join(
+                    filter(None, (_ebay_trading_value(error, "e:LongMessage") or _ebay_trading_value(error, "e:ShortMessage") for error in errors))
+                )
+                raise EbayIntegrationError(f"eBay Trading API could not list active items: {detail or ack or 'unknown error'}")
+
+            items = root.findall("e:ActiveList/e:ItemArray/e:Item", {"e": _EBAY_TRADING_NAMESPACE})
+            for item in items:
+                listing_id = _ebay_trading_value(item, "e:ItemID")
+                if not listing_id:
+                    continue
+                specifics: dict[str, Any] = {}
+                for pair in item.findall("e:ItemSpecifics/e:NameValueList", {"e": _EBAY_TRADING_NAMESPACE}):
+                    name = _ebay_trading_value(pair, "e:Name")
+                    values = [str(value.text or "").strip() for value in pair.findall("e:Value", {"e": _EBAY_TRADING_NAMESPACE}) if str(value.text or "").strip()]
+                    if name and values:
+                        specifics[name] = values[0]
+                image_urls = [
+                    str(value.text or "").strip()
+                    for value in item.findall("e:PictureDetails/e:PictureURL", {"e": _EBAY_TRADING_NAMESPACE})
+                    if str(value.text or "").strip()
+                ]
+                price = _ebay_trading_value(item, "e:SellingStatus/e:CurrentPrice")
+                quantity = _ebay_trading_value(item, "e:QuantityAvailable") or _ebay_trading_value(item, "e:Quantity") or "1"
+                sku = _ebay_trading_value(item, "e:SKU")
+                imported.append(
+                    {
+                        "source_listing_reference": f"https://www.ebay.com/itm/{listing_id}",
+                        "source_url": f"https://www.ebay.com/itm/{listing_id}",
+                        "title": _ebay_trading_value(item, "e:Title"),
+                        "description": _ebay_trading_value(item, "e:Description"),
+                        "price": price,
+                        "listing_price": price,
+                        "quantity": quantity,
+                        "image_urls": image_urls,
+                        "item_specifics": specifics,
+                        "attributes": specifics,
+                        "category_id": _ebay_trading_value(item, "e:PrimaryCategory/e:CategoryID"),
+                        "condition": _ebay_trading_value(item, "e:ConditionDisplayName") or _ebay_trading_value(item, "e:ConditionID"),
+                        "tags": ["ebay", "imported"],
+                        "source_identifiers": {"ebay_listing_id": listing_id, "offer_id": None, "sku": sku or None},
+                        "listing_start_time": _ebay_trading_value(item, "e:ListingDetails/e:StartTime"),
+                        "view_count": _ebay_trading_value(item, "e:HitCount"),
+                        "raw_offer": {"source": "ebay_trading_api", "item": {"listingId": listing_id, "sku": sku or None}},
+                        "raw_inventory_item": {"source": "ebay_trading_api", "item": {"listingId": listing_id}},
+                    }
+                )
+                if len(imported) >= requested_limit:
+                    break
+
+            total_pages = _ebay_trading_value(root, "e:ActiveList/e:PaginationResult/e:TotalNumberOfPages")
+            if not items or page_number >= int(total_pages or 1) or len(imported) >= requested_limit:
+                break
+            page_number += 1
+    return imported
 
 
 @dataclass(slots=True)
@@ -41,7 +169,8 @@ class EbayAPIClient:
 
     def __init__(self, access_token: str, *, sandbox: bool | None = None, timeout_seconds: int = 30):
         self.access_token = access_token
-        use_sandbox = settings.environment != "production" if sandbox is None else sandbox
+        runtime_settings = reload_settings()
+        use_sandbox = runtime_settings.environment != "production" if sandbox is None else sandbox
         self.base_url = "https://api.sandbox.ebay.com" if use_sandbox else "https://api.ebay.com"
         self.timeout = httpx.Timeout(timeout_seconds)
 
@@ -107,6 +236,11 @@ def _coerce_positive_float(value: Any) -> float | None:
     if numeric <= 0:
         return None
     return round(numeric, 3)
+
+
+def _coerce_price_number(value: Any) -> float | None:
+    """Normalize a persisted or remote price without accepting zero/negative values."""
+    return _coerce_positive_float(value)
 
 
 def _coerce_positive_int(value: Any) -> int | None:
@@ -250,6 +384,33 @@ def _payload_hash(payload: dict[str, Any] | None) -> str | None:
     return hashlib.sha256(serialized).hexdigest()
 
 
+def _build_ebay_sku(user_id: int, listing_id: int) -> str:
+    # eBay inventory SKUs must be alphanumeric and <= 50 chars.
+    # Keep the prefix recognizable while avoiding punctuation.
+    return f"posterprou{int(user_id)}l{int(listing_id)}"
+
+
+def _extract_listing_id_from_ebay_sku(sku: str, user_id: int | None = None) -> int | None:
+    raw = str(sku or "").strip()
+    if not raw:
+        return None
+    patterns = []
+    if user_id is not None:
+        patterns.append(rf"^posterprou{int(user_id)}l(\d+)$")
+        patterns.append(rf"^posterpro-{int(user_id)}-(\d+)$")
+    else:
+        patterns.append(r"^posterprou\d+l(\d+)$")
+        patterns.append(r"^posterpro-\d+-(\d+)$")
+    for pattern in patterns:
+        match = re.match(pattern, raw, re.IGNORECASE)
+        if match:
+            try:
+                return int(match.group(1))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 def _start_publish_attempt(
     db: Session,
     *,
@@ -268,7 +429,7 @@ def _start_publish_attempt(
         preflight_status=preflight_status,
         payload_snapshot=_serialize_payload_snapshot(payload_snapshot),
         payload_hash=_payload_hash(payload_snapshot),
-        inventory_item_sku=f"posterpro-{listing.user_id}-{listing.id}",
+        inventory_item_sku=_build_ebay_sku(listing.user_id, listing.id),
         retry_count=0,
     )
     db.add(attempt)
@@ -526,11 +687,13 @@ def _derive_item_type(title: str) -> str | None:
 
 
 def _oauth_base() -> str:
-    return "https://auth.sandbox.ebay.com/oauth2/authorize" if settings.environment != "production" else "https://auth.ebay.com/oauth2/authorize"
+    runtime_settings = reload_settings()
+    return "https://auth.sandbox.ebay.com/oauth2/authorize" if runtime_settings.environment != "production" else "https://auth.ebay.com/oauth2/authorize"
 
 
 def _token_endpoint() -> str:
-    return "https://api.sandbox.ebay.com/identity/v1/oauth2/token" if settings.environment != "production" else "https://api.ebay.com/identity/v1/oauth2/token"
+    runtime_settings = reload_settings()
+    return "https://api.sandbox.ebay.com/identity/v1/oauth2/token" if runtime_settings.environment != "production" else "https://api.ebay.com/identity/v1/oauth2/token"
 
 
 def _scopes() -> str:
@@ -566,10 +729,13 @@ def _scopes() -> str:
 
 
 def build_ebay_auth_url(user_id: int, redirect_uri: str) -> str:
+    runtime_settings = reload_settings()
+    if not runtime_settings.ebay_client_id:
+        raise EbayIntegrationError("Missing eBay OAuth settings (ebay_client_id / ebay_client_secret)")
     state = _make_oauth_state(user_id)
     query = urlencode(
         {
-            "client_id": settings.ebay_client_id,
+            "client_id": runtime_settings.ebay_client_id,
             "redirect_uri": redirect_uri,
             "response_type": "code",
             "scope": _scopes(),
@@ -581,19 +747,28 @@ def build_ebay_auth_url(user_id: int, redirect_uri: str) -> str:
 
 def _make_oauth_state(user_id: int) -> str:
     random_nonce = secrets.token_urlsafe(16)
-    payload = f"{user_id}:{random_nonce}".encode("utf-8")
-    return base64.urlsafe_b64encode(payload).decode("utf-8")
+    payload = f"{user_id}:{random_nonce}"
+    signature = hmac.new((settings.session_secret or "posterpro-oauth").encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return base64.urlsafe_b64encode(f"{payload}:{signature}".encode("utf-8")).decode("utf-8")
 
 
 def parse_oauth_state(state: str) -> int:
-    decoded = base64.urlsafe_b64decode(state.encode("utf-8")).decode("utf-8")
-    user_id_text, _ = decoded.split(":", maxsplit=1)
+    try:
+        decoded = base64.urlsafe_b64decode(state + ("=" * (-len(state) % 4))).decode("utf-8")
+        user_id_text, nonce, signature = decoded.split(":", maxsplit=2)
+    except Exception as exc:
+        raise EbayIntegrationError("Invalid OAuth state") from exc
+    payload = f"{user_id_text}:{nonce}"
+    expected = hmac.new((settings.session_secret or "posterpro-oauth").encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        raise EbayIntegrationError("Invalid OAuth state")
     return int(user_id_text)
 
 
 async def authenticate_user_ebay(user_id: int, redirect_uri: str) -> str:
     """Return user-specific OAuth URL; callback handling stores token in DB."""
-    if not settings.ebay_client_id or not settings.ebay_client_secret:
+    runtime_settings = reload_settings()
+    if not runtime_settings.ebay_client_id or not runtime_settings.ebay_client_secret:
         raise EbayIntegrationError("Missing eBay OAuth settings (ebay_client_id / ebay_client_secret)")
     if not redirect_uri:
         raise EbayIntegrationError("redirect_uri is required")
@@ -601,7 +776,10 @@ async def authenticate_user_ebay(user_id: int, redirect_uri: str) -> str:
 
 
 async def exchange_code_for_tokens(code: str, redirect_uri: str) -> EbayTokenBundle:
-    credentials = f"{settings.ebay_client_id}:{settings.ebay_client_secret}".encode("utf-8")
+    runtime_settings = reload_settings()
+    if not runtime_settings.ebay_client_id or not runtime_settings.ebay_client_secret:
+        raise EbayIntegrationError("Missing eBay OAuth settings (ebay_client_id / ebay_client_secret)")
+    credentials = f"{runtime_settings.ebay_client_id}:{runtime_settings.ebay_client_secret}".encode("utf-8")
     basic_auth = base64.b64encode(credentials).decode("utf-8")
     data = {
         "grant_type": "authorization_code",
@@ -628,6 +806,7 @@ async def exchange_code_for_tokens(code: str, redirect_uri: str) -> EbayTokenBun
 
 
 async def refresh_ebay_token(user_id: int, db: Session) -> MarketplaceAccount:
+    runtime_settings = reload_settings()
     account = db.execute(
         select(MarketplaceAccount).where(
             MarketplaceAccount.user_id == user_id,
@@ -637,7 +816,9 @@ async def refresh_ebay_token(user_id: int, db: Session) -> MarketplaceAccount:
     if not account or not account.refresh_token:
         raise EbayIntegrationError("No eBay account with refresh token found")
 
-    credentials = f"{settings.ebay_client_id}:{settings.ebay_client_secret}".encode("utf-8")
+    if not runtime_settings.ebay_client_id or not runtime_settings.ebay_client_secret:
+        raise EbayIntegrationError("Missing eBay OAuth settings (ebay_client_id / ebay_client_secret)")
+    credentials = f"{runtime_settings.ebay_client_id}:{runtime_settings.ebay_client_secret}".encode("utf-8")
     basic_auth = base64.b64encode(credentials).decode("utf-8")
     data = {
         "grant_type": "refresh_token",
@@ -660,6 +841,9 @@ async def refresh_ebay_token(user_id: int, db: Session) -> MarketplaceAccount:
     account.token_expires_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(seconds=int(payload.get("expires_in", 7200)))
     if payload.get("refresh_token"):
         account.refresh_token = payload["refresh_token"]
+    account.connection_status = "connected"
+    account.last_error = None
+    account.last_refresh_at = datetime.now(UTC).replace(tzinfo=None)
     db.add(account)
     db.commit()
     db.refresh(account)
@@ -668,7 +852,8 @@ async def refresh_ebay_token(user_id: int, db: Session) -> MarketplaceAccount:
 
 def summarize_ebay_account_health(account: MarketplaceAccount | None) -> dict[str, Any]:
     now = datetime.utcnow()
-    connected = bool(account and account.access_token)
+    reauthorization_required = bool(account and getattr(account, "connection_status", "connected") == "reauthorization_required")
+    connected = bool(account and account.access_token) and not reauthorization_required
     has_refresh_token = bool(account and account.refresh_token)
     token_expires_at = account.token_expires_at if account else None
 
@@ -677,7 +862,11 @@ def summarize_ebay_account_health(account: MarketplaceAccount | None) -> dict[st
     reconnect_required = False
     status_note = "Connect eBay for this operator before importing or publishing."
 
-    if connected:
+    if reauthorization_required:
+        token_status = "reauthorization_required"
+        reconnect_required = True
+        status_note = "eBay rejected the saved credentials. Reconnect eBay to authorize this operator again."
+    elif connected:
         if token_expires_at is None:
             token_status = "connected"
             import_ready = True
@@ -718,7 +907,19 @@ def summarize_ebay_account_health(account: MarketplaceAccount | None) -> dict[st
         "import_ready": import_ready,
         "reconnect_required": reconnect_required,
         "status_note": status_note,
+        "last_error": getattr(account, "last_error", None) if account else None,
+        "last_refresh_at": getattr(account, "last_refresh_at", None) if account else None,
+        "last_successful_check_at": getattr(account, "last_successful_check_at", None) if account else None,
     }
+
+
+def _mark_ebay_reauthorization_required(account: MarketplaceAccount, db: Session, error: Exception) -> None:
+    """Persist a safe, actionable credential failure without retaining token material."""
+    message = str(error).replace(account.access_token or "", "[redacted]")[:500]
+    account.connection_status = "reauthorization_required"
+    account.last_error = message
+    db.add(account)
+    db.commit()
 
 
 async def get_or_refresh_account(user_id: int, db: Session) -> MarketplaceAccount:
@@ -735,8 +936,48 @@ async def get_or_refresh_account(user_id: int, db: Session) -> MarketplaceAccoun
             # Older/manual eBay connections in this deployment can have an access token without a refresh token.
             # Fall back to the stored token so read-only/import paths can still attempt the API call.
             return account
-        return await refresh_ebay_token(user_id, db)
+        try:
+            return await refresh_ebay_token(user_id, db)
+        except EbayIntegrationError as exc:
+            # A refresh failure is not a healthy connection. Persist the
+            # actionable state so Settings and the publish queue stop showing
+            # a stale "connected" badge after the access token has expired.
+            _mark_ebay_reauthorization_required(account, db, exc)
+            raise
     return account
+
+
+async def _request_with_single_refresh(
+    user_id: int,
+    db: Session,
+    account: MarketplaceAccount,
+    *,
+    method: str,
+    path: str,
+    params: dict[str, Any] | None = None,
+    payload: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+) -> tuple[MarketplaceAccount, dict[str, Any]]:
+    client = EbayAPIClient(account.access_token)
+    try:
+        response = await client.request(method, path, params=params, payload=payload, headers=headers)
+        return account, response
+    except EbayIntegrationError as exc:
+        if "(401)" not in str(exc) or not account.refresh_token:
+            raise
+        try:
+            account = await refresh_ebay_token(user_id, db)
+        except EbayIntegrationError as refresh_exc:
+            _mark_ebay_reauthorization_required(account, db, refresh_exc)
+            raise
+        client = EbayAPIClient(account.access_token)
+        try:
+            response = await client.request(method, path, params=params, payload=payload, headers=headers)
+            return account, response
+        except EbayIntegrationError as retry_exc:
+            if "(401)" in str(retry_exc):
+                _mark_ebay_reauthorization_required(account, db, retry_exc)
+            raise
 
 
 async def create_inventory_location(
@@ -763,7 +1004,15 @@ async def create_inventory_location(
         raise EbayIntegrationError(f"Cannot create merchant location without: {', '.join(missing_origin_fields)}")
     payload = _merchant_location_payload(origin_settings)
     try:
-        await client.request("POST", f"/sell/inventory/v1/location/{location_key}", payload=payload)
+        _, response = await _request_with_single_refresh(
+            user_id,
+            db,
+            account,
+            method="POST",
+            path=f"/sell/inventory/v1/location/{location_key}",
+            payload=payload,
+        )
+        _ = response
     except EbayIntegrationError as exc:
         message = str(exc).lower()
         if "merchantlocationkey already exists" not in message:
@@ -846,7 +1095,7 @@ async def create_or_replace_item(
     inventory_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     client = EbayAPIClient(account.access_token)
-    sku = f"posterpro-{listing.user_id}-{listing.id}"
+    sku = _build_ebay_sku(listing.user_id, listing.id)
     payload = inventory_payload or {
         "availability": {"shipToLocationAvailability": {"quantity": 1}},
         "condition": "NEW",
@@ -1005,6 +1254,57 @@ async def get_business_policy_ids(
     }
 
 
+async def _list_business_policies_for_account(
+    user_id: int,
+    db: Session,
+    account: MarketplaceAccount,
+    *,
+    marketplace_id: str = "EBAY_US",
+) -> dict[str, Any]:
+    async def _fetch(current_account: MarketplaceAccount) -> dict[str, Any]:
+        return await list_business_policies(current_account.access_token, marketplace_id=marketplace_id)
+
+    try:
+        return await _fetch(account)
+    except EbayIntegrationError as exc:
+        if "(401)" not in str(exc) or not account.refresh_token:
+            raise
+        try:
+            refreshed = await refresh_ebay_token(user_id, db)
+        except EbayIntegrationError as refresh_exc:
+            _mark_ebay_reauthorization_required(account, db, refresh_exc)
+            raise
+        return await _fetch(refreshed)
+
+
+async def _get_business_policy_ids_for_account(
+    user_id: int,
+    db: Session,
+    account: MarketplaceAccount,
+    *,
+    marketplace_id: str = "EBAY_US",
+    create_if_missing: bool = True,
+) -> dict[str, Any]:
+    async def _fetch(current_account: MarketplaceAccount) -> dict[str, Any]:
+        return await get_business_policy_ids(
+            current_account.access_token,
+            marketplace_id=marketplace_id,
+            create_if_missing=create_if_missing,
+        )
+
+    try:
+        return await _fetch(account)
+    except EbayIntegrationError as exc:
+        if "(401)" not in str(exc) or not account.refresh_token:
+            raise
+        try:
+            refreshed = await refresh_ebay_token(user_id, db)
+        except EbayIntegrationError as refresh_exc:
+            _mark_ebay_reauthorization_required(account, db, refresh_exc)
+            raise
+        return await _fetch(refreshed)
+
+
 def _policy_summary_entry(policy: dict[str, Any], *, id_field: str, marketplace_id: str) -> dict[str, Any]:
     category_types = []
     for category_type in policy.get("categoryTypes") or []:
@@ -1111,7 +1411,17 @@ async def sync_business_policies(
     create_missing_defaults: bool = False,
 ) -> dict[str, Any]:
     account = await get_or_refresh_account(user_id, db)
-    policy_catalog = await list_business_policies(account.access_token, marketplace_id=marketplace_id)
+    # Policy selection is user-owned configuration.  Load it before building
+    # the sync response so a harmless catalog read cannot fail with an
+    # unbound local variable and leave the publishing UI in a false "blocked"
+    # state.
+    policy_settings = _load_listing_ebay_policy_settings(db, user_id)
+    policy_catalog = await _list_business_policies_for_account(
+        user_id,
+        db,
+        account,
+        marketplace_id=marketplace_id,
+    )
     selected = policy_catalog["selected"]
     payment_policies = policy_catalog["payment_policies"]
     fulfillment_policies = policy_catalog["fulfillment_policies"]
@@ -1148,8 +1458,19 @@ async def sync_business_policies(
                 "policy_catalog": policy_catalog,
                 "settings_updates": settings_updates,
             }
-        policy_ids = await get_business_policy_ids(account.access_token, marketplace_id=marketplace_id, create_if_missing=True)
-        policy_catalog = await list_business_policies(account.access_token, marketplace_id=marketplace_id)
+        policy_ids = await _get_business_policy_ids_for_account(
+            user_id,
+            db,
+            account,
+            marketplace_id=marketplace_id,
+            create_if_missing=True,
+        )
+        policy_catalog = await _list_business_policies_for_account(
+            user_id,
+            db,
+            account,
+            marketplace_id=marketplace_id,
+        )
         payment_policies = policy_catalog["payment_policies"]
         fulfillment_policies = policy_catalog["fulfillment_policies"]
         return_policies = policy_catalog["return_policies"]
@@ -1161,7 +1482,13 @@ async def sync_business_policies(
         }
         settings_updates["policy_sync_status"] = "created_defaults"
     else:
-        policy_ids = await get_business_policy_ids(account.access_token, marketplace_id=marketplace_id, create_if_missing=False)
+        policy_ids = await _get_business_policy_ids_for_account(
+            user_id,
+            db,
+            account,
+            marketplace_id=marketplace_id,
+            create_if_missing=False,
+        )
         settings_updates["policy_sync_status"] = "synced"
 
     settings_updates.update(
@@ -1193,11 +1520,24 @@ async def verify_merchant_location(
     *,
     location_key: str | None = None,
     create_if_missing: bool = False,
+    origin: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     account = await get_or_refresh_account(user_id, db)
     policy_settings = _load_listing_ebay_policy_settings(db, user_id)
     resolved_key = str(location_key or policy_settings.get("merchant_location_key") or f"posterpro-{user_id}").strip()
-    origin = _normalize_merchant_location_origin(policy_settings)
+    origin_settings = _normalize_merchant_location_origin(policy_settings)
+    if isinstance(origin, dict):
+        for field, key in (
+            ("merchant_location_location_name", "location_name"),
+            ("merchant_location_postal_code", "postal_code"),
+            ("merchant_location_country", "country"),
+            ("merchant_location_city", "city"),
+            ("merchant_location_state_or_province", "state_or_province"),
+            ("merchant_location_phone", "phone"),
+        ):
+            value = str(origin.get(field) or "").strip()
+            if value:
+                origin_settings[key] = value
     client = EbayAPIClient(account.access_token)
     settings_updates: dict[str, Any] = {
         "merchant_location_key": resolved_key,
@@ -1206,18 +1546,24 @@ async def verify_merchant_location(
     }
 
     try:
-        location = await client.request("GET", f"/sell/inventory/v1/location/{resolved_key}")
+        _, location = await _request_with_single_refresh(
+            user_id,
+            db,
+            account,
+            method="GET",
+            path=f"/sell/inventory/v1/location/{resolved_key}",
+        )
         address = (location.get("location") or {}).get("address") if isinstance(location.get("location"), dict) else {}
         address = address if isinstance(address, dict) else {}
         settings_updates.update(
             {
                 "merchant_location_verified": True,
                 "merchant_location_status": "verified",
-                "merchant_location_location_name": str(location.get("name") or origin.get("location_name") or "").strip() or "PosterPro Default Location",
-                "merchant_location_postal_code": str(address.get("postalCode") or origin.get("postal_code") or "").strip(),
-                "merchant_location_country": str(address.get("country") or origin.get("country") or "").strip(),
-                "merchant_location_city": str(address.get("city") or origin.get("city") or "").strip(),
-                "merchant_location_state_or_province": str(address.get("stateOrProvince") or origin.get("state_or_province") or "").strip(),
+                "merchant_location_location_name": str(location.get("name") or origin_settings.get("location_name") or "").strip() or "PosterPro Default Location",
+                "merchant_location_postal_code": str(address.get("postalCode") or origin_settings.get("postal_code") or "").strip(),
+                "merchant_location_country": str(address.get("country") or origin_settings.get("country") or "").strip(),
+                "merchant_location_city": str(address.get("city") or origin_settings.get("city") or "").strip(),
+                "merchant_location_state_or_province": str(address.get("stateOrProvince") or origin_settings.get("state_or_province") or "").strip(),
             }
         )
         return {
@@ -1272,8 +1618,8 @@ async def verify_merchant_location(
         missing_origin_fields = [
             field
             for field, value in {
-                "merchant_location_postal_code": origin.get("postal_code"),
-                "merchant_location_country": origin.get("country"),
+                "merchant_location_postal_code": origin_settings.get("postal_code"),
+                "merchant_location_country": origin_settings.get("country"),
             }.items()
             if not str(value or "").strip()
         ]
@@ -1294,7 +1640,7 @@ async def verify_merchant_location(
                 "settings_updates": settings_updates,
             }
 
-        created = await create_inventory_location(user_id, db, location_key=resolved_key, origin=origin)
+        created = await create_inventory_location(user_id, db, location_key=resolved_key, origin=origin_settings)
         settings_updates.update(
             {
                 "merchant_location_verified": True,
@@ -1531,6 +1877,49 @@ def _build_ebay_package_weight_and_size(listing: Listing) -> dict[str, Any] | No
     return payload or None
 
 
+def _flatten_ebay_specifics_for_storage(mapped_specifics: dict[str, list[str]] | None) -> dict[str, Any]:
+    flattened: dict[str, Any] = {}
+    if not isinstance(mapped_specifics, dict):
+        return flattened
+    for key, values in mapped_specifics.items():
+        name = str(key or "").strip()
+        if not name:
+            continue
+        if isinstance(values, list):
+            cleaned = [str(value).strip() for value in values if str(value or "").strip()]
+        else:
+            cleaned = [str(values).strip()] if str(values or "").strip() else []
+        if not cleaned:
+            continue
+        flattened[name] = cleaned[0] if len(cleaned) == 1 else cleaned
+    return flattened
+
+
+def _apply_ebay_plan_repairs_to_listing(listing: Listing, plan: dict[str, Any]) -> None:
+    payload_preview = plan.get("payload_preview") if isinstance(plan.get("payload_preview"), dict) else {}
+    category = plan.get("category") if isinstance(plan.get("category"), dict) else {}
+    category_id = str(category.get("category_id") or "").strip()
+    if category_id.isdigit():
+        listing.category_suggestion = category_id
+
+    flattened_specifics = _flatten_ebay_specifics_for_storage(payload_preview.get("item_specifics"))
+    if flattened_specifics:
+        listing.item_specifics = flattened_specifics
+
+    marketplace_data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}
+    listing.marketplace_data = {
+        **marketplace_data,
+        "ebay_last_resolved_category": {
+            "category_id": category_id,
+            "category_name": str(category.get("category_name") or "").strip(),
+            "source": str(category.get("source") or "").strip(),
+        },
+        "ebay_item_specifics_provenance": payload_preview.get("item_specifics_provenance") or {},
+        "ebay_item_specifics_approximate": payload_preview.get("item_specifics_approximate") or [],
+        "ebay_last_auto_repair_at": datetime.now(UTC).isoformat(),
+    }
+
+
 def _map_ebay_item_specifics(
     listing: Listing,
     aspects: dict[str, Any] | None,
@@ -1665,7 +2054,8 @@ async def build_ebay_publish_plan(
     else:
         live_policy_ids = await get_business_policy_ids(account.access_token, marketplace_id=marketplace_id, create_if_missing=False)
 
-    sku = f"posterpro-{listing.user_id}-{listing.id}"
+    sku = _build_ebay_sku(listing.user_id, listing.id)
+    sku = _build_ebay_sku(listing.user_id, listing.id)
     price = listing.suggested_price or listing.listing_price or listing.buy_it_now_price or listing.estimated_value or 19.99
     package_weight_and_size = _build_ebay_package_weight_and_size(listing)
     inventory_payload = {
@@ -1807,11 +2197,12 @@ async def get_fulfillment_orders(
     account: MarketplaceAccount,
     *,
     limit: int = 50,
+    offset: int = 0,
     filter_expression: str | None = None,
 ) -> list[dict[str, Any]]:
     """Pull paid/completed orders from eBay Fulfillment API."""
     client = EbayAPIClient(account.access_token)
-    params: dict[str, Any] = {"limit": limit}
+    params: dict[str, Any] = {"limit": limit, "offset": offset}
     if filter_expression:
         params["filter"] = filter_expression
     response = await client.request("GET", "/sell/fulfillment/v1/order", params=params)
@@ -1827,9 +2218,56 @@ async def get_active_ebay_listings(
 ) -> list[dict[str, Any]]:
     account = await get_or_refresh_account(user_id, db)
     client = EbayAPIClient(account.access_token)
-    offers_response = await client.request("GET", "/sell/inventory/v1/offer", params={"limit": limit, "offset": 0})
-    offers = [offer for offer in (offers_response.get("offers") or []) if isinstance(offer, dict)]
 
+    async def _offer_page(*, page_limit: int, offset: int) -> dict[str, Any]:
+        nonlocal account, client
+        try:
+            return await client.request("GET", "/sell/inventory/v1/offer", params={"limit": page_limit, "offset": offset})
+        except EbayIntegrationError as exc:
+            # eBay can revoke an access token before the locally supplied
+            # expiry. Refresh once, then retry the same *read-only* page.
+            if "(401)" not in str(exc) or not account.refresh_token:
+                raise
+            try:
+                account = await refresh_ebay_token(user_id, db)
+            except EbayIntegrationError as refresh_exc:
+                _mark_ebay_reauthorization_required(account, db, refresh_exc)
+                raise
+            client = EbayAPIClient(account.access_token)
+            try:
+                return await client.request("GET", "/sell/inventory/v1/offer", params={"limit": page_limit, "offset": offset})
+            except EbayIntegrationError as retry_exc:
+                if "(401)" in str(retry_exc):
+                    _mark_ebay_reauthorization_required(account, db, retry_exc)
+                raise
+
+    requested_limit = max(1, int(limit or 1))
+    page_limit = min(requested_limit, 100)
+    offers: list[dict[str, Any]] = []
+    offset = 0
+    try:
+        while len(offers) < requested_limit:
+            offers_response = await _offer_page(page_limit=min(page_limit, requested_limit - len(offers)), offset=offset)
+            page = [offer for offer in (offers_response.get("offers") or []) if isinstance(offer, dict)]
+            offers.extend(page)
+            if len(page) < page_limit:
+                break
+            offset += len(page)
+    except EbayIntegrationError as exc:
+        if not _is_inventory_sku_catalog_error(exc):
+            raise
+        imported = await _get_active_ebay_listings_via_trading_api(account, limit=requested_limit)
+        account.last_successful_check_at = datetime.now(UTC).replace(tzinfo=None)
+        account.connection_status = "connected"
+        account.last_error = None
+        db.add(account)
+        db.commit()
+        return imported
+    account.last_successful_check_at = datetime.now(UTC).replace(tzinfo=None)
+    account.connection_status = "connected"
+    account.last_error = None
+    db.add(account)
+    db.commit()
     imported: list[dict[str, Any]] = []
     for offer in offers:
         sku = str(offer.get("sku") or "").strip()
@@ -1947,6 +2385,7 @@ async def sync_ebay_active_listings(
     account = await get_or_refresh_account(user_id, db)
     active_listings = await get_active_ebay_listings(user_id, db, limit=limit)
     matched = 0
+    created = 0
     updated = 0
     unmatched = 0
     changed_fields: dict[str, int] = {}
@@ -1964,18 +2403,69 @@ async def sync_ebay_active_listings(
                     Listing.user_id == user_id,
                     Listing.ebay_listing_id == ebay_listing_id,
                 )
-            ).scalar_one_or_none()
-        if not local and sku.startswith(f"posterpro-{user_id}-"):
-            try:
-                listing_id = int(sku.rsplit("-", 1)[-1])
+            ).scalars().first()
+        if not local and ebay_listing_id:
+            # Older imports can retain the remote ID only on the marketplace
+            # projection.  Match that first before creating a history row.
+            local = db.execute(
+                select(Listing)
+                .join(MarketplaceListing, MarketplaceListing.listing_id == Listing.id)
+                .where(
+                    Listing.user_id == user_id,
+                    MarketplaceListing.marketplace == MarketplaceName.ebay,
+                    MarketplaceListing.marketplace_listing_id == ebay_listing_id,
+                )
+                .order_by(MarketplaceListing.updated_at.desc(), Listing.id.desc())
+            ).scalars().first()
+        if not local:
+            listing_id = _extract_listing_id_from_ebay_sku(sku, user_id=user_id)
+            if listing_id:
                 local = db.get(Listing, listing_id)
                 if local and local.user_id != user_id:
                     local = None
-            except (TypeError, ValueError):
-                local = None
         if not local:
-            unmatched += 1
-            continue
+            # Read-only eBay reconciliation is allowed to create a local
+            # historical mirror of a remote active offer.  It never calls a
+            # remote create/revise/end endpoint, and stable remote IDs/SKUs
+            # make reruns idempotent.
+            remote_images = [str(url).strip() for url in (remote.get("image_urls") or []) if str(url).strip()]
+            local = Listing(
+                user_id=user_id,
+                status=ListingStatus.posted,
+                source_type="ebay_history_reconciliation",
+                title=str(remote.get("title") or "eBay listing").strip()[:255] or "eBay listing",
+                description=str(remote.get("description") or "").strip() or None,
+                category_id=str(remote.get("category_id") or "").strip() or None,
+                item_specifics=remote.get("item_specifics") if isinstance(remote.get("item_specifics"), dict) else {},
+                condition=str(remote.get("condition") or "").strip() or None,
+                listing_price=_coerce_price_number(remote.get("listing_price")),
+                suggested_price=_coerce_price_number(remote.get("listing_price")),
+                quantity=max(0, int(remote.get("quantity") or 0)),
+                image_urls=remote_images or None,
+                listing_images=[
+                    {
+                        "storage_path": url,
+                        "source_url": url,
+                        "source_platform": "ebay",
+                        "operator_state": "approved",
+                        "is_reference": False,
+                        "metadata": {"source": "ebay_history_reconciliation", "remote_listing_id": ebay_listing_id},
+                    }
+                    for url in remote_images
+                ] or None,
+                ebay_listing_id=ebay_listing_id or None,
+                ebay_publish_status=EbayPublishStatus.POSTED,
+                source_metadata={
+                    "source": "ebay_history_reconciliation",
+                    "source_identifiers": {"ebay_listing_id": ebay_listing_id or None, "offer_id": offer_id or None, "sku": sku or None},
+                    "source_url": remote.get("source_url"),
+                    "imported_at": datetime.now(UTC).replace(tzinfo=None).isoformat(),
+                },
+                marketplace_data={"ebay_sync": {"source": "ebay_active_listings", "sku": sku or None, "offer_id": offer_id or None}},
+            )
+            db.add(local)
+            db.flush()
+            created += 1
 
         matched += 1
         revision_changes = _ebay_listing_revision_changes(local, remote)
@@ -2022,13 +2512,15 @@ async def sync_ebay_active_listings(
                 "remote_condition": remote.get("condition"),
                 "remote_item_specifics": remote.get("item_specifics"),
                 "remote_image_urls": remote.get("image_urls") or [],
+                "remote_listing_start_time": remote.get("listing_start_time"),
+                "remote_view_count": remote.get("view_count"),
                 **changed_fields_summary,
             },
         }
         _sync_ebay_marketplace_listing(
             db,
             listing_id=local.id,
-            status=MarketplaceListingStatus.UPDATED,
+            status=MarketplaceListingStatus.PUBLISHED,
             response={
                 "status": "SYNCED",
                 "source": "ebay_active_listings",
@@ -2054,6 +2546,7 @@ async def sync_ebay_active_listings(
         "marketplace": "ebay",
         "checked": len(active_listings),
         "matched": matched,
+        "created": created,
         "updated": updated,
         "unmatched": unmatched,
         "changed_fields": changed_fields,
@@ -2062,10 +2555,124 @@ async def sync_ebay_active_listings(
     }
 
 
+async def sync_ebay_fulfillment_history(
+    user_id: int,
+    db: Session,
+    *,
+    limit: int = 100,
+) -> dict[str, Any]:
+    from app.services.sale_detection_service import SaleDetectionService
+
+    account = await get_or_refresh_account(user_id, db)
+    requested_limit = max(1, int(limit or 1))
+    page_limit = min(requested_limit, 50)
+    orders: list[dict[str, Any]] = []
+    offset = 0
+    while len(orders) < requested_limit:
+        page = await get_fulfillment_orders(account, limit=min(page_limit, requested_limit - len(orders)), offset=offset)
+        orders.extend(page)
+        if len(page) < min(page_limit, requested_limit - len(orders) + len(page)):
+            break
+        offset += len(page)
+        if len(page) == 0:
+            break
+    sale_detection = SaleDetectionService()
+    matched = 0
+    created = 0
+    updated = 0
+    unmatched = 0
+    results: list[dict[str, Any]] = []
+
+    for order in orders:
+        if not isinstance(order, dict):
+            continue
+        line_items = order.get("lineItems") if isinstance(order.get("lineItems"), list) else []
+        first_line = line_items[0] if line_items and isinstance(line_items[0], dict) else {}
+        marketplace_order_id = str(order.get("orderId") or order.get("order_id") or "").strip() or None
+        marketplace_listing_id = (
+            str(first_line.get("legacyItemId") or first_line.get("itemId") or first_line.get("listingId") or order.get("legacyItemId") or "").strip()
+            or None
+        )
+        title = str(first_line.get("title") or order.get("title") or "").strip() or None
+        try:
+            quantity = max(1, int(first_line.get("quantity") or order.get("quantity") or 1))
+        except (TypeError, ValueError):
+            quantity = 1
+        amount = None
+        pricing_summary = order.get("pricingSummary") if isinstance(order.get("pricingSummary"), dict) else {}
+        total = pricing_summary.get("total") if isinstance(pricing_summary.get("total"), dict) else {}
+        try:
+            if total.get("value") is not None:
+                amount = float(total.get("value"))
+        except (TypeError, ValueError):
+            amount = None
+        sold_at = str(order.get("creationDate") or order.get("lastModifiedDate") or "").strip() or None
+        event = {
+            "marketplace": "ebay",
+            "marketplace_order_id": marketplace_order_id,
+            "marketplace_listing_id": marketplace_listing_id,
+            "quantity": quantity,
+            "amount": amount,
+            "currency": str(total.get("currency") or order.get("currency") or "USD"),
+            "sold_at": sold_at,
+            "raw": {"order": order, "source": "ebay_fulfillment_history"},
+            "title": title,
+        }
+        if sale_detection._already_processed(db, "ebay", marketplace_order_id, marketplace_listing_id):
+            continue
+        listing = sale_detection._find_listing(db, user_id, event)
+        sale = sale_detection._record_sale(db, user_id, listing, event)
+        created += 1
+        if listing:
+            matched += 1
+            remaining = max(0, int(listing.quantity or 0) - quantity)
+            listing.quantity = remaining
+            listing.sold_at = sale.sold_at
+            if remaining <= 0 and listing.status in {ListingStatus.ready, ListingStatus.draft, ListingStatus.posted}:
+                listing.status = ListingStatus.posted
+            listing.marketplace_data = {
+                **(listing.marketplace_data or {}),
+                "ebay_history_sync": {
+                    "synced_at": datetime.now(UTC).replace(tzinfo=None).isoformat(),
+                    "source": "ebay_fulfillment_history",
+                    "marketplace_order_id": marketplace_order_id,
+                    "marketplace_listing_id": marketplace_listing_id,
+                    "quantity": quantity,
+                    "amount": amount,
+                },
+            }
+            db.add(listing)
+            updated += 1
+        else:
+            unmatched += 1
+        db.add(sale)
+        results.append(
+            {
+                "sale_id": sale.id,
+                "listing_id": listing.id if listing else None,
+                "marketplace_order_id": marketplace_order_id,
+                "marketplace_listing_id": marketplace_listing_id,
+            }
+        )
+
+    db.commit()
+    return {
+        "user_id": user_id,
+        "marketplace": "ebay",
+        "checked": len(orders),
+        "matched": matched,
+        "created": created,
+        "updated": updated,
+        "unmatched": unmatched,
+        "results": results,
+        "account_id": account.id,
+    }
+
+
 async def revise_ebay_listing(listing: Listing, db: Session) -> dict[str, Any]:
     account = await get_or_refresh_account(listing.user_id, db)
     plan = await build_ebay_publish_plan(listing, db, allow_create_policies=False)
-    sku = f"posterpro-{listing.user_id}-{listing.id}"
+    sku = _build_ebay_sku(listing.user_id, listing.id)
     offer_id = _resolve_existing_ebay_offer_id(listing)
     if not offer_id and listing.ebay_listing_id:
         offer_id = str((listing.marketplace_data or {}).get("offer", {}).get("offerId") or "").strip() or None
@@ -2160,6 +2767,9 @@ async def publish_listing_to_ebay(listing: Listing, db: Session, *, relist: bool
 
     try:
         plan = await build_ebay_publish_plan(listing, db, allow_create_policies=True)
+        _apply_ebay_plan_repairs_to_listing(listing, plan)
+        db.add(listing)
+        db.commit()
         account = await get_or_refresh_account(listing.user_id, db)
         location_data = await create_inventory_location(
             listing.user_id,

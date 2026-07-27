@@ -20,6 +20,7 @@ import {
   fetchSettingsPanels,
   queueCrosspostJob,
   generateListing,
+  requestListingRevision,
   toggleAutonomousMode,
   updateListing,
 } from "../../lib/api";
@@ -34,6 +35,57 @@ const CHANNEL_LABELS = {
   whatnot: "Whatnot",
   vinted: "Vinted",
 };
+
+const MARKETPLACE_PREVIEW_STYLES = {
+  ebay: { brand: 'eBay', accent: 'bg-[#3665f3]', shell: 'border-[#d9e2ff]', price: 'text-[#111827]' },
+  facebook: { brand: 'Facebook Marketplace', accent: 'bg-[#0866ff]', shell: 'border-[#cfe0ff]', price: 'text-[#0f5132]' },
+  mercari: { brand: 'Mercari', accent: 'bg-[#ff0211]', shell: 'border-[#ffd8dc]', price: 'text-[#b42318]' },
+  poshmark: { brand: 'Poshmark', accent: 'bg-[#7b1e3a]', shell: 'border-[#efd7e0]', price: 'text-[#7b1e3a]' },
+  etsy: { brand: 'Etsy', accent: 'bg-[#f1641e]', shell: 'border-[#ffe0cf]', price: 'text-[#9c2d00]' },
+  depop: { brand: 'Depop', accent: 'bg-[#111827]', shell: 'border-[#d0d5dd]', price: 'text-[#111827]' },
+  whatnot: { brand: 'Whatnot', accent: 'bg-[#6d28d9]', shell: 'border-[#e5dcff]', price: 'text-[#5b21b6]' },
+  vinted: { brand: 'Vinted', accent: 'bg-[#007782]', shell: 'border-[#c6eef0]', price: 'text-[#00626c]' },
+};
+
+function MarketplaceVisualPreview({ entry, imageUrls, formatMoney }) {
+  const payload = entry?.payload || {};
+  const marketplace = String(entry?.marketplace || payload.marketplace || 'ebay').toLowerCase();
+  const style = MARKETPLACE_PREVIEW_STYLES[marketplace] || MARKETPLACE_PREVIEW_STYLES.ebay;
+  const images = Array.from(new Set([...(payload.image_urls || []), ...(imageUrls || [])].filter(Boolean))).slice(0, 12);
+  const price = payload.price ?? payload.listing_price ?? payload.starting_bid;
+  const shipping = payload.shipping_policy || payload.shipping || {};
+  return (
+    <div className={`overflow-hidden rounded-[18px] border bg-white shadow-[0_14px_28px_rgba(16,24,40,0.08)] ${style.shell}`}>
+      <div className={`${style.accent} flex items-center justify-between px-4 py-3 text-white`}>
+        <span className="text-base font-bold tracking-[-0.03em]">{style.brand}</span>
+        <span className="rounded-full bg-white/18 px-2.5 py-1 text-[11px] font-semibold">Preview only · not published</span>
+      </div>
+      <div className="grid gap-4 p-4 md:grid-cols-[minmax(0,1.05fr)_minmax(220px,0.95fr)]">
+        <div>
+          <div className="aspect-square overflow-hidden rounded-[12px] bg-[#f2f4f7]">
+            {images[0] ? <img src={images[0]} alt={payload.title || 'Listing preview'} className="h-full w-full object-contain" /> : <div className="flex h-full items-center justify-center text-sm text-[#667085]">No selected product image</div>}
+          </div>
+          {images.length > 1 ? (
+            <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
+              {images.map((url, index) => <img key={`${url}-${index}`} src={url} alt={`Listing image ${index + 1}`} className="h-14 w-14 shrink-0 rounded-[8px] border border-[#e5e7eb] object-cover" />)}
+            </div>
+          ) : null}
+        </div>
+        <div className="min-w-0">
+          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[#667085]">{payload.category_hint || payload.category_id || 'Marketplace category pending review'}</p>
+          <h3 className="mt-2 text-xl font-semibold leading-7 tracking-[-0.025em] text-[#101828]">{payload.title || 'Untitled listing'}</h3>
+          <p className={`mt-4 text-2xl font-bold ${style.price}`}>{formatMoney(price)}</p>
+          <div className="mt-4 space-y-2 text-sm text-[#475467]">
+            <p><span className="font-semibold text-[#344054]">Condition:</span> {payload.condition || 'Review needed'}</p>
+            <p><span className="font-semibold text-[#344054]">Quantity:</span> {payload.quantity ?? 1}</p>
+            <p><span className="font-semibold text-[#344054]">Shipping:</span> {shipping.service || payload.delivery_method || 'See listing details'}</p>
+          </div>
+          {payload.description ? <p className="mt-4 line-clamp-5 text-sm leading-6 text-[#475467]">{payload.description}</p> : null}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 const SHIPPING_SCOPE_OPTIONS = [
   { value: "local_only", label: "Local only" },
@@ -143,6 +195,8 @@ export default function ListingWorkspacePage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [revisionFields, setRevisionFields] = useState([]);
+  const [revisionNote, setRevisionNote] = useState("");
   const [queueingCrosspost, setQueueingCrosspost] = useState(false);
   const [importing, setImporting] = useState(false);
   const [listing, setListing] = useState(null);
@@ -151,7 +205,9 @@ export default function ListingWorkspacePage() {
   const [workflow, setWorkflow] = useState({
     review_before_publish: true,
     auto_publish_after_approval: false,
+    default_preview_marketplace: 'ebay',
   });
+  const [previewMarketplace, setPreviewMarketplace] = useState('ebay');
   const [form, setForm] = useState(() => normalizeListingForm(null));
   const [importForm, setImportForm] = useState({
     source_marketplace: "facebook",
@@ -174,7 +230,9 @@ export default function ListingWorkspacePage() {
         setWorkflow({
           review_before_publish: panels?.workflow?.review_before_publish ?? true,
           auto_publish_after_approval: panels?.workflow?.auto_publish_after_approval ?? false,
+          default_preview_marketplace: panels?.workflow?.default_preview_marketplace || 'ebay',
         });
+        setPreviewMarketplace(String(panels?.workflow?.default_preview_marketplace || 'ebay').toLowerCase());
         setListing(fetchedListing);
         setForm(normalizeListingForm(fetchedListing));
         if (fetchedListing?.id) {
@@ -204,6 +262,12 @@ export default function ListingWorkspacePage() {
       cancelled = true;
     };
   }, [isNew, listingId, router.isReady, user?.id]);
+
+  useEffect(() => {
+    if (!crosspostPreview.length) return;
+    if (crosspostPreview.some((entry) => String(entry.marketplace).toLowerCase() === previewMarketplace)) return;
+    setPreviewMarketplace(String(crosspostPreview[0]?.marketplace || 'ebay').toLowerCase());
+  }, [crosspostPreview, previewMarketplace]);
 
   const previewMode = router.isReady && (router.query.mode === 'preview' || router.query.preview === '1');
 
@@ -415,6 +479,24 @@ export default function ListingWorkspacePage() {
     }
   };
 
+  const requestRevision = async () => {
+    if (!listing?.id || !revisionFields.length) {
+      toast.error("Select at least one field to correct.");
+      return;
+    }
+    try {
+      const revised = await requestListingRevision(listing.id, revisionFields, revisionNote);
+      setListing(revised);
+      setForm(normalizeListingForm(revised));
+      setRevisionFields([]);
+      setRevisionNote("");
+      await reloadDashboard();
+      toast.success("Returned to Drafts with your correction request.");
+    } catch (error) {
+      toast.error(error.message || "Revision request failed.");
+    }
+  };
+
   const queueCrosspost = async () => {
     const currentListing = listing || (await saveListing("draft"));
     if (!currentListing?.id) return;
@@ -514,6 +596,14 @@ export default function ListingWorkspacePage() {
           </div>
         }
       />
+
+      <SectionPanel title="Send back to Drafts for correction" description="Choose the parts that need work. PosterPro records your request, moves the listing to Drafts, and uses your notes on the next AI revision.">
+        <div className="flex flex-wrap gap-3">
+          {['title', 'description', 'category', 'price', 'condition', 'photos', 'item specifics', 'shipping'].map((field) => <label key={field} className="flex items-center gap-2 text-sm"><input type="checkbox" checked={revisionFields.includes(field)} onChange={() => setRevisionFields((current) => current.includes(field) ? current.filter((item) => item !== field) : [...current, field])} /> Fix {field}</label>)}
+        </div>
+        <textarea value={revisionNote} onChange={(event) => setRevisionNote(event.target.value)} className="mt-3 min-h-20 w-full rounded-[10px] border border-[#e5e7eb] p-3 text-sm" placeholder="Optional: describe what is wrong or point the AI to a label/photo." />
+        <div className="mt-3"><Button variant="outline" onClick={requestRevision}>Send to Drafts &amp; request AI correction</Button></div>
+      </SectionPanel>
 
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1.25fr)_minmax(340px,0.75fr)]">
         <div className="space-y-5">
@@ -875,8 +965,18 @@ export default function ListingWorkspacePage() {
           <SectionPanel id="listing-execution-preview" title="Execution Preview" description="See how PosterPro will treat each selected target before it publishes or hands off.">
             <div className="space-y-3">
               {crosspostPreview.length ? (
-                crosspostPreview.map((entry) => (
-                  <div key={entry.marketplace} className="rounded-[12px] border border-[#e5e7eb] bg-white p-4">
+                <>
+                  <div className="flex flex-wrap gap-2" role="tablist" aria-label="Marketplace preview selector">
+                    {crosspostPreview.map((entry) => {
+                      const marketplace = String(entry.marketplace || 'ebay').toLowerCase();
+                      const selected = marketplace === previewMarketplace;
+                      return <button key={marketplace} type="button" onClick={() => setPreviewMarketplace(marketplace)} className={`rounded-full border px-3 py-2 text-sm font-semibold transition ${selected ? 'border-[#2563eb] bg-[#eef4ff] text-[#1d4ed8]' : 'border-[#e5e7eb] bg-white text-[#475467]'}`}>{CHANNEL_LABELS[marketplace] || marketplace}</button>;
+                    })}
+                  </div>
+                  {crosspostPreview.filter((entry) => String(entry.marketplace).toLowerCase() === previewMarketplace).map((entry) => (
+                  <div key={entry.marketplace} className="space-y-3">
+                    <MarketplaceVisualPreview entry={entry} imageUrls={form.image_urls.split('\n').map((value) => value.trim()).filter(Boolean)} formatMoney={formatMoney} />
+                    <div className="rounded-[12px] border border-[#e5e7eb] bg-white p-4">
                     <div className="flex items-center justify-between gap-2">
                       <p className="text-sm font-semibold text-[#101828]">{CHANNEL_LABELS[entry.marketplace] || entry.marketplace}</p>
                       <StatusPill status={entry.execution_mode === "direct_api" ? "success" : "warning"} label={entry.execution_mode} />
@@ -912,8 +1012,10 @@ export default function ListingWorkspacePage() {
                         Queueing this target does not by itself guarantee final marketplace submission. Check Settings for the current bridge submit policy if you need to confirm whether this deployment stops at draft-fill or is allowed to click the final marketplace submit step.
                       </div>
                     ) : null}
+                    </div>
                   </div>
-                ))
+                  ))}
+                </>
               ) : (
                 <div className="rounded-[12px] border border-[#e5e7eb] bg-white p-4 text-sm text-[#667085]">
                   Save the listing first to generate an execution preview for each selected target marketplace.

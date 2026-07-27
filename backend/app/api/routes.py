@@ -7,9 +7,9 @@ import httpx
 
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.api.schemas import (
@@ -23,6 +23,8 @@ from app.api.schemas import (
     ListingApprovalResponse,
     ListingCreateRequest,
     ListingGenerateRequest,
+    ListingRevisionRequest,
+    ListingApproveQueueRequest,
     ListingResponse,
     ListingTemplateApplyRequest,
     ListingTemplateCreateRequest,
@@ -59,6 +61,7 @@ from app.services.embedding import fake_clip_embedding
 from app.services.google_photos import GooglePhotosService
 from app.services.image_pipeline import ImagePipelineService
 from app.services.inventory_service import InventorySafetyError, InventoryService
+from app.services.intake_slate import IntakeSlateService
 from app.services.listing_ai import ListingAIService
 from app.services.listing_review import (
     derive_condition_data,
@@ -69,7 +72,8 @@ from app.services.listing_review import (
 )
 from app.services.media_lifecycle import purge_listing_media
 from app.services.listing_workspace import normalize_marketplace_data
-from app.services.marketplace_orchestrator import queue_publish
+from app.services.marketplace_orchestrator import enqueue_crosspost_job, queue_publish
+from app.services.marketplace_preflight import MarketplacePreflightService
 from app.services.operator_command_service import OperatorCommandService
 from app.services.profit_service import ProfitService
 from app.services.storage import LocalStorage
@@ -81,24 +85,27 @@ from app.services.listing_templates_service import listing_template_service
 from app.services.amazon_media import AmazonProductMediaProvider
 from app.services.amazon_product_discovery import AmazonProductDiscoveryService
 from app.services.automation_bridge import AutomationBridgeError, submit_bridge_job, wait_for_bridge_job
-from app.models.enums import ListingStatus
+from app.models.enums import ListingStatus, MarketplaceListingStatus, MarketplaceName
 from app.workers.tasks import (
     cluster_images_task,
     enqueue_storage_unit_batch_pipeline,
     process_overnight_storage_batches,
     process_photo_batch,
+    process_marketplace_crosspost_job_task,
 )
 
 router = APIRouter()
 inventory_service = InventoryService()
 photo_editor_service = PhotoEditorService()
 operator_command_service = OperatorCommandService()
+intake_slate_service = IntakeSlateService()
 
 _DEFAULT_WORKFLOW_PREFERENCES = {
     "review_before_publish": True,
     "auto_publish_after_approval": False,
     "bulk_approval_enabled": True,
     "listing_preview_mode": "marketplace",
+    "default_preview_marketplace": "ebay",
 }
 
 _GOOGLE_PHOTOS_WATCH_KEY = "google_photos_watch"
@@ -115,6 +122,39 @@ def _workflow_preferences(user: User | None) -> dict:
         "auto_publish_after_approval": bool(stored.get("auto_publish_after_approval", _DEFAULT_WORKFLOW_PREFERENCES["auto_publish_after_approval"])),
         "bulk_approval_enabled": bool(stored.get("bulk_approval_enabled", _DEFAULT_WORKFLOW_PREFERENCES["bulk_approval_enabled"])),
         "listing_preview_mode": str(stored.get("listing_preview_mode") or _DEFAULT_WORKFLOW_PREFERENCES["listing_preview_mode"]),
+        "default_preview_marketplace": str(stored.get("default_preview_marketplace") or _DEFAULT_WORKFLOW_PREFERENCES["default_preview_marketplace"]),
+    }
+
+
+def _approval_preflight_status(listing: Listing) -> dict:
+    marketplace_data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}
+    preflight_state = marketplace_data.get("marketplace_preflight")
+    by_marketplace = preflight_state.get("by_marketplace") if isinstance(preflight_state, dict) else {}
+    approved_markets: list[str] = []
+    blockers: dict[str, list[dict]] = {}
+    warnings: dict[str, list[dict]] = {}
+    ready_markets: list[str] = []
+
+    for market in [str(value).strip().lower() for value in (marketplace_data.get("targets") or []) if str(value).strip()]:
+        cached = by_marketplace.get(market) if isinstance(by_marketplace, dict) else None
+        if not isinstance(cached, dict) or cached.get("status") in {None, "", "stale"}:
+            continue
+        status = str(cached.get("status") or "").strip().lower()
+        if status in {"ready", "ready_with_warnings", "published"}:
+            approved_markets.append(market)
+            ready_markets.append(market)
+        elif status == "blocked":
+            blockers[market] = [item for item in (cached.get("blockers") or []) if isinstance(item, dict)]
+        if cached.get("warnings"):
+            warnings[market] = [item for item in (cached.get("warnings") or []) if isinstance(item, dict)]
+
+    return {
+        "approved_markets": approved_markets,
+        "ready_markets": ready_markets,
+        "blockers": blockers,
+        "warnings": warnings,
+        "has_blockers": bool(blockers),
+        "has_targets": bool(approved_markets or blockers or warnings),
     }
 
 
@@ -255,21 +295,72 @@ def _delete_listing_for_user(db: Session, *, listing: Listing, current_user: Use
 
 
 
-def _approve_listing_for_user(db: Session, *, listing: Listing, current_user: User) -> dict:
+def _approve_listing_for_user(
+    db: Session,
+    *,
+    listing: Listing,
+    current_user: User,
+    queue_automatically: bool | None = None,
+) -> dict:
     marketplace_data = dict(listing.marketplace_data or {})
     current_targets = marketplace_data.get("targets")
     targets = [str(value).strip().lower() for value in (current_targets or []) if str(value).strip()]
     for target in ("ebay", "facebook"):
         if target not in targets:
             targets.append(target)
-
-    listing.status = ListingStatus.ready
-    listing.needs_review = False
     listing.marketplace_data = normalize_marketplace_data(
         {
             **marketplace_data,
             "targets": targets,
             "crosspost_mode": str(marketplace_data.get("crosspost_mode") or "approval_required"),
+        }
+    )
+    preflight_service = MarketplacePreflightService()
+    preflight_results: dict[str, dict] = {}
+    blockers_by_market: dict[str, list[dict]] = {}
+    ready_markets: list[str] = []
+    warning_markets: list[str] = []
+    for market in targets:
+        preflight = preflight_service.preflight_listing(db, listing, market)
+        preflight_service.cache_preflight_summary(db, listing, preflight)
+        preflight_results[market] = preflight
+        blockers = [item for item in (preflight.get("blockers") or []) if isinstance(item, dict)]
+        warnings = [item for item in (preflight.get("warnings") or []) if isinstance(item, dict)]
+        if blockers:
+            blockers_by_market[market] = blockers
+        else:
+            ready_markets.append(market)
+        if warnings:
+            warning_markets.append(market)
+
+    publish_ready = bool(targets) and not blockers_by_market and all(
+        str(preflight_results.get(market, {}).get("status") or "").strip().lower() in {"ready", "ready_with_warnings", "published"}
+        for market in targets
+    )
+
+    source_metadata = dict(listing.source_metadata or {})
+    source_metadata["operator_approved_at"] = datetime.utcnow().isoformat() if publish_ready else None
+    source_metadata["operator_approved_by_user_id"] = current_user.id if publish_ready else None
+    source_metadata["approval_attempted_at"] = datetime.utcnow().isoformat()
+    if blockers_by_market:
+        source_metadata["approval_blockers"] = blockers_by_market
+    listing.source_metadata = source_metadata
+
+    if publish_ready:
+        listing.status = ListingStatus.ready
+        listing.needs_review = False
+    else:
+        listing.status = ListingStatus.draft
+        listing.needs_review = False
+    listing.marketplace_data = normalize_marketplace_data(
+        {
+            **(listing.marketplace_data or {}),
+            "targets": targets,
+            "crosspost_mode": str(marketplace_data.get("crosspost_mode") or "approval_required"),
+            "approval_ready_markets": ready_markets,
+            "approval_warning_markets": warning_markets,
+            "approval_blockers": blockers_by_market,
+            "approval_publishable": publish_ready,
         }
     )
     db.add(listing)
@@ -278,12 +369,15 @@ def _approve_listing_for_user(db: Session, *, listing: Listing, current_user: Us
 
     preferences = _workflow_preferences(current_user)
     results: list[dict] = []
-    if preferences.get("auto_publish_after_approval"):
+    should_auto_queue = (preferences.get("auto_publish_after_approval") if queue_automatically is None else queue_automatically) and publish_ready
+    if should_auto_queue:
         results = queue_publish(db, listing.id, targets)
         db.refresh(listing)
     return {
         "listing": _serialize_listing_response(listing),
         "auto_publish_after_approval": bool(preferences.get("auto_publish_after_approval")),
+        "approval_publishable": publish_ready,
+        "approval_blockers": blockers_by_market,
         "results": results,
     }
 
@@ -614,7 +708,15 @@ def import_google_photos(
 def get_google_photos_watch_settings(
     current_user: User = Depends(get_current_user),
 ):
-    return _google_photos_watch_settings(current_user)
+    settings_payload = intake_slate_service.settings_for_user(current_user)
+    return {
+        "enabled": bool(settings_payload.get("enabled")),
+        "auto_enrich": bool(settings_payload.get("auto_draft_listing", True)),
+        "album_url": str(settings_payload.get("album_url") or "").strip(),
+        "last_synced_at": settings_payload.get("last_synced_at"),
+        "last_imported_count": int(settings_payload.get("last_imported_count") or 0),
+        "last_error": str(settings_payload.get("last_error") or "").strip() or None,
+    }
 
 
 @router.put("/import/google-photos/watch")
@@ -623,19 +725,26 @@ def update_google_photos_watch_settings(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    saved = _save_google_photos_watch_settings(
-        user=current_user,
+    current = intake_slate_service.settings_for_user(current_user)
+    saved = intake_slate_service.save_settings(
         db=db,
-        settings_payload={
+        user=current_user,
+        payload={
+            **current,
             "enabled": bool(payload.enabled),
-            "auto_enrich": bool(payload.auto_enrich),
             "album_url": str(payload.album_url),
-            "last_synced_at": _google_photos_watch_settings(current_user).get("last_synced_at"),
-            "last_imported_count": _google_photos_watch_settings(current_user).get("last_imported_count", 0),
+            "auto_draft_listing": bool(payload.auto_enrich),
             "last_error": None,
         },
     )
-    return saved
+    return {
+        "enabled": bool(saved.get("enabled")),
+        "auto_enrich": bool(saved.get("auto_draft_listing", True)),
+        "album_url": str(saved.get("album_url") or "").strip(),
+        "last_synced_at": saved.get("last_synced_at"),
+        "last_imported_count": int(saved.get("last_imported_count") or 0),
+        "last_error": str(saved.get("last_error") or "").strip() or None,
+    }
 
 
 @router.post("/import/google-photos/watch/run")
@@ -643,39 +752,29 @@ def run_google_photos_watch(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    watch = _google_photos_watch_settings(current_user)
-    album_url = str(watch.get("album_url") or "").strip()
-    if not album_url:
-        raise HTTPException(status_code=400, detail="No Google Photos album URL configured.")
     try:
-        result = _import_google_photos_album(
-            album_url=album_url,
-            db=db,
-            current_user=current_user,
-            user_scope=current_user.id,
-            auto_enrich=bool(watch.get("auto_enrich", True)),
-        )
-        updated = _save_google_photos_watch_settings(
-            user=current_user,
-            db=db,
-            settings_payload={
-                **watch,
-                "last_synced_at": datetime.utcnow().isoformat(),
-                "last_imported_count": int(result.get("new_items") or 0),
-                "last_error": None,
+        result = intake_slate_service.monitor_google_album(db, user=current_user)
+        updated = intake_slate_service.settings_for_user(current_user)
+        return {
+            "watch": {
+                "enabled": bool(updated.get("enabled")),
+                "auto_enrich": bool(updated.get("auto_draft_listing", True)),
+                "album_url": str(updated.get("album_url") or "").strip(),
+                "last_synced_at": updated.get("last_synced_at"),
+                "last_imported_count": int(updated.get("last_imported_count") or 0),
+                "last_error": str(updated.get("last_error") or "").strip() or None,
             },
-        )
-        return {"watch": updated, "result": result}
+            "result": {
+                "scanned": int(result.get("scanned") or 0),
+                "new_items": int(result.get("imported") or 0),
+                "slates_detected": int(result.get("slates_detected") or 0),
+                "assigned_photos": int(result.get("assigned_photos") or 0),
+                "drafts_created": int(result.get("drafts_created") or 0),
+                "duplicates": int(result.get("duplicates") or 0),
+            },
+        }
     except Exception as exc:
-        _save_google_photos_watch_settings(
-            user=current_user,
-            db=db,
-            settings_payload={
-                **watch,
-                "last_error": str(exc),
-            },
-        )
-        raise
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/clusters")
@@ -687,13 +786,95 @@ def get_clusters(
     return [{"id": c.id, "title_hint": c.title_hint, "image_count": len(c.images)} for c in clusters]
 
 
-@router.get("/listings", response_model=list[ListingResponse])
+@router.get("/listings")
 def get_listings(
+    page: int | None = Query(default=None, ge=1),
+    page_size: int | None = Query(default=None, ge=1, le=250),
+    source_type: str | None = Query(default=None),
+    queue: str | None = Query(default=None, max_length=32),
+    search: str | None = Query(default=None, max_length=200),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    rows = db.execute(select(Listing).where(Listing.user_id == current_user.id).order_by(Listing.updated_at.desc())).scalars().all()
-    return [_serialize_listing_response(listing) for listing in rows]
+    """Return the operator catalog.
+
+    The legacy unpaged response is retained for integrations that have not
+    opted into paging.  The web workspace always sends both page parameters so
+    it never blocks on serializing an entire recovery/import history.
+    """
+    filters = []
+    normalized_source = str(source_type or "").strip().lower()
+    if normalized_source and normalized_source != "all":
+        filters.append(Listing.source_type == normalized_source)
+    normalized_search = str(search or "").strip()
+    if normalized_search:
+        pattern = f"%{normalized_search}%"
+        filters.append(or_(Listing.title.ilike(pattern), Listing.description.ilike(pattern)))
+    statement = select(Listing).where(*filters)
+
+    def _bucket(listing: Listing) -> str:
+        """Resolve catalog queues before pagination so totals remain honest."""
+        labels = {str(value).strip().lower() for value in (listing.custom_labels or [])}
+        if listing.sold_at is not None or int(listing.quantity or 1) <= 0:
+            return "sold"
+        if listing.status == ListingStatus.rejected or {"archived_vine", "archived_sold"} & labels:
+            return "archived"
+        if listing.status == ListingStatus.draft:
+            return "drafts"
+        if str(listing.status).lower() == "error" or str(listing.ebay_publish_status or "").upper() == "FAILED":
+            return "failed"
+        if str(listing.ebay_publish_status or "").upper() == "POSTED" or bool(listing.ebay_listing_id):
+            return "published"
+        source_metadata = listing.source_metadata if isinstance(listing.source_metadata, dict) else {}
+        is_recovery = str(listing.source_type or "") == "media_inventory_recovery"
+        explicitly_approved = bool(source_metadata.get("operator_approved_at"))
+        if is_recovery and not explicitly_approved:
+            return "drafts"
+        if listing.restricted_review_required or listing.needs_review:
+            return "review"
+        if listing.status == ListingStatus.ready:
+            preflight_state = (listing.marketplace_data or {}).get("marketplace_preflight") if isinstance(listing.marketplace_data, dict) else {}
+            by_marketplace = preflight_state.get("by_marketplace") if isinstance(preflight_state, dict) else {}
+            target_markets = [str(value).strip().lower() for value in (listing.marketplace_data or {}).get("targets") or [] if str(value).strip()]
+            approved_target = any(
+                isinstance(by_marketplace, dict)
+                and str((by_marketplace.get(market) or {}).get("status") or "").strip().lower() in {"ready", "ready_with_warnings", "published"}
+                for market in target_markets
+            )
+            return "ready" if explicitly_approved and approved_target else "drafts"
+        return "review"
+
+    normalized_queue = str(queue or "").strip().lower()
+    if page is None and page_size is None:
+        rows = db.execute(statement.order_by(Listing.updated_at.desc())).scalars().all()
+        if normalized_queue and normalized_queue != "all":
+            rows = [row for row in rows if _bucket(row) == normalized_queue]
+        return [_serialize_listing_response(listing) for listing in rows]
+
+    resolved_page = page or 1
+    resolved_page_size = page_size or 25
+    if normalized_queue and normalized_queue != "all":
+        matching_rows = [
+            row for row in db.execute(statement.order_by(Listing.updated_at.desc())).scalars().all()
+            if _bucket(row) == normalized_queue
+        ]
+        total = len(matching_rows)
+        start = (resolved_page - 1) * resolved_page_size
+        rows = matching_rows[start:start + resolved_page_size]
+    else:
+        total = int(db.execute(select(func.count()).select_from(Listing).where(*filters)).scalar_one())
+        rows = db.execute(
+            statement.order_by(Listing.updated_at.desc())
+            .offset((resolved_page - 1) * resolved_page_size)
+            .limit(resolved_page_size)
+        ).scalars().all()
+    return {
+        "items": [_serialize_listing_response(listing) for listing in rows],
+        "total": total,
+        "page": resolved_page,
+        "page_size": resolved_page_size,
+        "total_pages": max(1, (total + resolved_page_size - 1) // resolved_page_size),
+    }
 
 
 @router.post("/listings/vine/backfill-images")
@@ -823,6 +1004,13 @@ def backfill_vine_listing_images(
             str(source_metadata.get("manual_amazon_url") or source_metadata.get("item_url") or "").strip()
             or (str(item.manual_amazon_url).strip() if item and item.manual_amazon_url else None)
         )
+        # Preserve the exact source-page provenance when attaching a recovered
+        # gallery.  The old compatibility endpoint referenced `item_url`
+        # below without defining it, which aborted successful image attachment
+        # after the browser had already found product media.
+        item_url = (
+            str(item.item_url).strip() if item and item.item_url else None
+        ) or str(source_metadata.get("item_url") or source_metadata.get("amazon_source_page_url") or "").strip() or None
 
         if asin or manual_url:
             try:
@@ -1075,6 +1263,48 @@ def update_listing(
     db.commit()
     db.refresh(listing)
     return _serialize_listing_response(listing)
+
+
+@router.post("/listings/approve-and-queue")
+def approve_and_queue_listings(
+    payload: ListingApproveQueueRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    targets = [str(value).strip().lower() for value in (payload.marketplaces or ["ebay"]) if str(value).strip()]
+    if "ebay" in targets and (not payload.confirm_live_publish or str(payload.confirmation_phrase or "").strip() != "QUEUE LIVE EBAY READY LISTINGS"):
+        raise HTTPException(status_code=400, detail="Live eBay queue requires explicit confirmation.")
+    results = []
+    for listing_id in list(dict.fromkeys(payload.listing_ids or [])):
+        listing = db.get(Listing, listing_id)
+        if not listing:
+            results.append({"listing_id": listing_id, "status": "missing"})
+            continue
+        ensure_user_owns_resource(current_user, listing.user_id)
+        source_metadata = dict(listing.source_metadata or {})
+        source_metadata["approval_attempted_at"] = datetime.utcnow().isoformat()
+        source_metadata["operator_approved_by_user_id"] = current_user.id
+        listing.source_metadata = source_metadata
+        listing.marketplace_data = normalize_marketplace_data(
+            {
+                **(listing.marketplace_data or {}),
+                "targets": targets,
+                "crosspost_mode": str((listing.marketplace_data or {}).get("crosspost_mode") or "approval_required"),
+                "approval_requested": True,
+                "approval_publishable": False,
+            }
+        )
+        db.add(listing)
+        db.commit()
+        result = enqueue_crosspost_job(
+            db,
+            listing=listing,
+            target_markets=targets,
+            requested_mode="operator_approved_live_queue",
+            execution_plan={"operator_live_confirmed": True, "queued_from": "approve_and_queue", "targets": targets},
+        )
+        results.append({"listing_id": listing.id, "status": result.get("status"), "results": [], "job_id": result.get("job_id"), "task_id": result.get("task_id"), "error": result.get("error")})
+    return {"results": results}
 
 
 @router.post("/listings/{listing_id}/approve", response_model=ListingApprovalResponse)
@@ -1654,6 +1884,31 @@ def get_listing_pricing(
     return PricingService().get_pricing(db, listing_id)
 
 
+@router.post("/listings/{listing_id}/request-revision", response_model=ListingResponse)
+def request_listing_revision(
+    listing_id: int,
+    payload: ListingRevisionRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    listing = db.get(Listing, listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    ensure_user_owns_resource(current_user, listing.user_id)
+    metadata = dict(listing.source_metadata or {})
+    history = list(metadata.get("operator_revision_requests") or [])
+    history.append({"fields": list(dict.fromkeys(payload.fields or [])), "note": (payload.note or "").strip() or None, "requested_at": datetime.utcnow().isoformat()})
+    metadata["operator_revision_requests"] = history[-20:]
+    metadata["rework_state"] = "queued_for_ai_revision"
+    listing.source_metadata = metadata
+    listing.status = "draft"
+    listing.needs_review = False
+    db.add(listing)
+    db.commit()
+    db.refresh(listing)
+    return _serialize_listing_response(listing)
+
+
 @router.post("/listings/{listing_id}/generate", response_model=ListingResponse)
 def generate_listing(
     listing_id: int,
@@ -1726,8 +1981,9 @@ def generate_listing(
     listing.listing_price = pricing_analysis["recommended_price"]
     listing.marketplace_data = marketplace_data
     listing.source_metadata = source_metadata
+    # Generation is a submission for operator review, never an approval.
     listing.needs_review = True
-    listing.status = "ready"
+    listing.status = "PROCESSED"
     _apply_listing_review_defaults(listing)
     db.commit()
     db.refresh(listing)

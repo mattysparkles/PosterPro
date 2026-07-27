@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from sqlalchemy import func
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -19,6 +20,7 @@ from app.api.schemas import (
     CrosspostPreviewEntry,
     CrosspostQueueRequest,
     MarketplaceImportJobCreateRequest,
+    MarketplaceBulkImportRequest,
     MarketplaceImportJobResponse,
 )
 from app.core.auth import ensure_user_owns_resource, get_current_user
@@ -46,6 +48,23 @@ from app.workers.tasks import STALE_IMPORT_JOB_AFTER, _import_job_is_stale, proc
 from app.workers.celery_app import celery_app
 
 router = APIRouter()
+
+
+def _build_job_status_summary(rows: list[tuple[str | None, int]]) -> dict:
+    summary = {
+        "total": 0,
+        "queued": 0,
+        "running": 0,
+        "failed": 0,
+        "completed": 0,
+        "canceled": 0,
+    }
+    for status_value, count in rows:
+        normalized = str(status_value or "").lower()
+        summary["total"] += int(count or 0)
+        if normalized in summary:
+            summary[normalized] += int(count or 0)
+    return summary
 
 
 def _crosspost_operator_note(*, failed_target_count: int, review_required_count: int, submitted_count: int) -> str | None:
@@ -86,14 +105,19 @@ def _build_crosspost_target_outcomes(job: MarketplaceCrosspostJob) -> list[dict]
         execution_mode = str(item.get("execution_mode") or execution_by_market.get(marketplace, {}).get("execution_mode") or "").strip().lower() or None
         result_status = str(item.get("status") or "").strip().lower() or None
         failed = result_status == "failed"
+        response = item.get("response") if isinstance(item.get("response"), dict) else {}
+        listing_confirmed = bool(response.get("marketplace_listing_id") or (response.get("listing_urls") or []))
         submitted = result_status in {"submitted_to_marketplace", "published"}
+        if marketplace == "facebook" and execution_mode == "browser_assist":
+            submitted = submitted and listing_confirmed
+        bridge_fetch_pending = bool(response.get("bridge_fetch_status") == "pending") and execution_mode == "browser_assist"
         requires_review = result_status in {
             "manual_handoff_ready",
             "provider_packet_ready",
             "browser_handoff_ready",
             "draft_form_filled",
             "manual_packet_ready",
-        }
+        } or bridge_fetch_pending or result_status == "browser_automation_ready" or response.get("bridge_confirmation_status") == "submitted_without_visible_listing"
         operator_note = None
         if failed:
             operator_note = str(item.get("error") or "The assisted marketplace execution failed before completion.")
@@ -105,6 +129,10 @@ def _build_crosspost_target_outcomes(job: MarketplaceCrosspostJob) -> list[dict]
             operator_note = "PosterPro prepared a provider packet that still needs downstream execution."
         elif result_status == "browser_handoff_ready":
             operator_note = "PosterPro prepared a browser automation handoff that still needs execution."
+        elif bridge_fetch_pending:
+            operator_note = "PosterPro reached the browser-assisted handoff, but bridge polling is still pending review."
+        elif response.get("bridge_confirmation_status") == "submitted_without_visible_listing":
+            operator_note = "PosterPro clicked the Facebook submit action, but no visible seller listing was captured yet."
         elif submitted:
             operator_note = "PosterPro has confirmation that the assisted flow reached marketplace submission."
         outcomes.append(
@@ -140,7 +168,7 @@ def _build_crosspost_target_outcomes(job: MarketplaceCrosspostJob) -> list[dict]
     return pending_outcomes
 
 
-def _serialize_crosspost_job(job: MarketplaceCrosspostJob) -> dict:
+def _serialize_crosspost_job(job: MarketplaceCrosspostJob, *, compact: bool = False) -> dict:
     status_value = str(job.status or "").lower()
     can_cancel = status_value in {"queued", "running"}
     can_retry = status_value in {"completed", "failed", "canceled"}
@@ -192,8 +220,8 @@ def _serialize_crosspost_job(job: MarketplaceCrosspostJob) -> dict:
         "target_marketplaces": job.target_marketplaces,
         "requested_mode": job.requested_mode,
         "status": job.status,
-        "execution_plan": job.execution_plan,
-        "result_summary": job.result_summary,
+        "execution_plan": None if compact else job.execution_plan,
+        "result_summary": None if compact else job.result_summary,
         "task_id": job.task_id,
         "last_error": job.last_error,
         "can_retry": can_retry,
@@ -203,7 +231,7 @@ def _serialize_crosspost_job(job: MarketplaceCrosspostJob) -> dict:
         "review_required_count": review_required_count,
         "submitted_count": submitted_count,
         "failed_target_count": failed_target_count,
-        "target_outcomes": target_outcomes,
+        "target_outcomes": [] if compact else target_outcomes,
         "ui_state_tone": ui_state_tone,
         "ui_primary_action": ui_primary_action,
         "ui_secondary_actions": ui_secondary_actions,
@@ -212,7 +240,7 @@ def _serialize_crosspost_job(job: MarketplaceCrosspostJob) -> dict:
     }
 
 
-def _serialize_import_job(job: MarketplaceImportJob, *, db: Session) -> dict:
+def _serialize_import_job(job: MarketplaceImportJob, *, db: Session, compact: bool = False) -> dict:
     status_value = str(job.status or "").lower()
     is_stale = _import_job_is_stale(job)
     can_cancel = status_value in {"queued", "running"} and not is_stale
@@ -248,7 +276,7 @@ def _serialize_import_job(job: MarketplaceImportJob, *, db: Session) -> dict:
         review_listing_ids.append(job.created_listing_id)
 
     review_items: list[dict] = []
-    if review_listing_ids:
+    if review_listing_ids and not compact:
         listings = db.execute(select(Listing).where(Listing.id.in_(review_listing_ids))).scalars().all()
         listing_by_id = {listing.id: listing for listing in listings}
         for listing_id in review_listing_ids:
@@ -309,8 +337,8 @@ def _serialize_import_job(job: MarketplaceImportJob, *, db: Session) -> dict:
         "source_listing_reference": job.source_listing_reference,
         "import_mode": job.import_mode,
         "status": job.status,
-        "payload": job.payload,
-        "normalized_preview": job.normalized_preview,
+        "payload": None if compact else job.payload,
+        "normalized_preview": None if compact else job.normalized_preview,
         "created_listing_id": job.created_listing_id,
         "task_id": job.task_id,
         "last_error": job.last_error,
@@ -320,7 +348,7 @@ def _serialize_import_job(job: MarketplaceImportJob, *, db: Session) -> dict:
         "operator_note": operator_note,
         "operator_action": operator_action,
         "review_required_count": review_required_count,
-        "review_items": review_items,
+        "review_items": [] if compact else review_items,
         "ui_state_tone": ui_state_tone,
         "ui_primary_action": ui_primary_action,
         "ui_secondary_actions": ui_secondary_actions,
@@ -494,6 +522,36 @@ def create_marketplace_import_job(
     return _serialize_import_job(job, db=db)
 
 
+@router.post("/imports/marketplaces/bulk", include_in_schema=False)
+def create_marketplace_import_job_legacy_alias(
+    payload: MarketplaceBulkImportRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Compatibility alias for deployed clients that still call the old URL.
+
+    Imports are persisted as a single durable job; this route intentionally
+    does not perform a synchronous bulk import or any marketplace mutation.
+    """
+    jobs = []
+    skipped = []
+    for marketplace in dict.fromkeys(str(value).strip().lower() for value in payload.marketplaces if str(value).strip()):
+        # eBay has a direct read-only inventory import. Other marketplaces use
+        # the explicitly configured browser-assist mode; neither path writes to
+        # the remote marketplace.
+        import_mode = "sync_history" if marketplace == "ebay" else "browser_assist"
+        try:
+            job_payload = MarketplaceImportJobCreateRequest(
+                source_marketplace=marketplace,
+                import_mode=import_mode,
+                payload={"max_listings": payload.max_listings or 50},
+            )
+            jobs.append(create_marketplace_import_job(payload=job_payload, db=db, current_user=current_user))
+        except Exception as exc:  # retain a visible outcome for each requested target
+            skipped.append({"marketplace": marketplace, "reason": str(exc)})
+    return {"jobs": jobs, "skipped": skipped}
+
+
 @router.get("/imports/marketplaces/jobs", response_model=list[MarketplaceImportJobResponse])
 def list_marketplace_import_jobs(
     db: Session = Depends(get_db),
@@ -509,22 +567,44 @@ def list_marketplace_import_jobs(
 
 @router.get("/marketplace-jobs/overview", response_model=MarketplaceJobsOverviewResponse)
 def get_marketplace_jobs_overview(
+    limit: int | None = Query(default=None, ge=1, le=250),
+    compact: bool = Query(default=False),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    import_jobs = db.execute(
+    import_query = (
         select(MarketplaceImportJob)
         .where(MarketplaceImportJob.user_id == current_user.id)
         .order_by(MarketplaceImportJob.created_at.desc())
-    ).scalars().all()
-    crosspost_jobs = db.execute(
+    )
+    crosspost_query = (
         select(MarketplaceCrosspostJob)
         .where(MarketplaceCrosspostJob.user_id == current_user.id)
         .order_by(MarketplaceCrosspostJob.created_at.desc())
-    ).scalars().all()
+    )
+    if limit:
+        import_query = import_query.limit(limit)
+        crosspost_query = crosspost_query.limit(limit)
+
+    import_jobs = db.execute(import_query).scalars().all()
+    crosspost_jobs = db.execute(crosspost_query).scalars().all()
+
+    import_summary_rows = db.execute(
+        select(MarketplaceImportJob.status, func.count(MarketplaceImportJob.id))
+        .where(MarketplaceImportJob.user_id == current_user.id)
+        .group_by(MarketplaceImportJob.status)
+    ).all()
+    crosspost_summary_rows = db.execute(
+        select(MarketplaceCrosspostJob.status, func.count(MarketplaceCrosspostJob.id))
+        .where(MarketplaceCrosspostJob.user_id == current_user.id)
+        .group_by(MarketplaceCrosspostJob.status)
+    ).all()
+
     return {
-        "import_jobs": [_serialize_import_job(job, db=db) for job in import_jobs],
-        "crosspost_jobs": [_serialize_crosspost_job(job) for job in crosspost_jobs],
+        "import_jobs": [_serialize_import_job(job, db=db, compact=compact) for job in import_jobs],
+        "crosspost_jobs": [_serialize_crosspost_job(job, compact=compact) for job in crosspost_jobs],
+        "import_summary": _build_job_status_summary(import_summary_rows),
+        "crosspost_summary": _build_job_status_summary(crosspost_summary_rows),
     }
 
 

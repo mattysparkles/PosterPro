@@ -6,6 +6,7 @@ import { useRouter } from 'next/router';
 import AppShell from '../components/layout/AppShell';
 import HealthIndicator from '../components/ui/health-indicator';
 import Button from '../components/ui/button';
+import CollapsiblePanel from '../components/ui/collapsible-panel';
 import DataTable from '../components/ui/data-table';
 import EmptyState from '../components/ui/empty-state';
 import MetricCard from '../components/ui/metric-card';
@@ -84,7 +85,15 @@ function formatTime(value) {
 export default function PublishingPage() {
   const { user } = useAuth();
   const router = useRouter();
-  const { listings, autonomousConfig, enabledPlatforms, reload } = useDashboardData(user?.id);
+  const { listings, autonomousConfig, enabledPlatforms, reload } = useDashboardData(user?.id, {
+    includeClusters: false,
+    includeMarketplaces: false,
+    includeAnalytics: false,
+    includeAlerts: false,
+    includeOfferDashboard: false,
+    includeStorageBatches: false,
+    includeListingTemplates: false,
+  });
   const [activeTab, setActiveTab] = useState('queue');
   const [workflowPreferences, setWorkflowPreferences] = useState({
     review_before_publish: true,
@@ -108,7 +117,7 @@ export default function PublishingPage() {
     let active = true;
     const loadJobs = async () => {
       try {
-        const overview = await fetchMarketplaceJobsOverview();
+        const overview = await fetchMarketplaceJobsOverview({ limit: 40, compact: true });
         if (active) {
           setJobsOverview(overview || { import_jobs: [], crosspost_jobs: [] });
         }
@@ -189,12 +198,10 @@ export default function PublishingPage() {
   );
 
   const publishJobStats = useMemo(() => {
-    const allJobs = [...(jobsOverview.import_jobs || []), ...(jobsOverview.crosspost_jobs || [])];
-    const publishJobs = allJobs.filter((job) => job && (job.listing_id || String(job.job_type || job.source_marketplace || '').toLowerCase() === 'crosspost'));
-    const queued = publishJobs.filter((job) => ['queued', 'running'].includes(String(job.status).toLowerCase())).length;
-    const completed = publishJobs.filter((job) => String(job.status).toLowerCase() === 'completed').length;
-    const failed = publishJobs.filter((job) => String(job.status).toLowerCase() === 'failed').length;
-    const total = publishJobs.length;
+    const queued = Number(jobsOverview.crosspost_summary?.queued || 0) + Number(jobsOverview.crosspost_summary?.running || 0);
+    const completed = Number(jobsOverview.crosspost_summary?.completed || 0);
+    const failed = Number(jobsOverview.crosspost_summary?.failed || 0);
+    const total = Number(jobsOverview.crosspost_summary?.total || 0);
     const progress = total ? Math.round((completed / total) * 100) : 0;
     return { queued, completed, failed, total, progress };
   }, [jobsOverview]);
@@ -344,17 +351,24 @@ export default function PublishingPage() {
         <MetricCard label="Sold / closed" value={soldRows.length} detail="Marketplace rows closed by post-sale automation." />
       </section>
 
-      <SectionPanel title="Publishing progress" description="Worker queue state for marketplace publish jobs." action={<Link href="/jobs" className="text-sm font-medium text-[#2563eb]">Open jobs console</Link>}>
+      <CollapsiblePanel
+        id="publishing-progress"
+        title="Publishing progress"
+        description="Worker queue state for marketplace publish jobs."
+        defaultOpen
+        badge={`${publishJobStats.queued} active`}
+        action={<Link href="/jobs" className="text-sm font-medium text-[#2563eb]">Open jobs console</Link>}
+      >
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
           <MetricCard label="Queued / running" value={publishJobStats.queued} detail="Jobs still moving through the worker." />
           <MetricCard label="Completed" value={publishJobStats.completed} detail="Publish jobs that finished successfully." />
           <MetricCard label="Failed" value={publishJobStats.failed} detail="Jobs that need retry or reconnect." />
           <MetricCard label="Progress" value={`${publishJobStats.progress}%`} detail={`${publishJobStats.completed} of ${publishJobStats.total} publish jobs completed`} />
         </div>
-      </SectionPanel>
+      </CollapsiblePanel>
 
       <section className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]">
-        <SectionPanel id="publish-policy" title="Publish policy" description="Current operator workflow and queue behavior.">
+        <CollapsiblePanel id="publish-policy" title="Publish policy" description="Current operator workflow and queue behavior." defaultOpen={false}>
           <div className="grid gap-3 md:grid-cols-3">
             <div className="rounded-[12px] border border-[#e5e7eb] bg-white p-4">
               <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Approval gate</p>
@@ -369,8 +383,8 @@ export default function PublishingPage() {
               <p className="mt-2 text-sm font-semibold text-[#101828]">{workflowPreferences.listing_preview_mode === 'marketplace' ? 'Marketplace preview first' : 'Editor-first preview'}</p>
             </div>
           </div>
-        </SectionPanel>
-        <SectionPanel id="publish-next" title="What to do next" description="Shortest path from draft queue to live listings.">
+        </CollapsiblePanel>
+        <CollapsiblePanel id="publish-next" title="What to do next" description="Shortest path from draft queue to live listings." defaultOpen>
           <div className="space-y-3">
             <Link href="/listings?tab=review" className="block rounded-[12px] border border-[#e5e7eb] bg-white p-4 transition hover:border-[#bfd2ff] hover:bg-[#f8fbff]">
               <p className="text-sm font-semibold text-[#101828]">Review waiting drafts</p>
@@ -385,7 +399,7 @@ export default function PublishingPage() {
               <p className="mt-1 text-sm text-[#667085]">Use the jobs console to inspect queued work, structured handoff results, and retry failed jobs.</p>
             </Link>
           </div>
-        </SectionPanel>
+        </CollapsiblePanel>
       </section>
 
       <Toolbar

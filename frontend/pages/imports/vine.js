@@ -7,12 +7,12 @@ import AppShell from '../../components/layout/AppShell';
 import { PageAside, PageBand, PageFrame, PageMain, PageSplit } from '../../components/layout/PageFrame';
 import ActionBar from '../../components/ui/action-bar';
 import Button from '../../components/ui/button';
+import CollapsiblePanel from '../../components/ui/collapsible-panel';
 import DataTable from '../../components/ui/data-table';
 import EmptyState from '../../components/ui/empty-state';
 import ErrorState from '../../components/ui/error-state';
 import LoadingSkeleton from '../../components/ui/loading-skeleton';
 import PageHeader from '../../components/ui/page-header';
-import SectionPanel from '../../components/ui/section-panel';
 import StatusPill from '../../components/ui/status-pill';
 import { useAuth } from '../../contexts/AuthContext';
 import useDashboardData from '../../hooks/useDashboardData';
@@ -23,6 +23,7 @@ import {
   fetchVineBatch,
   fetchVineBatches,
   fetchVineMedia,
+  applyEbayLaunchRepair,
   repairVineImages,
   toggleAutonomousMode,
   updateCurrentUser,
@@ -224,7 +225,12 @@ export default function VineImportPage() {
       <PageFrame>
       <PageSplit columnsClassName="xl:grid-cols-[minmax(0,1fr)_340px]">
       <PageMain>
-      <SectionPanel title="Upload" description="Accepted formats: .xlsx and .csv preferred, .pdf supported with required preflight review.">
+      <CollapsiblePanel
+        title="Upload"
+        description="Accepted formats: .xlsx and .csv preferred, .pdf supported with required preflight review."
+        defaultOpen
+        badge={activeBatch ? `Batch #${activeBatch.id}` : 'No batch'}
+      >
         <div className="mb-3 rounded-[12px] border border-[#e4e7ec] bg-[#f9fafb] px-4 py-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
@@ -289,7 +295,7 @@ export default function VineImportPage() {
             <p className="mt-1 text-sm text-[#667085]">Use XLSX or CSV when possible. PDF imports stay in manual-review mode until you verify the parse.</p>
           </div>
         </div>
-      </SectionPanel>
+      </CollapsiblePanel>
       {loadError ? <ErrorState title="Could not load Vine imports" description={loadError} action={<Button variant="outline" onClick={() => loadBatches(activeBatch?.id || null)}>Retry</Button>} /> : null}
       {loading ? <LoadingSkeleton lines={4} className="mb-4" /> : null}
 
@@ -312,7 +318,7 @@ export default function VineImportPage() {
         </div>
       </PageBand>
 
-      <SectionPanel title="Import History" description="Recent private Vine imports for this account.">
+      <CollapsiblePanel title="Import History" description="Recent private Vine imports for this account." defaultOpen={false} badge={`${batches.length} batches`}>
         <DataTable
           columns={[
             { key: 'filename', label: 'Filename' },
@@ -337,12 +343,17 @@ export default function VineImportPage() {
           rowKey={(row) => row.id}
           emptyState={<EmptyState title="No imports yet" description="Upload your first Vine report to begin the preflight review." className="border-0 p-0 py-6" />}
         />
-      </SectionPanel>
+      </CollapsiblePanel>
       </PageAside>
       </PageSplit>
       </PageFrame>
 
-      <SectionPanel title="Preflight Review" description="Review parsed rows before creating inventory or drafts. For this workflow, locked/cancelled rows can still be drafted so nothing gets stranded.">
+      <CollapsiblePanel
+        title="Preflight Review"
+        description="Review parsed rows before creating inventory or drafts. For this workflow, locked/cancelled rows can still be drafted so nothing gets stranded."
+        defaultOpen
+        badge={activeBatch ? `${filteredItems.length} visible` : 'No active batch'}
+      >
         {activeBatch ? (
           <>
             {!enforceSixMonthLock ? (
@@ -447,6 +458,30 @@ export default function VineImportPage() {
                   }}
                 >
                   Repair Amazon images
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!!busyAction || !selectedFilteredIds.length}
+                  onClick={async () => {
+                    setBusyAction('repair-ebay');
+                    try {
+                      const results = await Promise.all(
+                        filteredSelection.map((item) =>
+                          applyEbayLaunchRepair(item.id, { apply_category_suggestion: true, validate_images: true }),
+                        ),
+                      );
+                      const applied = results.filter(Boolean).length;
+                      await loadBatches(activeBatch.id);
+                      toast.success(`Applied safe eBay repairs to ${applied} row${applied === 1 ? '' : 's'}.`);
+                    } catch (error) {
+                      toast.error(error.message);
+                    } finally {
+                      setBusyAction('');
+                    }
+                  }}
+                >
+                  Apply safe eBay repairs
                 </Button>
                 <Button
                   size="sm"
@@ -644,7 +679,7 @@ export default function VineImportPage() {
         ) : (
           <EmptyState title="No active batch" description="Select an import from history or upload a new report to review parsed Vine rows." className="border-0 p-0 py-6" />
         )}
-      </SectionPanel>
+      </CollapsiblePanel>
     </AppShell>
   );
 }

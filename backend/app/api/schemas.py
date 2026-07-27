@@ -14,8 +14,254 @@ class GooglePhotosWatchRequest(BaseModel):
     auto_enrich: bool = True
 
 
+class IntakeSettingsRequest(BaseModel):
+    provider: str = "google_photos"
+    album_url: HttpUrl | None = None
+    folder_id: str | None = None
+    enabled: bool = True
+    auto_draft_listing: bool = True
+    require_manual_review_before_publish: bool = True
+    default_item_prefix: str = "SP"
+    default_box_prefix: str = "BX"
+    default_location: str | None = None
+    default_session_naming_pattern: str = "{date}-{location}"
+    auto_increment_item_id: bool = True
+    auto_increment_box_id: bool = True
+    keep_same_box_mode: bool = False
+    exclude_head_slate_from_public_listing_photos: bool = True
+    internal_box_photos_default: bool = True
+    image_seo_filename_pattern: str = "{item_id}_{seo_title}_{photo_number}"
+    poll_interval_seconds: int = 300
+    marketplace_defaults: dict | None = None
+
+
+class IntakeSessionCreateRequest(BaseModel):
+    session_id: str | None = None
+    name: str | None = None
+    source_album_id: str | None = None
+    source_folder_id: str | None = None
+    default_location: str | None = None
+    item_prefix: str | None = None
+    box_prefix: str | None = None
+    status: str = "active"
+
+
+class IntakeSlateCreateRequest(BaseModel):
+    session_id: str | None = None
+    item_id: str | None = None
+    item_prefix: str | None = None
+    box_id: str | None = None
+    box_prefix: str | None = None
+    location: str | None = None
+    title: str | None = None
+    brand: str | None = None
+    model: str | None = None
+    condition: str | None = None
+    notes: str | None = None
+    flaws: str | None = None
+    weight: str | None = None
+    length: str | None = None
+    width: str | None = None
+    height: str | None = None
+    packed: bool = False
+    boundary_position: str | None = "start"
+    internal_notes: str | None = None
+    mark_packed: bool = False
+    increment_box: bool = False
+    same_box: bool = False
+
+
+class IntakeSlateUpdateRequest(BaseModel):
+    item_id: str | None = None
+    box_id: str | None = None
+    location: str | None = None
+    title: str | None = None
+    brand: str | None = None
+    model: str | None = None
+    condition: str | None = None
+    notes: str | None = None
+    flaws: str | None = None
+    weight: str | None = None
+    length: str | None = None
+    width: str | None = None
+    height: str | None = None
+    packed: bool | None = None
+    boundary_position: str | None = None
+    internal_notes: str | None = None
+    status: str | None = None
+
+
+class IntakePhotoCorrectionRequest(BaseModel):
+    item_id: str | None = None
+    batch_id: int | None = None
+    is_slate: bool | None = None
+    is_public_listing_candidate: bool | None = None
+    is_internal_only: bool | None = None
+    image_type: str | None = None
+
+
+class IntakeBatchDraftRequest(BaseModel):
+    force_regenerate: bool = False
+
+
+class IntakeUnassignedAssignmentRequest(BaseModel):
+    item_id: str
+    photo_ids: list[int] = Field(default_factory=list)
+    mark_ready_for_draft: bool = True
+
+
+class IntakeBoundarySelection(BaseModel):
+    photo_id: int
+    item_id: str
+
+
+class IntakeBoundaryApplyRequest(BaseModel):
+    boundaries: list[IntakeBoundarySelection] = Field(default_factory=list)
+    mark_ready_for_draft: bool = True
+
+
+class IntakeBatchMergeRequest(BaseModel):
+    source_batch_ids: list[int] = Field(default_factory=list)
+    target_item_id: str | None = None
+
+
+class IntakeBatchSplitRequest(BaseModel):
+    photo_ids: list[int] = Field(default_factory=list)
+    new_item_id: str | None = None
+    new_box_id: str | None = None
+    location: str | None = None
+
+
+class IntakeTimelineReconcileRequest(BaseModel):
+    photo_id: int | None = None
+    full_integrity_scan: bool = False
+
+
+class IntakeSlateRecoveryRunRequest(BaseModel):
+    photo_ids: list[int] | None = None
+    limit: int | None = Field(default=None, ge=1, le=10000)
+    pipeline_version: str = Field(default="deterministic_slate_recovery_v1", min_length=1, max_length=64)
+
+
+class IntakeFactUpdateRequest(BaseModel):
+    value: object | None = None
+    lock: bool = True
+
+
+class IntakeSessionResponse(BaseModel):
+    id: int
+    user_id: int
+    session_id: str
+    name: str | None = None
+    source_album_id: str | None = None
+    source_folder_id: str | None = None
+    default_location: str | None = None
+    item_prefix: str | None = None
+    box_prefix: str | None = None
+    status: str
+    metadata_json: dict | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    class Config:
+        from_attributes = True
+
+
+class IntakeSlateResponse(BaseModel):
+    id: int
+    user_id: int
+    intake_session_id: int | None = None
+    session_id: str | None = None
+    item_id: str
+    box_id: str | None = None
+    location: str | None = None
+    title: str | None = None
+    brand: str | None = None
+    model: str | None = None
+    condition: str | None = None
+    notes: str | None = None
+    flaws: str | None = None
+    weight: str | None = None
+    length: str | None = None
+    width: str | None = None
+    height: str | None = None
+    packed: bool = False
+    internal_notes: str | None = None
+    qr_payload_json: dict | None = None
+    slate_image_id: int | None = None
+    listing_id: int | None = None
+    status: str
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    class Config:
+        from_attributes = True
+
+
+class IntakePhotoResponse(BaseModel):
+    id: int
+    user_id: int
+    source_provider: str
+    source_photo_id: str
+    source_album_id: str | None = None
+    source_folder_id: str | None = None
+    original_filename: str | None = None
+    local_path: str
+    downloaded_url: str | None = None
+    content_hash: str | None = None
+    captured_at: datetime | None = None
+    uploaded_at: datetime | None = None
+    imported_at: datetime | None = None
+    image_type: str | None = None
+    is_slate: bool = False
+    is_public_listing_candidate: bool = True
+    is_internal_only: bool = False
+    item_id: str | None = None
+    batch_id: int | None = None
+    metadata_json: dict | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    class Config:
+        from_attributes = True
+
+
+class IntakePhotoBatchResponse(BaseModel):
+    id: int
+    user_id: int
+    intake_session_id: int | None = None
+    session_id: str | None = None
+    item_id: str
+    slate_id: int | None = None
+    first_photo_id: int | None = None
+    last_photo_id: int | None = None
+    photo_count: int = 0
+    public_photo_count: int = 0
+    internal_photo_count: int = 0
+    draft_listing_id: int | None = None
+    status: str
+    metadata_json: dict | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    class Config:
+        from_attributes = True
+
+
 class ListingGenerateRequest(BaseModel):
     barcode: str | None = None
+
+
+class ListingRevisionRequest(BaseModel):
+    fields: list[str] = []
+    note: str | None = None
+
+
+class ListingApproveQueueRequest(BaseModel):
+    listing_ids: list[int]
+    marketplaces: list[str] = ["ebay"]
+    confirm_live_publish: bool = False
+    confirmation_phrase: str | None = None
 
 
 class ListingCreateRequest(BaseModel):
@@ -280,6 +526,12 @@ class EbayPolicySelectRequest(BaseModel):
 
 class EbayMerchantLocationRequest(BaseModel):
     merchant_location_key: str | None = None
+    merchant_location_location_name: str | None = None
+    merchant_location_postal_code: str | None = None
+    merchant_location_country: str | None = None
+    merchant_location_city: str | None = None
+    merchant_location_state_or_province: str | None = None
+    merchant_location_phone: str | None = None
     create_if_missing: bool = False
 
 
@@ -530,6 +782,8 @@ class BulkMarketplacePublishReadyResponse(BaseModel):
 class ListingApprovalResponse(BaseModel):
     listing: ListingResponse
     auto_publish_after_approval: bool = False
+    approval_publishable: bool = False
+    approval_blockers: dict[str, list[dict]] = Field(default_factory=dict)
     results: list[MarketplacePublishResult] = Field(default_factory=list)
 
 
@@ -735,6 +989,7 @@ class UserUpdateRequest(BaseModel):
     auto_publish_after_approval: bool | None = None
     bulk_approval_enabled: bool | None = None
     listing_preview_mode: str | None = None
+    default_preview_marketplace: str | None = None
     vine_enforce_six_month_lock: bool | None = None
     sold_out_delist_everywhere: bool | None = None
     out_of_stock_delist_everywhere: bool | None = None
@@ -924,6 +1179,12 @@ class MarketplaceImportJobCreateRequest(BaseModel):
     payload: dict = Field(default_factory=dict)
 
 
+class MarketplaceBulkImportRequest(BaseModel):
+    """Compatibility payload for the former all-marketplace import control."""
+    marketplaces: list[str] = Field(default_factory=list)
+    max_listings: int | None = None
+
+
 class MarketplaceImportJobResponse(BaseModel):
     id: int
     user_id: int
@@ -968,9 +1229,20 @@ class BulkMarketplaceImportResponse(BaseModel):
     skipped: list[BulkMarketplaceImportSkip] = Field(default_factory=list)
 
 
+class MarketplaceJobsStatusSummary(BaseModel):
+    total: int = 0
+    queued: int = 0
+    running: int = 0
+    failed: int = 0
+    completed: int = 0
+    canceled: int = 0
+
+
 class MarketplaceJobsOverviewResponse(BaseModel):
     import_jobs: list[MarketplaceImportJobResponse] = Field(default_factory=list)
     crosspost_jobs: list[CrosspostJobResponse] = Field(default_factory=list)
+    import_summary: MarketplaceJobsStatusSummary = Field(default_factory=MarketplaceJobsStatusSummary)
+    crosspost_summary: MarketplaceJobsStatusSummary = Field(default_factory=MarketplaceJobsStatusSummary)
 
 
 class AutomationBridgeSmokeTestResponse(BaseModel):

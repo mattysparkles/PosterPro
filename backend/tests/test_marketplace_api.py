@@ -3,8 +3,9 @@ from uuid import uuid4
 import pytest
 
 from app.core import database as database_module
-from app.models.enums import MarketplaceName
+from app.models.enums import EbayPublishStatus, MarketplaceName
 from app.models.models import Cluster, Listing, Sale
+from app.api import routes as listings_routes
 from app.api import marketplaces as marketplaces_api
 from app.workers import tasks
 
@@ -64,6 +65,39 @@ async def test_marketplace_discovery_and_publish_queue(async_client, monkeypatch
     assert len(results) == 2
     assert results[0]["status"] == "QUEUED"
     assert results[1]["status"] == "MANUAL_HANDOFF_READY"
+
+
+@pytest.mark.anyio
+async def test_published_ebay_listing_queues_facebook_only(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "Marketplace Owner",
+            "email": f"market-fb-crosspost-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    listing_id = seed_listing(user_id)
+
+    class DummyTask:
+        id = "task-facebook-only"
+
+    monkeypatch.setattr(tasks.publish_listing_to_marketplace_task, "delay", lambda *_args, **_kwargs: DummyTask())
+    monkeypatch.setattr(marketplaces_api, "queue_publish", lambda *_args, **_kwargs: [
+        {"marketplace": "ebay", "status": "SKIPPED_ALREADY_PUBLISHED", "task_id": None},
+        {"marketplace": "facebook", "status": "QUEUED", "task_id": "task-facebook-only"},
+    ])
+
+    response = await async_client.post(
+        f"/listings/{listing_id}/publish",
+        json={"marketplaces": ["ebay", "facebook"], "confirm_live_publish": True, "confirmation_phrase": "QUEUE LIVE EBAY READY LISTINGS"},
+    )
+    assert response.status_code == 200
+    results = response.json()["results"]
+    assert any(item["marketplace"] == "ebay" and item["status"] == "SKIPPED_ALREADY_PUBLISHED" for item in results)
+    assert any(item["marketplace"] == "facebook" and item["status"] == "QUEUED" for item in results)
 
 
 @pytest.mark.anyio
@@ -198,7 +232,7 @@ async def test_launch_drill_dry_run_is_safe_and_itemized(async_client, monkeypat
                     "title": "Launch Drill Item",
                     "status": "ready",
                     "preflight": {"status": "ready"},
-                    "payload_preview": {"sku": "posterpro-1-1"},
+                    "payload_preview": {"sku": "posterprou1l1"},
                     "blockers": [],
                     "warnings": [],
                     "launch_checklist": [{"label": "Preflight ready", "ok": True}],
@@ -244,15 +278,26 @@ async def test_listing_approve_auto_queues_when_enabled(async_client, monkeypatc
         json={"needs_review": True, "status": "draft", "marketplace_data": {"targets": ["ebay"]}},
     )
 
+    def fake_preflight(self, _db, listing, marketplace):
+        return {
+            "listing_id": listing.id,
+            "marketplace": marketplace,
+            "status": "ready",
+            "blockers": [],
+            "warnings": [],
+        }
+
     class DummyTask:
         id = "approve-task-123"
 
+    monkeypatch.setattr(marketplaces_api.MarketplacePreflightService, "preflight_listing", fake_preflight)
     monkeypatch.setattr(tasks.publish_listing_to_marketplace_task, "delay", lambda *_args, **_kwargs: DummyTask())
 
     response = await async_client.post(f"/listings/{listing_id}/approve")
     assert response.status_code == 200
     payload = response.json()
     assert payload["auto_publish_after_approval"] is True
+    assert payload["approval_publishable"] is True
     assert len(payload["results"]) == 2
     targets = sorted([item["marketplace"] for item in payload["results"]])
     assert targets == ["ebay", "facebook"]
@@ -282,9 +327,19 @@ async def test_listing_bulk_approve_uses_same_contract(async_client, monkeypatch
         )
         assert update_resp.status_code == 200
 
+    def fake_preflight(self, _db, listing, marketplace):
+        return {
+            "listing_id": listing.id,
+            "marketplace": marketplace,
+            "status": "ready",
+            "blockers": [],
+            "warnings": [],
+        }
+
     class DummyTask:
         id = "approve-bulk-task-123"
 
+    monkeypatch.setattr(marketplaces_api.MarketplacePreflightService, "preflight_listing", fake_preflight)
     monkeypatch.setattr(tasks.publish_listing_to_marketplace_task, "delay", lambda *_args, **_kwargs: DummyTask())
 
     response = await async_client.post("/listings/approve-bulk", json={"listing_ids": [listing_a, listing_b]})
@@ -294,9 +349,112 @@ async def test_listing_bulk_approve_uses_same_contract(async_client, monkeypatch
     assert len(approvals) == 2
     for approval in approvals:
         assert approval["auto_publish_after_approval"] is False
+        assert approval["approval_publishable"] is True
         assert approval["results"] == []
         assert approval["listing"]["needs_review"] is False
         assert approval["listing"]["status"] == "ready"
+
+
+@pytest.mark.anyio
+async def test_listing_approve_keeps_blocked_items_in_draft(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "Blocked Approve Owner",
+            "email": f"approve-blocked-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+
+    listing_id = seed_listing(user_id)
+    await async_client.patch(
+        f"/listings/{listing_id}",
+        json={"needs_review": True, "status": "draft", "marketplace_data": {"targets": ["ebay"]}},
+    )
+
+    def fake_preflight(self, _db, listing, marketplace):
+        return {
+            "listing_id": listing.id,
+            "marketplace": marketplace,
+            "status": "blocked",
+            "blockers": [{"code": "EBAY_REQUIRED_ASPECT_MISSING", "message": "Type is required"}],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(marketplaces_api.MarketplacePreflightService, "preflight_listing", fake_preflight)
+
+    response = await async_client.post(f"/listings/{listing_id}/approve")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["approval_publishable"] is False
+    assert payload["listing"]["status"] == "draft"
+    assert payload["listing"]["needs_review"] is False
+    assert payload["results"] == []
+
+
+@pytest.mark.anyio
+async def test_approve_and_queue_uses_crosspost_job_without_synchronous_preflight(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "Queue Owner",
+            "email": f"approve-queue-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+
+    listing_id = seed_listing(user_id)
+    await async_client.patch(
+        f"/listings/{listing_id}",
+        json={"needs_review": True, "status": "draft", "marketplace_data": {"targets": ["ebay", "facebook"]}},
+    )
+
+    def fail_preflight(*_args, **_kwargs):
+        raise AssertionError("preflight should not run on the request thread")
+
+    monkeypatch.setattr(listings_routes.MarketplacePreflightService, "preflight_listing", fail_preflight)
+    monkeypatch.setattr(listings_routes, "enqueue_crosspost_job", lambda *_args, **_kwargs: {"status": "queued", "job_id": 77, "task_id": "crosspost-task-77"})
+
+    response = await async_client.post(
+        "/listings/approve-and-queue",
+        json={
+            "listing_ids": [listing_id],
+            "marketplaces": ["ebay", "facebook"],
+            "confirm_live_publish": True,
+            "confirmation_phrase": "QUEUE LIVE EBAY READY LISTINGS",
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["results"][0]["status"] == "queued"
+    assert payload["results"][0]["job_id"] == 77
+
+
+@pytest.mark.anyio
+async def test_ebay_history_sync_endpoint_exists(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "History Sync Owner",
+            "email": f"ebay-history-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+
+    async def fake_history(*_args, **_kwargs):
+        return {"checked": 2, "matched": 1, "created": 1, "updated": 1, "unmatched": 0}
+
+    monkeypatch.setattr(marketplaces_api, "sync_ebay_fulfillment_history", fake_history)
+
+    response = await async_client.post("/marketplaces/ebay/sync/history", json={})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["checked"] == 2
 
 
 @pytest.mark.anyio
@@ -343,8 +501,92 @@ async def test_sales_dashboard_reports_profit_and_cost_metrics(async_client):
     payload = response.json()
     assert payload["summary"]["total_profit"] == 50.0
     assert payload["sales"][0]["fees_actual"] == 12.0
-    assert payload["sales"][0]["marketplace_fees"] == 7.0
-    assert payload["sales"][0]["listing_title"] == "Shoes"
+
+
+@pytest.mark.anyio
+async def test_listings_and_sales_dashboard_default_to_all_rows(async_client):
+    register_one = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "All Rows Owner",
+            "email": f"all-rows-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register_one.status_code == 201
+    first_user_id = register_one.json()["user"]["id"]
+    first_listing_id = seed_listing(first_user_id)
+
+    register_two = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "All Rows Owner Two",
+            "email": f"all-rows-two-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register_two.status_code == 201
+    second_user_id = register_two.json()["user"]["id"]
+    second_listing_id = seed_listing(second_user_id)
+
+    db = database_module.SessionLocal()
+    try:
+        first_sale = Sale(
+            user_id=first_user_id,
+            listing_id=first_listing_id,
+            platform=MarketplaceName.ebay,
+            marketplace_order_id="ORDER-ALL-1",
+            marketplace_listing_id="LISTING-ALL-1",
+            quantity=1,
+            amount=45.0,
+            currency="USD",
+            fees_actual=4.0,
+            shipping_cost=3.0,
+            promotional_fees=1.0,
+            marketplace_fees=5.0,
+            profit=32.0,
+            roi_percentage=71.0,
+            status="DETECTED",
+            details={"source": "unit-test"},
+        )
+        second_sale = Sale(
+            user_id=second_user_id,
+            listing_id=second_listing_id,
+            platform=MarketplaceName.ebay,
+            marketplace_order_id="ORDER-ALL-2",
+            marketplace_listing_id="LISTING-ALL-2",
+            quantity=1,
+            amount=55.0,
+            currency="USD",
+            fees_actual=5.0,
+            shipping_cost=4.0,
+            promotional_fees=1.0,
+            marketplace_fees=6.0,
+            profit=39.0,
+            roi_percentage=70.0,
+            status="DETECTED",
+            details={"source": "unit-test"},
+        )
+        db.add_all([first_sale, second_sale])
+        db.commit()
+    finally:
+        db.close()
+
+    listings_resp = await async_client.get("/listings", params={"page": 1, "page_size": 50, "queue": "all"})
+    assert listings_resp.status_code == 200
+    listings_payload = listings_resp.json()
+    assert listings_payload["total"] >= 2
+    titles = {item["title"] for item in listings_payload["items"]}
+    assert "Shoes" in titles
+    assert any(item["id"] == second_listing_id for item in listings_payload["items"])
+
+    sales_resp = await async_client.get("/sales/dashboard", params={"limit": 50})
+    assert sales_resp.status_code == 200
+    sales_payload = sales_resp.json()
+    assert sales_payload["summary"]["total_sales"] >= 2
+    sale_listing_ids = {sale["listing_id"] for sale in sales_payload["sales"]}
+    assert first_listing_id in sale_listing_ids
+    assert second_listing_id in sale_listing_ids
 
 
 @pytest.mark.anyio

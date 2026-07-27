@@ -106,7 +106,7 @@ def test_build_ebay_publish_plan_maps_preview_and_account_summary(db_session, mo
 
     plan = asyncio.run(build_ebay_publish_plan(listing, db_session, allow_create_policies=False))
 
-    assert plan["sku"] == f"posterpro-{user.id}-{listing.id}"
+    assert plan["sku"] == f"posterprou{user.id}l{listing.id}"
     assert plan["payload_preview"]["item_specifics"]["Brand"] == ["Canon"]
     assert plan["payload_preview"]["condition"] == "USED_GOOD"
     assert plan["policy_settings"]["shipping_service_code"] == "USPSGroundAdvantage"
@@ -411,7 +411,7 @@ def test_ebay_preflight_reports_missing_policies_and_aspects(db_session, monkeyp
             "inventory_item_payload": {},
             "offer_payload": {},
             "payload_preview": {
-                "sku": "posterpro-1-1",
+                "sku": "posterprou1l1",
                 "title": listing.title,
                 "description": listing.description,
                 "condition": "USED_GOOD",
@@ -445,7 +445,7 @@ def test_ebay_preflight_reports_missing_policies_and_aspects(db_session, monkeyp
     assert "EBAY_RETURN_POLICY_MISSING" in blocker_codes
     assert "EBAY_MERCHANT_LOCATION_MISSING" in blocker_codes
     assert "EBAY_REQUIRED_ASPECT_MISSING" in blocker_codes
-    assert result["payload_preview"]["payload"]["sku"] == "posterpro-1-1"
+    assert result["payload_preview"]["payload"]["sku"] == "posterprou1l1"
 
 
 def test_facebook_preflight_flags_reference_only_images(db_session):
@@ -511,7 +511,7 @@ def test_ebay_preflight_reference_only_images_do_not_also_raise_invalid_url(db_s
             "policy_ids": {},
             "inventory_item_payload": {},
             "offer_payload": {},
-            "payload_preview": {"sku": "posterpro-1-1"},
+            "payload_preview": {"sku": "posterprou1l1"},
             "image_summary": {"image_count": 1, "actual_image_count": 0, "reference_only": True},
             "shipping_summary": {"shipping_profile": listing.shipping_profile, "shipping_policy": {}},
         }
@@ -673,7 +673,7 @@ def test_bulk_preflight_reports_mixed_ready_blocked_and_failed_rows(db_session, 
                 "warnings": warnings,
                 "missing_fields": [],
                 "invalid_fields": [],
-                "payload_preview": {"payload": {"sku": f"posterpro-{listing.id}"}},
+                "payload_preview": {"payload": {"sku": f"posterprou1l{listing.id}"}},
                 "policy_summary": {},
                 "category_summary": {},
                 "shipping_summary": {},
@@ -694,7 +694,7 @@ def test_bulk_preflight_reports_mixed_ready_blocked_and_failed_rows(db_session, 
                 "warnings": [],
                 "missing_fields": ["settings.ebay_marketplace_policy_settings.payment_policy_id"],
                 "invalid_fields": [],
-                "payload_preview": {"payload": {"sku": f"posterpro-{listing.id}"}},
+                "payload_preview": {"payload": {"sku": f"posterprou1l{listing.id}"}},
                 "policy_summary": {},
                 "category_summary": {},
                 "shipping_summary": {},
@@ -807,11 +807,15 @@ def test_bulk_publish_ready_dry_run_and_live_queue_behavior(db_session, monkeypa
 
     called = []
 
-    def fake_queue(db, *, listing, marketplace, preflight=None, skip_already_queued=False):
-        called.append((listing.id, marketplace))
-        return {"marketplace": marketplace, "status": "QUEUED", "task_id": f"task-{listing.id}-{marketplace}"}
+    class DummyTask:
+        def __init__(self, task_id):
+            self.id = task_id
 
-    monkeypatch.setattr(marketplace_orchestrator, "_queue_single_marketplace_publish", fake_queue)
+    monkeypatch.setattr(
+        marketplace_orchestrator.process_marketplace_crosspost_job_task,
+        "delay",
+        lambda job_id: called.append(job_id) or DummyTask(f"task-{job_id}"),
+    )
 
     dry_run_report = marketplace_orchestrator.bulk_publish_ready(
         db_session,
@@ -837,7 +841,7 @@ def test_bulk_publish_ready_dry_run_and_live_queue_behavior(db_session, monkeypa
     assert live_report["summary"]["queued"] == 2
     assert live_report["summary"]["skipped_warning_requires_confirmation"] == 2
     assert live_report["summary"]["skipped_blocked"] >= 2
-    assert called == [(ready_listing.id, "ebay"), (ready_listing.id, "facebook")]
+    assert len(called) == 1
 
     called.clear()
     allow_warning_report = marketplace_orchestrator.bulk_publish_ready(
@@ -848,14 +852,9 @@ def test_bulk_publish_ready_dry_run_and_live_queue_behavior(db_session, monkeypa
         dry_run=False,
         skip_already_queued=True,
     )
-    assert allow_warning_report["summary"]["queued"] == 4
+    assert allow_warning_report["summary"]["queued"] == 2
     assert allow_warning_report["summary"]["skipped_blocked"] >= 2
-    assert called == [
-        (ready_listing.id, "ebay"),
-        (ready_listing.id, "facebook"),
-        (warning_listing.id, "ebay"),
-        (warning_listing.id, "facebook"),
-    ]
+    assert len(called) == 1
 
 
 def test_bulk_publish_ready_skips_already_queued_items(db_session, monkeypatch):
@@ -897,10 +896,15 @@ def test_bulk_publish_ready_skips_already_queued_items(db_session, monkeypatch):
     )
 
     called = []
+
+    class DummyTask:
+        def __init__(self, task_id):
+            self.id = task_id
+
     monkeypatch.setattr(
-        marketplace_orchestrator,
-        "_queue_single_marketplace_publish",
-        lambda db, *, listing, marketplace, preflight=None, skip_already_queued=False: called.append((listing.id, marketplace)) or {"marketplace": marketplace, "status": "QUEUED", "task_id": f"task-{listing.id}-{marketplace}"},
+        marketplace_orchestrator.process_marketplace_crosspost_job_task,
+        "delay",
+        lambda job_id: called.append(job_id) or DummyTask(f"task-{job_id}"),
     )
 
     report = marketplace_orchestrator.bulk_publish_ready(
@@ -913,7 +917,7 @@ def test_bulk_publish_ready_skips_already_queued_items(db_session, monkeypatch):
 
     assert report["summary"]["queued"] == 1
     assert report["summary"]["skipped_already_queued"] == 1
-    assert called == [(ready_listing.id, "facebook")]
+    assert len(called) == 1
 
 
 def test_bulk_preflight_csv_export_contains_expected_columns():

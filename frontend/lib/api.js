@@ -2,6 +2,29 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "/api";
 
 const DEFAULT_TIMEOUT_MS = Number(process.env.NEXT_PUBLIC_API_TIMEOUT_MS || 15000);
 
+function formatApiErrorMessage(detail, fallback) {
+  if (typeof detail === "string" && detail.trim()) {
+    return detail;
+  }
+  if (detail && typeof detail === "object") {
+    const parts = [];
+    if (typeof detail.message === "string" && detail.message.trim()) parts.push(detail.message.trim());
+    if (typeof detail.error === "string" && detail.error.trim() && detail.error !== detail.message) parts.push(detail.error.trim());
+    if (typeof detail.status === "string" && detail.status.trim()) parts.push(`status: ${detail.status.trim()}`);
+    if (detail.persisted_status) parts.push(`persisted_status: ${String(detail.persisted_status)}`);
+    if (detail.expected_status) parts.push(`expected_status: ${String(detail.expected_status)}`);
+    if (!parts.length) {
+      try {
+        return JSON.stringify(detail);
+      } catch (error) {
+        return String(detail);
+      }
+    }
+    return parts.join(" | ");
+  }
+  return fallback;
+}
+
 async function jsonFetch(url, options = {}) {
   const controller = new AbortController();
   const timeoutMs = Number(options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
@@ -29,11 +52,12 @@ async function jsonFetch(url, options = {}) {
     : null;
   const text = data ? "" : await response.text();
   if (!response.ok) {
+    const message = formatApiErrorMessage(
+      data?.detail ?? data?.message,
+      text || `Request failed (${response.status} ${response.statusText})`,
+    );
     throw new Error(
-      data?.detail
-        || data?.message
-        || text
-        || `Request failed (${response.status} ${response.statusText})`
+      message
     );
   }
   return data;
@@ -141,8 +165,145 @@ export async function updateSessionViewMode(viewAsRegular) {
   });
 }
 
-export async function fetchListings() {
-  return jsonFetch(`${API_BASE}/listings`);
+export async function fetchListings(options = {}) {
+  // The unified catalog may contain a large recovery/import history.  This
+  // request is paged in the workspace so it cannot block rendering on every
+  // historical record. Callers without page options retain the legacy shape.
+  const params = new URLSearchParams();
+  if (options.page) params.set('page', String(options.page));
+  if (options.pageSize) params.set('page_size', String(options.pageSize));
+  if (options.sourceType && options.sourceType !== 'all') params.set('source_type', options.sourceType);
+  if (options.queue && options.queue !== 'all') params.set('queue', options.queue);
+  if (options.search) params.set('search', options.search);
+  const suffix = params.toString() ? `?${params.toString()}` : '';
+  return jsonFetch(`${API_BASE}/listings${suffix}`, { timeoutMs: 60000 });
+}
+
+export async function fetchIntakeSettings() {
+  return jsonFetch(`${API_BASE}/intake/settings`);
+}
+
+export async function updateIntakeSettings(body) {
+  return jsonFetch(`${API_BASE}/intake/settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function fetchIntakeSessions() {
+  return jsonFetch(`${API_BASE}/intake/sessions`);
+}
+
+export async function createIntakeSession(body) {
+  return jsonFetch(`${API_BASE}/intake/sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function createIntakeSlate(body) {
+  return jsonFetch(`${API_BASE}/intake/slates`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function updateIntakeSlate(slateId, body) {
+  return jsonFetch(`${API_BASE}/intake/slates/${slateId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function fetchIntakeQueue() {
+  return jsonFetch(`${API_BASE}/intake/queue`);
+}
+
+export async function runIntakeMonitor() {
+  return jsonFetch(`${API_BASE}/intake/monitor/run`, {
+    method: "POST",
+  });
+}
+
+export async function syncIntakeAlbumTruth() {
+  return jsonFetch(`${API_BASE}/intake/monitor/sync-current`, {
+    method: "POST",
+    timeoutMs: 0,
+  });
+}
+
+export async function reconcileIntakeTimeline(body = {}) {
+  return jsonFetch(`${API_BASE}/intake/timeline/reconcile`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    timeoutMs: 0,
+  });
+}
+
+export async function runIntakeIntegrityScan() {
+  return jsonFetch(`${API_BASE}/intake/integrity-scan`, { method: "POST" });
+}
+
+export async function fetchIntakeTimeline() {
+  return jsonFetch(`${API_BASE}/intake/timeline`);
+}
+
+export async function assignIntakeUnassignedPhotos(body) {
+  return jsonFetch(`${API_BASE}/intake/unassigned/assign`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function applyIntakePhotoBoundaries(body) {
+  return jsonFetch(`${API_BASE}/intake/photos/boundaries/apply`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    timeoutMs: 0,
+  });
+}
+
+export async function draftIntakeBatch(batchId, body = {}) {
+  return jsonFetch(`${API_BASE}/intake/batches/${batchId}/draft`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function updateIntakePhoto(photoId, body) {
+  return jsonFetch(`${API_BASE}/intake/photos/${photoId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function splitIntakeBatch(batchId, body) {
+  return jsonFetch(`${API_BASE}/intake/batches/${batchId}/split`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function mergeIntakeBatches(body) {
+  return jsonFetch(`${API_BASE}/intake/batches/merge`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export function buildIntakeExportUrl() {
+  return `${API_BASE}/intake/export.csv`;
 }
 
 export async function backfillVineListingImages(options = {}) {
@@ -198,6 +359,9 @@ export async function createMarketplaceImportJob(body) {
 }
 
 export async function bulkImportMarketplaces(body = {}) {
+  // The compatibility route fans one operator action into durable, per-market
+  // jobs.  It prevents an all-marketplace request from being mistaken for one
+  // malformed import payload.
   return jsonFetch(`${API_BASE}/imports/marketplaces/bulk`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -209,8 +373,15 @@ export async function fetchMarketplaceImportJobs() {
   return jsonFetch(`${API_BASE}/imports/marketplaces/jobs`);
 }
 
-export async function fetchMarketplaceJobsOverview() {
-  return jsonFetch(`${API_BASE}/marketplace-jobs/overview`);
+export async function fetchMarketplaceJobsOverview(options = {}) {
+  const url = new URL(`${API_BASE}/marketplace-jobs/overview`, window.location.origin);
+  if (Number.isFinite(Number(options.limit))) {
+    url.searchParams.set("limit", String(Number(options.limit)));
+  }
+  if (options.compact != null) {
+    url.searchParams.set("compact", String(Boolean(options.compact)));
+  }
+  return jsonFetch(url.toString().replace(window.location.origin, ""));
 }
 
 export async function fetchCrosspostJob(jobId) {
@@ -427,6 +598,21 @@ export async function generateListing(id) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({}),
+  });
+}
+
+export async function requestListingRevision(id, fields = [], note = "") {
+  return jsonFetch(`${API_BASE}/listings/${id}/request-revision`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ fields, note }),
+  });
+}
+
+export async function approveAndQueueListings(listingIds, marketplaces = ['ebay']) {
+  return jsonFetch(`${API_BASE}/listings/approve-and-queue`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ listing_ids: listingIds, marketplaces, confirm_live_publish: marketplaces.includes('ebay'), confirmation_phrase: 'QUEUE LIVE EBAY READY LISTINGS' }),
   });
 }
 
@@ -928,11 +1114,13 @@ export async function fetchSalesDashboard(userId, limit = 100, options = {}) {
 }
 
 export function downloadSalesReportCsv(userId) {
-  window.open(`${API_BASE}/sales/reports/sales.csv?user_id=${userId}`, '_blank', 'noopener,noreferrer');
+  const suffix = userId ? `?user_id=${userId}` : '';
+  window.open(`${API_BASE}/sales/reports/sales.csv${suffix}`, '_blank', 'noopener,noreferrer');
 }
 
 export function downloadInventoryReportCsv(userId) {
-  window.open(`${API_BASE}/sales/reports/inventory.csv?user_id=${userId}`, '_blank', 'noopener,noreferrer');
+  const suffix = userId ? `?user_id=${userId}` : '';
+  window.open(`${API_BASE}/sales/reports/inventory.csv${suffix}`, '_blank', 'noopener,noreferrer');
 }
 
 export async function updateSaleDetails(saleId, body) {
@@ -953,6 +1141,14 @@ export async function syncEbayListing(listingId, body = {}) {
 
 export async function refreshEbayInventory(body = {}) {
   return jsonFetch(`${API_BASE}/marketplaces/ebay/sync`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function refreshEbayHistory(body = {}) {
+  return jsonFetch(`${API_BASE}/marketplaces/ebay/sync/history`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -1002,15 +1198,29 @@ export async function fetchOfferHistory(userId) {
 }
 
 export async function fetchGooglePhotosWatch() {
-  return jsonFetch(`${API_BASE}/import/google-photos/watch`);
+  return fetchIntakeSettings().then((payload) => ({
+    enabled: Boolean(payload?.enabled),
+    auto_enrich: Boolean(payload?.auto_draft_listing ?? true),
+    album_url: payload?.album_url || "",
+    last_synced_at: payload?.last_synced_at || null,
+    last_imported_count: Number(payload?.last_imported_count || 0),
+    last_error: payload?.last_error || null,
+  }));
 }
 
 export async function updateGooglePhotosWatch(body) {
-  return jsonFetch(`${API_BASE}/import/google-photos/watch`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  return updateIntakeSettings({
+    enabled: Boolean(body?.enabled),
+    album_url: body?.album_url || "",
+    auto_draft_listing: Boolean(body?.auto_enrich ?? true),
+  }).then((payload) => ({
+    enabled: Boolean(payload?.enabled),
+    auto_enrich: Boolean(payload?.auto_draft_listing ?? true),
+    album_url: payload?.album_url || "",
+    last_synced_at: payload?.last_synced_at || null,
+    last_imported_count: Number(payload?.last_imported_count || 0),
+    last_error: payload?.last_error || null,
+  }));
 }
 
 export async function runGooglePhotosWatch() {
@@ -1041,6 +1251,18 @@ export function toPublicImageUrl(path) {
     return `${mediaBase}/${path.replace("./storage/", "")}`;
   }
   return path;
+}
+
+export function toThumbnailImageUrl(path, width = 200, height = 200) {
+  const publicPath = toPublicImageUrl(path);
+  // Normalize both relative and absolute URLs emitted by older listing rows.
+  // A number of imported/recovery records predate the public-media helper and
+  // contain either an absolute host URL or `/api/media/...`; both are still
+  // local originals and must use a bounded derivative in catalog views.
+  const localMatch = String(publicPath || '').match(/^(?:https?:\/\/[^/]+)?\/(?:api\/)?media\/([^?#]+)/i);
+  if (!localMatch) return publicPath;
+  const mediaPath = `/media/${localMatch[1]}`;
+  return `/media/thumbnail?path=${encodeURIComponent(mediaPath)}&width=${width}&height=${height}`;
 }
 
 export async function processListingPhoto({

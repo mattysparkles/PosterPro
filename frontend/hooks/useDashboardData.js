@@ -18,6 +18,22 @@ import {
 
 export default function useDashboardData(userId, options = {}) {
   const includeLeadInsights = Boolean(options.includeLeadInsights);
+  const includeClusters = options.includeClusters !== false;
+  const includeListings = options.includeListings !== false;
+  const includeMarketplaces = options.includeMarketplaces !== false;
+  const includeAnalytics = options.includeAnalytics !== false;
+  const includeAlerts = options.includeAlerts !== false;
+  const includeAutonomousConfig = options.includeAutonomousConfig !== false;
+  const includeOfferDashboard = options.includeOfferDashboard !== false;
+  const includePlatformConfig = options.includePlatformConfig !== false;
+  const includeStorageBatches = options.includeStorageBatches !== false;
+  const includeListingTemplates = options.includeListingTemplates !== false;
+  const paginateListings = options.paginateListings === true;
+  const listingPage = Math.max(1, Number(options.listingPage || 1));
+  const listingPageSize = Math.min(250, Math.max(1, Number(options.listingPageSize || 25)));
+  const listingSourceType = String(options.listingSourceType || '');
+  const listingSearch = String(options.listingSearch || '');
+  const listingQueue = String(options.listingQueue || '');
   const [clusters, setClusters] = useState([]);
   const [listings, setListings] = useState([]);
   const [marketplaces, setMarketplaces] = useState([]);
@@ -37,20 +53,28 @@ export default function useDashboardData(userId, options = {}) {
   const [enabledPlatforms, setEnabledPlatforms] = useState(["ebay"]);
   const [storageBatches, setStorageBatches] = useState([]);
   const [listingTemplates, setListingTemplates] = useState([]);
+  const [listingError, setListingError] = useState(null);
+  const [listingPagination, setListingPagination] = useState({ page: listingPage, page_size: listingPageSize, total: 0, total_pages: 1 });
 
   const reload = useCallback(async () => {
     if (!userId) return;
     const settled = await Promise.allSettled([
-      fetchClusters(),
-      fetchListings(),
-      fetchMarketplaces(),
-      fetchAnalyticsOverview(userId),
-      fetchAlerts(userId),
-      fetchAutonomousConfig(),
-      fetchEbayOfferDashboard(userId),
-      fetchPlatformConfig(userId),
-      fetchStorageUnitBatches(),
-      fetchListingTemplates(userId),
+      includeClusters ? fetchClusters() : Promise.resolve([]),
+      includeListings ? (paginateListings ? fetchListings({ page: listingPage, pageSize: listingPageSize, sourceType: listingSourceType, search: listingSearch, queue: listingQueue }) : fetchListings()) : Promise.resolve([]),
+      includeMarketplaces ? fetchMarketplaces() : Promise.resolve({ marketplaces: [] }),
+      includeAnalytics ? fetchAnalyticsOverview(userId) : Promise.resolve(null),
+      includeAlerts ? fetchAlerts(userId) : Promise.resolve({ alerts: [] }),
+      includeAutonomousConfig ? fetchAutonomousConfig() : Promise.resolve({
+        autonomous_mode: true,
+        autonomous_dry_run: false,
+      }),
+      includeOfferDashboard ? fetchEbayOfferDashboard(userId) : Promise.resolve({
+        active_offers: [],
+        decision_log: [],
+      }),
+      includePlatformConfig ? fetchPlatformConfig(userId) : Promise.resolve({ enabled_platforms: ["ebay"] }),
+      includeStorageBatches ? fetchStorageUnitBatches() : Promise.resolve([]),
+      includeListingTemplates ? fetchListingTemplates(userId) : Promise.resolve([]),
     ]);
 
     const [
@@ -67,7 +91,8 @@ export default function useDashboardData(userId, options = {}) {
     ] = settled;
 
     const c = clustersResult.status === "fulfilled" ? clustersResult.value : [];
-    const l = listingsResult.status === "fulfilled" ? listingsResult.value : [];
+    const listingResult = listingsResult.status === "fulfilled" ? listingsResult.value : [];
+    const l = Array.isArray(listingResult) ? listingResult : (listingResult?.items || []);
     const m = marketplacesResult.status === "fulfilled" ? marketplacesResult.value : { marketplaces: [] };
     const a = analyticsResult.status === "fulfilled" ? analyticsResult.value : null;
     const al = alertsResult.status === "fulfilled" ? alertsResult.value : { alerts: [] };
@@ -85,6 +110,16 @@ export default function useDashboardData(userId, options = {}) {
 
     setClusters(c || []);
     setListings(l || []);
+    setListingPagination(
+      Array.isArray(listingResult)
+        ? { page: 1, page_size: l?.length || listingPageSize, total: l?.length || 0, total_pages: 1 }
+        : {
+          page: Number(listingResult?.page || listingPage),
+          page_size: Number(listingResult?.page_size || listingPageSize),
+          total: Number(listingResult?.total || 0),
+          total_pages: Number(listingResult?.total_pages || 1),
+        },
+    );
     setMarketplaces(m?.marketplaces || []);
     setAnalytics(a);
     setAlerts(al?.alerts || []);
@@ -93,6 +128,14 @@ export default function useDashboardData(userId, options = {}) {
     setEnabledPlatforms(platformConfig?.enabled_platforms || ["ebay"]);
     setStorageBatches(batches || []);
     setListingTemplates(templates || []);
+    // Do not make a failed authenticated catalog request look like an empty
+    // catalog.  The Listings page has thousands of records for the recovery
+    // operator, and an expired session/network timeout must be actionable.
+    setListingError(
+      includeListings && listingsResult.status === "rejected"
+        ? (listingsResult.reason?.message || "Unable to load the listings catalog.")
+        : null,
+    );
 
     if (includeLeadInsights && l?.length) {
       const listingId = l[0].id;
@@ -105,7 +148,26 @@ export default function useDashboardData(userId, options = {}) {
       setPrediction(pred);
       setOptimization(opt);
     }
-  }, [includeLeadInsights, userId]);
+  }, [
+    includeAlerts,
+    includeAnalytics,
+    includeAutonomousConfig,
+    includeClusters,
+    includeLeadInsights,
+    includeListingTemplates,
+    includeListings,
+    includeMarketplaces,
+    includeOfferDashboard,
+    includePlatformConfig,
+    includeStorageBatches,
+    listingPage,
+    listingPageSize,
+    listingSearch,
+    listingQueue,
+    listingSourceType,
+    paginateListings,
+    userId,
+  ]);
 
   useEffect(() => {
     reload();
@@ -144,6 +206,8 @@ export default function useDashboardData(userId, options = {}) {
     enabledPlatforms,
     storageBatches,
     listingTemplates,
+    listingError,
+    listingPagination,
     readyCount,
     recentAutoPublished,
     setEnabledPlatforms,

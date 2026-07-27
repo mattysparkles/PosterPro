@@ -10,7 +10,15 @@ def _price(listing: Listing) -> float | None:
 
 
 def _shared_payload(listing: Listing) -> dict[str, Any]:
-    shipping = ((listing.marketplace_data or {}).get("shipping") or {}) if isinstance(listing.marketplace_data, dict) else {}
+    marketplace_shipping = ((listing.marketplace_data or {}).get("shipping") or {}) if isinstance(listing.marketplace_data, dict) else {}
+    shipping_profile = listing.shipping_profile if isinstance(listing.shipping_profile, dict) else {}
+    shipping = {
+        "mode": shipping_profile.get("shipping_charge_mode"),
+        "free_shipping": shipping_profile.get("free_shipping"),
+        "buyer_pays_shipping": shipping_profile.get("buyer_pays_shipping"),
+        **shipping_profile,
+        **marketplace_shipping,
+    }
     return {
         "title": listing.title,
         "description": listing.description,
@@ -30,6 +38,15 @@ def _shared_payload(listing: Listing) -> dict[str, Any]:
             "local_pickup_enabled": shipping.get("local_pickup_enabled"),
         },
     }
+
+
+def _facebook_image_urls(image_urls: list[str]) -> list[str]:
+    cleaned = [str(url).strip() for url in (image_urls or []) if str(url).strip()]
+    if not cleaned:
+        return []
+    preferred = [url for url in cleaned if not url.lower().endswith(".webp")]
+    active = preferred or cleaned
+    return active[:8]
 
 
 def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, Any]:
@@ -74,7 +91,7 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
             if shipping.get("mode") in {"calculated", "flat"}
             else "manual",
             "meetup_notes": meetup_notes,
-            "image_urls": shared["image_urls"],
+            "image_urls": _facebook_image_urls(shared["image_urls"]),
             "category_hint": shared["category"],
         }
 

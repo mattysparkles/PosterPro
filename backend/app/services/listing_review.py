@@ -157,6 +157,12 @@ def derive_shipping_profile(
     missing_weight = not package_weight
     missing_dimensions = not any(package_dimensions.get(key) for key in ("length", "width", "height"))
     estimated = bool(existing.get("estimated", missing_weight or missing_dimensions))
+    raw_price = listing.get("listing_price") or listing.get("suggested_price") or listing.get("buy_it_now_price") or listing.get("estimated_value")
+    try:
+        price = float(raw_price)
+    except (TypeError, ValueError):
+        price = None
+    buyer_pays_shipping = bool(price is not None and 0 < price < 10)
     return {
         "item_weight": existing.get("item_weight"),
         "package_weight": package_weight,
@@ -173,6 +179,9 @@ def derive_shipping_profile(
         "local_pickup_recommended": bool(existing.get("local_pickup_recommended", local_pickup)),
         "manual_measurement_needed": bool(existing.get("manual_measurement_needed", missing_weight or missing_dimensions)),
         "shipping_notes": str(existing.get("shipping_notes") or "").strip() or None,
+        "buyer_pays_shipping": bool(existing.get("buyer_pays_shipping", buyer_pays_shipping)),
+        "shipping_charge_mode": str(existing.get("shipping_charge_mode") or ("calculated" if buyer_pays_shipping else "included")),
+        "free_shipping": bool(existing.get("free_shipping", not buyer_pays_shipping)),
         "source_confidence": existing.get("source_confidence") or {},
         "estimated": estimated,
     }

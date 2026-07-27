@@ -173,7 +173,7 @@ async def test_ebay_policy_catalog_returns_candidate_lists(async_client, monkeyp
             "selected": {"payment_policy_id": "pay-1", "fulfillment_policy_id": "ful-1", "return_policy_id": "ret-1"},
         }
 
-    monkeypatch.setattr(marketplaces_api, "list_business_policies", fake_list)
+    monkeypatch.setattr(marketplaces_api, "_list_business_policies_for_account", fake_list)
 
     response = await async_client.get("/marketplaces/ebay/policies")
     assert response.status_code == 200
@@ -277,6 +277,60 @@ async def test_merchant_location_create_blocks_when_origin_fields_missing(async_
     payload = response.json()
     assert payload["status"] == "blocked"
     assert "merchant_location_postal_code" in payload["missing_fields"]
+
+
+@pytest.mark.anyio
+async def test_merchant_location_create_persists_form_origin_fields(async_client, monkeypatch):
+    user_id = await _register_user(async_client, "location-create-origin")
+    _connect_ebay_account(user_id)
+
+    async def fake_verify(*_args, **kwargs):
+        assert kwargs["create_if_missing"] is True
+        assert kwargs["origin"]["merchant_location_postal_code"] == "95125"
+        assert kwargs["origin"]["merchant_location_country"] == "US"
+        return {
+            "status": "created",
+            "marketplace_id": "EBAY_US",
+            "merchant_location_key": "posterpro-3",
+            "settings_updates": {
+                "merchant_location_key": "posterpro-3",
+                "merchant_location_verified": True,
+                "merchant_location_status": "created",
+                "merchant_location_last_checked_at": "2026-06-09T12:00:00",
+                "merchant_location_error": "",
+                "merchant_location_location_name": "PosterPro Default Location",
+                "merchant_location_postal_code": "95125",
+                "merchant_location_country": "US",
+                "merchant_location_city": "San Jose",
+                "merchant_location_state_or_province": "CA",
+                "merchant_location_phone": "",
+            },
+        }
+
+    monkeypatch.setattr(marketplaces_api, "verify_merchant_location", fake_verify)
+
+    response = await async_client.post(
+        "/marketplaces/ebay/location/create",
+        json={
+            "merchant_location_key": "posterpro-3",
+            "merchant_location_location_name": "PosterPro Default Location",
+            "merchant_location_postal_code": "95125",
+            "merchant_location_country": "US",
+            "merchant_location_city": "San Jose",
+            "merchant_location_state_or_province": "CA",
+            "merchant_location_phone": "",
+            "create_if_missing": True,
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "created"
+
+    settings = _load_ebay_policy_settings(user_id)
+    assert settings["merchant_location_key"] == "posterpro-3"
+    assert settings["merchant_location_verified"] is True
+    assert settings["merchant_location_status"] == "created"
+    assert settings["merchant_location_postal_code"] == "95125"
+    assert settings["merchant_location_country"] == "US"
 
 
 @pytest.mark.anyio

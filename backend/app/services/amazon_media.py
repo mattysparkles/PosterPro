@@ -86,6 +86,66 @@ def _extract_product_description(html: str) -> str | None:
     return description[:1200].strip() or None
 
 
+def _extract_amazon_product_facts(html: str) -> dict:
+    """Extract factual, reusable product-page fields without copying page copy.
+
+    Amazon changes its presentation frequently, so this deliberately accepts
+    several stable page/JSON-LD patterns and returns an empty field when a
+    value cannot be read.  The caller keeps the source values as provenance and
+    writes new listing copy separately.
+    """
+    title = ""
+    title_match = re.search(r'<span[^>]+id="productTitle"[^>]*>(.*?)</span>', html, flags=re.I | re.S)
+    if title_match:
+        title = _clean_text(title_match.group(1))
+    if not title:
+        og_title = re.search(r'<meta\s+property="og:title"\s+content="([^"]+)"', html, flags=re.I)
+        title = _clean_text(og_title.group(1)) if og_title else ""
+
+    price = None
+    price_patterns = (
+        r'<span[^>]+class="[^"]*a-price-whole[^"]*"[^>]*>\s*([0-9,]+)',
+        r'"price"\s*:\s*"?([0-9]+(?:\.[0-9]{1,2})?)',
+        r'<span[^>]+id="priceblock_[^"]+"[^>]*>\s*\$?\s*([0-9,]+(?:\.[0-9]{1,2})?)',
+    )
+    for pattern in price_patterns:
+        match = re.search(pattern, html, flags=re.I | re.S)
+        if not match:
+            continue
+        try:
+            candidate = float(match.group(1).replace(",", ""))
+        except ValueError:
+            continue
+        if candidate > 0:
+            price = round(candidate, 2)
+            break
+
+    bullets: list[str] = []
+    bullet_block = re.search(r'<div[^>]+id="feature-bullets"[^>]*>(.*?)</div>', html, flags=re.I | re.S)
+    if bullet_block:
+        for raw in re.findall(r'<span[^>]*class="[^"]*a-list-item[^"]*"[^>]*>(.*?)</span>', bullet_block.group(1), flags=re.I | re.S):
+            cleaned = _clean_text(raw)
+            if cleaned and cleaned not in bullets:
+                bullets.append(cleaned)
+
+    details: dict[str, str] = {}
+    for row in re.findall(r'<tr[^>]*>(.*?)</tr>', html, flags=re.I | re.S):
+        cells = [_clean_text(cell) for cell in re.findall(r'<(?:th|td)[^>]*>(.*?)</(?:th|td)>', row, flags=re.I | re.S)]
+        if len(cells) >= 2 and cells[0] and cells[1] and len(cells[0]) < 100:
+            details[cells[0]] = cells[1]
+
+    breadcrumbs = [_clean_text(value) for value in re.findall(r'<a[^>]+class="[^"]*a-link-normal[^"]*"[^>]*>(.*?)</a>', html, flags=re.I | re.S)]
+    breadcrumbs = [value for value in breadcrumbs if value and len(value) < 100]
+    return {
+        "title": title[:512],
+        "current_price": price,
+        "feature_bullets": bullets[:12],
+        "specifications": details,
+        "breadcrumbs": breadcrumbs[:12],
+        "description": _extract_product_description(html),
+    }
+
+
 def _is_amazon_media_url(url: str | None) -> bool:
     parsed = urlparse(str(url or "").strip())
     host = parsed.netloc.lower()
@@ -325,6 +385,15 @@ class AmazonProductMediaProvider:
             return result
 
     def fetch_product_page_description(self, asin: str, *, title_hint: str | None = None) -> str | None:
+        return self.fetch_product_page_facts(asin, title_hint=title_hint).get("description")
+
+    def fetch_product_page_facts(self, asin: str, *, title_hint: str | None = None) -> dict:
+        """Return source facts used to enrich a Vine draft.
+
+        This intentionally does not persist unverified text as a listing. The
+        Vine service records the facts as Amazon provenance and creates its own
+        concise description from them.
+        """
         product_url = self.get_product_url(asin)
         try:
             request_headers = {
@@ -342,10 +411,10 @@ class AmazonProductMediaProvider:
             with httpx.Client(timeout=15, follow_redirects=True, headers=request_headers) as client:
                 response = client.get(product_url)
             if response.status_code >= 400:
-                return None
-            return _extract_product_description(response.text)
+                return {}
+            return _extract_amazon_product_facts(response.text)
         except Exception:
-            return None
+            return {}
 
     def _cache_result(
         self,
@@ -432,29 +501,22 @@ def _build_filename_variants(label: str, asin: str, limit: int = 8) -> list[str]
             continue
         seen.add(token)
         unique_tokens.append(token)
-    base_phrases: list[str] = []
-    if unique_tokens:
-        first = unique_tokens[:4]
-        last = unique_tokens[-4:]
-        pivot = unique_tokens[1:5] or unique_tokens[:3]
-        templates = [
-            first,
-            list(reversed(first)),
-            last,
-            pivot,
-            [*first[:2], "detail", *first[2:4]],
-            [*first[:2], "outdoor", *first[2:4]],
-            [*last[:2], "marketplace", *last[2:4]],
-            [*pivot[:2], "listing", *pivot[2:4]],
-        ]
-        for phrase_tokens in templates:
-            phrase = "-".join(token for token in phrase_tokens if token)
-            phrase = re.sub(r"-{2,}", "-", phrase).strip("-")
-            if phrase and phrase not in base_phrases:
-                base_phrases.append(phrase[:80])
-    if not base_phrases:
-        base_phrases = ["vine-product"]
-    if asin:
-        asin_part = re.sub(r"[^a-z0-9]+", "", str(asin).lower())[:8]
-        base_phrases = [f"{phrase}-{asin_part}" for phrase in base_phrases]
-    return base_phrases[:limit]
+    product_slug = "-".join(unique_tokens[:10])[:72].strip("-") or "amazon-vine-product"
+    # The source gallery does not reliably label each angle.  Use honest,
+    # varied image purposes rather than unsupported marketing terms or random
+    # identifiers. A numeric suffix is added by storage only if necessary.
+    purposes = [
+        "product-front",
+        "product-angle",
+        "product-detail",
+        "product-features",
+        "product-packaging",
+        "product-specification",
+        "product-gallery",
+        "product-in-use",
+        "included-components",
+        "product-dimensions",
+        "product-rear-view",
+        "product-additional-view",
+    ]
+    return [f"{product_slug}-{purpose}"[:90].strip("-") for purpose in purposes[:limit]]

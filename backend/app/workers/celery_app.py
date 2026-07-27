@@ -46,5 +46,9 @@ celery_app.conf.update(
             "task": "flag_stale_listings",
             "schedule": crontab(minute=5, hour=0),
         },
+        "recover-intake-reconciliation-jobs-every-minute": {
+            "task": "process_intake_reconciliation_jobs",
+            "schedule": crontab(minute="*"),
+        },
     },
 )

@@ -9,6 +9,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy import func, select
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from app.api.schemas import (
@@ -42,7 +43,7 @@ from app.api.schemas import (
     UserResponse,
 )
 from app.core.auth import ensure_user_owns_resource, get_current_user, get_user_role, is_effective_admin, is_viewing_as_regular, resolve_user_scope, user_has_vine_access
-from app.core.config import settings
+from app.core.config import reload_settings, settings
 from app.core.database import get_db
 from app.models.enums import MarketplaceName
 from app.models.models import Listing, ListingTemplate, MarketplaceAccount, User
@@ -52,6 +53,7 @@ from app.services.marketplace_setup import (
     marketplace_status_snapshot,
     save_manual_marketplace_settings,
 )
+from app.services.multi_platform_publisher import get_enabled_platforms
 from app.services.automation_bridge import AutomationBridgeError, get_active_bridge_connect_session
 from app.services.marketplace_orchestrator import (
     list_marketplaces,
@@ -64,8 +66,10 @@ from app.services.marketplace_preflight import MarketplacePreflightService
 from app.services.ebay_service import (
     EbayIntegrationError,
     get_or_refresh_account,
+    _list_business_policies_for_account,
     list_business_policies,
     revise_ebay_listing,
+    sync_ebay_fulfillment_history,
     sync_business_policies,
     sync_ebay_active_listings,
     summarize_ebay_account_health,
@@ -88,8 +92,9 @@ def _require_live_ebay_confirmation(marketplaces: list[str] | None, *, confirm_l
 
 
 def _build_marketplace_connections(*, user: User, accounts: list[MarketplaceAccount]) -> list[MarketplaceConnectionStatusResponse]:
+    runtime_settings = reload_settings()
     accounts_by_market = {account.marketplace.value: account for account in accounts}
-    enabled_platforms = set(user.enabled_platforms or [MarketplaceName.ebay.value])
+    enabled_platforms = set(get_enabled_platforms(user))
     sale_detection_platforms = set(user.sale_detection_platforms or [])
 
     responses: list[MarketplaceConnectionStatusResponse] = []
@@ -147,6 +152,17 @@ def _persist_ebay_policy_settings(current_user: User, updates: dict[str, object]
     settings_json["ebay_marketplace_policy_settings"] = current
     current_user.settings_json = settings_json
     return current
+
+
+def _persist_ebay_policy_settings_row(db: Session, user_id: int, updates: dict[str, object]) -> dict[str, object]:
+    user = db.get(User, user_id)
+    if not user:
+        return {}
+    persisted = _persist_ebay_policy_settings(user, updates)
+    db.execute(update(User).where(User.id == user_id).values(settings_json=user.settings_json))
+    db.commit()
+    db.refresh(user)
+    return persisted
 
 
 def _bulk_preflight_response_to_csv(report: dict[str, object]) -> str:
@@ -495,7 +511,12 @@ async def get_ebay_policy_catalog(
 ):
     account = await get_or_refresh_account(current_user.id, db)
     try:
-        catalog = await list_business_policies(account.access_token, marketplace_id=marketplace_id)
+        catalog = await _list_business_policies_for_account(
+            current_user.id,
+            db,
+            account,
+            marketplace_id=marketplace_id,
+        )
         current_settings = current_user.settings_json or {}
         current = current_settings.get("ebay_marketplace_policy_settings")
         current = current if isinstance(current, dict) else {}
@@ -543,12 +564,7 @@ async def sync_ebay_policy_settings(
         marketplace_id=payload.marketplace_id,
         create_missing_defaults=payload.create_missing_defaults,
     )
-    _persist_ebay_policy_settings(current_user, report.get("settings_updates") or {})
-    db.add(current_user)
-    db.commit()
-    db.refresh(current_user)
-    policy_settings = current_user.settings_json.get("ebay_marketplace_policy_settings") if isinstance(current_user.settings_json, dict) else {}
-    policy_settings = policy_settings if isinstance(policy_settings, dict) else {}
+    policy_settings = _persist_ebay_policy_settings_row(db, current_user.id, report.get("settings_updates") or {})
     catalog = report.get("policy_catalog") or {}
     return EbayPolicyCatalogResponse(
         marketplace_id=report.get("marketplace_id") or payload.marketplace_id,
@@ -581,12 +597,7 @@ def select_ebay_policy_settings(
         "policy_sync_status": "selected_manual",
         "policy_sync_error": "",
     }
-    _persist_ebay_policy_settings(current_user, updates)
-    db.add(current_user)
-    db.commit()
-    db.refresh(current_user)
-    policy_settings = current_user.settings_json.get("ebay_marketplace_policy_settings") if isinstance(current_user.settings_json, dict) else {}
-    policy_settings = policy_settings if isinstance(policy_settings, dict) else {}
+    policy_settings = _persist_ebay_policy_settings_row(db, current_user.id, updates)
     return EbayPolicyCatalogResponse(
         marketplace_id=payload.marketplace_id,
         status="ready",
@@ -613,11 +624,28 @@ async def verify_ebay_merchant_location(
         db,
         location_key=payload.merchant_location_key,
         create_if_missing=payload.create_if_missing,
+        origin={
+            "merchant_location_location_name": payload.merchant_location_location_name or "",
+            "merchant_location_postal_code": payload.merchant_location_postal_code or "",
+            "merchant_location_country": payload.merchant_location_country or "",
+            "merchant_location_city": payload.merchant_location_city or "",
+            "merchant_location_state_or_province": payload.merchant_location_state_or_province or "",
+            "merchant_location_phone": payload.merchant_location_phone or "",
+        },
     )
-    _persist_ebay_policy_settings(current_user, report.get("settings_updates") or {})
-    db.add(current_user)
-    db.commit()
-    db.refresh(current_user)
+    persisted = _persist_ebay_policy_settings_row(db, current_user.id, report.get("settings_updates") or {})
+    expected_status = str(report.get("status") or "").strip().lower()
+    persisted_status = str(persisted.get("merchant_location_status") or "").strip().lower()
+    if expected_status in {"verified", "created"} and persisted_status not in {"verified", "created"}:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Merchant location response did not persist to the operator record.",
+                "expected_status": expected_status,
+                "persisted_status": persisted_status,
+                "persisted_settings": persisted,
+            },
+        )
     return report
 
 
@@ -632,11 +660,28 @@ async def create_ebay_merchant_location(
         db,
         location_key=payload.merchant_location_key,
         create_if_missing=True,
+        origin={
+            "merchant_location_location_name": payload.merchant_location_location_name or "",
+            "merchant_location_postal_code": payload.merchant_location_postal_code or "",
+            "merchant_location_country": payload.merchant_location_country or "",
+            "merchant_location_city": payload.merchant_location_city or "",
+            "merchant_location_state_or_province": payload.merchant_location_state_or_province or "",
+            "merchant_location_phone": payload.merchant_location_phone or "",
+        },
     )
-    _persist_ebay_policy_settings(current_user, report.get("settings_updates") or {})
-    db.add(current_user)
-    db.commit()
-    db.refresh(current_user)
+    persisted = _persist_ebay_policy_settings_row(db, current_user.id, report.get("settings_updates") or {})
+    expected_status = str(report.get("status") or "").strip().lower()
+    persisted_status = str(persisted.get("merchant_location_status") or "").strip().lower()
+    if expected_status in {"verified", "created"} and persisted_status not in {"verified", "created"}:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Merchant location response did not persist to the operator record.",
+                "expected_status": expected_status,
+                "persisted_status": persisted_status,
+                "persisted_settings": persisted,
+            },
+        )
     return report
 
 
@@ -670,6 +715,20 @@ async def refresh_ebay_inventory(
     scoped_user_id = resolve_user_scope(current_user, user_id)
     try:
         return await sync_ebay_active_listings(scoped_user_id, db, limit=limit)
+    except EbayIntegrationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/marketplaces/ebay/sync/history")
+async def sync_ebay_history(
+    user_id: int | None = Query(None),
+    limit: int = Query(100, ge=1, le=250),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    scoped_user_id = resolve_user_scope(current_user, user_id)
+    try:
+        return await sync_ebay_fulfillment_history(scoped_user_id, db, limit=limit)
     except EbayIntegrationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -729,7 +788,7 @@ def get_ebay_account_readiness(
             and str(policy_settings.get("return_policy_id") or "").strip()
             and str(policy_settings.get("merchant_location_key") or "").strip()
         ),
-        "mode": settings.environment,
+        "mode": reload_settings().environment,
     }
     return EbayAccountReadinessResponse(**response)
 
@@ -827,7 +886,7 @@ def get_platform_config(
     user = db.get(User, scoped_user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    enabled = user.enabled_platforms or [MarketplaceName.ebay.value]
+    enabled = get_enabled_platforms(user)
     return {"user_id": scoped_user_id, "enabled_platforms": enabled}
 
 
@@ -883,7 +942,7 @@ def update_marketplace_connection(
     db.refresh(user)
     snapshot = {
         **marketplace_status_snapshot(marketplace=marketplace, account=None, user=user),
-        "enabled_for_publishing": marketplace in (user.enabled_platforms or []),
+        "enabled_for_publishing": marketplace in get_enabled_platforms(user),
         "enabled_for_sale_detection": marketplace in (user.sale_detection_platforms or []),
     }
     return MarketplaceConnectionStatusResponse(**snapshot)
@@ -895,6 +954,7 @@ def get_account_setup_summary(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    runtime_settings = reload_settings()
     scoped_user_id = resolve_user_scope(current_user, user_id)
     user = db.get(User, scoped_user_id)
     if not user:
@@ -918,7 +978,7 @@ def get_account_setup_summary(
         active_bridge_connect_session = get_active_bridge_connect_session()
     except AutomationBridgeError:
         active_bridge_connect_session = None
-    server_has_ebay = bool(settings.ebay_client_id and settings.ebay_client_secret and (settings.ebay_runame or settings.ebay_redirect_uri))
+    server_has_ebay = bool(runtime_settings.ebay_client_id and runtime_settings.ebay_client_secret and (runtime_settings.ebay_runame or runtime_settings.ebay_redirect_uri))
 
     return AccountSetupSummaryResponse(
         user=UserResponse.model_validate(_serialize_user(user)),
@@ -934,13 +994,13 @@ def get_account_setup_summary(
             else None
         ),
         server_readiness=ServerReadinessResponse(
-            openai_configured=bool(settings.openai_api_key),
-            photoroom_configured=bool(settings.photoroom_api_key),
+            openai_configured=bool(runtime_settings.openai_api_key),
+            photoroom_configured=bool(runtime_settings.photoroom_api_key),
             ebay_oauth_configured=server_has_ebay,
-            storage_root_configured=bool(settings.storage_root),
-            session_secret_configured=bool(settings.session_secret),
-            amazon_vine_import_enabled=settings.amazon_vine_import_enabled,
-            amazon_media_lookup_enabled=settings.amazon_media_lookup_enabled,
-            amazon_paapi_configured=bool(settings.amazon_paapi_access_key and settings.amazon_paapi_secret_key),
+            storage_root_configured=bool(runtime_settings.storage_root),
+            session_secret_configured=bool(runtime_settings.session_secret),
+            amazon_vine_import_enabled=runtime_settings.amazon_vine_import_enabled,
+            amazon_media_lookup_enabled=runtime_settings.amazon_media_lookup_enabled,
+            amazon_paapi_configured=bool(runtime_settings.amazon_paapi_access_key and runtime_settings.amazon_paapi_secret_key),
         ),
     )

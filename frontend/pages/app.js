@@ -19,6 +19,7 @@ import { useRouter } from 'next/router';
 import AppShell from '../components/layout/AppShell';
 import ActionBar from '../components/ui/action-bar';
 import Button from '../components/ui/button';
+import CollapsiblePanel from '../components/ui/collapsible-panel';
 import DataTableCard from '../components/ui/data-table-card';
 import EmptyState from '../components/ui/empty-state';
 import MetricCard from '../components/ui/metric-card';
@@ -33,10 +34,15 @@ import { useAuth } from '../contexts/AuthContext';
 import useDashboardData from '../hooks/useDashboardData';
 import {
   fetchAccountSetupSummary,
+  fetchAlerts,
+  fetchIntakeQueue,
+  fetchIntakeSettings,
   fetchMarketplaceJobsOverview,
   runDashboardOperatorCommand,
+  runIntakeMonitor,
   fetchSalesDashboard,
   toggleAutonomousMode,
+  updateIntakeSettings,
   uploadVineReport,
 } from '../lib/api';
 import { formatPublishFailureMessage } from '../lib/publish-status';
@@ -74,7 +80,22 @@ export default function Dashboard() {
   const router = useRouter();
   const { user } = useAuth();
   const vineFileInputRef = useRef(null);
-  const { listings, alerts, autonomousConfig, readyCount, reload } = useDashboardData(user?.id);
+  const { listings, autonomousConfig, readyCount, reload } = useDashboardData(user?.id, {
+    includeClusters: false,
+    includeMarketplaces: false,
+    includeAnalytics: false,
+    includeAlerts: false,
+    includeOfferDashboard: false,
+    includePlatformConfig: false,
+    includeStorageBatches: false,
+    includeListingTemplates: false,
+    // The dashboard only needs recent activity. Never serialize the entire
+    // operator catalog here; the Listings workspace owns full pagination.
+    paginateListings: true,
+    listingPage: 1,
+    listingPageSize: 25,
+  });
+  const [alerts, setAlerts] = useState([]);
   const [setupSummary, setSetupSummary] = useState(null);
   const [jobsOverview, setJobsOverview] = useState({ import_jobs: [], crosspost_jobs: [] });
   const [salesDashboard, setSalesDashboard] = useState({ summary: {} });
@@ -85,6 +106,12 @@ export default function Dashboard() {
   const [operatorConfirmation, setOperatorConfirmation] = useState('');
   const [operatorCommandResult, setOperatorCommandResult] = useState(null);
   const [operatorCommandRunning, setOperatorCommandRunning] = useState(false);
+  const [intakeSettings, setIntakeSettings] = useState(null);
+  const [intakeQueue, setIntakeQueue] = useState({ batches: [], unassigned_photos: [] });
+  const [intakeAlbumUrl, setIntakeAlbumUrl] = useState('');
+  const [intakeFolderId, setIntakeFolderId] = useState('');
+  const [intakeSaving, setIntakeSaving] = useState(false);
+  const [intakeSyncing, setIntakeSyncing] = useState(false);
 
   const draftCount = useMemo(
     () => listings.filter((listing) => listing.status !== 'ready' && listing.ebay_publish_status !== 'POSTED' && !listing.ebay_listing_id).length,
@@ -120,24 +147,56 @@ export default function Dashboard() {
     setLoadingPanels(true);
     Promise.allSettled([
       fetchAccountSetupSummary(user.id),
-      fetchMarketplaceJobsOverview(),
+      fetchMarketplaceJobsOverview({ limit: 25, compact: true }),
       fetchSalesDashboard(user.id, 25),
-    ]).then(([setupResult, jobsResult, salesResult]) => {
+      fetchIntakeSettings(),
+      fetchIntakeQueue(),
+    ]).then(([setupResult, jobsResult, salesResult, intakeSettingsResult, intakeQueueResult]) => {
       setSetupSummary(setupResult.status === 'fulfilled' ? setupResult.value : null);
       setJobsOverview(jobsResult.status === 'fulfilled' ? jobsResult.value || { import_jobs: [], crosspost_jobs: [] } : { import_jobs: [], crosspost_jobs: [] });
       setSalesDashboard(salesResult.status === 'fulfilled' ? salesResult.value || { summary: {} } : { summary: {} });
+      const nextIntakeSettings = intakeSettingsResult.status === 'fulfilled' ? intakeSettingsResult.value || null : null;
+      const nextIntakeQueue = intakeQueueResult.status === 'fulfilled'
+        ? {
+            batches: intakeQueueResult.value?.batches || [],
+            unassigned_photos: intakeQueueResult.value?.unassigned_photos || [],
+          }
+        : { batches: [], unassigned_photos: [] };
+      setIntakeSettings(nextIntakeSettings);
+      setIntakeQueue(nextIntakeQueue);
+      setIntakeAlbumUrl(nextIntakeSettings?.album_url || '');
+      setIntakeFolderId(nextIntakeSettings?.folder_id || '');
       setLoadingPanels(false);
     });
+  }, [user?.id]);
+
+  useEffect(() => {
+    let active = true;
+    if (!user?.id) {
+      setAlerts([]);
+      return undefined;
+    }
+    fetchAlerts(user.id)
+      .then((payload) => {
+        if (active) setAlerts(payload?.alerts || []);
+      })
+      .catch(() => {
+        if (active) setAlerts([]);
+      });
+    return () => {
+      active = false;
+    };
   }, [user?.id]);
 
   const allJobs = useMemo(() => [...(jobsOverview.import_jobs || []), ...(jobsOverview.crosspost_jobs || [])], [jobsOverview]);
   const jobsSummary = useMemo(
     () => ({
-      queued: allJobs.filter((job) => ['queued', 'running'].includes(String(job.status).toLowerCase())).length,
-      failed: allJobs.filter((job) => String(job.status).toLowerCase() === 'failed').length,
-      completed: allJobs.filter((job) => String(job.status).toLowerCase() === 'completed').length,
+      queued: Number(jobsOverview.import_summary?.queued || 0) + Number(jobsOverview.import_summary?.running || 0)
+        + Number(jobsOverview.crosspost_summary?.queued || 0) + Number(jobsOverview.crosspost_summary?.running || 0),
+      failed: Number(jobsOverview.import_summary?.failed || 0) + Number(jobsOverview.crosspost_summary?.failed || 0),
+      completed: Number(jobsOverview.import_summary?.completed || 0) + Number(jobsOverview.crosspost_summary?.completed || 0),
     }),
-    [allJobs],
+    [jobsOverview],
   );
 
   const blockers = useMemo(() => {
@@ -171,6 +230,20 @@ export default function Dashboard() {
     ['Session security', setupSummary?.server_readiness?.session_secret_configured, 'Encrypted secret handling'],
   ];
   const activeBridgeConnectSession = setupSummary?.active_bridge_connect_session || null;
+  const intakeMetrics = useMemo(() => {
+    const batches = intakeQueue?.batches || [];
+    return {
+      batches: batches.length,
+      drafted: batches.filter((item) => item.draft_listing_id).length,
+      ready: batches.filter((item) => item.status === 'ready_for_draft').length,
+      unassigned: (intakeQueue?.unassigned_photos || []).length,
+    };
+  }, [intakeQueue]);
+  const intakeLastRun = intakeSettings?.last_monitor_result || null;
+  const latestDraftedBatch = useMemo(
+    () => (intakeQueue?.batches || []).find((item) => item.draft_listing_id) || null,
+    [intakeQueue],
+  );
   const recentJobRows = allJobs
     .slice()
     .sort((a, b) => new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0))
@@ -185,6 +258,44 @@ export default function Dashboard() {
       status: job.status || 'queued',
       updated_at: job.updated_at || job.created_at,
     }));
+
+  const saveIntakeAlbum = async () => {
+    setIntakeSaving(true);
+    try {
+      const payload = await updateIntakeSettings({
+        ...(intakeSettings || {}),
+        enabled: true,
+        album_url: intakeAlbumUrl || null,
+        folder_id: intakeFolderId || null,
+      });
+      setIntakeSettings(payload);
+      setIntakeAlbumUrl(payload?.album_url || '');
+      setIntakeFolderId(payload?.folder_id || '');
+      toast.success('Intake album settings saved.');
+    } catch (error) {
+      toast.error(error.message || 'Failed to save intake album settings.');
+    } finally {
+      setIntakeSaving(false);
+    }
+  };
+
+  const runDashboardIntakeMonitor = async () => {
+    setIntakeSyncing(true);
+    try {
+      const payload = await runIntakeMonitor();
+      setIntakeSettings(payload?.settings || intakeSettings);
+      const latestQueue = await fetchIntakeQueue();
+      setIntakeQueue({
+        batches: latestQueue?.batches || [],
+        unassigned_photos: latestQueue?.unassigned_photos || [],
+      });
+      toast.success(`Intake sync finished: ${payload?.result?.imported || 0} imported, ${payload?.result?.drafts_created || 0} drafts created.`);
+    } catch (error) {
+      toast.error(error.message || 'Failed to run intake monitor.');
+    } finally {
+      setIntakeSyncing(false);
+    }
+  };
 
   const dashboardSections = useMemo(
     () => [
@@ -254,9 +365,93 @@ export default function Dashboard() {
         left={<HealthIndicator healthy={!blockers.length} label={blockers.length ? `${blockers.length} setup blockers` : 'Setup healthy'} />}
         right={<span>{jobsSummary.queued} jobs running/queued</span>}
       />
-      <SectionPanel
+      <CollapsiblePanel title="Head Slate intake" description="Connect or run the photo intake workflow when you need it." defaultOpen={false}>
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]">
+          <div className="rounded-[18px] border border-[#e5e7eb] bg-white p-5">
+            <div className="flex flex-wrap items-center gap-2">
+              <StatusPill status={intakeSettings?.enabled ? 'success' : 'warning'} label={intakeSettings?.enabled ? 'Monitor enabled' : 'Monitor disabled'} />
+              <StatusPill status={intakeMetrics.unassigned ? 'warning' : intakeMetrics.ready || intakeMetrics.drafted ? 'success' : 'default'} label={intakeMetrics.unassigned ? 'Needs slate grouping' : 'Stable'} />
+            </div>
+            <label className="mt-4 block">
+              <span className="text-sm font-semibold text-[#101828]">Google Photos album URL</span>
+              <div className="mt-2 grid gap-3">
+              <input
+                value={intakeAlbumUrl}
+                onChange={(event) => setIntakeAlbumUrl(event.target.value)}
+                className="w-full rounded-[14px] border border-[#d0d5dd] bg-[#fcfcfd] px-4 py-3 text-sm text-[#101828] outline-none focus:border-[#2563eb] focus:ring-2 focus:ring-[#dbeafe]"
+                  placeholder="https://photos.app.goo.gl/... or a shared Drive link"
+                />
+                <input
+                  value={intakeFolderId}
+                  onChange={(event) => setIntakeFolderId(event.target.value)}
+                  className="w-full rounded-[14px] border border-[#d0d5dd] bg-[#fcfcfd] px-4 py-3 text-sm text-[#101828] outline-none focus:border-[#2563eb] focus:ring-2 focus:ring-[#dbeafe]"
+                  placeholder="Optional Google Drive folder URL or shared link"
+                />
+              </div>
+            </label>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <Button onClick={saveIntakeAlbum} disabled={intakeSaving || !(intakeAlbumUrl.trim() || intakeFolderId.trim())}>
+                {intakeSaving ? 'Saving…' : 'Save source + enable monitor'}
+              </Button>
+              <Button variant="secondary" onClick={runDashboardIntakeMonitor} disabled={intakeSyncing || !(intakeSettings?.album_url || intakeSettings?.folder_id)}>
+                {intakeSyncing ? 'Running…' : 'Run intake now'}
+              </Button>
+              <Button href="/intake/slate" variant="outline">Generate head slate</Button>
+            </div>
+            <p className="mt-3 text-sm text-[#667085]">
+              When a head slate is detected, PosterPro groups the following photos into one item batch, builds the draft, and sends it into review.
+            </p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {(intakeSettings?.marketplace_defaults?.targets || ['ebay', 'facebook']).map((target) => (
+                <span key={target} className="pp-chip capitalize">{target}</span>
+              ))}
+            </div>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
+            <div className="rounded-[18px] border border-[#e5e7eb] bg-[#fcfcfd] p-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Queued intake batches</p>
+              <p className="mt-2 text-2xl font-semibold text-[#101828]">{intakeMetrics.batches}</p>
+              <p className="mt-1 text-sm text-[#667085]">{intakeMetrics.ready} ready to draft, {intakeMetrics.drafted} drafted</p>
+            </div>
+            <div className="rounded-[18px] border border-[#e5e7eb] bg-[#fcfcfd] p-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Unassigned photos</p>
+              <p className="mt-2 text-2xl font-semibold text-[#101828]">{intakeMetrics.unassigned}</p>
+              <p className="mt-1 text-sm text-[#667085]">{intakeMetrics.unassigned ? 'Photos imported without a matching slate boundary.' : 'Album stream is grouped cleanly.'}</p>
+            </div>
+            <div className="rounded-[18px] border border-[#e5e7eb] bg-[#fcfcfd] p-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Last sync</p>
+              <p className="mt-2 text-sm font-semibold text-[#101828]">{formatTime(intakeSettings?.last_synced_at)}</p>
+              <p className="mt-1 text-sm text-[#667085]">{intakeSettings?.last_error || 'No intake monitor errors reported.'}</p>
+            </div>
+            {intakeLastRun ? (
+              <div className="rounded-[18px] border border-[#dbe7ff] bg-[#f8fbff] p-4">
+                <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Last monitor run</p>
+                <p className="mt-2 text-sm font-semibold text-[#101828]">
+                  {intakeLastRun.imported || 0} imported, {intakeLastRun.slates_detected || 0} slates, {intakeLastRun.assigned_photos || 0} assigned, {intakeLastRun.drafts_created || 0} drafts.
+                </p>
+                <p className="mt-1 text-sm text-[#667085]">
+                  Scanned {intakeLastRun.scanned || 0} photos with {intakeLastRun.failed_downloads || 0} download failures.
+                </p>
+              </div>
+            ) : null}
+            {latestDraftedBatch?.draft_listing_id ? (
+              <Button href={`/listings/${latestDraftedBatch.draft_listing_id}?mode=preview`} variant="outline" className="justify-between">
+                <span>Preview latest intake draft</span>
+                <ArrowRight size={14} />
+              </Button>
+            ) : null}
+            <Button href={intakeMetrics.unassigned ? '/intake/queue' : '/listings?tab=review'} variant="outline" className="justify-between">
+              <span>{intakeMetrics.unassigned ? 'Open intake queue' : 'Open review queue'}</span>
+              <ArrowRight size={14} />
+            </Button>
+          </div>
+        </div>
+      </CollapsiblePanel>
+      <CollapsiblePanel
         title="Workspace overview"
         description="Primary throughput, backlog, and publishing posture in one operator view."
+        defaultOpen
+        badge={`${readyCount} ready`}
         action={
           <Link href="/publishing" className="inline-flex items-center gap-1 text-sm font-medium text-[#2563eb]">
             Open publish queue
@@ -384,68 +579,71 @@ export default function Dashboard() {
               ))}
             </div>
           </div>
-          <div className="rounded-[18px] border border-[#e5e7eb] bg-[#fcfcfd] p-5">
-            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">Fast actions</p>
-            <div className="mt-4 space-y-2">
-              <Button href="/intake" variant="outline" className="w-full justify-between">
-                <span>Upload photos</span>
-                <ArrowRight size={14} />
-              </Button>
-              <Button href="/listings/new" className="w-full justify-between">
-                <span>Create listing</span>
-                <ArrowRight size={14} />
-              </Button>
-              <Button href="/publishing" variant="outline" className="w-full justify-between">
-                <span>Open publish queue</span>
-                <ArrowRight size={14} />
-              </Button>
-              <Button href="/settings?tab=ebay" variant="outline" className="w-full justify-between">
-                <span>eBay setup</span>
-                <ArrowRight size={14} />
-              </Button>
+          <CollapsiblePanel title="Fast actions" description="Most common workflow moves kept behind a single task panel." defaultOpen={false}>
+            <div className="rounded-[18px] border border-[#e5e7eb] bg-[#fcfcfd] p-5">
+              <div className="space-y-2">
+                <Button href="/intake" variant="outline" className="w-full justify-between">
+                  <span>Upload photos</span>
+                  <ArrowRight size={14} />
+                </Button>
+                <Button href="/listings/new" className="w-full justify-between">
+                  <span>Create listing</span>
+                  <ArrowRight size={14} />
+                </Button>
+                <Button href="/publishing" variant="outline" className="w-full justify-between">
+                  <span>Open publish queue</span>
+                  <ArrowRight size={14} />
+                </Button>
+                <Button href="/settings?tab=ebay" variant="outline" className="w-full justify-between">
+                  <span>eBay setup</span>
+                  <ArrowRight size={14} />
+                </Button>
+              </div>
             </div>
-          </div>
+          </CollapsiblePanel>
         </div>
-      </SectionPanel>
+      </CollapsiblePanel>
       {loadingPanels ? <LoadingSkeleton lines={5} /> : null}
     </div>
   );
 
   const renderActivity = () => (
     <div className="space-y-5">
-      <DataTableCard
-        title="Recent listing activity"
-        description="Latest changes across drafts, review queue, and live marketplace rows."
-        action={<Link href="/listings" className="text-sm font-medium text-[#2563eb]">View all listings</Link>}
-        onRowClick={(listing) => router.push(`/listings/${listing.id}`)}
-        columns={[
-          {
-            key: 'title',
-            label: 'Listing',
-            render: (listing) => (
-              <div>
-                <p className="truncate font-medium text-[#101828]">{listing.title || `Listing #${listing.id}`}</p>
-                <p className="mt-1 text-xs text-[#667085]">#{listing.id}</p>
-              </div>
-            ),
-          },
-          {
-            key: 'status',
-            label: 'Status',
-            render: (listing) => <StatusPill status={listing.status || 'draft'} label={listing.status || 'Draft'} />,
-          },
-          {
-            key: 'updated',
-            label: 'Updated',
-            render: (listing) => formatTime(listing.updated_at || listing.created_at),
-          },
-        ]}
-        rows={recentActivity}
-        rowKey={(row) => row.id}
-        emptyState={<EmptyState title="No recent activity" description="Recent listing changes will appear here." className="border-0 p-0 py-6" />}
-      />
+      <CollapsiblePanel title="Recent listing activity" description="Latest changes across drafts, review queue, and live marketplace rows." defaultOpen>
+        <DataTableCard
+          title="Recent listing activity"
+          description="Latest changes across drafts, review queue, and live marketplace rows."
+          action={<Link href="/listings" className="text-sm font-medium text-[#2563eb]">View all listings</Link>}
+          onRowClick={(listing) => router.push(`/listings/${listing.id}`)}
+          columns={[
+            {
+              key: 'title',
+              label: 'Listing',
+              render: (listing) => (
+                <div>
+                  <p className="truncate font-medium text-[#101828]">{listing.title || `Listing #${listing.id}`}</p>
+                  <p className="mt-1 text-xs text-[#667085]">#{listing.id}</p>
+                </div>
+              ),
+            },
+            {
+              key: 'status',
+              label: 'Status',
+              render: (listing) => <StatusPill status={listing.status || 'draft'} label={listing.status || 'Draft'} />,
+            },
+            {
+              key: 'updated',
+              label: 'Updated',
+              render: (listing) => formatTime(listing.updated_at || listing.created_at),
+            },
+          ]}
+          rows={recentActivity}
+          rowKey={(row) => row.id}
+          emptyState={<EmptyState title="No recent activity" description="Recent listing changes will appear here." className="border-0 p-0 py-6" />}
+        />
+      </CollapsiblePanel>
 
-      <SectionPanel title="Attention feed" description="Errors, alerts, and items that need an operator now.">
+      <CollapsiblePanel title="Attention feed" description="Errors, alerts, and items that need an operator now." defaultOpen={false}>
         <div className="space-y-3">
           {attentionItems.length ? (
             attentionItems.map((listing) => (
@@ -469,10 +667,17 @@ export default function Dashboard() {
             ))
           ) : alerts?.length ? (
             alerts.slice(0, 5).map((alert, index) => (
-              <div key={`${alert.title || 'alert'}-${index}`} className="rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-3">
-                <p className="text-sm font-medium text-[#101828]">{alert.title || 'Alert'}</p>
-                <p className="mt-1 text-sm text-[#667085]">{alert.message || 'Check the latest workflow state.'}</p>
-              </div>
+              alert.href ? (
+                <Link key={`${alert.title || 'alert'}-${index}`} href={alert.href} className="block rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-3 transition hover:bg-[#f9fafb]">
+                  <p className="text-sm font-medium text-[#101828]">{alert.title || 'Alert'}</p>
+                  <p className="mt-1 text-sm text-[#667085]">{alert.message || 'Check the latest workflow state.'}</p>
+                </Link>
+              ) : (
+                <div key={`${alert.title || 'alert'}-${index}`} className="rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-3">
+                  <p className="text-sm font-medium text-[#101828]">{alert.title || 'Alert'}</p>
+                  <p className="mt-1 text-sm text-[#667085]">{alert.message || 'Check the latest workflow state.'}</p>
+                </div>
+              )
             ))
           ) : (
             <div className="rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-8 text-center">
@@ -482,57 +687,61 @@ export default function Dashboard() {
             </div>
           )}
         </div>
-      </SectionPanel>
+      </CollapsiblePanel>
     </div>
   );
 
   const renderJobs = () => (
     <div className="space-y-5">
-      <DataTableCard
-        title="Batch processing status"
-        description="Recent import and cross-post jobs without leaving the dashboard."
-        action={<Link href="/jobs" className="text-sm font-medium text-[#2563eb]">Open jobs console</Link>}
-        columns={[
-          { key: 'job_type', label: 'Job type' },
-          {
-            key: 'reference',
-            label: 'Reference',
-            render: (row) => {
-              if (row.listing_id) {
+      <CollapsiblePanel title="Batch processing status" description="Recent import and cross-post jobs without leaving the dashboard." defaultOpen>
+        <DataTableCard
+          title="Batch processing status"
+          description="Recent import and cross-post jobs without leaving the dashboard."
+          action={<Link href="/jobs" className="text-sm font-medium text-[#2563eb]">Open jobs console</Link>}
+          columns={[
+            { key: 'job_type', label: 'Job type' },
+            {
+              key: 'reference',
+              label: 'Reference',
+              render: (row) => {
+                if (row.listing_id) {
+                  return (
+                    <Link href={`/listings/${row.listing_id}`} className="font-medium text-[#2563eb]">
+                      {row.reference}
+                    </Link>
+                  );
+                }
                 return (
-                  <Link href={`/listings/${row.listing_id}`} className="font-medium text-[#2563eb]">
+                  <Link
+                    href={`/jobs/${row.job_kind === 'imports' ? 'import' : 'crosspost'}/${row.job_id}`}
+                    className="font-medium text-[#2563eb]"
+                  >
                     {row.reference}
                   </Link>
                 );
-              }
-              return (
-                <Link
-                  href={`/jobs/${row.job_kind === 'imports' ? 'import' : 'crosspost'}/${row.job_id}`}
-                  className="font-medium text-[#2563eb]"
-                >
-                  {row.reference}
-                </Link>
-              );
+              },
             },
-          },
-          { key: 'status', label: 'Status', render: (row) => <StatusPill status={row.status} label={row.status} /> },
-          { key: 'updated_at', label: 'Updated', render: (row) => formatTime(row.updated_at) },
-        ]}
-        rows={recentJobRows}
-        rowKey={(row) => row.id}
-        emptyState={<EmptyState title="No jobs yet" description="Import and cross-post jobs will appear here once work starts moving through the marketplace execution layer." className="border-0 p-0 py-6" />}
-      />
-      <div className="grid gap-3 md:grid-cols-3">
-        <MetricCard label="Queued or running" value={jobsSummary.queued} detail="Current job execution load." href="/jobs/active" />
-        <MetricCard label="Completed" value={jobsSummary.completed} detail="Jobs that finished successfully." href="/jobs/completed" />
-        <MetricCard label="Failed" value={jobsSummary.failed} detail="Jobs that need review or retry." href="/jobs/failed" />
-      </div>
+            { key: 'status', label: 'Status', render: (row) => <StatusPill status={row.status} label={row.status} /> },
+            { key: 'updated_at', label: 'Updated', render: (row) => formatTime(row.updated_at) },
+          ]}
+          rows={recentJobRows}
+          rowKey={(row) => row.id}
+          emptyState={<EmptyState title="No jobs yet" description="Import and cross-post jobs will appear here once work starts moving through the marketplace execution layer." className="border-0 p-0 py-6" />}
+        />
+      </CollapsiblePanel>
+      <CollapsiblePanel title="Job summary" description="Worker load at a glance." defaultOpen={false}>
+        <div className="grid gap-3 md:grid-cols-3">
+          <MetricCard label="Queued or running" value={jobsSummary.queued} detail="Current job execution load." href="/jobs/active" />
+          <MetricCard label="Completed" value={jobsSummary.completed} detail="Jobs that finished successfully." href="/jobs/completed" />
+          <MetricCard label="Failed" value={jobsSummary.failed} detail="Jobs that need review or retry." href="/jobs/failed" />
+        </div>
+      </CollapsiblePanel>
     </div>
   );
 
   const renderOperations = () => (
     <div className="space-y-5">
-      <SectionPanel title="Operational posture" description="Short-form status modules instead of one oversized narrative dashboard.">
+      <CollapsiblePanel title="Operational posture" description="Short-form status modules instead of one oversized narrative dashboard." defaultOpen>
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="rounded-[14px] border border-[#e5e7eb] bg-white p-4">
             <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Marketplace sync</p>
@@ -558,22 +767,22 @@ export default function Dashboard() {
             </div>
           ))}
         </div>
-      </SectionPanel>
+      </CollapsiblePanel>
 
-      <SectionPanel title="Quick actions" description="Most common workflow moves kept in a dedicated command module.">
+      <CollapsiblePanel title="Quick actions" description="Most common workflow moves kept in a dedicated command module." defaultOpen={false}>
         <div className="grid gap-3 2xl:grid-cols-2">
           <QuickActionCard href="/intake" icon={Upload} eyebrow="Intake" title="Upload Photos" description="Start a new intake batch with loose photos or a zip import." meta={`${listings.length} items`} />
           <QuickActionCard href="/listings/new" icon={PlusCircle} eyebrow="Listings" title="Create Listing" description="Open the listing workspace directly for a manual item or imported draft." meta={`${draftCount} drafts`} />
           <QuickActionCard href="/publishing" icon={RefreshCcw} eyebrow="Publishing" title="Publish Queue" description="Review approvals, queue health, and live marketplace rows." meta={`${readyCount} ready`} />
           <QuickActionCard href="/sales" icon={ShoppingCart} eyebrow="Revenue" title="Sales & Orders" description="Monitor detected sales and finish bookkeeping adjustments." meta={`${salesDashboard.summary?.units || 0} units`} />
         </div>
-      </SectionPanel>
+      </CollapsiblePanel>
     </div>
   );
 
   const renderChannels = () => (
     <div className="space-y-5">
-      <SectionPanel title="Marketplace connections" description="Channel state visible as a compact admin panel instead of a dashboard sidebar fragment.">
+      <CollapsiblePanel title="Marketplace connections" description="Channel state visible as a compact admin panel instead of a dashboard sidebar fragment." defaultOpen>
         <div className="space-y-3">
           {activeBridgeConnectSession ? (
             <div className="rounded-[14px] border border-[#fde68a] bg-[#fffbeb] p-4">
@@ -614,14 +823,14 @@ export default function Dashboard() {
             <EmptyState title="No channel records yet" description="Connect eBay or add manual marketplace records from Settings." className="border-0 p-0 py-8" />
           )}
         </div>
-      </SectionPanel>
+      </CollapsiblePanel>
     </div>
   );
 
   const renderSetup = () => (
     <div className="space-y-5">
       {setupSummary ? <SetupChecklistPanel setupSummary={setupSummary} /> : null}
-      <SectionPanel title="Current blockers" description="Missing setup or workflow conditions that still prevent clean end-to-end operation.">
+      <CollapsiblePanel title="Current blockers" description="Missing setup or workflow conditions that still prevent clean end-to-end operation." defaultOpen>
         <div className="space-y-3">
           {blockers.length ? (
             blockers.map((item) => (
@@ -637,13 +846,13 @@ export default function Dashboard() {
             </div>
           )}
         </div>
-      </SectionPanel>
+      </CollapsiblePanel>
     </div>
   );
 
   const renderSystem = () => (
     <div className="space-y-5">
-      <SectionPanel title="System readiness" description="Live dependencies that still control automation depth.">
+      <CollapsiblePanel title="System readiness" description="Live dependencies that still control automation depth." defaultOpen>
         <div className="grid gap-3 2xl:grid-cols-2">
           {readinessRows.map(([label, ok, note]) => (
             <div key={label} className="rounded-[12px] border border-[#e5e7eb] bg-white p-4">
@@ -660,7 +869,7 @@ export default function Dashboard() {
             </div>
           ))}
         </div>
-      </SectionPanel>
+      </CollapsiblePanel>
       <div className="grid gap-3 2xl:grid-cols-2">
         <QuickActionCard href="/settings?tab=ebay" icon={Store} eyebrow="Integrations" title="Connect eBay" description="Finish OAuth setup or reconnect the current operator account." meta={setupSummary?.server_readiness?.ebay_oauth_configured ? 'Configured' : 'Needs setup'} />
         <QuickActionCard href="/inventory" icon={Package} eyebrow="Inventory" title="View Inventory" description="Inspect intake, active items, sold units, and storage batches." meta={`${listings.length} tracked`} />
@@ -740,9 +949,9 @@ export default function Dashboard() {
       <div className="space-y-5">
         <SectionPanel
           title="Workspace sections"
-          description="Switch between the main operator views without carrying a second sidebar around the page."
+          description="Switch views without a second wall of full-width controls."
         >
-          <div className="grid gap-3 xl:grid-cols-4">
+          <div className="flex flex-wrap gap-2">
             {dashboardSections.map((section) => {
               const active = activeSection === section.key;
               return (
@@ -751,14 +960,13 @@ export default function Dashboard() {
                   type="button"
                   onClick={() => selectSection(section.key)}
                   className={[
-                    'rounded-[20px] border px-4 py-4 text-left transition',
+                    'rounded-full border px-4 py-2.5 text-left transition',
                     active
                       ? 'border-[#bfd4ef] bg-[linear-gradient(135deg,#eef5ff_0%,#ffffff_100%)] text-[#173a63] shadow-[0_16px_32px_rgba(23,58,99,0.12)]'
                       : 'border-[#d0d5dd] bg-white text-[#344054] hover:border-[#98a2b3] hover:bg-[#f9fafb]',
                   ].join(' ')}
                 >
                   <span className="block text-sm font-semibold">{section.label}</span>
-                  <span className="mt-2 block text-xs leading-5 text-[#667085]">{section.description}</span>
                 </button>
               );
             })}

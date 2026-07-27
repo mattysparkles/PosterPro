@@ -10,9 +10,17 @@ import CmsTemplateWorkspace from '../components/CmsTemplateWorkspace';
 import ThemeSelector from '../components/settings/ThemeSelector';
 import SettingsLayout from '../components/settings/SettingsLayout';
 import SettingsNav from '../components/settings/SettingsNav';
+import {
+  SettingsWorkspaceAside,
+  SettingsWorkspaceGrid,
+  SettingsWorkspaceHero,
+  SettingsWorkspaceMain,
+  SettingsWorkspaceRailCard,
+} from '../components/settings/SettingsWorkspace';
 import { SettingsGuideCard as GuideCard, SettingsInstructionTable as InstructionTable } from '../components/settings/SettingsGuideCard';
 import AppCard from '../components/ui/app-card';
 import Button from '../components/ui/button';
+import CollapsiblePanel from '../components/ui/collapsible-panel';
 import Drawer from '../components/ui/drawer';
 import EmptyState from '../components/ui/empty-state';
 import FormSection from '../components/ui/form-section';
@@ -188,6 +196,7 @@ export default function SettingsPage() {
     auto_publish_after_approval: false,
     bulk_approval_enabled: true,
     listing_preview_mode: 'marketplace',
+    default_preview_marketplace: 'ebay',
   });
   const [automationForm, setAutomationForm] = useState({
     autonomous_dry_run: false,
@@ -344,6 +353,7 @@ export default function SettingsPage() {
         auto_publish_after_approval: panels.workflow?.auto_publish_after_approval ?? false,
         bulk_approval_enabled: panels.workflow?.bulk_approval_enabled ?? true,
         listing_preview_mode: panels.workflow?.listing_preview_mode || 'marketplace',
+        default_preview_marketplace: panels.workflow?.default_preview_marketplace || 'ebay',
       });
       setAutomationForm({
         autonomous_dry_run: !!panels.automation.autonomous_dry_run,
@@ -425,6 +435,7 @@ export default function SettingsPage() {
       setActiveTab(tab);
     }
     if (marketplace) {
+      setActiveTab('marketplaces');
       setSelectedMarketplace(marketplace.toLowerCase());
     }
   }, [router.isReady, router.query.marketplace, router.query.tab]);
@@ -528,8 +539,14 @@ export default function SettingsPage() {
 
   const openMarketplaceDrawer = (marketplace) => {
     if (!marketplace) return;
-    const usesBrowserAssistDefaults = BROWSER_CONNECT_MARKETPLACES.includes(marketplace.marketplace);
+    setActiveTab('marketplaces');
     setSelectedMarketplace(marketplace.marketplace);
+    seedMarketplaceForm(marketplace);
+  };
+
+  const seedMarketplaceForm = (marketplace) => {
+    if (!marketplace) return;
+    const usesBrowserAssistDefaults = BROWSER_CONNECT_MARKETPLACES.includes(marketplace.marketplace);
     setMarketplaceForm({
       display_name: marketplace.display_name || '',
       account_handle: marketplace.account_handle || '',
@@ -564,7 +581,17 @@ export default function SettingsPage() {
   };
   const getBridgeAccountForMarketplace = (marketplace) => {
     if (!marketplace) return null;
-    const accountKey = String(marketplace.bridge_account_key || '').trim().toLowerCase();
+    const accountKey = String(
+      marketplace.bridge_account_key ||
+        bridgeAccounts.find(
+          (account) =>
+            account.marketplace === marketplace.marketplace &&
+            ['ready', 'active', 'valid'].includes(String(account.session_state || '').toLowerCase()),
+        )?.account_key ||
+        '',
+    )
+      .trim()
+      .toLowerCase();
     if (!accountKey) return null;
     return (
       bridgeAccounts.find(
@@ -582,13 +609,90 @@ export default function SettingsPage() {
       bridgeAccounts.find(
         (account) =>
           account.marketplace === configuredMarketplace?.marketplace &&
-          account.account_key === String(marketplaceForm.bridge_account_key || '').trim().toLowerCase(),
+          account.account_key === String(
+            marketplaceForm.bridge_account_key ||
+              bridgeAccounts.find(
+                (candidate) =>
+                  candidate.marketplace === configuredMarketplace?.marketplace &&
+                  ['ready', 'active', 'valid'].includes(String(candidate.session_state || '').toLowerCase()),
+              )?.account_key ||
+              '',
+          )
+            .trim()
+            .toLowerCase(),
       ) || null,
     [bridgeAccounts, configuredMarketplace?.marketplace, marketplaceForm.bridge_account_key],
   );
   const browserConnectInProgress =
     !!configuredMarketplace &&
     activeBridgeConnectMarketplace === String(configuredMarketplace.marketplace || '').toLowerCase();
+
+  const buildMarketplaceSetupHref = (marketplaceName) =>
+    `/settings?tab=marketplaces&marketplace=${encodeURIComponent(String(marketplaceName || '').toLowerCase())}`;
+
+  const buildMarketplaceConnectHref = (marketplace) => {
+    const marketplaceName = String(marketplace?.marketplace || '').toLowerCase();
+    const accountKey = String(
+      marketplace?.bridge_account_key ||
+        bridgeAccounts.find(
+          (account) =>
+            account.marketplace === marketplaceName &&
+            ['ready', 'active', 'valid'].includes(String(account.session_state || '').toLowerCase()),
+        )?.account_key ||
+        '',
+    )
+      .trim()
+      .toLowerCase();
+    if (!marketplaceName || !accountKey) return buildMarketplaceSetupHref(marketplaceName || 'marketplaces');
+    const params = new URLSearchParams({
+      marketplace: marketplaceName,
+      accountKey,
+      displayName: marketplace.display_name || MARKETPLACE_LABELS[marketplaceName] || marketplaceName,
+      notes: marketplace.notes || '',
+    });
+    if (String(marketplace.account_handle || '').trim()) {
+      params.set('loginHandle', String(marketplace.account_handle || '').trim());
+    }
+    return `/bridge-desktop?${params.toString()}`;
+  };
+
+  useEffect(() => {
+    if (!configuredMarketplace || activeTab !== 'marketplaces') return;
+    setMarketplaceForm((current) => {
+      const nextBridgeKey = String(
+        configuredMarketplace.bridge_account_key ||
+          bridgeAccounts.find(
+            (account) =>
+              account.marketplace === configuredMarketplace.marketplace &&
+              ['ready', 'active', 'valid'].includes(String(account.session_state || '').toLowerCase()),
+          )?.account_key ||
+          '',
+      );
+      const sameMarketplace =
+        String(current.display_name || '') === String(configuredMarketplace.display_name || '') &&
+        String(current.account_handle || '') === String(configuredMarketplace.account_handle || '') &&
+        String(current.bridge_account_key || '') === nextBridgeKey;
+      if (sameMarketplace) return current;
+      const usesBrowserAssistDefaults = BROWSER_CONNECT_MARKETPLACES.includes(configuredMarketplace.marketplace);
+      return {
+        display_name: configuredMarketplace.display_name || '',
+        account_handle: configuredMarketplace.account_handle || '',
+        notes: configuredMarketplace.notes || '',
+        workflow_state: configuredMarketplace.workflow_state || 'draft',
+        import_mode:
+          configuredMarketplace.import_mode ||
+          (usesBrowserAssistDefaults && BROWSER_IMPORT_MARKETPLACES.includes(configuredMarketplace.marketplace) ? 'browser_assist' : 'manual'),
+        publish_mode: configuredMarketplace.publish_mode || (usesBrowserAssistDefaults ? 'browser_assist' : 'manual_review'),
+        shipping_scope: configuredMarketplace.shipping_scope || defaultShippingScopeForMarketplace(configuredMarketplace.marketplace),
+        renewal_mode: configuredMarketplace.renewal_mode || 'manual',
+        support_url: configuredMarketplace.support_url || '',
+        bridge_account_key: nextBridgeKey,
+        import_listing_limit: Number(configuredMarketplace.import_listing_limit || 10),
+        bridge_session_state: current.bridge_session_state || 'draft',
+        bridge_session_payload_text: current.bridge_session_payload_text || '',
+      };
+    });
+  }, [activeTab, configuredMarketplace]);
 
   useEffect(() => {
     if (!BROWSER_CONNECT_MARKETPLACES.includes(String(configuredMarketplace?.marketplace || '')) || !selectedBridgeAccount) return;
@@ -650,6 +754,9 @@ export default function SettingsPage() {
 
     setSavingBrowserSession(true);
     try {
+      const sessionState = String(marketplaceForm.bridge_session_state || '').trim().toLowerCase();
+      const sessionIsReady = ['ready', 'active', 'valid'].includes(sessionState);
+      const nextWorkflowState = sessionIsReady ? 'ready' : String(marketplaceForm.workflow_state || 'draft').trim().toLowerCase() || 'draft';
       await upsertBridgeAccount(marketplaceName, accountKey, {
         display_name: marketplaceForm.display_name || configuredMarketplace?.display_name || MARKETPLACE_LABELS[marketplaceName] || marketplaceName,
         login_handle: marketplaceForm.account_handle || configuredMarketplace?.account_handle || '',
@@ -661,10 +768,23 @@ export default function SettingsPage() {
         session_payload: sessionPayload,
       });
       await updateBridgeAccountSession(marketplaceName, accountKey, {
-        session_state: marketplaceForm.bridge_session_state,
+        session_state: sessionState || 'draft',
         session_payload: sessionPayload,
         last_tested_at: new Date().toISOString(),
         notes: marketplaceForm.notes,
+      });
+      await updateMarketplaceConnection(user.id, marketplaceName, {
+        display_name: marketplaceForm.display_name || configuredMarketplace?.display_name || MARKETPLACE_LABELS[marketplaceName] || marketplaceName,
+        account_handle: marketplaceForm.account_handle || configuredMarketplace?.account_handle || '',
+        notes: marketplaceForm.notes,
+        workflow_state: nextWorkflowState,
+        import_mode: marketplaceForm.import_mode || (BROWSER_IMPORT_MARKETPLACES.includes(marketplaceName) ? 'browser_assist' : 'manual'),
+        publish_mode: marketplaceForm.publish_mode || (BROWSER_CONNECT_MARKETPLACES.includes(marketplaceName) ? 'browser_assist' : 'manual_review'),
+        shipping_scope: marketplaceForm.shipping_scope || defaultShippingScopeForMarketplace(marketplaceName),
+        renewal_mode: marketplaceForm.renewal_mode || 'manual',
+        support_url: marketplaceForm.support_url || '',
+        bridge_account_key: accountKey,
+        import_listing_limit: Number(marketplaceForm.import_listing_limit || 10),
       });
       await reload();
       toast.success(`${MARKETPLACE_LABELS[marketplaceName] || marketplaceName} browser session saved.`);
@@ -725,17 +845,40 @@ export default function SettingsPage() {
     if (!marketplace || !BROWSER_CONNECT_MARKETPLACES.includes(String(marketplace.marketplace || '').toLowerCase())) {
       return;
     }
-    const accountKey = String(marketplace.bridge_account_key || '').trim().toLowerCase();
+    const marketplaceName = String(marketplace.marketplace || '').trim().toLowerCase();
+    let accountKey = String(marketplace.bridge_account_key || '').trim().toLowerCase();
     if (!accountKey) {
-      openMarketplaceDrawer(marketplace);
-      toast.error(`Save a bridge account key in ${MARKETPLACE_LABELS[marketplace.marketplace] || marketplace.marketplace} setup before running the live connect flow.`);
-      return;
+      // A bridge key scopes the browser profile; it is not a credential.  Make
+      // the first Connect click complete this safe setup step instead of
+      // dead-ending the operator in a form before the login workspace opens.
+      accountKey = `${marketplaceName}-main`;
+      try {
+        await updateMarketplaceConnection(user.id, marketplaceName, {
+          display_name: marketplace.display_name || MARKETPLACE_LABELS[marketplaceName] || marketplaceName,
+          account_handle: marketplace.account_handle || '',
+          notes: marketplace.notes || '',
+          workflow_state: 'draft',
+          import_mode: BROWSER_IMPORT_MARKETPLACES.includes(marketplaceName) ? 'browser_assist' : 'manual',
+          publish_mode: 'browser_assist',
+          shipping_scope: defaultShippingScopeForMarketplace(marketplaceName),
+          renewal_mode: 'manual',
+          support_url: marketplace.support_url || '',
+          bridge_account_key: accountKey,
+          import_listing_limit: Number(marketplace.import_listing_limit || 10),
+        });
+        await reload();
+        toast.success(`${MARKETPLACE_LABELS[marketplaceName] || marketplaceName} browser setup is ready. Opening the login workspace.`);
+      } catch (error) {
+        openMarketplaceDrawer(marketplace);
+        toast.error(error.message || `Could not prepare ${MARKETPLACE_LABELS[marketplaceName] || marketplaceName} browser setup.`);
+        return;
+      }
     }
-    setSelectedMarketplace(marketplace.marketplace);
+    setSelectedMarketplace(marketplaceName);
     await launchBrowserConnectWorkspace({
-      marketplace: marketplace.marketplace,
+      marketplace: marketplaceName,
       accountKey,
-      displayName: marketplace.display_name || MARKETPLACE_LABELS[marketplace.marketplace] || marketplace.marketplace,
+      displayName: marketplace.display_name || MARKETPLACE_LABELS[marketplaceName] || marketplaceName,
       loginHandle: '',
       notes: marketplace.notes || '',
     });
@@ -748,6 +891,10 @@ export default function SettingsPage() {
         marketplace_id: 'EBAY_US',
         create_missing_defaults: createMissingDefaults,
       });
+      const syncStatus = String(report?.status || '').toLowerCase();
+      if (!['updated', 'synced', 'created_defaults'].includes(syncStatus)) {
+        throw new Error(report?.sync_error || report?.policy_settings?.policy_sync_error || `eBay policy sync did not complete (status: ${syncStatus || 'unknown'}).`);
+      }
       setEbayPolicyCatalog(report);
       setEbayPolicyForm((current) => ({
         ...current,
@@ -783,6 +930,10 @@ export default function SettingsPage() {
     setCreatingEbayLocation(createIfMissing);
     try {
       const report = createIfMissing ? await createEbayMerchantLocation(payload) : await verifyEbayMerchantLocation(payload);
+      const locationStatus = String(report?.status || '').toLowerCase();
+      if (!['verified', 'created'].includes(locationStatus)) {
+        throw new Error(report?.error || report?.settings_updates?.merchant_location_error || `eBay merchant location was not verified (status: ${locationStatus || 'unknown'}).`);
+      }
       setEbayPolicyCatalog((current) => current ? { ...current, policy_settings: report?.settings_updates ? { ...(current.policy_settings || {}), ...report.settings_updates } : current.policy_settings } : current);
       await reload();
       toast.success(createIfMissing ? 'Merchant location created and verified.' : 'Merchant location verified.');
@@ -1048,66 +1199,126 @@ export default function SettingsPage() {
         }
       >
           {activeTab === 'overview' ? (
-            <SectionPanel
-              title="Settings Overview"
-              description="The shortest path to the settings areas that matter: profile, workflow, marketplace setup, and jobs."
-            >
-              <div className="space-y-6">
-                <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                  {workflowCards.map((card) => (
-                    <MetricCard key={card.label} label={card.label} value={card.value} detail={card.detail} />
-                  ))}
-                </section>
+            <div className="space-y-6">
+              <SettingsWorkspaceHero
+                eyebrow="Settings control center"
+                title="Run account, marketplace, and system setup from one desktop workspace."
+                description="The overview is now a routing surface instead of a document dump. Pick a lane, complete the required actions, then move back into listings or jobs."
+                stats={workflowCards}
+                actions={
+                  <>
+                    <Button type="button" variant="outline" onClick={() => selectTab('profile')}>
+                      Open profile
+                    </Button>
+                    <Button href="/settings/ebay">Open eBay setup</Button>
+                  </>
+                }
+              />
 
-                <div className="grid gap-4 lg:grid-cols-2">
-                  <button
-                    type="button"
-                    onClick={() => selectTab('profile')}
-                    className="rounded-[14px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]"
+              <SettingsWorkspaceGrid>
+                <SettingsWorkspaceMain>
+                  <SectionPanel
+                    title="Priority setup lanes"
+                    description="Use these first. They map to the real sequence operators need to finish before imports and publishing behave reliably."
                   >
-                    <p className="text-sm font-semibold text-[#101828]">Profile</p>
-                    <p className="mt-1 text-sm text-[#667085]">Operator identity, password changes, and personal account details.</p>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => selectTab('workflow')}
-                    className="rounded-[14px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]"
+                    <div className="grid gap-4 lg:grid-cols-2">
+                      <button
+                        type="button"
+                        onClick={() => selectTab('profile')}
+                        className="rounded-[18px] border border-[#e5e7eb] bg-white p-5 text-left transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]"
+                      >
+                        <p className="text-sm font-semibold text-[#101828]">Profile</p>
+                        <p className="mt-2 text-sm leading-6 text-[#667085]">Operator identity, password changes, and admin preview controls.</p>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => selectTab('workflow')}
+                        className="rounded-[18px] border border-[#e5e7eb] bg-white p-5 text-left transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]"
+                      >
+                        <p className="text-sm font-semibold text-[#101828]">Workflow</p>
+                        <p className="mt-2 text-sm leading-6 text-[#667085]">Review gate policy, bulk approvals, and operator defaults.</p>
+                      </button>
+                      <a
+                        href="/settings/ebay"
+                        className="rounded-[18px] border border-[#e5e7eb] bg-white p-5 text-left transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]"
+                      >
+                        <p className="text-sm font-semibold text-[#101828]">eBay setup</p>
+                        <p className="mt-2 text-sm leading-6 text-[#667085]">OAuth, policy sync, merchant location, and import readiness.</p>
+                      </a>
+                      <button
+                        type="button"
+                        onClick={() => selectTab('marketplaces')}
+                        className="rounded-[18px] border border-[#e5e7eb] bg-white p-5 text-left transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]"
+                      >
+                        <p className="text-sm font-semibold text-[#101828]">Marketplace setup</p>
+                        <p className="mt-2 text-sm leading-6 text-[#667085]">Assisted channels, bridge identities, and support truth per marketplace.</p>
+                      </button>
+                    </div>
+                  </SectionPanel>
+
+                  <SectionPanel
+                    title="Follow-through workspaces"
+                    description="After setup is stable, move into execution and monitoring."
                   >
-                    <p className="text-sm font-semibold text-[#101828]">Workflow</p>
-                    <p className="mt-1 text-sm text-[#667085]">Review-before-publish, bulk actions, and queue behavior.</p>
-                  </button>
-                    <a
-                      href="/settings/ebay"
-                      className="rounded-[14px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]"
-                    >
-                      <p className="text-sm font-semibold text-[#101828]">eBay setup</p>
-                      <p className="mt-1 text-sm text-[#667085]">Connect the account, sync policies, and verify merchant location.</p>
-                    </a>
-                  <button
-                    type="button"
-                    onClick={() => selectTab('marketplaces')}
-                    className="rounded-[14px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]"
+                    <div className="grid gap-4 lg:grid-cols-2">
+                      <Link
+                        href="/jobs"
+                        className="rounded-[18px] border border-[#e5e7eb] bg-white p-5 text-left transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]"
+                      >
+                        <p className="text-sm font-semibold text-[#101828]">Jobs console</p>
+                        <p className="mt-2 text-sm leading-6 text-[#667085]">Imports, assisted jobs, retries, and bridge outcomes.</p>
+                      </Link>
+                      <Link
+                        href="/listings"
+                        className="rounded-[18px] border border-[#e5e7eb] bg-white p-5 text-left transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]"
+                      >
+                        <p className="text-sm font-semibold text-[#101828]">Listings</p>
+                        <p className="mt-2 text-sm leading-6 text-[#667085]">Review drafts, pricing, publish readiness, and repair queues.</p>
+                      </Link>
+                    </div>
+                  </SectionPanel>
+                </SettingsWorkspaceMain>
+
+                <SettingsWorkspaceAside>
+                  <SettingsWorkspaceRailCard
+                    title="Operator sequence"
+                    description="This is the intended desktop order for a fresh account or a broken channel."
+                    tone="tint"
                   >
-                    <p className="text-sm font-semibold text-[#101828]">Marketplace setup</p>
-                    <p className="mt-1 text-sm text-[#667085]">Assisted channels, manual connections, and onboarding status.</p>
-                  </button>
-                  <Link
-                    href="/jobs"
-                    className="rounded-[14px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]"
+                    <ol className="space-y-3 text-sm text-[#344054]">
+                      {[
+                        'Complete the operator profile and password flow.',
+                        'Set review-first workflow defaults.',
+                        'Connect eBay, sync policies, and verify merchant location.',
+                        'Connect assisted marketplaces only after the bridge is healthy.',
+                        'Move into Listings and Jobs for review and execution.',
+                      ].map((item, index) => (
+                        <li key={item} className="flex gap-3">
+                          <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white text-xs font-semibold text-[#2563eb]">{index + 1}</span>
+                          <span className="leading-6">{item}</span>
+                        </li>
+                      ))}
+                    </ol>
+                  </SettingsWorkspaceRailCard>
+
+                  <SettingsWorkspaceRailCard
+                    title="Current health focus"
+                    description="These shortcuts reflect the settings areas that most directly affect imports and publishing."
                   >
-                    <p className="text-sm font-semibold text-[#101828]">Jobs console</p>
-                    <p className="mt-1 text-sm text-[#667085]">Imports, assisted jobs, retries, and bridge outcomes.</p>
-                  </Link>
-                  <Link
-                    href="/listings"
-                    className="rounded-[14px] border border-[#e5e7eb] bg-white p-4 text-left transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]"
-                  >
-                    <p className="text-sm font-semibold text-[#101828]">Listings</p>
-                    <p className="mt-1 text-sm text-[#667085]">Review drafts, pricing, publish readiness, and repair queues.</p>
-                  </Link>
-                </div>
-              </div>
-            </SectionPanel>
+                    <div className="space-y-3">
+                      <div className="rounded-[14px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+                        <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[#667085]">eBay publish readiness</p>
+                        <StatusPill className="mt-2" status={ebayAccountReadiness?.publish_ready ? 'success' : 'warning'} label={ebayAccountReadiness?.publish_ready ? 'Ready' : 'Needs review'} />
+                      </div>
+                      <div className="rounded-[14px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+                        <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[#667085]">Connected channels</p>
+                        <p className="mt-2 text-lg font-semibold text-[#101828]">{setupSummary?.connected_marketplaces ?? 0}</p>
+                      </div>
+                    </div>
+                  </SettingsWorkspaceRailCard>
+                </SettingsWorkspaceAside>
+              </SettingsWorkspaceGrid>
+            </div>
           ) : null}
 
           {activeTab === 'appearance' ? (
@@ -1137,39 +1348,47 @@ export default function SettingsPage() {
           ) : null}
 
           {activeTab === 'profile' ? (
-            <SectionPanel title="Profile" description="Keep the operator identity, sign-in, and recovery flow simple.">
-              <div className="space-y-6">
-                <div className="grid gap-4 md:grid-cols-3">
-                  <MetricCard label="Profile status" value={setupSummary?.account_profile_complete ? 'Complete' : 'Needs attention'} detail="Name and account identity used across the workspace." />
-                  <MetricCard label="Password status" value="Manage locally" detail="Rotate the operator password without server access." />
-                  <MetricCard label="Admin preview" value={user?.is_admin ? (user?.view_as_regular ? 'Regular view' : 'Admin view') : 'Not available'} detail="Review the UI as an operator when needed." />
-                </div>
-                <form
-                  className="space-y-4"
-                  onSubmit={async (event) => {
-                    event.preventDefault();
-                    setSavingProfile(true);
-                    try {
-                      await updateCurrentUser({ full_name: profileName });
-                      await refreshUser();
-                      await reload();
-                      toast.success('Profile updated.');
-                    } catch (error) {
-                      toast.error(error.message);
-                    } finally {
-                      setSavingProfile(false);
-                    }
-                  }}
-                >
-                  <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
-                    <div className="space-y-4">
-                      <div className="space-y-2">
-                        <label className="text-sm font-medium text-[#101828]">Operator or business name</label>
-                        <Input value={profileName} onChange={(event) => setProfileName(event.target.value)} placeholder="Sparkles Resale Ops" />
-                      </div>
-                      <div className="space-y-2">
-                        <label className="text-sm font-medium text-[#101828]">Email</label>
-                        <Input value={settingsPanels?.profile?.email || user?.email || ''} disabled />
+            <div className="space-y-6">
+              <SettingsWorkspaceHero
+                eyebrow="Operator identity"
+                title="Profile, password, and admin preview belong in one focused workspace."
+                description="This lane is now split between the primary account form on the left and recovery or preview controls on the right."
+                stats={[
+                  { label: 'Profile status', value: setupSummary?.account_profile_complete ? 'Complete' : 'Needs attention', detail: 'Name and account identity used across the workspace.' },
+                  { label: 'Password status', value: 'Manage locally', detail: 'Rotate the operator password without server access.' },
+                  { label: 'Admin preview', value: user?.is_admin ? (user?.view_as_regular ? 'Regular view' : 'Admin view') : 'Not available', detail: 'Review the UI as an operator when needed.' },
+                ]}
+              />
+
+              <SettingsWorkspaceGrid>
+                <SettingsWorkspaceMain>
+                  <SectionPanel title="Profile details" description="Maintain the operator identity used across PosterPro.">
+                    <form
+                      className="space-y-4"
+                      onSubmit={async (event) => {
+                        event.preventDefault();
+                        setSavingProfile(true);
+                        try {
+                          await updateCurrentUser({ full_name: profileName });
+                          await refreshUser();
+                          await reload();
+                          toast.success('Profile updated.');
+                        } catch (error) {
+                          toast.error(error.message);
+                        } finally {
+                          setSavingProfile(false);
+                        }
+                      }}
+                    >
+                      <div className="grid gap-4 lg:grid-cols-2">
+                        <div className="space-y-2">
+                          <label className="text-sm font-medium text-[#101828]">Operator or business name</label>
+                          <Input value={profileName} onChange={(event) => setProfileName(event.target.value)} placeholder="Sparkles Resale Ops" />
+                        </div>
+                        <div className="space-y-2">
+                          <label className="text-sm font-medium text-[#101828]">Email</label>
+                          <Input value={settingsPanels?.profile?.email || user?.email || ''} disabled />
+                        </div>
                       </div>
                       <div className="flex flex-wrap items-center gap-3">
                         <Button type="submit" disabled={savingProfile}>
@@ -1186,9 +1405,84 @@ export default function SettingsPage() {
                           />
                         ) : null}
                       </div>
-                    </div>
+                    </form>
+                  </SectionPanel>
+
+                  <SectionPanel title="Password" description="Rotate the operator password from inside PosterPro without touching server settings.">
+                    <form
+                      className="space-y-4"
+                      onSubmit={async (event) => {
+                        event.preventDefault();
+                        if (passwordForm.new_password !== passwordForm.confirm_password) {
+                          toast.error('The new password confirmation does not match.');
+                          return;
+                        }
+                        setSavingPassword(true);
+                        try {
+                          await changePassword({
+                            current_password: passwordForm.current_password,
+                            new_password: passwordForm.new_password,
+                          });
+                          setPasswordForm({
+                            current_password: '',
+                            new_password: '',
+                            confirm_password: '',
+                          });
+                          toast.success('Password changed.');
+                        } catch (error) {
+                          toast.error(error.message);
+                        } finally {
+                          setSavingPassword(false);
+                        }
+                      }}
+                    >
+                      <div className="grid gap-4">
+                        <div className="space-y-2">
+                          <label className="text-sm font-medium text-[#101828]">Current password</label>
+                          <Input
+                            type="password"
+                            value={passwordForm.current_password}
+                            onChange={(event) => setPasswordForm((current) => ({ ...current, current_password: event.target.value }))}
+                            placeholder="Enter current password"
+                          />
+                        </div>
+                        <div className="grid gap-4 lg:grid-cols-2">
+                          <div className="space-y-2">
+                            <label className="text-sm font-medium text-[#101828]">New password</label>
+                            <Input
+                              type="password"
+                              value={passwordForm.new_password}
+                              onChange={(event) => setPasswordForm((current) => ({ ...current, new_password: event.target.value }))}
+                              placeholder="Create a stronger password"
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <label className="text-sm font-medium text-[#101828]">Confirm new password</label>
+                            <Input
+                              type="password"
+                              value={passwordForm.confirm_password}
+                              onChange={(event) => setPasswordForm((current) => ({ ...current, confirm_password: event.target.value }))}
+                              placeholder="Repeat the new password"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-3">
+                        <Button type="submit" disabled={savingPassword}>
+                          {savingPassword ? 'Updating...' : 'Change password'}
+                        </Button>
+                        <Link href="/forgot-password" className="text-sm font-medium text-[#2563eb]">
+                          Open forgot-password flow
+                        </Link>
+                      </div>
+                    </form>
+                  </SectionPanel>
+                </SettingsWorkspaceMain>
+
+                <SettingsWorkspaceAside>
+                  <SettingsWorkspaceRailCard title="What to do here" description="Keep identity and access work contained to this lane." tone="tint">
                     <GuideCard
-                      title="What to do here"
+                      title="Profile sequence"
                       description="Set the operator name, confirm the email, and keep the password flow local to this page."
                       prerequisites={['Real operator name or business name', 'Reachable account email']}
                       steps={[
@@ -1198,244 +1492,194 @@ export default function SettingsPage() {
                       ]}
                       tone="slate"
                     />
-                  </div>
-                </form>
-
-                <div className="grid gap-4 xl:grid-cols-2">
-                  <form
-                    className="rounded-[16px] border border-[#e5e7eb] bg-[#fcfcfd] p-5"
-                    onSubmit={async (event) => {
-                      event.preventDefault();
-                      if (passwordForm.new_password !== passwordForm.confirm_password) {
-                        toast.error('The new password confirmation does not match.');
-                        return;
-                      }
-                      setSavingPassword(true);
-                      try {
-                        await changePassword({
-                          current_password: passwordForm.current_password,
-                          new_password: passwordForm.new_password,
-                        });
-                        setPasswordForm({
-                          current_password: '',
-                          new_password: '',
-                          confirm_password: '',
-                        });
-                        toast.success('Password changed.');
-                      } catch (error) {
-                        toast.error(error.message);
-                      } finally {
-                        setSavingPassword(false);
-                      }
-                    }}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <p className="text-sm font-semibold text-[#101828]">Password</p>
-                        <p className="mt-1 text-sm text-[#667085]">Rotate the password from inside PosterPro without touching server settings.</p>
-                      </div>
-                      <HelpTip label="Password help">
-                        Passwords are never stored in plain text. PosterPro verifies them against salted PBKDF2 password hashes.
-                      </HelpTip>
-                    </div>
-                    <div className="mt-4 space-y-3">
-                      <div className="space-y-2">
-                        <label className="text-sm font-medium text-[#101828]">Current password</label>
-                        <Input
-                          type="password"
-                          value={passwordForm.current_password}
-                          onChange={(event) => setPasswordForm((current) => ({ ...current, current_password: event.target.value }))}
-                          placeholder="Enter current password"
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <label className="text-sm font-medium text-[#101828]">New password</label>
-                        <Input
-                          type="password"
-                          value={passwordForm.new_password}
-                          onChange={(event) => setPasswordForm((current) => ({ ...current, new_password: event.target.value }))}
-                          placeholder="Create a stronger password"
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <label className="text-sm font-medium text-[#101828]">Confirm new password</label>
-                        <Input
-                          type="password"
-                          value={passwordForm.confirm_password}
-                          onChange={(event) => setPasswordForm((current) => ({ ...current, confirm_password: event.target.value }))}
-                          placeholder="Repeat the new password"
-                        />
-                      </div>
-                    </div>
-                    <div className="mt-4 flex flex-wrap items-center gap-3">
-                      <Button type="submit" disabled={savingPassword}>
-                        {savingPassword ? 'Updating...' : 'Change password'}
-                      </Button>
-                      <Link href="/forgot-password" className="text-sm font-medium text-[#2563eb]">
-                        Open forgot-password flow
-                      </Link>
-                    </div>
-                  </form>
+                  </SettingsWorkspaceRailCard>
 
                   {user?.is_admin ? (
-                    <div className="rounded-[16px] border border-[#dbe7ff] bg-[#f7faff] p-5">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className="text-sm font-semibold text-[#101828]">Admin preview mode</p>
-                          <p className="mt-1 text-sm text-[#667085]">Temporarily hide admin-only controls so you can review the operator flow as a regular user.</p>
-                        </div>
+                    <SettingsWorkspaceRailCard title="Admin preview mode" description="Temporarily hide admin-only controls so you can review the operator flow as a regular user." tone="default">
+                      <div className="space-y-4">
                         <HelpTip label="Admin preview help">
                           Regular-user preview keeps the same account signed in but suppresses admin-only settings and permissions for this session.
                         </HelpTip>
+                        <div className="flex flex-wrap items-center gap-3">
+                          <StatusPill
+                            status={user?.view_as_regular ? 'warning' : 'success'}
+                            label={user?.view_as_regular ? 'Regular-user preview on' : 'Full admin mode'}
+                          />
+                          <Button
+                            type="button"
+                            variant="outline"
+                            disabled={savingViewMode}
+                            onClick={async () => {
+                              setSavingViewMode(true);
+                              try {
+                                await setViewAsRegular(!user?.view_as_regular);
+                                await reload();
+                                toast.success(user?.view_as_regular ? 'Admin mode restored.' : 'Regular-user preview enabled.');
+                              } catch (error) {
+                                toast.error(error.message);
+                              } finally {
+                                setSavingViewMode(false);
+                              }
+                            }}
+                          >
+                            {savingViewMode ? 'Updating...' : user?.view_as_regular ? 'Return to admin mode' : 'View as regular user'}
+                          </Button>
+                        </div>
                       </div>
-                      <div className="mt-4 flex flex-wrap items-center gap-3">
-                        <StatusPill
-                          status={user?.view_as_regular ? 'warning' : 'success'}
-                          label={user?.view_as_regular ? 'Regular-user preview on' : 'Full admin mode'}
-                        />
-                        <Button
-                          type="button"
-                          variant="outline"
-                          disabled={savingViewMode}
-                          onClick={async () => {
-                            setSavingViewMode(true);
-                            try {
-                              await setViewAsRegular(!user?.view_as_regular);
-                              await reload();
-                              toast.success(user?.view_as_regular ? 'Admin mode restored.' : 'Regular-user preview enabled.');
-                            } catch (error) {
-                              toast.error(error.message);
-                            } finally {
-                              setSavingViewMode(false);
-                            }
-                          }}
-                        >
-                          {savingViewMode ? 'Updating...' : user?.view_as_regular ? 'Return to admin mode' : 'View as regular user'}
-                        </Button>
-                      </div>
-                    </div>
+                    </SettingsWorkspaceRailCard>
                   ) : (
-                    <GuideCard
-                      title="Password recovery"
-                      description="If access is lost, use the public reset flow to recover the account."
-                      steps={[
-                        'Open the forgot-password screen from sign-in or this profile page.',
-                        'Request a reset for the account email.',
-                        'Complete the reset form with the recovery token and choose a new password.',
-                      ]}
-                      tone="amber"
-                    />
+                    <SettingsWorkspaceRailCard title="Password recovery" description="If access is lost, use the public reset flow to recover the account." tone="warm">
+                      <GuideCard
+                        title="Password recovery"
+                        description="If access is lost, use the public reset flow to recover the account."
+                        steps={[
+                          'Open the forgot-password screen from sign-in or this profile page.',
+                          'Request a reset for the account email.',
+                          'Complete the reset form with the recovery token and choose a new password.',
+                        ]}
+                        tone="amber"
+                      />
+                    </SettingsWorkspaceRailCard>
                   )}
-	              </div>
-	              </div>
-	            </SectionPanel>
+                </SettingsWorkspaceAside>
+              </SettingsWorkspaceGrid>
+            </div>
           ) : null}
 
           {activeTab === 'workflow' ? (
-            <SectionPanel title="Workflow" description="Keep the draft pipeline simple: generate, review, approve, publish.">
-              <div className="space-y-6">
-                <div className="grid gap-4 md:grid-cols-3">
-                  <MetricCard label="Review gate" value={workflowForm.review_before_publish ? 'On' : 'Off'} detail="Drafts stop for human review before any publish call." />
-                  <MetricCard label="Bulk approvals" value={workflowForm.bulk_approval_enabled ? 'Enabled' : 'Disabled'} detail="Approve many drafts after a queue spot-check." />
-                  <MetricCard label="Preview mode" value={WORKFLOW_PREVIEW_OPTIONS.find((option) => option.value === workflowForm.listing_preview_mode)?.label || 'Marketplace preview'} detail="How the review drawer opens by default." />
-                </div>
-                <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(320px,0.9fr)]">
-                  <form
-                    className="space-y-4"
-                    onSubmit={async (event) => {
-                      event.preventDefault();
-                      setSavingProfile(true);
-                      try {
-                        await updateCurrentUser(workflowForm);
-                        await refreshUser();
-                        await reload();
-                        toast.success('Workflow preferences saved.');
-                      } catch (error) {
-                        toast.error(error.message);
-                      } finally {
-                        setSavingProfile(false);
-                      }
-                    }}
-                  >
-                    <div className="grid gap-3">
-                      <label className="flex items-center justify-between rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-4 text-sm text-[#101828]">
-                        <div>
-                          <p className="font-semibold text-[#101828]">Require review before publish</p>
-                          <p className="mt-1 text-sm text-[#667085]">Keep drafts in review until an operator approves them.</p>
+            <div className="space-y-6">
+              <SettingsWorkspaceHero
+                eyebrow="Workflow policy"
+                title="Keep the draft-to-publish lane explicit, review-first, and easy to audit."
+                description="These controls set operator behavior for approvals, queueing, and the default review surface. The left side is for policy changes; the right side is guidance."
+                stats={[
+                  { label: 'Review gate', value: workflowForm.review_before_publish ? 'On' : 'Off', detail: 'Drafts stop for human review before any publish call.' },
+                  { label: 'Bulk approvals', value: workflowForm.bulk_approval_enabled ? 'Enabled' : 'Disabled', detail: 'Approve many drafts after a queue spot-check.' },
+                  { label: 'Preview mode', value: WORKFLOW_PREVIEW_OPTIONS.find((option) => option.value === workflowForm.listing_preview_mode)?.label || 'Marketplace preview', detail: 'How the review drawer opens by default.' },
+                ]}
+              />
+
+              <SettingsWorkspaceGrid>
+                <SettingsWorkspaceMain>
+                  <SectionPanel title="Workflow controls" description="Primary publish-gate and review behavior.">
+                    <form
+                      className="space-y-4"
+                      onSubmit={async (event) => {
+                        event.preventDefault();
+                        setSavingProfile(true);
+                        try {
+                          await updateCurrentUser(workflowForm);
+                          await refreshUser();
+                          await reload();
+                          toast.success('Workflow preferences saved.');
+                        } catch (error) {
+                          toast.error(error.message);
+                        } finally {
+                          setSavingProfile(false);
+                        }
+                      }}
+                    >
+                      <div className="grid gap-3">
+                        <label className="flex items-center justify-between rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-4 text-sm text-[#101828]">
+                          <div>
+                            <p className="font-semibold text-[#101828]">Require review before publish</p>
+                            <p className="mt-1 text-sm text-[#667085]">Keep drafts in review until an operator approves them.</p>
+                          </div>
+                          <input
+                            type="checkbox"
+                            checked={workflowForm.review_before_publish}
+                            onChange={(event) => setWorkflowForm((current) => ({ ...current, review_before_publish: event.target.checked }))}
+                          />
+                        </label>
+                        <label className="flex items-center justify-between rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-4 text-sm text-[#101828]">
+                          <div>
+                            <p className="font-semibold text-[#101828]">Allow auto-publish after approval</p>
+                            <p className="mt-1 text-sm text-[#667085]">Use this only if you want approved drafts to queue immediately after confirmation.</p>
+                          </div>
+                          <input
+                            type="checkbox"
+                            checked={workflowForm.auto_publish_after_approval}
+                            onChange={(event) => setWorkflowForm((current) => ({ ...current, auto_publish_after_approval: event.target.checked }))}
+                          />
+                        </label>
+                        <label className="flex items-center justify-between rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-4 text-sm text-[#101828]">
+                          <div>
+                            <p className="font-semibold text-[#101828]">Enable bulk approvals</p>
+                            <p className="mt-1 text-sm text-[#667085]">Select many drafts and approve them together after a queue spot-check.</p>
+                          </div>
+                          <input
+                            type="checkbox"
+                            checked={workflowForm.bulk_approval_enabled}
+                            onChange={(event) => setWorkflowForm((current) => ({ ...current, bulk_approval_enabled: event.target.checked }))}
+                          />
+                        </label>
+                        <div className="rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-4">
+                          <label className="text-sm font-semibold text-[#101828]">Default review layout</label>
+                          <p className="mt-1 text-sm text-[#667085]">Choose whether the review drawer opens in marketplace preview or editor mode.</p>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {WORKFLOW_PREVIEW_OPTIONS.map((option) => (
+                              <button
+                                key={option.value}
+                                type="button"
+                                onClick={() => setWorkflowForm((current) => ({ ...current, listing_preview_mode: option.value }))}
+                                className={`rounded-[10px] border px-3 py-2 text-sm font-medium ${
+                                  workflowForm.listing_preview_mode === option.value
+                                    ? 'border-[#bfd2ff] bg-[#eef4ff] text-[#2563eb]'
+                                    : 'border-[#e5e7eb] bg-white text-[#475467]'
+                                }`}
+                              >
+                                {option.label}
+                              </button>
+                            ))}
+                          </div>
                         </div>
-                        <input
-                          type="checkbox"
-                          checked={workflowForm.review_before_publish}
-                          onChange={(event) => setWorkflowForm((current) => ({ ...current, review_before_publish: event.target.checked }))}
-                        />
-                      </label>
-                      <label className="flex items-center justify-between rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-4 text-sm text-[#101828]">
-                        <div>
-                          <p className="font-semibold text-[#101828]">Allow auto-publish after approval</p>
-                          <p className="mt-1 text-sm text-[#667085]">Use this only if you want approved drafts to queue immediately after confirmation.</p>
-                        </div>
-                        <input
-                          type="checkbox"
-                          checked={workflowForm.auto_publish_after_approval}
-                          onChange={(event) => setWorkflowForm((current) => ({ ...current, auto_publish_after_approval: event.target.checked }))}
-                        />
-                      </label>
-                      <label className="flex items-center justify-between rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-4 text-sm text-[#101828]">
-                        <div>
-                          <p className="font-semibold text-[#101828]">Enable bulk approvals</p>
-                          <p className="mt-1 text-sm text-[#667085]">Select many drafts and approve them together after a queue spot-check.</p>
-                        </div>
-                        <input
-                          type="checkbox"
-                          checked={workflowForm.bulk_approval_enabled}
-                          onChange={(event) => setWorkflowForm((current) => ({ ...current, bulk_approval_enabled: event.target.checked }))}
-                        />
-                      </label>
-                      <div className="rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-4">
-                        <label className="text-sm font-semibold text-[#101828]">Default review layout</label>
-                        <p className="mt-1 text-sm text-[#667085]">Choose whether the review drawer opens in marketplace preview or editor mode.</p>
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          {WORKFLOW_PREVIEW_OPTIONS.map((option) => (
-                            <button
-                              key={option.value}
-                              type="button"
-                              onClick={() => setWorkflowForm((current) => ({ ...current, listing_preview_mode: option.value }))}
-                              className={`rounded-[10px] border px-3 py-2 text-sm font-medium ${
-                                workflowForm.listing_preview_mode === option.value
-                                  ? 'border-[#bfd2ff] bg-[#eef4ff] text-[#2563eb]'
-                                  : 'border-[#e5e7eb] bg-white text-[#475467]'
-                              }`}
-                            >
-                              {option.label}
-                            </button>
-                          ))}
+                        <div className="rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-4">
+                          <label className="text-sm font-semibold text-[#101828]" htmlFor="default-preview-marketplace">Default marketplace preview</label>
+                          <p className="mt-1 text-sm text-[#667085]">Choose the visual marketplace preview shown first when you open a listing.</p>
+                          <select
+                            id="default-preview-marketplace"
+                            value={workflowForm.default_preview_marketplace}
+                            onChange={(event) => setWorkflowForm((current) => ({ ...current, default_preview_marketplace: event.target.value }))}
+                            className="mt-3 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828] outline-none focus:border-[#2563eb]"
+                          >
+                            <option value="ebay">eBay</option>
+                            <option value="facebook">Facebook Marketplace</option>
+                            <option value="mercari">Mercari</option>
+                            <option value="poshmark">Poshmark</option>
+                            <option value="etsy">Etsy</option>
+                            <option value="depop">Depop</option>
+                          </select>
                         </div>
                       </div>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-3">
-                      <Button type="submit" disabled={savingProfile}>
-                        {savingProfile ? 'Saving...' : 'Save workflow'}
-                      </Button>
-                      <StatusPill status={workflowForm.review_before_publish ? 'success' : 'warning'} label={workflowForm.review_before_publish ? 'Review gate on' : 'Direct publish allowed'} />
-                      <StatusPill status={workflowForm.bulk_approval_enabled ? 'info' : 'default'} label={workflowForm.bulk_approval_enabled ? 'Bulk actions enabled' : 'Single approvals only'} />
-                    </div>
-                  </form>
+                      <div className="flex flex-wrap items-center gap-3">
+                        <Button type="submit" disabled={savingProfile}>
+                          {savingProfile ? 'Saving...' : 'Save workflow'}
+                        </Button>
+                        <StatusPill status={workflowForm.review_before_publish ? 'success' : 'warning'} label={workflowForm.review_before_publish ? 'Review gate on' : 'Direct publish allowed'} />
+                        <StatusPill status={workflowForm.bulk_approval_enabled ? 'info' : 'default'} label={workflowForm.bulk_approval_enabled ? 'Bulk actions enabled' : 'Single approvals only'} />
+                      </div>
+                    </form>
+                  </SectionPanel>
+                </SettingsWorkspaceMain>
 
-                  <GuideCard
-                    title="Recommended operator flow"
-                    description="Use review-first mode. It is the safe default and keeps drafts out of the publish queue until they are checked."
-                    tooltip="Some AI and marketplace paths are still partial, so review-first is the best operator default."
-                    prerequisites={['Import a photo batch', 'Generate listing data', 'Open drafts from the Listings review queue']}
-                    steps={[
-                      'Leave review-before-publish enabled.',
-                      'Check price, photos, and marketplace readiness in Listings.',
-                      'Use bulk approval only after a batch spot-check.',
-                    ]}
-                    tone="slate"
-                  />
-                </div>
-              </div>
-            </SectionPanel>
+                <SettingsWorkspaceAside>
+                  <SettingsWorkspaceRailCard title="Recommended operator flow" description="Review-first guidance for the safest daily workflow." tone="tint">
+                    <GuideCard
+                      title="Recommended operator flow"
+                      description="Use review-first mode. It is the safe default and keeps drafts out of the publish queue until they are checked."
+                      tooltip="Some AI and marketplace paths are still partial, so review-first is the best operator default."
+                      prerequisites={['Import a photo batch', 'Generate listing data', 'Open drafts from the Listings review queue']}
+                      steps={[
+                        'Leave review-before-publish enabled.',
+                        'Check price, photos, and marketplace readiness in Listings.',
+                        'Use bulk approval only after a batch spot-check.',
+                      ]}
+                      tone="slate"
+                    />
+                  </SettingsWorkspaceRailCard>
+                </SettingsWorkspaceAside>
+              </SettingsWorkspaceGrid>
+            </div>
           ) : null}
 
           {activeTab === 'ebay' ? (
@@ -1444,14 +1688,18 @@ export default function SettingsPage() {
               description="Connect the account first, then sync policies and verify merchant location before importing or publishing."
             >
               <div className="space-y-6">
-                <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)]">
-                  <div className="rounded-[18px] border border-[#e5e7eb] bg-white p-5">
-                    <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#667085]">Step 1</p>
-                    <h3 className="mt-2 text-lg font-semibold tracking-[-0.02em] text-[#101828]">Connect the seller account</h3>
-                    <p className="mt-2 text-sm leading-6 text-[#667085]">
-                      Use the OAuth button below. If the token is stale, reconnecting here is the first fix. Do not skip ahead to policies until this is connected.
-                    </p>
-                    <div className="mt-4 flex flex-wrap gap-2">
+                <SettingsWorkspaceHero
+                  eyebrow="eBay control lane"
+                  title="OAuth, policies, location, and import readiness all belong in one ordered workspace."
+                  description="The eBay settings lane is now structured around the real sequence required to import and publish reliably: connect first, then sync business policies, then verify merchant location, then import or publish."
+                  stats={[
+                    { label: 'Connection', value: settingsPanels?.ebay?.connected ? 'Connected' : 'Not connected', detail: 'Current account OAuth state.' },
+                    { label: 'Import ready', value: ebayImportReady ? 'Yes' : 'No', detail: 'Direct import can run only with a usable token.' },
+                    { label: 'Publish ready', value: ebayAccountReadiness?.publish_ready ? 'Yes' : 'No', detail: 'Policies and location must be complete.' },
+                    { label: 'Reconnect', value: ebayReconnectRequired ? 'Required' : 'Not required', detail: 'Stale token indicator from readiness checks.' },
+                  ]}
+                  actions={
+                    <>
                       <a href="#ebay-connect" className="rounded-full border border-[#d0d5dd] bg-white px-3 py-2 text-sm font-medium text-[#344054] transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]">
                         Connect
                       </a>
@@ -1464,39 +1712,63 @@ export default function SettingsPage() {
                       <a href="#ebay-import" className="rounded-full border border-[#d0d5dd] bg-white px-3 py-2 text-sm font-medium text-[#344054] transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]">
                         Import
                       </a>
-                    </div>
-                    <ol className="mt-4 space-y-2 text-sm text-[#344054]">
-                      {(MARKETPLACE_GUIDES.ebay.steps || []).slice(0, 4).map((step, index) => (
-                        <li key={step} className="flex gap-3 rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] px-3 py-2">
-                          <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#eff6ff] text-xs font-semibold text-[#2563eb]">
-                            {index + 1}
-                          </span>
-                          <span className="leading-6">{step}</span>
-                        </li>
-                      ))}
-                    </ol>
-                  </div>
-                  <div className="rounded-[18px] border border-[#dbe7ff] bg-[#f7faff] p-5">
-                    <p className="text-sm font-semibold text-[#101828]">Primary action</p>
-                    <p className="mt-1 text-sm text-[#667085]">
-                      {ebayReconnectRequired
-                        ? 'Reconnect the seller account if the current token is no longer usable.'
-                        : 'Use OAuth to connect the current operator account.'}
-                    </p>
-                    <Button
-                      type="button"
-                      size="lg"
-                      variant={ebayReconnectRequired ? 'danger' : 'default'}
-                      className="mt-4 w-full"
-                      onClick={connectEbay}
-                      disabled={connectingEbay || !settingsPanels?.ebay?.oauth_ready}
-                    >
-                      {connectingEbay ? 'Opening OAuth...' : ebayReconnectRequired ? 'Reconnect eBay now' : 'Connect eBay now'}
-                    </Button>
-                    <p className="mt-3 text-xs uppercase tracking-[0.12em] text-[#667085]">This opens the eBay connect flow.</p>
-                  </div>
-                </div>
+                    </>
+                  }
+                />
 
+                <SettingsWorkspaceGrid>
+                  <SettingsWorkspaceMain>
+                    <div className="rounded-[18px] border border-[#e5e7eb] bg-white p-5">
+                      <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#667085]">Step 1</p>
+                      <h3 className="mt-2 text-lg font-semibold tracking-[-0.02em] text-[#101828]">Connect the seller account</h3>
+                      <p className="mt-2 text-sm leading-6 text-[#667085]">
+                        Use the OAuth button below. If the token is stale, reconnecting here is the first fix. Do not skip ahead to policies until this is connected.
+                      </p>
+                      <ol className="mt-4 space-y-2 text-sm text-[#344054]">
+                        {(MARKETPLACE_GUIDES.ebay.steps || []).slice(0, 4).map((step, index) => (
+                          <li key={step} className="flex gap-3 rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] px-3 py-2">
+                            <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#eff6ff] text-xs font-semibold text-[#2563eb]">
+                              {index + 1}
+                            </span>
+                            <span className="leading-6">{step}</span>
+                          </li>
+                        ))}
+                      </ol>
+                    </div>
+                  </SettingsWorkspaceMain>
+
+                  <SettingsWorkspaceAside>
+                    <SettingsWorkspaceRailCard
+                      title="Primary action"
+                      description={
+                        ebayReconnectRequired
+                          ? 'Reconnect the seller account if the current token is no longer usable.'
+                          : 'Use OAuth to connect the current operator account.'
+                      }
+                      tone="tint"
+                    >
+                      <Button
+                        type="button"
+                        size="lg"
+                        variant={ebayReconnectRequired ? 'danger' : 'default'}
+                        className="w-full"
+                        onClick={connectEbay}
+                        disabled={connectingEbay || !settingsPanels?.ebay?.oauth_ready}
+                      >
+                        {connectingEbay ? 'Opening OAuth...' : ebayReconnectRequired ? 'Reconnect eBay now' : 'Connect eBay now'}
+                      </Button>
+                      <p className="mt-3 text-xs uppercase tracking-[0.12em] text-[#667085]">This opens the eBay connect flow.</p>
+                    </SettingsWorkspaceRailCard>
+                  </SettingsWorkspaceAside>
+                </SettingsWorkspaceGrid>
+
+                <CollapsiblePanel
+                  id="ebay-connection"
+                  title="Connect and validate account"
+                  description="OAuth status, current readiness, and server app credentials."
+                  defaultOpen
+                  badge={settingsPanels?.ebay?.connected ? 'Connected' : 'Needs connect'}
+                >
                 <div className="grid gap-4 lg:grid-cols-2">
                   <div className="rounded-[18px] border border-[#e5e7eb] bg-white p-5">
                     <div className="flex items-start justify-between gap-3">
@@ -1610,7 +1882,15 @@ export default function SettingsPage() {
                     </div>
                   </form>
                 </div>
+                </CollapsiblePanel>
 
+                <CollapsiblePanel
+                  id="ebay-policies-location"
+                  title="Policies and merchant location"
+                  description="Sync business policies, pick IDs, and verify the inventory origin."
+                  defaultOpen={Boolean(!ebayAccountReadiness?.publish_ready)}
+                  badge={ebayAccountReadiness?.publish_ready ? 'Publish ready' : 'Needs policy/location review'}
+                >
                 <div className="grid gap-4 xl:grid-cols-2">
                   <section id="ebay-policies" className="rounded-[18px] border border-[#e5e7eb] bg-white p-5">
                     <div className="flex items-start justify-between gap-3">
@@ -1738,7 +2018,16 @@ export default function SettingsPage() {
                       ))}
                     </div>
                   </section>
+                </div>
+                </CollapsiblePanel>
 
+                <CollapsiblePanel
+                  id="ebay-import-tools"
+                  title="Import and advanced tools"
+                  description="Import live eBay listings or use manual token import only when needed."
+                  defaultOpen={false}
+                >
+                <div className="grid gap-4 xl:grid-cols-2">
                   <section id="ebay-import" className="rounded-[18px] border border-[#e5e7eb] bg-white p-5">
                     <p className="text-sm font-semibold text-[#101828]">Import existing eBay listings</p>
                     <p className="mt-1 text-sm text-[#667085]">Pull live inventory into PosterPro for review and dedupe after the account is connected.</p>
@@ -1832,6 +2121,7 @@ export default function SettingsPage() {
                     </details>
                   </section>
                 </div>
+                </CollapsiblePanel>
               </div>
             </SectionPanel>
           ) : null}
@@ -2252,6 +2542,13 @@ export default function SettingsPage() {
                   <MetricCard label="Assisted channels" value={(setupSummary?.marketplace_connections || []).filter((marketplace) => ['browser_assist', 'manual'].includes(marketplace.connection_mode)).length} detail="Channels that rely on browser-assist or manual setup." />
                 </div>
 
+                <CollapsiblePanel
+                  id="marketplace-import-sync"
+                  title="Import and sync drafts"
+                  description="Bulk import entry point for channels that can actually pull listings."
+                  defaultOpen
+                  badge={eligibleMarketplaceBulkImports.length ? `${eligibleMarketplaceBulkImports.length} ready` : 'No ready imports'}
+                >
                 <div className="rounded-[18px] border border-[#e5e7eb] bg-white p-5">
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div>
@@ -2284,6 +2581,13 @@ export default function SettingsPage() {
                     </Button>
                   </div>
                 </div>
+                </CollapsiblePanel>
+                <CollapsiblePanel
+                  id="marketplace-guides"
+                  title="Onboarding guidance"
+                  description="Secondary operator guidance for assisted channels and onboarding order."
+                  defaultOpen={false}
+                >
                 <GuideCard
                   title="Assisted marketplaces"
                   description="Mercari, Poshmark, and Whatnot use the bridge. Keep the workflow explicit: save identity, connect, validate, then hand off."
@@ -2310,6 +2614,14 @@ export default function SettingsPage() {
                     'Enable sales sync only where PosterPro can truly monitor post-sale activity.',
                   ]}
                 />
+                </CollapsiblePanel>
+                <CollapsiblePanel
+                  id="marketplace-cards"
+                  title="Marketplace setup cards"
+                  description="Per-channel controls, support contract, and connection actions."
+                  defaultOpen
+                  badge={`${(setupSummary?.marketplace_connections || []).length} channels`}
+                >
                 {[...(setupSummary?.marketplace_connections || [])]
                   .sort((a, b) => {
                     const aName = String(a.marketplace || '').toLowerCase();
@@ -2331,10 +2643,22 @@ export default function SettingsPage() {
                   const bridgeAccount = getBridgeAccountForMarketplace(marketplace);
                   const supportsBrowserConnect = BROWSER_CONNECT_MARKETPLACES.includes(marketplace.marketplace);
                   const supportsBrowserImport = BROWSER_IMPORT_MARKETPLACES.includes(marketplace.marketplace);
+                  const hasBridgeAccountKey = Boolean(String(marketplace.bridge_account_key || '').trim());
                   const browserSessionReady =
                     supportsBrowserConnect &&
                     bridgeAccount &&
                     ['ready', 'active', 'valid'].includes(String(bridgeAccount.session_state || '').toLowerCase());
+                  const savedAccountHandle = String(marketplace.account_handle || '').trim().toLowerCase();
+                  const bridgeLoginHandle = String(bridgeAccount?.login_handle || '').trim().toLowerCase();
+                  const browserIdentityVerified =
+                    !supportsBrowserConnect
+                      ? true
+                      : !!browserSessionReady &&
+                        !!savedAccountHandle &&
+                        !!bridgeLoginHandle &&
+                        bridgeLoginHandle === savedAccountHandle;
+                  const browserNeedsReconnect = supportsBrowserConnect && (!browserSessionReady || !browserIdentityVerified);
+                  const marketplaceReadyForUi = marketplace.connected && !browserNeedsReconnect;
                   const resellerPriority = isResellerMarketplace(marketplace.marketplace);
                   return (
                     <div
@@ -2359,7 +2683,10 @@ export default function SettingsPage() {
                             status={marketplace.available ? 'info' : 'warning'}
                             label={marketplace.connection_mode === 'oauth' ? 'OAuth' : supportsBrowserConnect ? 'Browser assist' : 'Manual'}
                           />
-                          <StatusPill status={marketplace.connected ? 'success' : 'default'} label={marketplace.connected ? 'Ready' : 'Not ready'} />
+                          <StatusPill
+                            status={marketplaceReadyForUi ? 'success' : browserNeedsReconnect ? 'warning' : 'default'}
+                            label={marketplaceReadyForUi ? 'Ready' : browserNeedsReconnect ? 'Needs reconnect' : 'Not ready'}
+                          />
                         </div>
                       </div>
                       {(marketplace.display_name || marketplace.account_handle || marketplace.external_account_id) ? (
@@ -2414,12 +2741,20 @@ export default function SettingsPage() {
                               <p className="mt-1 text-sm text-[#101828]">{marketplace.bridge_account_key || 'Missing'}</p>
                             </div>
                             <div className="rounded-[10px] border border-white/80 bg-white/90 px-3 py-2">
+                              <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Saved account handle</p>
+                              <p className="mt-1 text-sm text-[#101828]">{marketplace.account_handle || 'Missing'}</p>
+                            </div>
+                            <div className="rounded-[10px] border border-white/80 bg-white/90 px-3 py-2">
                               <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Credential + session</p>
                               <p className="mt-1 text-sm text-[#101828]">
                                 {bridgeAccount
                                   ? `${bridgeAccount.credential_configured ? 'Credential saved' : 'No credential'} · ${bridgeAccount.session_state || 'draft'}`
                                   : 'No bridge account saved'}
                               </p>
+                            </div>
+                            <div className="rounded-[10px] border border-white/80 bg-white/90 px-3 py-2">
+                              <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Bridge login handle</p>
+                              <p className="mt-1 text-sm text-[#101828]">{bridgeAccount?.login_handle || 'Unverified in saved session'}</p>
                             </div>
                             <div className="rounded-[10px] border border-white/80 bg-white/90 px-3 py-2">
                               <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#667085]">Last tested</p>
@@ -2437,15 +2772,32 @@ export default function SettingsPage() {
                               </p>
                             </div>
                           </div>
+                          {browserNeedsReconnect ? (
+                            <div className="mt-3 rounded-[10px] border border-[#fecdca] bg-[#fff6f3] px-3 py-3 text-sm text-[#912018]">
+                              <p className="font-semibold">Facebook session needs reconnect or identity review.</p>
+                              <p className="mt-1">
+                                Saved handle: <span className="font-medium">{marketplace.account_handle || 'missing'}</span>
+                                {' '}· Bridge session: <span className="font-medium">{bridgeAccount?.login_handle || 'unverified'}</span>
+                              </p>
+                              <p className="mt-1">Do not treat this channel as ready until the browser session is reconnected with the correct account.</p>
+                            </div>
+                          ) : null}
                           <div className="mt-3 flex flex-wrap gap-2">
                             <Button
                               size="sm"
+                              type="button"
                               onClick={() => {
                                 void connectBrowserMarketplaceFromCard(marketplace);
                               }}
                               disabled={launchingBrowserWorkspace}
                             >
-                              {launchingBrowserWorkspace ? 'Opening workspace...' : 'Connect now'}
+                              {launchingBrowserWorkspace
+                                ? 'Opening workspace...'
+                                : !hasBridgeAccountKey
+                                  ? 'Set up browser assist'
+                                  : browserNeedsReconnect
+                                    ? 'Reconnect now'
+                                    : 'Connect now'}
                             </Button>
                             {marketplace.marketplace === 'ebay' ? (
                               <Button
@@ -2495,7 +2847,7 @@ export default function SettingsPage() {
                             <Button
                               variant="outline"
                               size="sm"
-                              onClick={() => openMarketplaceDrawer(marketplace)}
+                              href={buildMarketplaceSetupHref(marketplace.marketplace)}
                             >
                               {`Open ${MARKETPLACE_LABELS[marketplace.marketplace] || marketplace.marketplace} setup`}
                             </Button>
@@ -2529,11 +2881,7 @@ export default function SettingsPage() {
                           <Button
                             variant="outline"
                             size="sm"
-                            href={marketplace.marketplace === 'ebay' ? '/settings/ebay' : undefined}
-                            onClick={() => {
-                              if (marketplace.marketplace === 'ebay') return;
-                              openMarketplaceDrawer(marketplace);
-                            }}
+                            href={marketplace.marketplace === 'ebay' ? '/settings/ebay' : buildMarketplaceSetupHref(marketplace.marketplace)}
                           >
                           {marketplace.marketplace === 'ebay'
                             ? 'Open eBay setup'
@@ -2614,6 +2962,7 @@ export default function SettingsPage() {
                     </div>
                   );
                 })}
+                </CollapsiblePanel>
               </div>
             </SectionPanel>
           ) : null}
@@ -2661,6 +3010,13 @@ export default function SettingsPage() {
                     </Button>
                   </div>
                 </div>
+                <CollapsiblePanel
+                  id="automation-bridge"
+                  title="Automation bridge"
+                  description="Browser-assist/provider-assist transport configuration and bridge smoke checks."
+                  defaultOpen
+                  badge={settingsPanels?.automation?.automation_bridge_configured ? 'Bridge ready' : 'Needs config'}
+                >
                 <div className="rounded-[14px] border border-[#dbe7ff] bg-[#f7faff] p-4">
                   <div className="flex items-start justify-between gap-3">
                     <div>
@@ -2776,6 +3132,14 @@ export default function SettingsPage() {
                     </p>
                   </div>
                 </div>
+                </CollapsiblePanel>
+                <CollapsiblePanel
+                  id="automation-bridge-accounts"
+                  title="Bridge marketplace accounts"
+                  description="Saved runner-side identities and session state for assisted channels."
+                  defaultOpen={false}
+                  badge={bridgeAccounts.length ? `${bridgeAccounts.length} saved` : 'No accounts'}
+                >
                 <div className="rounded-[14px] border border-[#e5e7eb] bg-white p-4">
                   <div className="flex items-start justify-between gap-3">
                     <div>
@@ -2948,6 +3312,13 @@ export default function SettingsPage() {
                     </div>
                   </div>
                 </div>
+                </CollapsiblePanel>
+                <CollapsiblePanel
+                  id="automation-sold-sync"
+                  title="Automation rules and sold-sync"
+                  description="Global automation switches and delist behavior after sales."
+                  defaultOpen={false}
+                >
                 <label className="flex items-center justify-between rounded-[10px] border border-[#e5e7eb] bg-white px-4 py-3 text-sm text-[#101828]">
                   Dry run mode
                   <input
@@ -3043,6 +3414,7 @@ export default function SettingsPage() {
                     </Button>
                   </div>
                 </div>
+                </CollapsiblePanel>
                 <Button type="submit" disabled={savingServer || !canManageServer}>
                   {savingServer ? 'Saving...' : 'Save automation'}
                 </Button>
@@ -3507,9 +3879,9 @@ export default function SettingsPage() {
                       Open jobs console
                     </Button>
                     {configuredMarketplace.support_url ? (
-                      <a href={configuredMarketplace.support_url} target="_blank" rel="noreferrer">
-                        <Button type="button" variant="outline">Open runbook</Button>
-                      </a>
+                      <Button href={configuredMarketplace.support_url} type="button" variant="outline" external>
+                        Open runbook
+                      </Button>
                     ) : null}
                   </div>
                 </div>
@@ -3526,9 +3898,13 @@ export default function SettingsPage() {
                       Status: <span className="font-medium">{String(activeBridgeConnectSession.status || 'waiting_for_login').replace(/_/g, ' ')}</span>
                     </p>
                     <div className="mt-3">
-                      <Link href={`/bridge-desktop?marketplace=${encodeURIComponent(configuredMarketplace.marketplace)}&connectSessionId=${encodeURIComponent(activeBridgeConnectSession.connect_session_id)}`}>
-                        <Button type="button" variant="outline">{`Resume ${MARKETPLACE_LABELS[configuredMarketplace.marketplace] || configuredMarketplace.marketplace} login`}</Button>
-                      </Link>
+                      <Button
+                        href={`/bridge-desktop?marketplace=${encodeURIComponent(configuredMarketplace.marketplace)}&connectSessionId=${encodeURIComponent(activeBridgeConnectSession.connect_session_id)}`}
+                        type="button"
+                        variant="outline"
+                      >
+                        {`Resume ${MARKETPLACE_LABELS[configuredMarketplace.marketplace] || configuredMarketplace.marketplace} login`}
+                      </Button>
                     </div>
                   </div>
                 ) : null}

@@ -31,6 +31,7 @@ from app.services.listing_workspace import normalize_marketplace_data
 from app.services.listing_review import derive_condition_data, derive_shipping_profile, normalize_listing_images
 from app.services.marketplace_execution import resolve_execution_mode
 from app.services.marketplace_field_mapper import build_marketplace_payload, normalize_import_payload
+from app.services.marketplace_preflight import MarketplacePreflightService
 from app.services.automation_bridge import submit_bridge_job, wait_for_bridge_job, get_bridge_asset, AutomationBridgeError
 from app.services.secondary_marketplace_execution import execute_secondary_marketplace_path
 from app.services.inventory_service import InventorySafetyError, InventoryService
@@ -43,6 +44,7 @@ from app.services.pricing_service import PricingService
 from app.services.multi_platform_publisher import get_enabled_platforms, multi_platform_publisher, upsert_marketplace_listing
 from app.services.offer_service import OfferService
 from app.services.sale_detection_service import SaleDetectionService
+from app.services.intake_slate import IntakeSlateService
 from app.services.ebay_service import EbayIntegrationError, get_active_ebay_listings, sync_ebay_active_listings
 from app.workers.celery_app import celery_app
 from app.services.clustering import cluster_embeddings
@@ -56,6 +58,48 @@ sale_detection_service = SaleDetectionService()
 inventory_service = InventoryService()
 
 
+def _json_safe(value: Any) -> Any:
+    """Make external/preflight payloads safe for JSON persistence."""
+    return json.loads(json.dumps(value, default=str))
+
+
+@celery_app.task(name="process_intake_reconciliation_jobs")
+def process_intake_reconciliation_jobs_task(user_id: int | None = None, limit: int = 25) -> dict[str, Any]:
+    """Durably resume intake reconciliation after monitor or worker interruption."""
+    db = SessionLocal()
+    try:
+        results = IntakeSlateService().process_reconciliation_jobs(
+            db,
+            user_id=user_id,
+            worker_id="celery-intake-reconciliation",
+            limit=limit,
+        )
+        return {"processed": len(results), "results": results}
+    finally:
+        db.close()
+
+
+@celery_app.task(name="drain_intake_provider_media", bind=True, max_retries=None)
+def drain_intake_provider_media_task(self, user_id: int) -> dict[str, Any]:
+    """Drain discovery records in chunks; a chunk limit is never an intake stop."""
+    db = SessionLocal()
+    try:
+        user = db.get(User, user_id)
+        if user is None:
+            return {"processed": 0, "reason": "user_missing"}
+        result = IntakeSlateService().monitor_google_album(db, user=user)
+        if int(result.get("processing_backlog_count") or 0) > 0:
+            # One successor task maintains bounded throughput without asking an
+            # operator to press import again.
+            self.apply_async(args=[user_id], countdown=2)
+        return result
+    except Exception as exc:
+        logger.exception("intake provider media drain failed", extra={"user_id": user_id})
+        raise self.retry(exc=exc, countdown=min(300, 2 ** min(int(self.request.retries or 0), 8)))
+    finally:
+        db.close()
+
+
 def _force_marketplace_listing_state(
     db,
     *,
@@ -65,12 +109,15 @@ def _force_marketplace_listing_state(
     response: dict | None,
 ) -> None:
     market = MarketplaceName(marketplace)
+    db.flush()
     external_listing_id = None
     if isinstance(response, dict):
         external_listing_id = (
             response.get("listing_id")
+            or response.get("marketplace_listing_id")
             or response.get("external_listing_id")
             or (((response.get("bridge_completion") or {}).get("result") or {}).get("listing_id"))
+            or (((response.get("bridge_completion") or {}).get("result") or {}).get("marketplace_listing_id"))
         )
     updated = db.execute(
         sql_update(MarketplaceListing)
@@ -201,6 +248,19 @@ def _find_duplicate_import_candidate(
 def _crosspost_job_canceled(db, job_id: int) -> bool:
     job = db.get(MarketplaceCrosspostJob, job_id)
     return bool(job and str(job.status).lower() == "canceled")
+
+
+def _is_already_published_to_marketplace(db, listing: Listing, marketplace: str) -> bool:
+    market = str(marketplace or "").strip().lower()
+    if market == MarketplaceName.ebay.value:
+        return bool(listing.ebay_listing_id or str(listing.ebay_publish_status or "").upper() == "POSTED")
+    row = db.execute(
+        select(MarketplaceListing).where(
+            MarketplaceListing.listing_id == listing.id,
+            MarketplaceListing.marketplace == MarketplaceName(market),
+        )
+    ).scalar_one_or_none()
+    return bool(row and row.status == MarketplaceListingStatus.PUBLISHED)
 
 
 def _import_job_canceled(db, job_id: int) -> bool:
@@ -661,7 +721,30 @@ def process_marketplace_crosspost_job_task(self, job_id: int) -> dict:
             db.expire_all()
             if _crosspost_job_canceled(db, job_id):
                 return {"job_id": job_id, "status": "canceled", "results": results}
+            if _is_already_published_to_marketplace(db, listing, market):
+                results.append(
+                    {
+                        "marketplace": market,
+                        "execution_mode": "skipped",
+                        "status": "skipped_already_published",
+                        "response": {"status": "SKIPPED_ALREADY_PUBLISHED"},
+                    }
+                )
+                continue
             execution_mode = resolve_execution_mode(listing=listing, user=user, marketplace=market)
+            preflight = _json_safe(MarketplacePreflightService().preflight_listing(db, listing, market))
+            if preflight.get("blockers"):
+                failed_markets.append(market)
+                response = {"preflight": preflight, "error": "Publish blocked by marketplace preflight."}
+                upsert_marketplace_listing(db, listing_id=listing.id, marketplace=market, status=MarketplaceListingStatus.FAILED, response=response)
+                _force_marketplace_listing_state(db, listing_id=listing.id, marketplace=market, status=MarketplaceListingStatus.FAILED, response=response)
+                results.append({"marketplace": market, "execution_mode": execution_mode, "status": "blocked", "response": response})
+                continue
+            if listing.status not in {ListingStatus.ready, ListingStatus.posted}:
+                listing.status = ListingStatus.ready
+                listing.needs_review = False
+                db.add(listing)
+                db.commit()
             payload = build_marketplace_payload(listing, market)
             if execution_mode == "direct_api":
                 result = multi_platform_publisher.publish(db, listing, market)
@@ -704,7 +787,7 @@ def process_marketplace_crosspost_job_task(self, job_id: int) -> dict:
                     try:
                         bridge_completion = wait_for_bridge_job(
                             job_id=bridge_job_id,
-                            timeout_seconds=180,
+                            timeout_seconds=600,
                             poll_interval_seconds=1.0,
                         )
                         response = {
@@ -721,7 +804,13 @@ def process_marketplace_crosspost_job_task(self, job_id: int) -> dict:
                             bridge_result = bridge_completion.get("result") if isinstance(bridge_completion.get("result"), dict) else {}
                             result_status = str(bridge_result.get("status") or response.get("status") or "planned")
                             submitted_to_marketplace = bool(bridge_result.get("submitted")) or str(result_status).strip().lower() in {"submitted_to_marketplace", "published"}
-                            if submitted_to_marketplace:
+                            listing_urls = bridge_result.get("listing_urls")
+                            if not isinstance(listing_urls, list):
+                                listing_urls = []
+                            marketplace_listing_id = str(bridge_result.get("marketplace_listing_id") or "").strip() or None
+                            submission_visible = bool(marketplace_listing_id or listing_urls)
+                            facebook_needs_visibility = market == "facebook" and execution_mode == "browser_assist"
+                            if submitted_to_marketplace and (submission_visible or not facebook_needs_visibility):
                                 listing_status = MarketplaceListingStatus.PUBLISHED
                                 response = {
                                     **(response if isinstance(response, dict) else {}),
@@ -729,8 +818,34 @@ def process_marketplace_crosspost_job_task(self, job_id: int) -> dict:
                                     "bridge_completion": bridge_completion,
                                     "submitted": True,
                                 }
+                                if marketplace_listing_id:
+                                    response["marketplace_listing_id"] = marketplace_listing_id
+                                if listing_urls:
+                                    response["listing_urls"] = listing_urls
+                            elif submitted_to_marketplace and facebook_needs_visibility:
+                                response = {
+                                    **(response if isinstance(response, dict) else {}),
+                                    "status": result_status,
+                                    "bridge_completion": bridge_completion,
+                                    "submitted": True,
+                                    "bridge_confirmation_status": "submitted_without_visible_listing",
+                                }
                     except Exception as exc:
-                        error_message = str(exc)
+                        bridge_error = str(exc)
+                        if execution_mode == "browser_assist" and (
+                            "bridge job fetch failed" in bridge_error.lower()
+                            or "did not finish within" in bridge_error.lower()
+                        ):
+                            response = {
+                                **(response if isinstance(response, dict) else {}),
+                                "bridge_fetch_status": "pending",
+                                "bridge_fetch_warning": bridge_error,
+                            }
+                            result_status = str(response.get("status") or "BROWSER_AUTOMATION_READY")
+                            listing_status = MarketplaceListingStatus.PENDING
+                            error_message = None
+                        else:
+                            error_message = bridge_error
 
                 if error_message:
                     failed_markets.append(market)

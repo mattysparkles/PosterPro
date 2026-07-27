@@ -351,8 +351,12 @@ export default function BridgeDesktopPage() {
 
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1.7fr)_minmax(320px,0.9fr)]">
           <SectionPanel
-            title="Live bridge desktop"
-            description={`Use this desktop surface to sign into ${marketplaceLabel} on the bridge-host Chromium session.`}
+            title={sessionIsTerminal && sessionStatus === 'completed' ? `${marketplaceLabel} connected` : 'Live bridge desktop'}
+            description={
+              sessionIsTerminal && sessionStatus === 'completed'
+                ? 'The browser session was captured successfully. Desktop access is intentionally closed once capture is complete.'
+                : `Use this desktop surface to sign into ${marketplaceLabel} on the bridge-host Chromium session.`
+            }
           >
             <div className="space-y-3">
               <div className="flex flex-wrap items-center gap-2">
@@ -364,14 +368,24 @@ export default function BridgeDesktopPage() {
                   </Button>
                 ) : null}
               </div>
-              <div className="rounded-[18px] border border-[#d0d5dd] bg-[#0f172a] p-3">
-                <div
-                  ref={viewerRef}
-                  className="min-h-[620px] w-full overflow-hidden rounded-[14px] bg-[#020617]"
-                />
-              </div>
-              <p className="text-sm text-[#475467]">{viewerMessage}</p>
-              <div className="rounded-[18px] border border-[#dbe7ff] bg-[#f7faff] p-4">
+              {sessionIsTerminal && sessionStatus === 'completed' ? (
+                <div className="rounded-[18px] border border-[#abefc6] bg-[#ecfdf3] p-6 text-sm text-[#067647]">
+                  <p className="text-base font-semibold text-[#027a48]">{marketplaceLabel} browser session captured</p>
+                  <p className="mt-2">You can return to Settings to see the active session and use the assisted listing workflow. Start a fresh session only if you need to switch accounts or recapture an expired login.</p>
+                  <div className="mt-4">
+                    <Button href={returnHref}>Return to marketplace settings</Button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div className="rounded-[18px] border border-[#d0d5dd] bg-[#0f172a] p-3">
+                    <div
+                      ref={viewerRef}
+                      className="min-h-[620px] w-full overflow-hidden rounded-[14px] bg-[#020617]"
+                    />
+                  </div>
+                  <p className="text-sm text-[#475467]">{viewerMessage}</p>
+                  <div className="rounded-[18px] border border-[#dbe7ff] bg-[#f7faff] p-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <p className="text-sm font-semibold text-[#101828]">Fallback login surface</p>
@@ -465,7 +479,9 @@ export default function BridgeDesktopPage() {
                     Escape
                   </Button>
                 </div>
-              </div>
+                  </div>
+                </>
+              )}
             </div>
           </SectionPanel>
 

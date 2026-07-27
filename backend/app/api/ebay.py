@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.api.schemas import EbayManualConnectRequest, EbayPublishConfirmationRequest
 from app.core.auth import ensure_user_owns_resource, get_current_user, resolve_user_scope
-from app.core.config import settings
+from app.core.config import reload_settings, settings
 from app.core.database import get_db
 from app.models.enums import MarketplaceName
 from app.models.models import EbayOfferHistory, Listing, MarketplaceAccount, User
@@ -18,10 +18,12 @@ from app.services.ebay_service import (
     authenticate_user_ebay,
     exchange_code_for_tokens,
     get_or_refresh_account,
+    _list_business_policies_for_account,
     parse_oauth_state,
     publish_listing_to_ebay,
     revise_ebay_listing,
     sync_ebay_active_listings,
+    sync_ebay_fulfillment_history,
 )
 from app.services.pricing_research_service import validate_marketplace_readiness
 router = APIRouter()
@@ -33,7 +35,8 @@ async def ebay_auth_url(
     redirect_uri: str | None = Query(None),
     current_user: User = Depends(get_current_user),
 ):
-    callback = redirect_uri or settings.ebay_runame or settings.ebay_redirect_uri
+    runtime_settings = reload_settings()
+    callback = redirect_uri or runtime_settings.ebay_runame or runtime_settings.ebay_redirect_uri
     if not callback:
         raise HTTPException(status_code=400, detail="eBay RuName is required")
     try:
@@ -50,7 +53,8 @@ async def ebay_callback(
     redirect_uri: str | None = Query(None),
     db: Session = Depends(get_db),
 ):
-    callback = redirect_uri or settings.ebay_runame or settings.ebay_redirect_uri
+    runtime_settings = reload_settings()
+    callback = redirect_uri or runtime_settings.ebay_runame or runtime_settings.ebay_redirect_uri
     if not callback:
         raise HTTPException(status_code=400, detail="eBay RuName is required")
 
@@ -79,7 +83,25 @@ async def ebay_callback(
         account.access_token = token_bundle.access_token
         account.refresh_token = token_bundle.refresh_token
         account.token_expires_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(seconds=token_bundle.expires_in)
+    # A successful OAuth callback only proves the code exchange. Verify the
+    # actual Sell API before showing the operator a connected state.
+    try:
+        await _list_business_policies_for_account(user_id, db, account, marketplace_id="EBAY_US")
+    except EbayIntegrationError as exc:
+        account.connection_status = "reauthorization_required"
+        account.last_error = f"OAuth completed, but eBay Sell API verification failed: {exc}"
+        db.add(account)
+        db.commit()
+        return {
+            "connected": False,
+            "user_id": user_id,
+            "marketplace": "ebay",
+            "verification_error": "OAuth completed but eBay rejected the token for Sell API access. Verify the Production application credentials and reconnect.",
+        }
 
+    account.connection_status = "connected"
+    account.last_error = None
+    account.last_successful_check_at = datetime.now(UTC).replace(tzinfo=None)
     db.add(account)
     db.commit()
     return {"connected": True, "user_id": user_id, "marketplace": "ebay"}
@@ -119,6 +141,8 @@ async def save_ebay_tokens_manually(
         account.access_token = access_token
         account.refresh_token = refresh_token or account.refresh_token
         account.token_expires_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(seconds=expires_in)
+    account.connection_status = "connected"
+    account.last_error = None
 
     db.add(account)
     db.commit()
@@ -141,6 +165,20 @@ async def sync_ebay_inventory(
     scoped_user_id = resolve_user_scope(current_user, user_id)
     try:
         return await sync_ebay_active_listings(scoped_user_id, db, limit=limit)
+    except EbayIntegrationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/sync/history")
+async def sync_ebay_history(
+    user_id: int | None = Query(None),
+    limit: int = Query(100, ge=1, le=250),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    scoped_user_id = resolve_user_scope(current_user, user_id)
+    try:
+        return await sync_ebay_fulfillment_history(scoped_user_id, db, limit=limit)
     except EbayIntegrationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

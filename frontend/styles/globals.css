@@ -114,6 +114,37 @@ a {
   text-decoration: none;
 }
 
+.pp-button span,
+.pp-button strong,
+.pp-button em,
+.pp-button svg {
+  color: currentColor !important;
+}
+
+.pp-button svg {
+  stroke: currentColor !important;
+}
+
+.pp-tab-item,
+.pp-shell-chip {
+  color: inherit;
+}
+
+.pp-tab-item *,
+.pp-shell-chip * {
+  color: inherit !important;
+}
+
+.pp-tab-item svg,
+.pp-shell-chip svg {
+  stroke: currentColor !important;
+}
+
+.pp-tab-item.is-active,
+.pp-shell-chip.is-active {
+  color: #ffffff !important;
+}
+
 ::selection {
   background: color-mix(in srgb, var(--pp-primary) 18%, transparent);
   color: var(--pp-text);

@@ -49,7 +49,7 @@ export default function SalesPage() {
   const reload = async () => {
     if (!user?.id) return;
     const [salesData, autoData, settings] = await Promise.all([
-      fetchSalesDashboard(user.id, 200, { search, sortBy, sortDir }),
+      fetchSalesDashboard(null, 200, { search, sortBy, sortDir }),
       fetchAutonomousConfig(),
       fetchSaleDetectionSettings(user.id),
     ]);

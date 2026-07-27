@@ -26,7 +26,7 @@ class AmazonProductDiscoveryService:
         normalized_asin = self._normalize_asin(asin)
         if normalized_asin:
             media = self.provider.lookup_by_asin(normalized_asin, title_hint=product_name)
-            description = self.provider.fetch_product_page_description(normalized_asin, title_hint=product_name)
+            product_facts = self.provider.fetch_product_page_facts(normalized_asin, title_hint=product_name)
             result = {
                 "status": "matched" if (media.get("gallery_image_urls") or media.get("primary_image_url")) else "manual_review_needed",
                 "confidence": "high",
@@ -36,14 +36,13 @@ class AmazonProductDiscoveryService:
                 "images": media.get("gallery_image_urls") or ([media.get("primary_image_url")] if media.get("primary_image_url") else []),
                 "local_asset_ids": media.get("local_asset_ids") or [],
                 "image_status": media.get("status") or "pending",
-                "description": description,
+                "description": product_facts.get("description"),
+                "product_facts": product_facts,
             }
-            if product_name and allow_title_search and not result["images"]:
-                title_result = self._discover_from_title(product_name)
-                if title_result.get("images"):
-                    title_result["status"] = "matched"
-                    title_result["confidence"] = "high" if title_result.get("confidence") == "high" else "medium"
-                    return title_result
+            # An ASIN identifies a specific Amazon variation.  Do not silently
+            # replace it with a title-search candidate when Amazon blocks the
+            # product page: that can attach another product's photographs to a
+            # Vine draft. Such rows remain retryable/manual-review items.
             return result
 
         if product_name and allow_title_search:
@@ -97,7 +96,7 @@ class AmazonProductDiscoveryService:
             asin = best_candidate["asin"]
             resolved_title = best_candidate["title"] or title
             media = self.provider.lookup_by_asin(asin, title_hint=resolved_title)
-            description = self.provider.fetch_product_page_description(asin, title_hint=resolved_title)
+            product_facts = self.provider.fetch_product_page_facts(asin, title_hint=resolved_title)
             return {
                 "status": "matched",
                 "confidence": "high" if best_score >= 0.75 else "medium",
@@ -107,7 +106,8 @@ class AmazonProductDiscoveryService:
                 "images": media.get("gallery_image_urls") or ([media.get("primary_image_url")] if media.get("primary_image_url") else []),
                 "local_asset_ids": media.get("local_asset_ids") or [],
                 "image_status": media.get("status") or "pending",
-                "description": description,
+                "description": product_facts.get("description"),
+                "product_facts": product_facts,
                 "search_score": round(best_score, 3),
             }
         except Exception:
@@ -118,7 +118,7 @@ class AmazonProductDiscoveryService:
         if asin_match:
             asin = asin_match.group(1)
             media = self.provider.lookup_by_asin(asin)
-            description = self.provider.fetch_product_page_description(asin)
+            product_facts = self.provider.fetch_product_page_facts(asin)
             return {
                 "status": "matched",
                 "confidence": confidence,
@@ -128,7 +128,8 @@ class AmazonProductDiscoveryService:
                 "images": media.get("gallery_image_urls") or ([media.get("primary_image_url")] if media.get("primary_image_url") else []),
                 "local_asset_ids": media.get("local_asset_ids") or [],
                 "image_status": media.get("status") or "pending",
-                "description": description,
+                "description": product_facts.get("description"),
+                "product_facts": product_facts,
             }
         return self._manual_needed(manual_url, "manual_url_missing_asin")
 

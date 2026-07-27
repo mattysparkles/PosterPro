@@ -15,7 +15,7 @@ export function Tabs({ items, value, onChange, className }) {
             className={cn(
               'pp-tab-item inline-flex h-10 items-center px-4 text-sm font-semibold transition',
               active
-                ? 'bg-[var(--pp-primary)] text-white shadow-[0_10px_22px_rgba(23,58,99,0.18)]'
+                ? 'is-active bg-[var(--pp-primary)] text-white shadow-[0_10px_22px_rgba(23,58,99,0.18)]'
                 : 'text-[var(--pp-muted)] hover:bg-white hover:text-[var(--pp-text)]',
             )}
           >

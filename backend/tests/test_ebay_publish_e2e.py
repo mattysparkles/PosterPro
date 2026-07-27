@@ -130,10 +130,10 @@ async def test_publish_attempt_audit_trail_records_payload_hash_and_translation(
                 "package_dimensions_required": True,
             },
             "policy_ids": {},
-            "inventory_item_payload": {"sku": f"posterpro-{listing.user_id}-{listing.id}"},
-            "offer_payload": {"sku": f"posterpro-{listing.user_id}-{listing.id}", "categoryId": "30090"},
+            "inventory_item_payload": {"sku": f"posterprou{listing.user_id}l{listing.id}"},
+            "offer_payload": {"sku": f"posterprou{listing.user_id}l{listing.id}", "categoryId": "30090"},
             "payload_preview": {
-                "sku": f"posterpro-{listing.user_id}-{listing.id}",
+                "sku": f"posterprou{listing.user_id}l{listing.id}",
                 "title": listing.title,
                 "description": listing.description,
                 "condition": "NEW",

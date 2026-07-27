@@ -1,4 +1,5 @@
 import sys
+from pathlib import Path
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -8,7 +9,8 @@ from app.core.secrets import decrypt_secret_if_needed
 
 _RUNNING_PYTEST = "pytest" in sys.modules
 _DEFAULT_DB_URL = "sqlite:///./posterpro_test.db" if _RUNNING_PYTEST else "sqlite:///./posterpro.db"
-_ENV_FILE = None if _RUNNING_PYTEST else ".env"
+_BACKEND_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+_ENV_FILE = None if _RUNNING_PYTEST else str(_BACKEND_ENV_FILE)
 
 
 class Settings(BaseSettings):
@@ -106,3 +108,15 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def reload_settings() -> Settings:
+    """Reload settings from the current process environment and env file.
+
+    PosterPro updates backend/.env when operators save server credentials.
+    Long-running worker processes need a way to pick up those changes without
+    a manual restart, especially for marketplace OAuth credentials.
+    """
+    global settings
+    settings = Settings()
+    return settings

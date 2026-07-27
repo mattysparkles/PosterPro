@@ -53,6 +53,7 @@ import {
   processListingPhoto,
   approveListing as approveListingApi,
   approveListingsBulk,
+  approveAndQueueListings,
   exportMarketplacePreflightCsv,
   fetchEbayAccountReadiness,
   fetchEbayLaunchRepairQueue,
@@ -68,11 +69,14 @@ import {
   applyEbayLaunchRepair,
   publishListingEbay,
   toggleAutonomousMode,
+  toThumbnailImageUrl,
   uploadListingPhotos,
   updateListing,
 } from '../lib/api';
 
 const LISTING_TABS = [
+  { value: 'all', label: 'All Listings' },
+  { value: 'vine', label: 'Amazon Vine' },
   { value: 'review', label: 'Needs Review' },
   { value: 'drafts', label: 'Drafts' },
   { value: 'ready', label: 'Ready' },
@@ -85,6 +89,7 @@ const LISTING_TABS = [
 const FILTER_OPTIONS = [
   { value: 'all', label: 'All marketplaces' },
   { value: 'ebay', label: 'eBay' },
+  { value: 'facebook', label: 'Facebook Marketplace' },
   { value: 'etsy', label: 'Etsy' },
   { value: 'poshmark', label: 'Poshmark' },
   { value: 'mercari', label: 'Mercari' },
@@ -96,6 +101,7 @@ const FILTER_OPTIONS = [
 const SOURCE_OPTIONS = [
   { value: 'all', label: 'All sources' },
   { value: 'amazon_vine', label: 'Amazon Vine' },
+  { value: 'media_inventory_recovery', label: 'Recovered inventory' },
 ];
 
 const READINESS_FILTER_OPTIONS = [
@@ -179,19 +185,33 @@ function getListingBucket(listing) {
   if (listing.status === 'draft') return 'drafts';
   if (listing.status === 'error' || listing.ebay_publish_status === 'FAILED') return 'failed';
   if (listing.ebay_publish_status === 'POSTED' || listing.ebay_listing_id) return 'published';
-  if (listing.status === 'ready') return 'ready';
-  if (listing.restricted_review_required || listing.needs_review) return 'review';
+  const isRecovery = listing?.source_type === 'media_inventory_recovery';
+  const explicitlyApproved = Boolean(listing?.source_metadata?.operator_approved_at);
+  if (isRecovery && !explicitlyApproved) return 'drafts';
+  if (listing.restricted_review_required || listing.needs_review) return isCompleteForOperatorReview(listing) ? 'review' : 'drafts';
+  if (listing.status === 'ready') return explicitlyApproved || !isRecovery ? 'ready' : 'drafts';
   return 'review';
 }
 
+function isCompleteForOperatorReview(listing) {
+  const readiness = getReadinessSummary(listing);
+  const hasPrice = Boolean(listing?.listing_price || listing?.suggested_price || listing?.price);
+  const hasCategory = Boolean(listing?.category_id || listing?.category_suggestion || listing?.detected_category_guess);
+  const hasCondition = Boolean(listing?.condition || listing?.condition_data?.condition_bucket);
+  const imageCount = Number(readiness?.actual_image_count || getListingImageCount(listing) || 0);
+  return Boolean((listing?.title || listing?.suggested_title) && listing?.description && hasPrice && hasCategory && hasCondition && imageCount > 0);
+}
+
 function matchesTab(listing, tab) {
+  if (tab === 'all') return true;
+  if (tab === 'vine') return isAmazonVineSource(listing);
   if (tab === 'sold') return isSoldListing(listing);
   if (isSoldListing(listing)) return false;
   if (tab === 'archived') return isArchivedListing(listing);
   if (isArchivedListing(listing)) return false;
-  if (tab === 'drafts') return listing.status === 'draft';
-  if (tab === 'review') return Boolean((listing.needs_review || listing.restricted_review_required) && listing.status !== 'ready' && !(listing.ebay_publish_status === 'POSTED' || listing.ebay_listing_id));
-  if (tab === 'ready') return Boolean(listing.status === 'ready' && !(listing.ebay_publish_status === 'POSTED' || listing.ebay_listing_id));
+  if (tab === 'drafts') return getListingBucket(listing) === 'drafts';
+  if (tab === 'review') return getListingBucket(listing) === 'review';
+  if (tab === 'ready') return getListingBucket(listing) === 'ready';
   if (tab === 'published') return Boolean(listing.ebay_publish_status === 'POSTED' || listing.ebay_listing_id);
   if (tab === 'failed') return Boolean(listing.status === 'error' || listing.ebay_publish_status === 'FAILED');
   return false;
@@ -403,10 +423,15 @@ function formatMarketplace(name) {
 
 function getQuickPublishTargets(listing, enabledPlatforms) {
   const marketplaces = getListingMarketplaces(listing, enabledPlatforms);
-  if (marketplaces.includes('ebay')) {
-    return ['ebay'];
+  const alreadyPostedToEbay = listing?.ebay_publish_status === 'POSTED' || Boolean(listing?.ebay_listing_id);
+  if (alreadyPostedToEbay) {
+    const secondaryTargets = marketplaces.filter((market) => market !== 'ebay');
+    if (secondaryTargets.length) return secondaryTargets;
+    const inferred = (enabledPlatforms || []).filter((market) => market && market !== 'ebay');
+    if (inferred.length) return inferred.slice(0, 2);
+    return ['facebook'];
   }
-  return marketplaces.length ? [marketplaces[0]] : ['ebay'];
+  return marketplaces.length ? marketplaces : ['ebay'];
 }
 
 function getListingFailureMessage(listing) {
@@ -420,12 +445,30 @@ export default function ListingsPage() {
   const { user } = useAuth();
   const router = useRouter();
   const { publish, publishing, errors, statusByListing, refreshStatus } = useMarketplacePublish();
-  const { listings, autonomousConfig, enabledPlatforms, listingTemplates, reload } = useDashboardData(user?.id);
-  const [activeTab, setActiveTab] = useState('drafts');
+  const [catalogPage, setCatalogPage] = useState(1);
+  const [catalogPageSize, setCatalogPageSize] = useState(25);
+  // These filters are inputs to the paginated catalog request, so they must
+  // exist before useDashboardData builds that request.  Keeping them below
+  // the hook caused a temporal-dead-zone render failure on /listings.
+  const [activeTab, setActiveTab] = useState('all');
   const [search, setSearch] = useState('');
   const [marketFilter, setMarketFilter] = useState('all');
   const [sourceFilter, setSourceFilter] = useState('all');
   const [readinessFilter, setReadinessFilter] = useState('all');
+  const { listings, listingError, listingPagination, autonomousConfig, enabledPlatforms, listingTemplates, reload } = useDashboardData(user?.id, {
+    includeClusters: false,
+    includeMarketplaces: false,
+    includeAnalytics: false,
+    includeAlerts: false,
+    includeOfferDashboard: false,
+    includeStorageBatches: false,
+    paginateListings: true,
+    listingPage: catalogPage,
+    listingPageSize: catalogPageSize,
+    listingSourceType: sourceFilter === 'amazon_vine' || activeTab === 'vine' ? 'amazon_vine' : sourceFilter,
+    listingSearch: search,
+    listingQueue: activeTab === 'vine' ? 'all' : activeTab,
+  });
   const [selectedIds, setSelectedIds] = useState([]);
   const [selectedListingId, setSelectedListingId] = useState(null);
   const [viewMode, setViewMode] = useState('table');
@@ -439,7 +482,11 @@ export default function ListingsPage() {
   const [jobsOverview, setJobsOverview] = useState({ import_jobs: [], crosspost_jobs: [] });
   const [bulkPreflightReport, setBulkPreflightReport] = useState(null);
   const [bulkPreflightLoading, setBulkPreflightLoading] = useState(false);
+  const [bulkPreflightProgress, setBulkPreflightProgress] = useState(null);
   const [bulkPublishReport, setBulkPublishReport] = useState(null);
+  const [pendingBulkPublish, setPendingBulkPublish] = useState(null);
+  const [bulkPublishAcknowledged, setBulkPublishAcknowledged] = useState(false);
+  const [bulkPublishSubmitting, setBulkPublishSubmitting] = useState(false);
   const [launchCandidatesReport, setLaunchCandidatesReport] = useState(null);
   const [launchCandidatesLoading, setLaunchCandidatesLoading] = useState(false);
   const [ebayAccountReadiness, setEbayAccountReadiness] = useState(null);
@@ -489,9 +536,21 @@ export default function ListingsPage() {
 
   const selectTab = (nextTab) => {
     setActiveTab(nextTab);
+    setCatalogPage(1);
     setSelectedIds([]);
     if (!router.isReady) return;
     router.replace({ pathname: router.pathname, query: { ...router.query, tab: nextTab } }, undefined, { shallow: true });
+  };
+
+  const clearAllFilters = () => {
+    setActiveTab('all');
+    setSearch('');
+    setMarketFilter('all');
+    setSourceFilter('all');
+    setReadinessFilter('all');
+    setSelectedIds([]);
+    setCatalogPage(1);
+    if (router.isReady) router.replace({ pathname: router.pathname }, undefined, { shallow: true });
   };
 
   useEffect(() => {
@@ -512,7 +571,7 @@ export default function ListingsPage() {
     let active = true;
     const loadJobs = async () => {
       try {
-        const overview = await fetchMarketplaceJobsOverview();
+        const overview = await fetchMarketplaceJobsOverview({ limit: 40, compact: true });
         if (active) {
           setJobsOverview(overview || { import_jobs: [], crosspost_jobs: [] });
         }
@@ -521,7 +580,9 @@ export default function ListingsPage() {
       }
     };
     loadJobs();
-    const timer = setInterval(loadJobs, 5000);
+    // Queue state is supporting context on the catalog page. Polling it every
+    // five seconds made the page feel as though it was constantly reloading.
+    const timer = setInterval(loadJobs, 30000);
     return () => {
       active = false;
       clearInterval(timer);
@@ -575,14 +636,17 @@ export default function ListingsPage() {
   const selectedPublishableRows = useMemo(() => {
     return selectedRows.filter((listing) => {
       const bucket = getListingBucket(listing);
-      const isReadyRow = listing?.status === 'ready';
+      const isReadyRow = bucket === 'ready' || listing?.status === 'ready';
       const isDraftRow = bucket === 'drafts' || listing?.status === 'draft';
+      const hasCrosspostTargets = getQuickPublishTargets(listing, enabledPlatforms).length > 0;
+      const crosspostOnly = isAlreadyPostedToEbay(listing) && hasCrosspostTargets;
+      if (crosspostOnly) return true;
       if (workflowPreferences.review_before_publish) {
-        return isReadyRow && !isAlreadyPostedToEbay(listing);
+        return isReadyRow;
       }
-      return (isDraftRow || isReadyRow) && !isAlreadyPostedToEbay(listing);
+      return isDraftRow || isReadyRow;
     });
-  }, [isAlreadyPostedToEbay, selectedRows, workflowPreferences.review_before_publish]);
+  }, [enabledPlatforms, isAlreadyPostedToEbay, selectedRows, workflowPreferences.review_before_publish]);
 
   const selectedNeedsApprovalRows = useMemo(() => {
     return selectedRows.filter((listing) => getListingBucket(listing) === 'review' || listing.status === 'draft');
@@ -661,12 +725,10 @@ export default function ListingsPage() {
   }, [bulkScopeRows, selectedRows.length]);
 
   const publishJobStats = useMemo(() => {
-    const allJobs = [...(jobsOverview.import_jobs || []), ...(jobsOverview.crosspost_jobs || [])];
-    const publishJobs = allJobs.filter((job) => String(job?.source_marketplace || '').toLowerCase() !== 'import');
-    const queued = publishJobs.filter((job) => ['queued', 'running'].includes(String(job.status).toLowerCase())).length;
-    const completed = publishJobs.filter((job) => String(job.status).toLowerCase() === 'completed').length;
-    const failed = publishJobs.filter((job) => String(job.status).toLowerCase() === 'failed').length;
-    const total = publishJobs.length;
+    const queued = Number(jobsOverview.crosspost_summary?.queued || 0) + Number(jobsOverview.crosspost_summary?.running || 0);
+    const completed = Number(jobsOverview.crosspost_summary?.completed || 0);
+    const failed = Number(jobsOverview.crosspost_summary?.failed || 0);
+    const total = Number(jobsOverview.crosspost_summary?.total || 0);
     const progress = total ? Math.round((completed / total) * 100) : 0;
     return { queued, completed, failed, total, progress };
   }, [jobsOverview]);
@@ -898,7 +960,7 @@ export default function ListingsPage() {
     setSelectedIds((current) => (current.includes(id) ? current.filter((item) => item !== id) : [...current, id]));
   };
 
-  const queuePublishRows = async (rows) => {
+  const queuePublishRows = async (rows, { ebayConfirmationAlreadyGranted = false } = {}) => {
     const publishableRows = rows.filter(Boolean);
     if (!publishableRows.length) {
       return { failed: 0, total: 0 };
@@ -911,7 +973,7 @@ export default function ListingsPage() {
     const uniqueTargetSets = new Set(targetSets);
     if (uniqueTargetSets.size === 1) {
       const marketplaces = JSON.parse(targetSets[0]);
-      if (marketplaces.includes('ebay')) {
+      if (marketplaces.includes('ebay') && !ebayConfirmationAlreadyGranted) {
         const confirmed = confirmLiveEbayQueue({
           count: publishableRows.length,
           marketplaces,
@@ -937,7 +999,22 @@ export default function ListingsPage() {
       const failed = Array.isArray(response?.results)
         ? response.results.filter((item) => item && item.error).length
         : 0;
-      return { failed, total: publishableRows.length };
+      const queueResults = Array.isArray(response?.results) ? response.results : [];
+      const marketplaceResults = queueResults.flatMap((item) => Array.isArray(item?.results) ? item.results : []);
+      const queued = marketplaceResults.filter((item) => item?.status === 'QUEUED').length;
+      const blocked = marketplaceResults.filter((item) => item?.status === 'BLOCKED').length;
+      const alreadyQueued = marketplaceResults.filter((item) => item?.status === 'SKIPPED_ALREADY_QUEUED').length;
+      setBulkPublishReport({
+        dry_run: false,
+        direct_queue: true,
+        summary: { queued, skipped_blocked: blocked, skipped_already_queued: alreadyQueued, failed },
+        items: queueResults.map((item) => ({
+          listing_id: item?.listing_id,
+          marketplaces: Object.fromEntries((item?.results || []).map((result) => [result.marketplace || 'unknown', result])),
+          error: item?.error || null,
+        })),
+      });
+      return { failed, total: publishableRows.length, queued, blocked, alreadyQueued };
     }
 
     const results = await Promise.allSettled(
@@ -947,7 +1024,13 @@ export default function ListingsPage() {
       )),
     );
     const failed = results.filter((result) => result.status === 'rejected').length;
-    return { failed, total: publishableRows.length };
+    setBulkPublishReport({
+      dry_run: false,
+      direct_queue: true,
+      summary: { queued: publishableRows.length - failed, skipped_blocked: 0, skipped_already_queued: 0, failed },
+      items: results.map((result, index) => ({ listing_id: publishableRows[index]?.id, marketplaces: {}, error: result.status === 'rejected' ? String(result.reason || 'Publish request failed') : null })),
+    });
+    return { failed, total: publishableRows.length, queued: publishableRows.length - failed };
   };
 
   const publishSelected = async () => {
@@ -966,12 +1049,11 @@ export default function ListingsPage() {
       return;
     }
 
-    const { failed, total } = await queuePublishRows(selectedPublishableRows);
-    if (failed) {
-      toast.error(`${failed} publish action${failed === 1 ? '' : 's'} failed.`);
-    } else {
-      toast.success(`Queued ${total} listing${total === 1 ? '' : 's'} for publish.`);
-    }
+    const { failed, total, queued = 0, blocked = 0, canceled } = await queuePublishRows(selectedPublishableRows);
+    if (canceled) return;
+    if (failed) toast.error(`${failed} publish action${failed === 1 ? '' : 's'} failed.`);
+    if (queued) toast.success(`Queued ${queued} of ${total} listing${total === 1 ? '' : 's'} for publish.${blocked ? ` ${blocked} blocked.` : ''}`);
+    else if (!failed) toast.error(`Nothing was queued.${blocked ? ` ${blocked} listing${blocked === 1 ? '' : 's'} was blocked.` : ''}`);
     await reload();
   };
 
@@ -986,33 +1068,44 @@ export default function ListingsPage() {
     setSelectedIds([]);
   };
 
-  const approveAndPublishSelected = async () => {
-    if (!selectedRows.length) {
+  const approveAndPublishSelected = async ({ confirmedEbay = false, targetIds = null } = {}) => {
+    const targetRows = Array.isArray(targetIds) && targetIds.length
+      ? listings.filter((listing) => targetIds.includes(listing.id))
+      : selectedRows;
+    if (!targetRows.length) {
       toast.error('Select one or more listings first.');
       return;
     }
-    const reviewIds = selectedRows
-      .filter((listing) => getListingBucket(listing) === 'review' || listing.status === 'draft')
-      .map((listing) => listing.id);
-    if (reviewIds.length) {
-      await approveListingsBulk(reviewIds);
-    }
-    const publishable = selectedRows.filter((listing) => {
-      const bucket = getListingBucket(listing);
-      return listing.status === 'ready' || bucket === 'drafts' || bucket === 'review' || listing.status === 'draft';
-    });
-    if (!publishable.length) {
-      toast.error('Select at least one listing that can move to publish.');
+    const requestedMarketplaces = Array.from(new Set(targetRows.flatMap((listing) => {
+      const targets = getQuickPublishTargets(listing, enabledPlatforms);
+      return targets.length ? targets : ['ebay'];
+    })));
+    if (requestedMarketplaces.includes('ebay') && !confirmedEbay) {
+      setBulkPublishAcknowledged(false);
+      setPendingBulkPublish({ listingIds: targetRows.map((listing) => listing.id), marketplaces: requestedMarketplaces });
       return;
     }
-    const { failed, total } = await queuePublishRows(publishable);
-    await reload();
-    toast.success(
-      failed
-        ? `Approved and queued ${total - failed} listing${total - failed === 1 ? '' : 's'} for publish; ${failed} failed.`
-        : `Approved and queued ${total} listing${total === 1 ? '' : 's'} for publish.`,
-    );
-    setSelectedIds([]);
+    setBulkPublishSubmitting(true);
+    try {
+      setPendingBulkPublish(null);
+      const response = await approveAndQueueListings(targetRows.map((listing) => listing.id), requestedMarketplaces);
+      const outcomes = Array.isArray(response?.results) ? response.results : [];
+      const queued = outcomes.filter((item) => String(item?.status || '').toLowerCase() === 'queued').length;
+      const blocked = outcomes.filter((item) => String(item?.status || '').toLowerCase() === 'blocked').length;
+      const failed = outcomes.filter((item) => String(item?.status || '').toLowerCase() === 'failed').length;
+      const total = targetRows.length;
+      setBulkPublishReport({ dry_run: false, direct_queue: true, summary: { queued, skipped_blocked: blocked, skipped_already_queued: 0, failed }, items: outcomes.map((item) => ({ listing_id: item.listing_id, marketplaces: Object.fromEntries((item.results || []).map((result) => [result.marketplace || 'unknown', result])), error: item.status === 'queued' ? null : item.status })) });
+      await reload();
+      if (queued) toast.success(`Approved and queued ${queued} of ${total} listing${total === 1 ? '' : 's'} for publish.${blocked ? ` ${blocked} blocked.` : ''}${failed ? ` ${failed} failed.` : ''}`);
+      else toast.error(`Approved the selected listings, but nothing was queued.${blocked ? ` ${blocked} blocked by safeguards.` : ''}${failed ? ` ${failed} failed.` : ''}`);
+      setSelectedIds([]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'The approval and publish queue request failed.';
+      setBulkPublishReport({ dry_run: false, direct_queue: true, summary: { queued: 0, skipped_blocked: 0, skipped_already_queued: 0, failed: targetRows.length }, items: targetRows.map((listing) => ({ listing_id: listing.id, marketplaces: {}, error: message })) });
+      toast.error(message);
+    } finally {
+      setBulkPublishSubmitting(false);
+    }
   };
 
   const confirmDeleteListings = (count) => {
@@ -1180,20 +1273,51 @@ export default function ListingsPage() {
       return null;
     }
     setBulkPreflightLoading(true);
+    setBulkPreflightProgress({ completed: 0, total: targetIds.length, marketplaces });
     const marketLabel = (marketplaces || []).map((market) => formatMarketplace(market)).join(', ') || 'Marketplace';
     const loadingToastId = toast.loading(`Running ${marketLabel} preflight for ${targetIds.length} listing${targetIds.length === 1 ? '' : 's'}...`);
     try {
-      const report = await fetchMarketplacePreflightBulk({
-        listing_ids: targetIds,
-        marketplaces,
-        force_refresh: Boolean(options.forceRefresh),
-        only_drafts: Boolean(options.onlyDrafts),
-        selected_statuses: options.selectedStatuses || null,
-        only_missing_preflight: Boolean(options.onlyMissingPreflight),
-        only_stale_preflight: Boolean(options.onlyStalePreflight),
-        only_ready_candidates: Boolean(options.onlyReadyCandidates),
-        only_blocked_candidates: Boolean(options.onlyBlockedCandidates),
-      });
+      // eBay plan validation can make remote policy/category calls. Keep each
+      // browser request deliberately small so a 25-row review cannot exceed a
+      // proxy timeout; surface progress after every completed chunk.
+      const chunkSize = (marketplaces || []).includes('ebay') ? 2 : 8;
+      const reports = [];
+      for (let offset = 0; offset < targetIds.length; offset += chunkSize) {
+        const listingIds = targetIds.slice(offset, offset + chunkSize);
+        try {
+          reports.push(await fetchMarketplacePreflightBulk({
+            listing_ids: listingIds,
+            marketplaces,
+            force_refresh: Boolean(options.forceRefresh),
+            only_drafts: Boolean(options.onlyDrafts),
+            selected_statuses: options.selectedStatuses || null,
+            only_missing_preflight: Boolean(options.onlyMissingPreflight),
+            only_stale_preflight: Boolean(options.onlyStalePreflight),
+            only_ready_candidates: Boolean(options.onlyReadyCandidates),
+            only_blocked_candidates: Boolean(options.onlyBlockedCandidates),
+          }));
+        } catch (error) {
+          reports.push({
+            items: listingIds.map((listingId) => ({ listing_id: listingId, marketplaces: {}, error: error instanceof Error ? error.message : 'Preflight request failed.' })),
+            marketplaces,
+            summary: { total_listings_checked: listingIds.length, total_marketplaces_checked: listingIds.length * (marketplaces || []).length, preflight_failed: listingIds.length },
+          });
+        }
+        const completed = Math.min(offset + listingIds.length, targetIds.length);
+        setBulkPreflightProgress({ completed, total: targetIds.length, marketplaces });
+        toast.loading(`Running ${marketLabel} preflight: ${completed} of ${targetIds.length} checked…`, { id: loadingToastId });
+      }
+      const report = reports.reduce((combined, current) => {
+        combined.items.push(...(current?.items || []));
+        Object.entries(current?.summary || {}).forEach(([key, value]) => {
+          if (typeof value === 'number') combined.summary[key] = (combined.summary[key] || 0) + value;
+          else if (key === 'blocker_codes' || key === 'warning_codes') {
+            combined.summary[key] = { ...(combined.summary[key] || {}) };
+            Object.entries(value || {}).forEach(([code, count]) => { combined.summary[key][code] = (combined.summary[key][code] || 0) + Number(count || 0); });
+          }
+        });
+        return combined;
+      }, { items: [], marketplaces, summary: {} });
       setBulkPreflightReport(report);
       await reload();
       const summary = report?.summary || {};
@@ -1207,6 +1331,7 @@ export default function ListingsPage() {
       return null;
     } finally {
       setBulkPreflightLoading(false);
+      setBulkPreflightProgress(null);
     }
   };
 
@@ -1541,6 +1666,170 @@ export default function ListingsPage() {
     }
   };
 
+  // The catalog route is an entry point, not an operations dashboard. Keep
+  // first paint deliberately small and isolated from expensive legacy
+  // preflight/repair widgets; those tools remain available from the detail
+  // workspace and their dedicated routes.
+  const compactCatalog = true;
+  if (compactCatalog) {
+    return (
+      <AppShell
+        active="/listings"
+        title="Listings"
+        autonomousConfig={autonomousConfig}
+        onToggleAutonomous={async () => {
+          await toggleAutonomousMode(!autonomousConfig.autonomous_mode);
+          await reload();
+        }}
+      >
+        <PageHeader
+          eyebrow="Catalog"
+          breadcrumbs={[{ label: 'Workspace' }, { label: 'Listings', active: true }]}
+          title="Listings"
+          description="A fast, paginated catalog for reviewing drafts, live listings, imports, and recovered inventory."
+          actions={<div className="flex flex-wrap gap-2"><Button href="/listings/new">New listing</Button><Button href="/settings" variant="outline">Settings</Button></div>}
+        />
+        <PageFrame>
+          <SectionPanel title="Find listings" description={`${listingPagination.total.toLocaleString()} records · ${catalogPageSize} per page`}>
+            <div className="grid gap-3 lg:grid-cols-[minmax(220px,1fr)_190px_auto] lg:items-center">
+              <input
+                value={search}
+                onChange={(event) => { setSearch(event.target.value); setCatalogPage(1); }}
+                placeholder="Search title or description"
+                className="h-10 rounded-[10px] border border-[#d0d5dd] bg-white px-3 text-sm text-[#101828] outline-none focus:border-[#2563eb]"
+              />
+              <select value={catalogPageSize} onChange={(event) => { setCatalogPageSize(Number(event.target.value)); setCatalogPage(1); }} className="h-10 rounded-[10px] border border-[#d0d5dd] bg-white px-3 text-sm text-[#101828]">
+                {[25, 50, 100, 250].map((size) => <option key={size} value={size}>{size} per page</option>)}
+              </select>
+              <Button variant="outline" onClick={clearAllFilters}>Clear filters</Button>
+            </div>
+            <div className="mt-4 flex flex-wrap gap-2" aria-label="Listing filters">
+              {LISTING_TABS.map((tab) => <button key={tab.value} type="button" onClick={() => { setActiveTab(tab.value); setCatalogPage(1); }} className={`rounded-full border px-3 py-2 text-sm font-semibold ${activeTab === tab.value ? 'border-[#2563eb] bg-[#eef4ff] text-[#1d4ed8]' : 'border-[#e5e7eb] bg-white text-[#475467]'}`}>{tab.label}</button>)}
+            </div>
+            <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-[#eaecf0] pt-3">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={!filteredListings.length}
+                onClick={() => {
+                  const pageIds = filteredListings.map((listing) => listing.id);
+                  const pageIsSelected = pageIds.length > 0 && pageIds.every((id) => selectedIds.includes(id));
+                  setSelectedIds((current) => pageIsSelected
+                    ? current.filter((id) => !pageIds.includes(id))
+                    : Array.from(new Set([...current, ...pageIds])));
+                }}
+              >
+                {filteredListings.length && filteredListings.every((listing) => selectedIds.includes(listing.id)) ? 'Clear page selection' : 'Select all on this page'}
+              </Button>
+              <p className="text-xs text-[#667085]">Select all applies to the current paginated page ({filteredListings.length} listings), not the entire catalog.</p>
+            </div>
+          </SectionPanel>
+          {selectedIds.length ? (
+            <SectionPanel
+              title={`${selectedIds.length} listing${selectedIds.length === 1 ? '' : 's'} selected`}
+              description="Approval changes only the selected local draft records. Publishing always asks for a separate explicit confirmation and remains subject to marketplace preflight and duplicate safeguards."
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                {workflowPreferences.bulk_approval_enabled && selectedReviewRows.length ? <Button variant="outline" size="sm" onClick={approveSelected}>Approve selected</Button> : null}
+                <Button variant="outline" size="sm" onClick={approveAndPublishSelected}>{selectedReviewRows.length ? 'Approve & queue publish' : 'Queue selected for publishing'}</Button>
+                <Button variant="outline" size="sm" onClick={() => runBulkMarketplacePreflight(['ebay'])} disabled={bulkPreflightLoading}>Run eBay preflight</Button>
+                <Button variant="outline" size="sm" onClick={() => setSelectedIds([])}>Clear selection</Button>
+              </div>
+            </SectionPanel>
+          ) : null}
+          {pendingBulkPublish ? (
+            <SectionPanel title="Confirm live eBay queue" tone="warning" description={`${pendingBulkPublish.listingIds.length} selected listing${pendingBulkPublish.listingIds.length === 1 ? '' : 's'} will be approved where needed, then sent to the eBay publishing worker. This is a real marketplace action; the result panel and Jobs page will show the actual outcome.`}>
+              <div className="flex max-w-xl flex-col gap-3 sm:flex-row sm:items-end">
+                <label className="flex flex-1 cursor-pointer items-start gap-2 text-sm text-[#344054]">
+                  <input type="checkbox" checked={bulkPublishAcknowledged} onChange={(event) => setBulkPublishAcknowledged(event.target.checked)} className="mt-1 h-4 w-4" />
+                  <span>I understand this queues real eBay publication work for these listings. I will review the resulting job statuses before assuming any listing is live.</span>
+                </label>
+                <Button
+                  size="sm"
+                  disabled={!bulkPublishAcknowledged || bulkPublishSubmitting}
+                  onClick={() => approveAndPublishSelected({ confirmedEbay: true, targetIds: pendingBulkPublish.listingIds })}
+                >
+                  {bulkPublishSubmitting ? 'Queueing…' : `Confirm & queue ${pendingBulkPublish.listingIds.length}`}
+                </Button>
+                <Button variant="outline" size="sm" disabled={bulkPublishSubmitting} onClick={() => { setPendingBulkPublish(null); setBulkPublishAcknowledged(false); }}>Cancel</Button>
+              </div>
+            </SectionPanel>
+          ) : null}
+          {bulkPublishReport ? (
+            <SectionPanel
+              title={bulkPublishReport.direct_queue ? 'Latest publish queue result' : 'Latest ready-only publish result'}
+              description={bulkPublishReport.direct_queue
+                ? 'Queued means PosterPro handed the work to a marketplace worker. Open Jobs to see whether the marketplace accepted, blocked, or failed the remote action.'
+                : 'This report shows the outcome of the latest marketplace-ready queue run.'}
+            >
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <MetricCard label="Queued" value={bulkPublishReport?.summary?.queued || 0} detail="Worker tasks created." />
+                <MetricCard label="Blocked" value={bulkPublishReport?.summary?.skipped_blocked || 0} detail="Preflight or duplicate safeguard stopped these." />
+                <MetricCard label="Already queued" value={bulkPublishReport?.summary?.skipped_already_queued || 0} detail="Existing work was retained." />
+                <MetricCard label="Failed" value={bulkPublishReport?.summary?.failed || 0} detail="Could not be queued." />
+              </div>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <Button href="/jobs" variant="outline" size="sm">Open Jobs &amp; progress</Button>
+                <Button variant="outline" size="sm" onClick={() => setBulkPublishReport(null)}>Dismiss</Button>
+              </div>
+            </SectionPanel>
+          ) : null}
+          {bulkPreflightProgress ? (
+            <SectionPanel title="Marketplace preflight in progress" description={`Checking ${bulkPreflightProgress.completed} of ${bulkPreflightProgress.total} selected listing${bulkPreflightProgress.total === 1 ? '' : 's'} in small timeout-safe batches.`}>
+              <div className="h-2 overflow-hidden rounded-full bg-[#eaecf0]" aria-label="Preflight progress">
+                <div className="h-full rounded-full bg-[#2563eb] transition-all" style={{ width: `${Math.max(3, Math.round((bulkPreflightProgress.completed / Math.max(1, bulkPreflightProgress.total)) * 100))}%` }} />
+              </div>
+            </SectionPanel>
+          ) : null}
+          {listingError ? <SectionPanel tone="danger" title="Catalog could not load"><p className="text-sm">{listingError}</p></SectionPanel> : null}
+          <SectionPanel title={`${activeTabLabel} · page ${listingPagination.page} of ${listingPagination.total_pages}`} description="Select listings for approval or publishing, or open one to review its marketplace preview, photos, details, and readiness.">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3 border-b border-[#eaecf0] pb-3">
+              <p className="text-sm text-[#667085]">Showing {filteredListings.length} records on this page.</p>
+              <div className="flex items-center gap-2"><Button size="sm" variant="outline" disabled={listingPagination.page <= 1} onClick={() => { setCatalogPage(Math.max(1, listingPagination.page - 1)); setSelectedIds([]); }}>Previous</Button><span className="text-sm font-semibold text-[#344054]">{listingPagination.page} / {listingPagination.total_pages}</span><Button size="sm" variant="outline" disabled={listingPagination.page >= listingPagination.total_pages} onClick={() => { setCatalogPage(Math.min(listingPagination.total_pages, listingPagination.page + 1)); setSelectedIds([]); }}>Next</Button></div>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              {filteredListings.map((listing) => (
+                <article key={listing.id} className={`rounded-[16px] border bg-white p-3 transition ${selectedIds.includes(listing.id) ? 'border-[#2563eb] ring-2 ring-[#dbeafe]' : 'border-[#e5e7eb] hover:border-[#a9c5ff] hover:shadow-[0_10px_24px_rgba(37,99,235,0.08)]'}`}>
+                  <div className="flex gap-2">
+                    <label className="flex w-5 shrink-0 cursor-pointer items-start pt-1" title={`Select ${getListingTitle(listing)}`}>
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.includes(listing.id)}
+                        onChange={() => toggleRow(listing.id)}
+                        aria-label={`Select ${getListingTitle(listing)}`}
+                        className="h-4 w-4 rounded border-[#98a2b3] text-[#2563eb]"
+                      />
+                    </label>
+                    <Link href={`/listings/${listing.id}?mode=preview`} className="group min-w-0 flex-1">
+                  <div className="flex gap-3">
+                    <div className="h-20 w-20 shrink-0 overflow-hidden rounded-[10px] bg-[#f2f4f7]">
+                      {getListingThumbnail(listing) ? <img src={toThumbnailImageUrl(getListingThumbnail(listing), 240, 240)} alt="" loading="lazy" decoding="async" className="h-full w-full object-cover" /> : <div className="flex h-full items-center justify-center text-xs text-[#98a2b3]">No image</div>}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="line-clamp-2 text-sm font-semibold text-[#101828]">{getListingTitle(listing)}</p>
+                      <p className="mt-1 text-base font-bold text-[#101828]">${getListingPrice(listing)}</p>
+                      <p className="mt-1 text-xs text-[#667085]">#{listing.id} · {getListingBucket(listing).replaceAll('_', ' ')}</p>
+                    </div>
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-1.5">
+                    {(getListingMarketplaces(listing, enabledPlatforms, { allowFallback: false }).length ? getListingMarketplaces(listing, enabledPlatforms, { allowFallback: false }) : ['unassigned']).map((market) => <span key={market} className="rounded-full bg-[#f2f4f7] px-2 py-1 text-[11px] font-semibold text-[#475467]">{formatMarketplace(market)}</span>)}
+                  </div>
+                  </Link>
+                  </div>
+                </article>
+              ))}
+              {!filteredListings.length ? <p className="col-span-full rounded-[12px] border border-dashed border-[#d0d5dd] p-6 text-center text-sm text-[#667085]">No listings match this page’s filters.</p> : null}
+            </div>
+            <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-[#eaecf0] pt-4">
+              <p className="text-sm text-[#667085]">Showing {filteredListings.length} records on this page.</p>
+              <div className="flex items-center gap-2"><Button size="sm" variant="outline" disabled={listingPagination.page <= 1} onClick={() => setCatalogPage(Math.max(1, listingPagination.page - 1))}>Previous</Button><span className="text-sm font-semibold text-[#344054]">{listingPagination.page} / {listingPagination.total_pages}</span><Button size="sm" variant="outline" disabled={listingPagination.page >= listingPagination.total_pages} onClick={() => setCatalogPage(Math.min(listingPagination.total_pages, listingPagination.page + 1))}>Next</Button></div>
+            </div>
+          </SectionPanel>
+        </PageFrame>
+      </AppShell>
+    );
+  }
+
   return (
     <AppShell
       active="/listings"
@@ -1640,23 +1929,32 @@ export default function ListingsPage() {
             sourceOptions={SOURCE_OPTIONS}
             readinessFilterOptions={READINESS_FILTER_OPTIONS}
             listingTabs={LISTING_TABS}
+            onClearAllFilters={clearAllFilters}
+            onFiltersChanged={() => setCatalogPage(1)}
+            catalogTotal={listingPagination.total}
+            catalogPage={listingPagination.page}
+            catalogPageSize={catalogPageSize}
+            onCatalogPageSizeChange={(nextSize) => {
+              setCatalogPageSize(nextSize);
+              setCatalogPage(1);
+              setSelectedIds([]);
+            }}
           />
         )}
       />
-      <div className="border-t border-[#e5e7eb] bg-white/82 px-5 py-5 lg:px-6">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+      <div className="border-t border-[#e5e7eb] bg-white/82 px-5 py-4 lg:px-6">
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] xl:items-center">
           <div>
             <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#667085]">Workspace mode</p>
-            <h3 className="mt-2 text-xl font-semibold tracking-[-0.03em] text-[#101828]">Choose one job instead of staring at everything</h3>
-            <p className="mt-1 max-w-2xl text-sm leading-6 text-[#667085]">
-              Results, repair work, launch QA, and queue follow-up are now separated. Switch modes to keep the page focused.
+            <h3 className="mt-1 text-lg font-semibold tracking-[-0.03em] text-[#101828]">Choose a focused workspace</h3>
+            <p className="mt-1 max-w-xl text-sm leading-6 text-[#667085]">
+              Results stays primary; repair, launch, and queue tools stay available without consuming the whole screen.
             </p>
+            <div className="mt-3 inline-flex rounded-full border border-[#dbe5f5] bg-white px-3 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-[#2563eb]">
+              Current mode: {workspaceModes.find((mode) => mode.key === workspaceMode)?.label}
+            </div>
           </div>
-          <div className="rounded-full border border-[#dbe5f5] bg-white px-3 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-[#2563eb]">
-            Current mode: {workspaceModes.find((mode) => mode.key === workspaceMode)?.label}
-          </div>
-        </div>
-        <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+        <div className="grid grid-cols-2 gap-2 md:grid-cols-5">
           {workspaceModes.map((mode) => {
             const Icon = mode.icon;
             const active = workspaceMode === mode.key;
@@ -1666,23 +1964,24 @@ export default function ListingsPage() {
                 type="button"
                 onClick={() => setWorkspaceMode(mode.key)}
                 className={[
-                  'rounded-[20px] border p-4 text-left transition',
+                  'rounded-[14px] border p-3 text-left transition',
                   active
                     ? 'border-[#bfd2ff] bg-[#f4f8ff] shadow-[0_14px_40px_rgba(37,99,235,0.12)]'
                     : 'border-[#e5e7eb] bg-white hover:border-[#cdd8ea] hover:bg-[#fbfcff]',
                 ].join(' ')}
               >
                 <div className="flex items-center justify-between gap-3">
-                  <span className={`inline-flex h-11 w-11 items-center justify-center rounded-2xl border ${active ? 'border-[#bfd2ff] bg-white text-[#2563eb]' : 'border-[#e5e7eb] bg-[#f8fafc] text-[#667085]'}`}>
-                    <Icon size={18} />
+                  <span className={`inline-flex h-9 w-9 items-center justify-center rounded-xl border ${active ? 'border-[#bfd2ff] bg-white text-[#2563eb]' : 'border-[#e5e7eb] bg-[#f8fafc] text-[#667085]'}`}>
+                    <Icon size={16} />
                   </span>
                   <span className="text-2xl font-semibold tracking-[-0.03em] text-[#101828]">{mode.count}</span>
                 </div>
-                <p className="mt-4 text-sm font-semibold text-[#101828]">{mode.label}</p>
-                <p className="mt-1 text-sm leading-6 text-[#667085]">{mode.description}</p>
+                <p className="mt-2 text-sm font-semibold text-[#101828]">{mode.label}</p>
+                <p className="mt-1 hidden text-xs leading-5 text-[#667085] xl:block">{mode.description}</p>
               </button>
             );
           })}
+        </div>
         </div>
       </div>
       </PageBand>
@@ -2075,6 +2374,22 @@ export default function ListingsPage() {
           ) : null}
         </Drawer>
       </div>
+      <div className="mt-5 flex flex-col gap-3 rounded-[16px] border border-[#e5e7eb] bg-white px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+        <p className="text-sm text-[#475467]">
+          Showing page {listingPagination.page} of {listingPagination.total_pages} · {listingPagination.total.toLocaleString()} listings in this catalog.
+        </p>
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="outline" disabled={listingPagination.page <= 1} onClick={() => { setCatalogPage(Math.max(1, listingPagination.page - 1)); setSelectedIds([]); }}>
+            Previous
+          </Button>
+          <span className="rounded-[8px] bg-[#f2f4f7] px-3 py-2 text-xs font-semibold text-[#344054]">
+            {listingPagination.page} / {listingPagination.total_pages}
+          </span>
+          <Button size="sm" variant="outline" disabled={listingPagination.page >= listingPagination.total_pages} onClick={() => { setCatalogPage(Math.min(listingPagination.total_pages, listingPagination.page + 1)); setSelectedIds([]); }}>
+            Next
+          </Button>
+        </div>
+      </div>
       </SectionPanel>
       ) : null}
 
@@ -2087,7 +2402,30 @@ export default function ListingsPage() {
         defaultOpen
       >
         <PageSplit columnsClassName="xl:grid-cols-[minmax(0,1fr)_380px]">
-          <PageMain>
+      <PageMain>
+        {listingError ? (
+          <SectionPanel
+            title="Catalog load needs attention"
+            description="PosterPro did not receive a listings response, so it is intentionally not presenting the catalog as empty."
+            tone="danger"
+            action={<Button size="sm" variant="outline" onClick={() => reload()}>Retry catalog</Button>}
+          >
+            <p className="text-sm text-[var(--pp-text-muted)]">
+              {listingError} Signed-in account: #{user?.id || 'unknown'}.
+            </p>
+          </SectionPanel>
+        ) : null}
+        {!listingError && listings.length === 0 ? (
+          <SectionPanel
+            title="No listings belong to this signed-in account"
+            description="PosterPro is showing the complete catalog for the current account; it has not applied a hidden recovery or Vine filter."
+            action={<Button size="sm" variant="outline" href="/login">Switch account</Button>}
+          >
+            <p className="text-sm text-[var(--pp-text-muted)]">
+              Signed-in account: #{user?.id || 'unknown'}. If you expected recovered inventory or Amazon Vine drafts here, sign out and use the recovery operator account, then select Clear all filters.
+            </p>
+          </SectionPanel>
+        ) : null}
             <ListingsStatusGrid workflowPreferences={workflowPreferences} listingMetrics={listingMetrics} formatMarketplace={formatMarketplace} />
           </PageMain>
 
@@ -2247,3 +2585,12 @@ export default function ListingsPage() {
 }
 
 ListingsPage.requireAuth = true;
+
+// Listing actions are safety-critical and must never be served from a stale
+// page document after a deployment. Next's hashed JS handles normal cache
+// invalidation; this header also prevents a browser/proxy retaining an older
+// HTML shell with obsolete bulk-action handlers.
+export async function getServerSideProps({ res }) {
+  res.setHeader('Cache-Control', 'no-store, max-age=0, must-revalidate');
+  return { props: {} };
+}

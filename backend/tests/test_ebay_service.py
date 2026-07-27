@@ -1,6 +1,7 @@
 import asyncio
 
 from app.models.enums import EbayPublishStatus
+from app.models.models import Listing, User
 from app.services import ebay_service
 
 
@@ -14,12 +15,14 @@ class DummyListing:
         self.suggested_price = 44.5
         self.ebay_publish_status = EbayPublishStatus.DRAFT
         self.marketplace_data = None
+        self.item_specifics = {}
         self.ebay_listing_id = None
         self.publish_attempts = []
 
 
 class DummyAccount:
     def __init__(self):
+        self.id = 1
         self.access_token = "token"
         self.refresh_token = "refresh-token"
 
@@ -36,6 +39,25 @@ class DummyDB:
 
     def refresh(self, _obj):
         return None
+
+
+def test_apply_ebay_plan_repairs_to_listing_persists_safe_category_and_specifics():
+    listing = DummyListing()
+    plan = {
+        "category": {"category_id": "171485", "category_name": "Lamps", "source": "ebay_taxonomy"},
+        "payload_preview": {
+            "item_specifics": {"Brand": ["Acme"], "Type": ["Desk Lamp"], "Features": ["Dimmable", "LED"]},
+            "item_specifics_provenance": {"Brand": "derived", "Type": "approximate"},
+            "item_specifics_approximate": ["Brand", "Type"],
+        },
+    }
+
+    ebay_service._apply_ebay_plan_repairs_to_listing(listing, plan)
+
+    assert listing.category_suggestion == "171485"
+    assert listing.item_specifics == {"Brand": "Acme", "Type": "Desk Lamp", "Features": ["Dimmable", "LED"]}
+    assert listing.marketplace_data["ebay_last_resolved_category"]["category_id"] == "171485"
+    assert listing.marketplace_data["ebay_item_specifics_provenance"]["Brand"] == "derived"
 
 
 def test_create_offer_for_item_uses_policy_ids(monkeypatch):
@@ -153,3 +175,69 @@ def test_publish_listing_to_ebay_invalid_item_error_sets_failed(monkeypatch):
 
     assert calls["item"] == 1
     assert listing.ebay_publish_status == EbayPublishStatus.FAILED
+
+
+def test_read_only_active_listing_check_refreshes_stale_invalid_access_token(monkeypatch):
+    account = DummyAccount()
+    refreshed = DummyAccount()
+    refreshed.access_token = "fresh-token"
+    calls = {"requests": 0, "refreshes": 0}
+
+    async def fake_get_account(_user_id, _db):
+        return account
+
+    async def fake_refresh(_user_id, _db):
+        calls["refreshes"] += 1
+        return refreshed
+
+    async def fake_request(self, method, path, **_kwargs):
+        assert method == "GET" and path == "/sell/inventory/v1/offer"
+        calls["requests"] += 1
+        if calls["requests"] == 1:
+            raise ebay_service.EbayIntegrationError("eBay API request failed (401) for /sell/inventory/v1/offer")
+        assert self.access_token == "fresh-token"
+        return {"offers": []}
+
+    monkeypatch.setattr(ebay_service, "get_or_refresh_account", fake_get_account)
+    monkeypatch.setattr(ebay_service, "refresh_ebay_token", fake_refresh)
+    monkeypatch.setattr(ebay_service.EbayAPIClient, "request", fake_request)
+
+    assert asyncio.run(ebay_service.get_active_ebay_listings(1, DummyDB())) == []
+    assert calls == {"requests": 2, "refreshes": 1}
+
+
+def test_read_only_ebay_sync_creates_idempotent_local_history_for_unmatched_remote_offer(db_session, monkeypatch):
+    user = User(email="ebay-history@example.com")
+    db_session.add(user)
+    db_session.commit()
+
+    async def fake_get_account(_user_id, _db):
+        return DummyAccount()
+
+    remote = {
+        "source_url": "https://www.ebay.com/itm/123456789012",
+        "title": "Remote eBay item",
+        "description": "Imported from active eBay inventory.",
+        "listing_price": 24.99,
+        "quantity": 1,
+        "image_urls": ["https://i.ebayimg.com/images/g/example/s-l1600.jpg"],
+        "item_specifics": {"Brand": "Acme"},
+        "category_id": "123",
+        "condition": "New",
+        "source_identifiers": {"ebay_listing_id": "123456789012", "offer_id": "offer-1", "sku": "remote-sku-1"},
+    }
+
+    async def fake_active(_user_id, _db, **_kwargs):
+        return [remote]
+
+    monkeypatch.setattr(ebay_service, "get_or_refresh_account", fake_get_account)
+    monkeypatch.setattr(ebay_service, "get_active_ebay_listings", fake_active)
+
+    first = asyncio.run(ebay_service.sync_ebay_active_listings(user.id, db_session))
+    second = asyncio.run(ebay_service.sync_ebay_active_listings(user.id, db_session))
+    listing = db_session.query(Listing).filter_by(user_id=user.id, ebay_listing_id="123456789012").one()
+
+    assert first["created"] == 1
+    assert second["created"] == 0
+    assert listing.source_type == "ebay_history_reconciliation"
+    assert listing.ebay_publish_status == EbayPublishStatus.POSTED

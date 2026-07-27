@@ -94,6 +94,10 @@ export default function EbaySettingsPage() {
         marketplace_id: 'EBAY_US',
         create_missing_defaults: createMissingDefaults,
       });
+      const syncStatus = String(report?.status || '').toLowerCase();
+      if (!['updated', 'synced', 'created_defaults'].includes(syncStatus)) {
+        throw new Error(report?.sync_error || report?.policy_settings?.policy_sync_error || `eBay policy sync did not complete (status: ${syncStatus || 'unknown'}).`);
+      }
       setEbayPolicyCatalog(report);
       await reload();
       toast.success(createMissingDefaults ? 'Default policies created or synced.' : 'eBay policies synced.');
@@ -107,7 +111,11 @@ export default function EbaySettingsPage() {
   const verifyLocation = async () => {
     setVerifyingLocation(true);
     try {
-      await verifyEbayMerchantLocation({ marketplace_id: 'EBAY_US' });
+      const report = await verifyEbayMerchantLocation({ marketplace_id: 'EBAY_US' });
+      const locationStatus = String(report?.status || '').toLowerCase();
+      if (!['verified', 'created'].includes(locationStatus)) {
+        throw new Error(report?.error || report?.settings_updates?.merchant_location_error || `eBay merchant location was not verified (status: ${locationStatus || 'unknown'}).`);
+      }
       await reload();
       toast.success('Merchant location verified.');
     } catch (error) {
@@ -120,10 +128,14 @@ export default function EbaySettingsPage() {
   const createLocation = async () => {
     setCreatingLocation(true);
     try {
-      await createEbayMerchantLocation({
+      const report = await createEbayMerchantLocation({
         marketplace_id: 'EBAY_US',
         ...DEFAULT_LOCATION,
       });
+      const locationStatus = String(report?.status || '').toLowerCase();
+      if (!['verified', 'created'].includes(locationStatus)) {
+        throw new Error(report?.error || report?.settings_updates?.merchant_location_error || `eBay merchant location was not saved (status: ${locationStatus || 'unknown'}).`);
+      }
       await reload();
       toast.success('Merchant location saved.');
     } catch (error) {

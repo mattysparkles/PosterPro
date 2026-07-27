@@ -1401,22 +1401,25 @@ export default function ListingEditor({
             const enabled = selectedPlatforms.includes(market);
             const status = statusMap[market] || "Not published";
             return (
-              <button
+              <label
                 key={market}
-                type="button"
-                className={`rounded-[10px] border p-3 text-left transition ${
+                className={`cursor-pointer rounded-[10px] border p-3 text-left transition ${
                   enabled ? 'border-[#2563eb] bg-[#eef4ff]' : 'border-[#e5e7eb] bg-white'
                 }`}
-                onClick={() => togglePlatform(market)}
               >
-                <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    checked={enabled}
+                    onChange={() => togglePlatform(market)}
+                    className="h-4 w-4 rounded border-[#d0d5dd] text-[#2563eb] focus:ring-[#dbeafe]"
+                  />
                   <span className="text-sm font-semibold capitalize text-[#101828]">{market}</span>
-                  <span className={`inline-block h-2.5 w-2.5 rounded-full ${enabled ? 'bg-[#2563eb]' : 'bg-[#d0d5dd]'}`} />
                 </div>
                 <span className="mt-2 inline-block rounded-full border border-[#e5e7eb] bg-[#f9fafb] px-2 py-0.5 text-xs font-medium text-[#667085]">
                   {status}
                 </span>
-              </button>
+              </label>
             );
           })}
         </div>

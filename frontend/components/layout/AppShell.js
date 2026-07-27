@@ -1,4 +1,5 @@
 /* eslint-disable @next/next/no-html-link-for-pages */
+import Link from 'next/link';
 import { useRouter } from 'next/router';
 import { useEffect, useState } from 'react';
 import {
@@ -84,7 +85,7 @@ function NavGroup({ title, description, items, isSelected, onNavigate, collapsed
           const Icon = item.icon;
           const selected = isSelected(item.href);
           return (
-            <a
+            <Link
               key={item.href}
               href={item.href}
               onClick={onNavigate}
@@ -108,7 +109,7 @@ function NavGroup({ title, description, items, isSelected, onNavigate, collapsed
                   <span className="mt-0.5 block text-xs leading-5 text-[var(--pp-shell-soft-copy)]">{title}</span>
                 </span>
               ) : null}
-            </a>
+            </Link>
           );
         })}
       </div>
@@ -192,7 +193,7 @@ export default function AppShell({
   const renderNav = (onNavigate) => (
     <div className="space-y-4">
       <section className="pp-sidebar-brand-panel p-5 text-[var(--pp-shell-copy)]">
-        <a href="/app" className="flex items-center gap-3">
+        <Link href="/app" className="flex items-center gap-3">
           <div className="pp-sidebar-brand-mark flex h-12 w-12 items-center justify-center rounded-[18px] font-[var(--pp-heading-font)] text-xl font-bold text-white">
             PP
           </div>
@@ -202,7 +203,7 @@ export default function AppShell({
             <p className="text-sm text-[var(--pp-shell-soft-copy)]">Reseller operations system</p>
           </div>
           ) : null}
-        </a>
+        </Link>
         {!sidebarCollapsed ? (
         <div className="mt-5 grid gap-3">
           <div className="rounded-[18px] border border-white/10 bg-white/5 px-3 py-3">
@@ -274,9 +275,9 @@ export default function AppShell({
                 type="button"
                 onClick={typeof item.onClick === 'function' ? item.onClick : undefined}
                 className={[
-                  'rounded-full border px-3 py-2 text-sm font-semibold transition',
+                  'pp-shell-chip rounded-full border px-3 py-2 text-sm font-semibold transition',
                   item.active
-                    ? 'border-[#bfd4ef] bg-[var(--pp-primary)] text-white'
+                    ? 'is-active border-[#bfd4ef] bg-[var(--pp-primary)] text-white'
                     : 'border-[var(--pp-border)] bg-[var(--pp-surface-strong)] text-[var(--pp-muted)] hover:border-[#b8a98d] hover:bg-white hover:text-[var(--pp-text)]',
                 ].join(' ')}
               >
@@ -299,14 +300,14 @@ export default function AppShell({
         <div className="pp-shell-content-wrap min-w-0">
           <header className="pp-shell-header-surface sticky top-0 z-30 backdrop-blur-xl">
             <div className="mx-auto flex w-full max-w-[1520px] items-center gap-3 px-4 py-3 md:px-6">
-              <Button variant="secondary" size="sm" className="gap-2 px-3 shadow-none md:hidden" onClick={() => setMobileMenuOpen(true)} aria-label="Open navigation">
+              <Button variant="secondary" size="sm" className="gap-2 px-3 shadow-none" onClick={() => setMobileMenuOpen(true)} aria-label="Open navigation menu" title="Open navigation menu">
                 <Menu size={18} />
                 Menu
               </Button>
               <Button
                 variant="secondary"
                 size="sm"
-                className="hidden gap-2 px-3 shadow-none md:inline-flex"
+                className="hidden gap-2 px-3 shadow-none xl:inline-flex"
                 onClick={toggleSidebar}
                 aria-label={sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'}
                 title={sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'}
@@ -341,11 +342,13 @@ export default function AppShell({
                 />
               </form>
 
-              <a href="/intake" className="hidden lg:inline-flex">
-                <Button variant="outline" size="sm">
-                  Quick import
-                </Button>
-              </a>
+              <Button href="/intake" variant="outline" size="sm" className="hidden lg:inline-flex">
+                Quick import
+              </Button>
+              <Button href="/settings" variant="outline" size="sm" className="inline-flex">
+                <Settings2 size={15} />
+                Settings
+              </Button>
 
               <button
                 type="button"
@@ -359,47 +362,35 @@ export default function AppShell({
             </div>
           </header>
 
-          <main className="mx-auto w-full max-w-[1520px] px-4 py-6 pb-24 md:px-6">
-            <div className="space-y-6">
-              <div className="pp-shell-lane-strip px-1">
-                <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-                  <div className="min-w-0">
-                    <p className="pp-topbar-kicker">{currentGroup?.label || 'Workspace lane'}</p>
-                    <p className="mt-2 text-sm leading-6 text-[var(--pp-muted)]">
-                      {currentGroup?.description || 'Move between related tools without hunting through a single long page.'}
-                    </p>
-                  </div>
-                  <div className="grid min-w-0 flex-1 gap-2 sm:grid-cols-2 xl:max-w-[760px] xl:grid-cols-4">
-                    {currentGroupItems.map((item) => {
-                      const Icon = item.icon || Settings2;
-                      const selected = isSelected(item.href);
-                      return (
-                        <a
-                          key={item.href}
-                          href={item.href}
-                          className={`pp-shell-lane-link ${selected ? 'is-active' : ''}`}
-                        >
-                          <span className="pp-shell-lane-icon">
-                            <Icon size={16} />
-                          </span>
-                          <span className="min-w-0">
-                            <span className="block truncate text-sm font-semibold">{item.label}</span>
-                            <span className="mt-1 block text-xs text-[var(--pp-muted)]">{currentGroup.label}</span>
-                          </span>
-                        </a>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
+          <main className="mx-auto w-full max-w-[1520px] px-4 py-4 pb-20 md:px-6">
+            <div className="space-y-4">
+              <nav aria-label={`${currentGroup?.label || 'Workspace'} shortcuts`} className="pp-shell-lane-strip flex items-center gap-2 overflow-x-auto px-1 py-1">
+                <span className="hidden shrink-0 text-xs font-semibold uppercase tracking-[0.12em] text-[var(--pp-muted)] lg:inline">
+                  {currentGroup?.label || 'Workspace'}
+                </span>
+                {currentGroupItems.map((item) => {
+                  const Icon = item.icon || Settings2;
+                  const selected = isSelected(item.href);
+                  return (
+                    <Link
+                      key={item.href}
+                      href={item.href}
+                      className={`pp-shell-lane-link shrink-0 ${selected ? 'is-active' : ''}`}
+                    >
+                      <span className="pp-shell-lane-icon"><Icon size={15} /></span>
+                      <span className="text-sm font-semibold">{item.label}</span>
+                    </Link>
+                  );
+                })}
+              </nav>
               {sectionBadge}
-              <div className={`mx-auto w-full ${contentWidthClass} min-w-0 space-y-6 ${contentClassName}`}>{children}</div>
+              <div className={`mx-auto w-full ${contentWidthClass} min-w-0 space-y-4 ${contentClassName}`}>{children}</div>
             </div>
           </main>
         </div>
       </div>
 
-      <Drawer open={mobileMenuOpen} onClose={() => setMobileMenuOpen(false)} title="Main menu" description="Jump to the core workspace areas from one place." widthClassName="max-w-[440px]">
+      <Drawer open={mobileMenuOpen} onClose={() => setMobileMenuOpen(false)} title="Main menu" description="All core areas, marketplace setup, and settings are available here." widthClassName="max-w-[440px]">
         <div className="space-y-4">{renderNav(() => setMobileMenuOpen(false))}</div>
       </Drawer>
     </div>

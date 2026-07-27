@@ -33,8 +33,10 @@ def sales_dashboard(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    scoped_user_id = resolve_user_scope(current_user, user_id)
-    stmt = select(Sale).join(Listing, Listing.id == Sale.listing_id, isouter=True).where(Sale.user_id == scoped_user_id)
+    scoped_user_id = resolve_user_scope(current_user, user_id) if user_id is not None else None
+    stmt = select(Sale).join(Listing, Listing.id == Sale.listing_id, isouter=True)
+    if scoped_user_id is not None:
+        stmt = stmt.where(Sale.user_id == scoped_user_id)
     if marketplace and marketplace in MarketplaceName._value2member_map_:
         stmt = stmt.where(Sale.platform == MarketplaceName(marketplace))
     if search:
@@ -69,6 +71,19 @@ def sales_dashboard(
     gross_sales = sum(float(s.amount or 0.0) for s in sales)
     total_profit = sum(float(s.profit or 0.0) for s in sales)
     units = sum(int(s.quantity or 1) for s in sales)
+    platform_stmt = select(
+        Sale.platform,
+        func.count(Sale.id),
+        func.sum(Sale.amount),
+        func.sum(Sale.fees_actual),
+        func.sum(Sale.shipping_cost),
+        func.sum(Sale.promotional_fees),
+        func.sum(Sale.marketplace_fees),
+        func.sum(Sale.profit),
+    )
+    if scoped_user_id is not None:
+        platform_stmt = platform_stmt.where(Sale.user_id == scoped_user_id)
+    platform_stmt = platform_stmt.group_by(Sale.platform)
     by_platform = {
         getattr(row[0], "value", row[0]): {
             "count": row[1],
@@ -79,18 +94,7 @@ def sales_dashboard(
             "marketplace_fees": float(row[6] or 0),
             "profit": float(row[7] or 0),
         }
-        for row in db.execute(
-            select(
-                Sale.platform,
-                func.count(Sale.id),
-                func.sum(Sale.amount),
-                func.sum(Sale.fees_actual),
-                func.sum(Sale.shipping_cost),
-                func.sum(Sale.promotional_fees),
-                func.sum(Sale.marketplace_fees),
-                func.sum(Sale.profit),
-            ).where(Sale.user_id == scoped_user_id).group_by(Sale.platform)
-        ).all()
+        for row in db.execute(platform_stmt).all()
     }
     return {
         "user_id": scoped_user_id,
@@ -261,8 +265,11 @@ def export_sales_csv(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    scoped_user_id = resolve_user_scope(current_user, user_id)
-    sales = db.execute(select(Sale).where(Sale.user_id == scoped_user_id).order_by(Sale.sold_at.desc().nullslast())).scalars().all()
+    scoped_user_id = resolve_user_scope(current_user, user_id) if user_id is not None else None
+    stmt = select(Sale).order_by(Sale.sold_at.desc().nullslast())
+    if scoped_user_id is not None:
+        stmt = stmt.where(Sale.user_id == scoped_user_id)
+    sales = db.execute(stmt).scalars().all()
     buffer = io.StringIO()
     writer = csv.writer(buffer)
     writer.writerow(["sale_id", "listing_id", "platform", "amount", "currency", "quantity", "fees_actual", "shipping_cost", "promotional_fees", "marketplace_fees", "profit", "roi_percentage", "sold_at", "status"])
@@ -298,8 +305,11 @@ def export_inventory_csv(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    scoped_user_id = resolve_user_scope(current_user, user_id)
-    listings = db.execute(select(Listing).where(Listing.user_id == scoped_user_id).order_by(Listing.updated_at.desc())).scalars().all()
+    scoped_user_id = resolve_user_scope(current_user, user_id) if user_id is not None else None
+    stmt = select(Listing).order_by(Listing.updated_at.desc())
+    if scoped_user_id is not None:
+        stmt = stmt.where(Listing.user_id == scoped_user_id)
+    listings = db.execute(stmt).scalars().all()
     buffer = io.StringIO()
     writer = csv.writer(buffer)
     writer.writerow(["listing_id", "title", "status", "marketplace", "listing_price", "sale_price", "quantity", "updated_at"])

@@ -13,10 +13,11 @@ from fastapi import UploadFile
 from app.core.config import settings
 from app.api.schemas import VineImportActionRequest
 from app.api.vine_imports import create_vine_drafts, create_vine_inventory, list_vine_batches, repair_vine_images, upload_vine_report
-from app.models.models import Image, Listing, ProductMediaCache, User, VineImportItem
+from app.models.models import Image, Listing, ProductMediaCache, User, VineImportBatch, VineImportItem
 from app.services.amazon_media import AmazonProductMediaProvider
 from app.services.amazon_product_discovery import AmazonProductDiscoveryService
 from app.services.listing_review import normalize_listing_images
+from app.services.listing_review import derive_shipping_profile
 from app.services.vine_import_service import VineImportService, _is_unsafe_vine_image
 from app.services.vine_parser import calculate_vine_eligibility, parse_vine_csv, parse_vine_pdf, parse_vine_xlsx
 from app.services.vine_policy import review_vine_product
@@ -157,6 +158,13 @@ def build_sample_csv():
     ).encode("utf-8")
 
 
+def _write_cached_media_file(tmp_path, relative_path: str) -> str:
+    target = tmp_path / relative_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"posterpro-test-image")
+    return f"/media/{relative_path}"
+
+
 def test_xlsx_header_detection_and_field_extraction():
     rows = parse_vine_xlsx(build_sample_xlsx(), reference_date=date(2026, 5, 5))
     assert len(rows) == 4
@@ -287,14 +295,37 @@ def test_media_fetch_failure_does_not_fail_import(monkeypatch, db_session):
     assert (result.get("blocked", 0) + result.get("manual_review_needed", 0)) >= 1
 
 
-def test_cached_media_url_lookup_is_safe_when_cache_missing_or_partial(db_session):
+def test_cached_media_url_lookup_is_safe_when_cache_missing_or_partial(db_session, monkeypatch, tmp_path):
     service = VineImportService()
+    monkeypatch.setattr(settings, "storage_root", tmp_path)
     assert service._lookup_cached_media_urls(db_session, None) == []
     assert service._lookup_cached_media_urls(db_session, "B000MISS00") == []
 
-    db_session.add(ProductMediaCache(asin="B000TEST10", marketplace_region="US", primary_image_url="/media/primary.jpg"))
+    db_session.add(
+        ProductMediaCache(
+            asin="B000TEST10",
+            marketplace_region="US",
+            primary_image_url=_write_cached_media_file(tmp_path, "primary.jpg"),
+        )
+    )
     db_session.commit()
     assert service._lookup_cached_media_urls(db_session, "B000TEST10") == ["/media/primary.jpg"]
+
+
+def test_cached_media_url_lookup_skips_missing_local_media(db_session, monkeypatch, tmp_path):
+    service = VineImportService()
+    monkeypatch.setattr(settings, "storage_root", tmp_path)
+    db_session.add(
+        ProductMediaCache(
+            asin="B000MISS11",
+            marketplace_region="US",
+            fetch_status="fetched",
+            primary_image_url="/media/amazon-vine/missing-primary.jpg",
+            gallery_image_urls_json=["/media/amazon-vine/missing-gallery.jpg"],
+        )
+    )
+    db_session.commit()
+    assert service._lookup_cached_media_urls(db_session, "B000MISS11") == []
 
 
 def test_amazon_media_provider_uses_owner_user_and_region(monkeypatch, db_session):
@@ -694,11 +725,109 @@ def test_create_listing_drafts_uses_amazon_discovery_for_images_and_description(
     assert listing.condition == "New"
 
 
-def test_repair_vine_listing_images_replaces_unsafe_sources_with_amazon_cache(db_session):
+def test_vine_draft_uses_amazon_facts_for_category_price_shipping_and_rewritten_copy(monkeypatch, db_session):
+    user = User(email=f"vine-facts-{uuid4()}@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+    service = VineImportService()
+    batch = VineImportBatch(user_id=user.id, filename="vine.xlsx", source_type="xlsx")
+    db_session.add(batch)
+    db_session.flush()
+    item = VineImportItem(
+        batch_id=batch.id,
+        user_id=user.id,
+        asin="B0POOL0001",
+        product_name="Portable Pool Pump with Filter",
+        category="Collectibles > Cameras",
+        estimated_tax_value=0,
+        eligibility_status="eligible",
+    )
+    db_session.add(item)
+    db_session.commit()
+
+    monkeypatch.setattr(
+        AmazonProductDiscoveryService,
+        "discover_for_vine_item",
+        lambda *args, **kwargs: {
+            "status": "matched", "confidence": "high", "asin": "B0POOL0001",
+            "source_page_url": "https://www.amazon.com/dp/B0POOL0001",
+            "images": ["/media/amazon-vine/pool-pump.jpg"], "local_asset_ids": [], "image_status": "fetched",
+            "description": "Original Amazon copy that should not be pasted word for word.",
+            "product_facts": {
+                "title": "AquaFlow Portable Pool Pump with Filter",
+                "current_price": 8.99,
+                "feature_bullets": ["Compact filter pump for above-ground pools"],
+                "specifications": {"Power Source": "Corded electric"},
+                "breadcrumbs": ["Patio, Lawn & Garden", "Pools & Spas", "Pool Pumps"],
+            },
+        },
+    )
+
+    result = service.create_listing_drafts(db_session, batch=batch, item_ids=[item.id], allow_drafts_without_media=True)
+    assert result["created"] == 1
+    listing = db_session.get(Listing, item.listing_id)
+    assert listing is not None
+    assert listing.category_suggestion.endswith("Pool Pumps")
+    assert listing.listing_price == 8.99
+    assert listing.suggested_price == 8.99
+    assert listing.marketplace_data["shipping"]["buyer_pays_shipping"] is True
+    assert listing.marketplace_data["shipping"]["free_shipping"] is False
+    assert "Original Amazon copy" not in (listing.description or "")
+    assert listing.source_metadata["amazon_product_facts"]["current_price"] == 8.99
+
+
+def test_vine_draft_uses_seller_paid_shipping_at_ten_or_more(monkeypatch, db_session):
+    user = User(email=f"vine-shipping-{uuid4()}@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.flush()
+    batch = VineImportBatch(user_id=user.id, filename="vine.xlsx", source_type="xlsx")
+    db_session.add(batch)
+    db_session.flush()
+    item = VineImportItem(batch_id=batch.id, user_id=user.id, asin="B0PRICE001", product_name="Desk Lamp", estimated_tax_value=0, eligibility_status="eligible")
+    db_session.add(item)
+    db_session.commit()
+    monkeypatch.setattr(AmazonProductDiscoveryService, "discover_for_vine_item", lambda *args, **kwargs: {
+        "status": "matched", "asin": item.asin, "images": [], "local_asset_ids": [], "image_status": "pending",
+        "description": "", "product_facts": {"current_price": 10.00, "title": "Desk Lamp"},
+    })
+    service.create_listing_drafts(db_session, batch=batch, item_ids=[item.id], allow_drafts_without_media=True)
+    listing = db_session.get(Listing, item.listing_id)
+    assert listing is not None
+    assert listing.marketplace_data["shipping"]["buyer_pays_shipping"] is False
+    assert listing.marketplace_data["shipping"]["free_shipping"] is True
+
+
+def test_vine_category_and_pricing_policy_uses_product_facts_without_etv():
+    service = VineImportService()
+    pool_pump = VineImportItem(
+        product_name="Pool Booster Pump Compatible With Pools",
+        category="Collectibles > Cameras",
+        estimated_tax_value=0,
+    )
+    category, source = service._resolve_category(pool_pump, amazon_facts={"current_price": 287.0})
+    pricing = service._pricing_from_amazon(pool_pump, amazon_facts={"current_price": 8.99})
+    assert category.endswith("Pool Pumps")
+    assert source == "product_keyword"
+    assert pricing["listing_price"] == 8.99
+    assert pricing["price_source"] == "amazon_current_price"
+
+
+def test_shared_shipping_policy_charges_buyer_below_ten_dollars():
+    low = derive_shipping_profile(listing={"listing_price": 9.99})
+    regular = derive_shipping_profile(listing={"listing_price": 10.00})
+    assert low["buyer_pays_shipping"] is True
+    assert low["free_shipping"] is False
+    assert regular["buyer_pays_shipping"] is False
+    assert regular["free_shipping"] is True
+
+
+def test_repair_vine_listing_images_replaces_unsafe_sources_with_amazon_cache(db_session, monkeypatch, tmp_path):
     user = User(email=f"vine-repair-{uuid4()}@example.com", role="owner", is_admin=True)
     db_session.add(user)
     db_session.commit()
     db_session.refresh(user)
+    monkeypatch.setattr(settings, "storage_root", tmp_path)
 
     service = VineImportService()
     batch = service.create_batch_from_upload(
@@ -737,8 +866,11 @@ def test_repair_vine_listing_images_replaces_unsafe_sources_with_amazon_cache(db
         )
     cache.fetch_status = "fetched"
     cache.source_provider = "page_metadata"
-    cache.primary_image_url = "/media/amazon-vine/good.jpg"
-    cache.gallery_image_urls_json = ["/media/amazon-vine/good.jpg", "/media/amazon-vine/second.jpg"]
+    cache.primary_image_url = _write_cached_media_file(tmp_path, "amazon-vine/good.jpg")
+    cache.gallery_image_urls_json = [
+        _write_cached_media_file(tmp_path, "amazon-vine/good.jpg"),
+        _write_cached_media_file(tmp_path, "amazon-vine/second.jpg"),
+    ]
     cache.local_asset_ids_json = []
     db_session.add(cache)
     db_session.commit()
@@ -761,6 +893,38 @@ def test_repair_vine_listing_images_replaces_unsafe_sources_with_amazon_cache(db
     assert all(image.get("is_reference") is False for image in (refreshed.listing_images or []))
     assert "vine" not in (refreshed.description or "").lower()
     assert refreshed.condition == "New"
+
+
+def test_repair_vine_listing_images_is_scoped_to_requested_batch(db_session, monkeypatch):
+    user = User(email=f"vine-batch-scope-{uuid4()}@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.flush()
+    batch_a = VineImportBatch(user_id=user.id, filename="first.xlsx", source_type="xlsx")
+    batch_b = VineImportBatch(user_id=user.id, filename="second.xlsx", source_type="xlsx")
+    listing_a = Listing(user_id=user.id, title="First batch item", source_type="amazon_vine")
+    listing_b = Listing(user_id=user.id, title="Second batch item", source_type="amazon_vine")
+    db_session.add_all([batch_a, batch_b, listing_a, listing_b])
+    db_session.flush()
+    item_a = VineImportItem(batch_id=batch_a.id, user_id=user.id, asin="B000SCOPE1", product_name="First", eligibility_status="eligible", listing_id=listing_a.id)
+    item_b = VineImportItem(batch_id=batch_b.id, user_id=user.id, asin="B000SCOPE2", product_name="Second", eligibility_status="eligible", listing_id=listing_b.id)
+    db_session.add_all([item_a, item_b])
+    db_session.commit()
+
+    seen = []
+    def _discover(self, *, asin=None, **kwargs):  # noqa: ANN001
+        seen.append(asin)
+        return {}
+
+    monkeypatch.setattr(AmazonProductDiscoveryService, "discover_for_vine_item", _discover)
+    result = VineImportService().repair_vine_listing_images(
+        db_session,
+        user_id=user.id,
+        batch_id=batch_a.id,
+        force_refresh=True,
+        use_bridge_session=False,
+    )
+    assert result["processed"] == 1
+    assert seen == ["B000SCOPE1"]
 
 
 def test_discover_for_vine_item_allows_title_search(db_session, monkeypatch):
@@ -1140,6 +1304,48 @@ def test_vine_auto_build_processes_only_new_rows(db_session, monkeypatch):
     new_item = next(item for item in batch_b_items if item.asin == "B000CSV002")
     assert duplicate_item.listing_id is None
     assert new_item.listing_id is not None
+
+
+def test_upload_vine_report_triggers_auto_build_new_only(db_session, monkeypatch):
+    settings.amazon_vine_import_enabled = True
+    owner = User(email=f"vine-upload-autobuild-{uuid4()}@example.com", role="owner", is_admin=True)
+    db_session.add(owner)
+    db_session.commit()
+    db_session.refresh(owner)
+
+    seen: dict[str, object] = {}
+
+    def _fake_auto_build(db, *, batch, item_ids, new_only, include_cancelled):  # noqa: ANN001
+        seen["batch_id"] = batch.id
+        seen["item_ids"] = item_ids
+        seen["new_only"] = new_only
+        seen["include_cancelled"] = include_cancelled
+        batch.stats_json = {
+            **(batch.stats_json or {}),
+            "auto_build_processed": 1,
+        }
+        db.add(batch)
+        db.commit()
+        return {
+            "batch_id": batch.id,
+            "processed_item_ids": [],
+            "listing_ids": [],
+            "new_only": new_only,
+            "duplicates_skipped": 0,
+            "draft_result": {"created": 0, "updated": 0, "skipped": 0, "created_listing_ids": []},
+            "repair_result": {"updated": 0, "removed_unsafe": 0, "already_present": 0, "missing_asin": 0, "bridge_refetched": 0, "bridge_failed": 0},
+        }
+
+    monkeypatch.setattr("app.api.vine_imports.service.auto_build_batch_drafts", _fake_auto_build)
+
+    upload = UploadFile(filename="vine.xlsx", file=BytesIO(build_sample_xlsx()))
+    batch = asyncio.run(upload_vine_report(file=upload, db=db_session, current_user=owner))
+
+    assert seen["batch_id"] == batch.id
+    assert seen["item_ids"] is None
+    assert seen["new_only"] is True
+    assert seen["include_cancelled"] is False
+    assert batch.stats_json and batch.stats_json.get("auto_build_processed") == 1
 
 
 def test_repair_vine_images_route_maps_item_ids_to_listing_ids(db_session, monkeypatch):

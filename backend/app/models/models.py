@@ -1,15 +1,30 @@
 from datetime import date, datetime
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, Enum, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Date, DateTime, Enum, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy.types import TypeDecorator
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+from app.core.config import settings
+from app.core.secrets import decrypt_secret_if_needed, encrypt_secret
 from app.models.enums import EbayPublishStatus, ListingStatus, MarketplaceListingStatus, MarketplaceName
 
 
 class TimestampMixin:
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class EncryptedTokenText(TypeDecorator):
+    """Transparent at-rest encryption with backward-compatible legacy reads."""
+    impl = Text
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        return encrypt_secret(value, secret_key=settings.session_secret) if value else value
+
+    def process_result_value(self, value, dialect):
+        return decrypt_secret_if_needed(value, secret_key=settings.session_secret) if value else value
 
 
 class User(Base, TimestampMixin):
@@ -136,6 +151,406 @@ class StorageUnitBatch(Base, TimestampMixin):
     listings: Mapped[list["Listing"]] = relationship(back_populates="batch")
 
 
+class IntakeSession(Base, TimestampMixin):
+    __tablename__ = "intake_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    session_id: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source_album_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    source_folder_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    default_location: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    item_prefix: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    box_prefix: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(64), default="active", index=True)
+    metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class IntakeSlate(Base, TimestampMixin):
+    __tablename__ = "intake_slates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    intake_session_id: Mapped[int | None] = mapped_column(ForeignKey("intake_sessions.id"), nullable=True, index=True)
+    session_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    item_id: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    box_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    location: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    brand: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    condition: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    flaws: Mapped[str | None] = mapped_column(Text, nullable=True)
+    weight: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    length: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    width: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    height: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    packed: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    internal_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    qr_payload_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    slate_image_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    listing_id: Mapped[int | None] = mapped_column(ForeignKey("listings.id"), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(64), default="draft", index=True)
+
+
+class IntakePhotoBatch(Base, TimestampMixin):
+    __tablename__ = "intake_photo_batches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    intake_session_id: Mapped[int | None] = mapped_column(ForeignKey("intake_sessions.id"), nullable=True, index=True)
+    session_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    item_id: Mapped[str] = mapped_column(String(255), index=True)
+    slate_id: Mapped[int | None] = mapped_column(ForeignKey("intake_slates.id"), nullable=True, index=True)
+    first_photo_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    last_photo_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    photo_count: Mapped[int] = mapped_column(Integer, default=0)
+    public_photo_count: Mapped[int] = mapped_column(Integer, default=0)
+    internal_photo_count: Mapped[int] = mapped_column(Integer, default=0)
+    draft_listing_id: Mapped[int | None] = mapped_column(ForeignKey("listings.id"), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(64), default="collecting", index=True)
+    metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class IntakePhoto(Base, TimestampMixin):
+    __tablename__ = "intake_photos"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    source_provider: Mapped[str] = mapped_column(String(64), index=True)
+    source_photo_id: Mapped[str] = mapped_column(String(512), index=True)
+    source_album_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    source_folder_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    original_filename: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    local_path: Mapped[str] = mapped_column(Text)
+    downloaded_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    content_hash: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    captured_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    uploaded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    imported_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    image_type: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    is_slate: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    is_public_listing_candidate: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    is_internal_only: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    item_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    batch_id: Mapped[int | None] = mapped_column(ForeignKey("intake_photo_batches.id"), nullable=True, index=True)
+    metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class IntakeSlateRecoveryCandidate(Base, TimestampMixin):
+    """Append-only-in-effect recovery evidence; never an assignment instruction."""
+
+    __tablename__ = "intake_slate_recovery_candidates"
+    __table_args__ = (
+        UniqueConstraint("user_id", "intake_photo_id", "pipeline_version", name="uq_intake_slate_recovery_candidate_version"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    intake_photo_id: Mapped[int] = mapped_column(ForeignKey("intake_photos.id"), index=True)
+    pipeline_version: Mapped[str] = mapped_column(String(64), index=True)
+    classification: Mapped[str] = mapped_column(String(32), index=True)
+    raw_item_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    normalized_item_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    box_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    location: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    quantity: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    condition: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    stored_qr_payload_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    stored_ocr_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    evidence_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    classification_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    item_id_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    match_status: Mapped[str] = mapped_column(String(32), default="unresolved", index=True)
+    matched_canonical_item_id: Mapped[int | None] = mapped_column(ForeignKey("canonical_items.id"), nullable=True, index=True)
+    matched_intake_slate_id: Mapped[int | None] = mapped_column(ForeignKey("intake_slates.id"), nullable=True, index=True)
+    matched_batch_id: Mapped[int | None] = mapped_column(ForeignKey("intake_photo_batches.id"), nullable=True, index=True)
+    review_status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    accepted_rejected_state: Mapped[str] = mapped_column(String(32), default="unreviewed", index=True)
+
+
+# Media recovery is deliberately isolated from intake assignment tables.  These
+# rows retain enough provenance to recreate a draft without asserting that a
+# recovered image belonged to a historical IntakePhoto or IntakePhotoBatch.
+class MediaRecoveryRun(Base, TimestampMixin):
+    __tablename__ = "media_recovery_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    run_key: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    pipeline_version: Mapped[str] = mapped_column(String(64), index=True)
+    source_roots_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    processing_status: Mapped[str] = mapped_column(String(32), default="running", index=True)
+    imported_media_count: Mapped[int] = mapped_column(Integer, default=0)
+    group_count: Mapped[int] = mapped_column(Integer, default=0)
+    draft_count: Mapped[int] = mapped_column(Integer, default=0)
+    # Recovery-only control.  This is intentionally not shared with the normal
+    # listing pipeline, which must remain available while recovery is audited.
+    draft_creation_state: Mapped[str] = mapped_column(String(48), default="frozen_for_quality_audit", index=True)
+    result_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class MediaRecoveryMedia(Base, TimestampMixin):
+    __tablename__ = "media_recovery_media"
+    __table_args__ = (UniqueConstraint("run_id", "absolute_path", name="uq_media_recovery_media_path"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("media_recovery_runs.id"), index=True)
+    absolute_path: Mapped[str] = mapped_column(Text)
+    relative_path: Mapped[str] = mapped_column(Text)
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    perceptual_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    file_metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    slate_evidence_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    duplicate_of_media_id: Mapped[int | None] = mapped_column(ForeignKey("media_recovery_media.id"), nullable=True, index=True)
+    processing_state: Mapped[str] = mapped_column(String(32), default="manifested", index=True)
+    final_disposition: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    assigned_recovery_item_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+
+
+class MediaRecoveryItemGroup(Base, TimestampMixin):
+    __tablename__ = "media_recovery_item_groups"
+    __table_args__ = (UniqueConstraint("run_id", "recovery_item_id", name="uq_media_recovery_group_item"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("media_recovery_runs.id"), index=True)
+    parent_group_id: Mapped[int | None] = mapped_column(ForeignKey("media_recovery_item_groups.id"), nullable=True, index=True)
+    recovery_item_id: Mapped[str] = mapped_column(String(255), index=True)
+    grouping_status: Mapped[str] = mapped_column(String(32), index=True)
+    grouping_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    media_paths_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    evidence_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    analysis_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    draft_listing_id: Mapped[int | None] = mapped_column(ForeignKey("listings.id"), nullable=True, index=True)
+
+
+class MediaRecoveryPhotoEvidence(Base, TimestampMixin):
+    """Versioned, photo-local recovery evidence; never inferred from assignment."""
+    __tablename__ = "media_recovery_photo_evidence"
+    __table_args__ = (
+        UniqueConstraint("recovery_group_id", "media_id", "pipeline_version", name="uq_media_recovery_photo_evidence_version"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("media_recovery_runs.id"), index=True)
+    recovery_group_id: Mapped[int] = mapped_column(ForeignKey("media_recovery_item_groups.id"), index=True)
+    media_id: Mapped[int] = mapped_column(ForeignKey("media_recovery_media.id"), index=True)
+    listing_id: Mapped[int | None] = mapped_column(ForeignKey("listings.id"), nullable=True, index=True)
+    pipeline_version: Mapped[str] = mapped_column(String(96), index=True)
+    photo_role: Mapped[str] = mapped_column(String(64), default="unclassified", index=True)
+    ocr_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    barcode_attempts_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    decoded_barcode_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    decoded_barcode_value: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    brand: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    product_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    mpn: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    manufacturer_sku: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    upc: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    ean: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    gtin: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    isbn: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    specifications_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    packaging_identity: Mapped[str | None] = mapped_column(Text, nullable=True)
+    included_components_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    damage_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    condition_evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
+    measurement_evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
+    testing_evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
+    evidence_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    extraction_method: Mapped[str] = mapped_column(String(64), default="deterministic", index=True)
+    error_status: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+
+
+# Canonical intake records are intentionally separate from Listing. A listing is a
+# marketplace representation; these records preserve the item, evidence, and
+# reconciliation history that can safely survive a listing regeneration.
+class CanonicalItem(Base, TimestampMixin):
+    __tablename__ = "canonical_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    item_id: Mapped[str] = mapped_column(String(255), index=True)
+    inventory_sku: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    current_listing_id: Mapped[int | None] = mapped_column(ForeignKey("listings.id"), nullable=True, index=True)
+    current_slate_id: Mapped[int | None] = mapped_column(ForeignKey("intake_slates.id"), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(64), default="provisional", index=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class SlateObservation(Base, TimestampMixin):
+    __tablename__ = "slate_observations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    canonical_item_id: Mapped[int | None] = mapped_column(ForeignKey("canonical_items.id"), nullable=True, index=True)
+    intake_slate_id: Mapped[int | None] = mapped_column(ForeignKey("intake_slates.id"), nullable=True, index=True)
+    media_id: Mapped[int | None] = mapped_column(ForeignKey("intake_photos.id"), nullable=True, index=True)
+    item_id: Mapped[str] = mapped_column(String(255), index=True)
+    observation_type: Mapped[str] = mapped_column(String(64), default="original", index=True)
+    template_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    capture_timestamp: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    raw_qr_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    raw_ocr_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    parsed_values_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    reconciliation_status: Mapped[str] = mapped_column(String(64), default="resolved", index=True)
+    operator_confirmed: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
+
+class CanonicalItemFact(Base, TimestampMixin):
+    __tablename__ = "canonical_item_facts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    canonical_item_id: Mapped[int] = mapped_column(ForeignKey("canonical_items.id"), index=True)
+    field_name: Mapped[str] = mapped_column(String(128), index=True)
+    value_json: Mapped[object | None] = mapped_column(JSON, nullable=True)
+    normalized_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_type: Mapped[str] = mapped_column(String(64), index=True)
+    source_identifier: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    value_status: Mapped[str] = mapped_column(String(32), default="inferred", index=True)
+    precedence: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    is_locked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    conflict_state: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    effective_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+
+
+class IntakeReconciliationEvent(Base, TimestampMixin):
+    __tablename__ = "intake_reconciliation_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    event_type: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(64), default="completed", index=True)
+    source_media_id: Mapped[int | None] = mapped_column(ForeignKey("intake_photos.id"), nullable=True, index=True)
+    canonical_item_id: Mapped[int | None] = mapped_column(ForeignKey("canonical_items.id"), nullable=True, index=True)
+    interval_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    details_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class IntakeNotification(Base, TimestampMixin):
+    __tablename__ = "intake_notifications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    canonical_item_id: Mapped[int | None] = mapped_column(ForeignKey("canonical_items.id"), nullable=True, index=True)
+    notification_type: Mapped[str] = mapped_column(String(64), index=True)
+    title: Mapped[str] = mapped_column(String(255))
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    href: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+
+
+# Intake jobs are deliberately independent of Celery task IDs. A broker can
+# redeliver a task or a process can die mid-run; these rows remain the durable
+# source of truth for ownership, idempotency, and operator-visible recovery.
+class IntakeSourceState(Base, TimestampMixin):
+    __tablename__ = "intake_source_states"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(64), index=True)
+    source_key: Mapped[str] = mapped_column(String(512), index=True)
+    provider_cursor: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pagination_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_poll_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    last_poll_completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    last_successful_poll_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    last_full_enumeration_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    last_complete_page: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    lookback_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_integrity_scan_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    poll_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
+    next_scheduled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    enumeration_generation: Mapped[int] = mapped_column(Integer, default=0)
+    scan_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+    enumerated_count: Mapped[int] = mapped_column(Integer, default=0)
+    new_count: Mapped[int] = mapped_column(Integer, default=0)
+    changed_count: Mapped[int] = mapped_column(Integer, default=0)
+    skipped_budget_count: Mapped[int] = mapped_column(Integer, default=0)
+    oldest_capture_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    newest_capture_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    enumeration_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+    enumeration_interrupted: Mapped[bool] = mapped_column(Boolean, default=False)
+    discovery_persisted_count: Mapped[int] = mapped_column(Integer, default=0)
+    provider_visible_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    processing_backlog_count: Mapped[int] = mapped_column(Integer, default=0)
+    processing_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+    reconciliation_backlog_count: Mapped[int] = mapped_column(Integer, default=0)
+    source_caught_up: Mapped[bool] = mapped_column(Boolean, default=False)
+    poll_lease_owner: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    poll_lease_acquired_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    poll_lease_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    poll_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    poll_cancellation_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    enumeration_status: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    enumeration_progress_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class IntakeProviderMedia(Base, TimestampMixin):
+    """Lightweight durable discovery record; full assets live in IntakePhoto after processing."""
+    __tablename__ = "intake_provider_media"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    source_state_id: Mapped[int] = mapped_column(ForeignKey("intake_source_states.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(64), index=True)
+    source_key: Mapped[str] = mapped_column(String(512), index=True)
+    provider_media_id: Mapped[str] = mapped_column(String(512), index=True)
+    provider_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    preview_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    original_filename: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    provider_order: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    captured_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    uploaded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    metadata_fingerprint: Mapped[str] = mapped_column(String(128), index=True)
+    discovery_generation: Mapped[int] = mapped_column(Integer, default=0)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    processing_status: Mapped[str] = mapped_column(String(64), default="discovered", index=True)
+    processing_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    processing_lease_owner: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    processing_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    intake_photo_id: Mapped[int | None] = mapped_column(ForeignKey("intake_photos.id"), nullable=True, index=True)
+    metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class IntakeReconciliationJob(Base, TimestampMixin):
+    __tablename__ = "intake_reconciliation_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    source_state_id: Mapped[int | None] = mapped_column(ForeignKey("intake_source_states.id"), nullable=True, index=True)
+    source_media_id: Mapped[int | None] = mapped_column(ForeignKey("intake_photos.id"), nullable=True, index=True)
+    job_type: Mapped[str] = mapped_column(String(64), default="reconcile_media", index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(255), index=True)
+    interval_key: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(64), default="queued", index=True)
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_retries: Mapped[int] = mapped_column(Integer, default=3)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    result_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    lease_owner: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    run_after: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+
+
 class MarketplaceAccount(Base, TimestampMixin):
     __tablename__ = "marketplace_accounts"
 
@@ -143,9 +558,13 @@ class MarketplaceAccount(Base, TimestampMixin):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     marketplace: Mapped[MarketplaceName] = mapped_column(Enum(MarketplaceName), index=True)
     external_account_id: Mapped[str] = mapped_column(String(255))
-    access_token: Mapped[str] = mapped_column(Text)
-    refresh_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    access_token: Mapped[str] = mapped_column(EncryptedTokenText())
+    refresh_token: Mapped[str | None] = mapped_column(EncryptedTokenText(), nullable=True)
     token_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    connection_status: Mapped[str] = mapped_column(String(32), default="connected", index=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_refresh_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_successful_check_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="marketplace_accounts")
 
