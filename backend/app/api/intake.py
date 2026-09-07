@@ -92,8 +92,6 @@ def _serialize_slate(row: IntakeSlate | None) -> dict[str, Any] | None:
         "internal_notes": row.internal_notes,
         "qr_payload_json": row.qr_payload_json or {},
         "metadata_json": row.metadata_json or {},
-        "classification": (row.metadata_json or {}).get("classification") or row.image_type,
-        "classification_source": (row.metadata_json or {}).get("classification_source"),
         "slate_image_id": row.slate_image_id,
         "listing_id": row.listing_id,
         "status": row.status,
@@ -126,6 +124,8 @@ def _serialize_photo(row: IntakePhoto) -> dict[str, Any]:
         "thumbnail_url": service.public_media_url(row.local_path),
         "display_url": service.public_media_url(row.local_path),
         "metadata_json": row.metadata_json or {},
+        "classification": (row.metadata_json or {}).get("classification") or row.image_type,
+        "classification_source": (row.metadata_json or {}).get("classification_source"),
         "created_at": _iso(row.created_at),
         "updated_at": _iso(row.updated_at),
     }
