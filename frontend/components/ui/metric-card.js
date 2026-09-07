@@ -1,8 +1,20 @@
 import { cn } from '../../lib/utils';
 
 export default function MetricCard({ label, value, detail, className, onClick, ...props }) {
+  const interactiveProps = onClick
+    ? {
+        role: 'button',
+        tabIndex: 0,
+        onKeyDown: (event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            onClick(event);
+          }
+        },
+      }
+    : {};
   return (
-    <div className={cn('pp-card pp-metric-card min-h-[146px] p-5', onClick ? 'cursor-pointer transition hover:-translate-y-0.5 hover:shadow-lg focus:outline-none focus:ring-2 focus:ring-blue-500' : '', className)} onClick={onClick} {...props}>
+    <div className={cn('pp-card pp-metric-card min-h-[146px] p-5', onClick ? 'cursor-pointer transition hover:-translate-y-0.5 hover:shadow-lg focus:outline-none focus:ring-2 focus:ring-blue-500' : '', className)} onClick={onClick} {...interactiveProps} {...props}>
       <div className="flex items-start justify-between gap-3">
         <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[var(--pp-muted)]">{label}</p>
         <span className="pp-metric-card__dot" aria-hidden="true" />
