@@ -1,12 +1,12 @@
 CURRENT COMMIT
-5c13ebe (local; push blocked by DNS/network)
+pending (performance/UI truth changes uncommitted)
 LAST FULLY COMPLETED ACCEPTANCE GATE
-Timeline selected-Slate classification now persists, updates optimistically, provides visible feedback, emits a durable notification, and highlights Slate thumbnails. Frontend identity route added.
+Timeline selected-Slate classification plus durable notification and visible highlighting; performance source audit/build passed.
 EXACT NEXT FILE/FUNCTION TO OPEN
-frontend/pages/frontend-deployment.js and frontend/components/layout/AppShell.js notification DOM/runtime.
+frontend/components/layout/AppShell.js notification portal and frontend/hooks/useDashboardData.js static request cache.
 EXACT NEXT ACTION TO EXECUTE
-Verify public `/frontend-deployment` build identity and trace live Jobs/notification routes; then run safe correction acceptance and Vine readiness audit.
+Restart services when systemd access returns; curl `/frontend-deployment`; capture authenticated API latency/query/payload metrics; continue Jobs/Timeline runtime UI probes.
 CURRENT BLOCKERS
-GitHub DNS/network unavailable for push; systemd bus/browser operator proof and safe production correction test still pending.
+Public DNS, localhost services, systemd bus, and GitHub DNS unavailable in current harness; authenticated browser proof and production correction/Vine tests pending.
 DO-NOT-REDO ITEMS
 Listings normalization source patch, taxonomy browser navigation/path persistence, correction queue ordering, basic Jobs details, timeline classification/zoom, eBay same-ID update anchor.

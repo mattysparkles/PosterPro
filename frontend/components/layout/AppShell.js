@@ -2,6 +2,7 @@
 import Link from 'next/link';
 import { useRouter } from 'next/router';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   BarChart3,
   Bot,
@@ -489,7 +490,7 @@ export default function AppShell({
                   <Bell size={15} />
                   {notificationUnreadCount ? <span className="inline-flex min-w-5 items-center justify-center rounded-full bg-[#b42318] px-1.5 py-0.5 text-[11px] font-semibold text-white">{notificationUnreadCount}</span> : null}
                 </Button>
-                {notificationsOpen ? (
+                {notificationsOpen && typeof document !== 'undefined' ? createPortal((
                   <div className="fixed right-3 top-[72px] z-50 mt-2 w-[min(360px,calc(100vw-24px))] max-h-[min(70vh,560px)] overflow-y-auto rounded-[18px] border border-[var(--pp-border)] bg-white p-3 shadow-[0_16px_40px_rgba(16,24,40,0.18)] sm:right-6">
                     <div className="flex items-center justify-between gap-3 border-b border-[var(--pp-border)] pb-2">
                       <div>
@@ -542,7 +543,7 @@ export default function AppShell({
                       )}
                     </div>
                   </div>
-                ) : null}
+                ), document.body) : null}
               </div>
 
               <button

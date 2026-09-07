@@ -182,7 +182,19 @@ function RawJsonBlock({ title, value }) {
 export default function JobsPage() {
   const router = useRouter();
   const { user } = useAuth();
-  const { autonomousConfig, reload: reloadDashboard } = useDashboardData(user?.id);
+  // Jobs only needs the autonomous toggle; avoid loading the entire catalog,
+  // analytics, alerts, offers, templates, and storage datasets on navigation.
+  const { autonomousConfig, reload: reloadDashboard } = useDashboardData(user?.id, {
+    includeListings: false,
+    includeClusters: false,
+    includeMarketplaces: false,
+    includeAnalytics: false,
+    includeAlerts: false,
+    includeOfferDashboard: false,
+    includePlatformConfig: false,
+    includeStorageBatches: false,
+    includeListingTemplates: false,
+  });
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("crosspost");
   const [statusFilter, setStatusFilter] = useState("");
