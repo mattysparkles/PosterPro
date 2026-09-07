@@ -482,8 +482,8 @@ export async function browseEbayCategories(parentCategoryId = "") {
   const query = parentCategoryId ? `?parent_category_id=${encodeURIComponent(parentCategoryId)}` : "";
   return jsonFetch(`${API_BASE}/ebay/taxonomy/browse${query}`);
 }
-export async function classifyTimelineAssets(photoIds, classification) { return jsonFetch(`${API_BASE}/intake/timeline/classify`, { method: 'POST', body: JSON.stringify({ photo_ids: photoIds, classification }) }); }
-export async function resetTimelineClassifications(options = {}) { return jsonFetch(`${API_BASE}/intake/timeline/reset-classifications`, { method: 'POST', body: JSON.stringify(options) }); }
+export async function classifyTimelineAssets(photoIds, classification) { return jsonFetch(`${API_BASE}/intake/timeline/classify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ photo_ids: photoIds, classification }) }); }
+export async function resetTimelineClassifications(options = {}) { return jsonFetch(`${API_BASE}/intake/timeline/reset-classifications`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(options) }); }
 export async function reprioritizeCorrectionJob(jobId, priority) { return jsonFetch(`${API_BASE}/marketplace-jobs/correction-jobs/${jobId}/priority`, { method: 'PATCH', body: JSON.stringify({ priority }) }); }
 
 export async function createMarketplaceImportJob(body) {
