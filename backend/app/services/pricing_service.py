@@ -109,7 +109,10 @@ class PricingService:
             "category": listing.category_suggestion or listing.category_id,
             "estimated_value": listing.estimated_value,
         }
-        guard_key = ai_signature(purpose="pricing", payload={"listing_id": listing.id, "signals": signals, "model": self.model})
+        guard_key = ai_signature(
+            purpose="pricing",
+            payload={"user_id": listing.user_id, "listing_id": listing.id, "signals": signals, "model": self.model},
+        )
         if not ai_allow(guard_key):
             logger.info("Skipping duplicate or circuit-open pricing provider call", extra={"listing_id": listing.id})
             return None
