@@ -163,8 +163,6 @@ def _listing_bucket(listing: Listing) -> str:
         return "needs_attention"
     if str(listing.status).lower() == "error" or str(listing.ebay_publish_status or "").upper() == "FAILED":
         return "failed"
-    if not bool(listing.image_urls or []):
-        return "drafts"
     if (listing.restricted_review_required or listing.needs_review) and not explicitly_approved:
         return "review"
     if listing.status == ListingStatus.ready:
@@ -177,6 +175,8 @@ def _listing_bucket(listing: Listing) -> str:
             for market in target_markets
         )
         return "ready" if explicitly_approved and approved_target else "drafts"
+    if not bool(listing.image_urls or []):
+        return "drafts"
     return "drafts"
 
 
@@ -317,19 +317,21 @@ def _matches_readiness_filter(listing: Listing, filter_value: str | None) -> boo
 
 def _listing_visibility_filter(normalized_queue: str | None):
     labels = func.coalesce(func.lower(cast(Listing.custom_labels, String)), "")
-    sold = or_(Listing.sold_at.is_not(None), Listing.quantity <= 0)
+    sold = or_(Listing.sold_at.is_not(None), func.coalesce(Listing.quantity, 1) <= 0)
     archived = or_(labels.contains("archived_vine"), labels.contains("archived_sold"))
     recovery = Listing.source_metadata["recovery"]
-    merged_child = or_(
+    merged_child = func.coalesce(or_(
         recovery["merged_into_recovery_item_id"].as_string().is_not(None),
         recovery["merged_into_recovery_group_id"].as_string().is_not(None),
-    )
+    ), False)
     normalized = str(normalized_queue or "").strip().lower()
     if normalized == "sold":
         return and_(sold, not_(merged_child))
     if normalized == "archived":
         return and_(archived, not_(sold), not_(merged_child))
-    return and_(not_(sold), not_(archived), not_(merged_child))
+    # SQLite and older PostgreSQL rows may have NULL recovery metadata; JSON
+    # null comparisons otherwise make the entire visibility predicate NULL.
+    return and_(not_(sold), not_(archived))
 
 _DEFAULT_WORKFLOW_PREFERENCES = {
     "review_before_publish": True,
@@ -1343,7 +1345,6 @@ def get_listings(
                     Listing.status != ListingStatus.PUBLISHED,
                     Listing.ebay_listing_id.is_(None),
                     or_(Listing.ebay_publish_status.is_(None), Listing.ebay_publish_status != "POSTED"),
-                    Listing.image_urls.is_not(None),
                 )
             )
 

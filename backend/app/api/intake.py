@@ -517,12 +517,31 @@ def apply_retroactive_regroup(payload: dict, db: Session = Depends(get_db), curr
     idx = next((i for i,p in enumerate(photos) if p.id == int(before_id)), None)
     if idx is None: raise HTTPException(status_code=400, detail="Boundary photo is unavailable")
     target = next((p for p in photos[idx:] if p.batch_id), None)
+    affected = [p for p in photos[idx:] if target and p.batch_id == target.batch_id]
+    before_state = {str(p.id): {"slate_id": p.slate_id, "batch_id": p.batch_id, "item_id": p.item_id} for p in affected}
+    event = IntakeReconciliationEvent(user_id=current_user.id, event_type="timeline_retroactive_regroup", status="planned", source_media_id=slate.id, details_json={"slate_id": slate.id, "before": before_state, "boundary": boundary})
+    db.add(event); db.flush()
     if target:
-        for p in photos[idx:]:
+        for p in affected:
             if p.batch_id == target.batch_id: p.slate_id = slate.id; db.add(p)
     metadata["retroactive_boundary"]["regroup_applied_at"] = datetime.now(UTC).isoformat()
-    slate.metadata_json = metadata; db.add(slate); db.commit()
-    return {"status":"applied", "slate_id": slate.id, "moved_photo_ids":[p.id for p in photos[idx:] if target and p.batch_id == target.batch_id]}
+    slate.metadata_json = metadata; db.add(slate); event.status = "completed"; event.details_json = {**(event.details_json or {}), "after": {str(p.id): {"slate_id": p.slate_id, "batch_id": p.batch_id, "item_id": p.item_id} for p in affected}}; db.commit()
+    return {"status":"applied", "slate_id": slate.id, "event_id": event.id, "moved_photo_ids":[p.id for p in affected]}
+
+@router.post("/timeline/regroup/undo")
+def undo_retroactive_regroup(payload: dict, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    event_id = int((payload or {}).get("event_id") or 0)
+    event = db.get(IntakeReconciliationEvent, event_id)
+    if not event or event.user_id != current_user.id or event.event_type != "timeline_retroactive_regroup":
+        raise HTTPException(status_code=404, detail="Regroup event not found")
+    before = (event.details_json or {}).get("before") or {}
+    restored = []
+    for photo_id, state in before.items():
+        photo = db.get(IntakePhoto, int(photo_id))
+        if not photo or photo.user_id != current_user.id: continue
+        photo.slate_id = state.get("slate_id"); photo.batch_id = state.get("batch_id"); photo.item_id = state.get("item_id"); db.add(photo); restored.append(photo.id)
+    event.status = "undone"; event.details_json = {**(event.details_json or {}), "undone_at": datetime.now(UTC).isoformat(), "restored_photo_ids": restored}; db.commit()
+    return {"status": "undone", "event_id": event.id, "restored_photo_ids": restored}
 
 
 @router.patch("/slates/{slate_id}")

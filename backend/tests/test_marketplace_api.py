@@ -10,6 +10,7 @@ from app.api import routes as listings_routes
 from app.api import marketplaces as marketplaces_api
 from app.services.listing_specificity import classify_listing_reviewability, is_bare_identifier_title, is_caption_like_title
 from app.workers import tasks
+from app.models.models import ListingCorrectionJob
 
 
 def seed_listing(user_id: int) -> int:
@@ -34,6 +35,24 @@ def seed_bucket_listing(user_id: int, **kwargs) -> int:
     db.refresh(listing)
     db.close()
     return listing.id
+
+
+@pytest.mark.anyio
+async def test_need_a_correction_api_creates_authenticated_durable_job(async_client, monkeypatch):
+    register = await async_client.post("/auth/register", json={"full_name": "Correction Owner", "email": f"correction-{uuid4()}@example.com", "password": "supersecret123"})
+    assert register.status_code == 201
+    listing_id = seed_bucket_listing(register.json()["user"]["id"], status=ListingStatus.draft, title="Generic Product", description="Condition: New.", source_type="amazon_vine", source_metadata={"amazon_evidence": {"asin": "B000TEST", "title": "160-in-1 Electronic Learning Kit", "brand": "Example"}})
+    monkeypatch.setattr(tasks.process_listing_correction_jobs_task, "delay", lambda **_kwargs: None)
+    response = await async_client.post(f"/listings/{listing_id}/request-revision", json={"fields": ["title", "description", "category"], "note": "Use the actual source evidence. The title and description are too generic and the eBay category is incorrect.", "priority": 0})
+    assert response.status_code == 200
+    db = database_module.SessionLocal()
+    job = db.query(ListingCorrectionJob).filter(ListingCorrectionJob.listing_id == listing_id).one()
+    assert job.priority == 0
+    assert job.fields == ["title", "description", "category"]
+    assert "actual source evidence" in job.operator_note
+    assert response.json()["source_metadata"]["correction_job_id"] == job.id
+    assert response.json()["source_metadata"]["correction_status"] in {"QUEUED", "QUEUED - DRAFTING PAUSED"}
+    db.close()
 
 
 @pytest.mark.anyio
