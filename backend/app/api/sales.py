@@ -33,7 +33,7 @@ def sales_dashboard(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    scoped_user_id = resolve_user_scope(current_user, user_id) if user_id is not None else None
+    scoped_user_id = resolve_user_scope(current_user, user_id) if user_id is not None else current_user.id
     stmt = select(Sale).join(Listing, Listing.id == Sale.listing_id, isouter=True)
     if scoped_user_id is not None:
         stmt = stmt.where(Sale.user_id == scoped_user_id)
@@ -266,7 +266,7 @@ def export_sales_csv(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    scoped_user_id = resolve_user_scope(current_user, user_id) if user_id is not None else None
+    scoped_user_id = resolve_user_scope(current_user, user_id) if user_id is not None else current_user.id
     stmt = select(Sale).order_by(Sale.sold_at.desc().nullslast())
     if scoped_user_id is not None:
         stmt = stmt.where(Sale.user_id == scoped_user_id)
@@ -306,7 +306,7 @@ def export_inventory_csv(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    scoped_user_id = resolve_user_scope(current_user, user_id) if user_id is not None else None
+    scoped_user_id = resolve_user_scope(current_user, user_id) if user_id is not None else current_user.id
     stmt = select(Listing).order_by(Listing.updated_at.desc())
     if scoped_user_id is not None:
         stmt = stmt.where(Listing.user_id == scoped_user_id)

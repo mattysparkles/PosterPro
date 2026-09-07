@@ -404,7 +404,7 @@ def _serialize_import_job(job: MarketplaceImportJob, *, db: Session, compact: bo
 
     review_items: list[dict] = []
     if review_listing_ids and not compact:
-        listings = db.execute(select(Listing).where(Listing.id.in_(review_listing_ids))).scalars().all()
+        listings = db.execute(select(Listing).where(Listing.user_id == current_user.id, Listing.id.in_(review_listing_ids))).scalars().all()
         listing_by_id = {listing.id: listing for listing in listings}
         for listing_id in review_listing_ids:
             listing = listing_by_id.get(listing_id)

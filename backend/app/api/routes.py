@@ -1249,7 +1249,9 @@ def get_listings(
     opted into paging.  The web workspace always sends both page parameters so
     it never blocks on serializing an entire recovery/import history.
     """
-    filters = []
+    # Every normal catalog request is tenant-scoped. Platform-wide views must
+    # use an explicit admin endpoint; never infer that from a missing query arg.
+    filters = [Listing.user_id == current_user.id]
     normalized_source = str(source_type or "").strip().lower()
     if normalized_source and normalized_source != "all":
         filters.append(Listing.source_type == normalized_source)

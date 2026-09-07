@@ -121,7 +121,7 @@ def _serialize_photo(row: IntakePhoto) -> dict[str, Any]:
         "is_internal_only": bool(row.is_internal_only),
         "item_id": row.item_id,
         "batch_id": row.batch_id,
-        "slate_id": row.slate_id,
+        "slate_id": (row.metadata_json or {}).get("official_slate_id"),
         "thumbnail_url": service.public_media_url(row.local_path),
         "display_url": service.public_media_url(row.local_path),
         "metadata_json": row.metadata_json or {},
@@ -521,14 +521,13 @@ def apply_retroactive_regroup(payload: dict, db: Session = Depends(get_db), curr
     if idx is None: raise HTTPException(status_code=400, detail="Boundary photo is unavailable")
     target = next((p for p in photos[idx:] if p.batch_id), None)
     affected = [p for p in photos[idx:] if target and p.batch_id == target.batch_id]
-    before_state = {str(p.id): {"slate_id": p.slate_id, "batch_id": p.batch_id, "item_id": p.item_id} for p in affected}
+    before_state = {"batch_id": scope_batch.id if scope_batch else None, "batch_slate_id": scope_batch.slate_id if scope_batch else None, "photos": {str(p.id): {"batch_id": p.batch_id, "item_id": p.item_id, "official_slate_id": (p.metadata_json or {}).get("official_slate_id")} for p in affected}}
     event = IntakeReconciliationEvent(user_id=current_user.id, event_type="timeline_retroactive_regroup", status="planned", source_media_id=slate.id, details_json={"slate_id": slate.id, "before": before_state, "boundary": boundary})
     db.add(event); db.flush()
     if target:
-        for p in affected:
-            if p.batch_id == target.batch_id: p.slate_id = slate.id; db.add(p)
+        scope_batch.slate_id = slate.id; db.add(scope_batch)
     metadata["retroactive_boundary"]["regroup_applied_at"] = datetime.now(UTC).isoformat()
-    slate.metadata_json = metadata; db.add(slate); event.status = "completed"; event.details_json = {**(event.details_json or {}), "after": {str(p.id): {"slate_id": p.slate_id, "batch_id": p.batch_id, "item_id": p.item_id} for p in affected}}; db.commit()
+    slate.metadata_json = metadata; db.add(slate); event.status = "completed"; event.details_json = {**(event.details_json or {}), "after": {"batch_id": scope_batch.id if scope_batch else None, "batch_slate_id": scope_batch.slate_id if scope_batch else slate.id, "photos": {str(p.id): {"batch_id": p.batch_id, "item_id": p.item_id, "official_slate_id": (p.metadata_json or {}).get("official_slate_id")} for p in affected}}}; db.commit()
     return {"status":"applied", "slate_id": slate.id, "event_id": event.id, "moved_photo_ids":[p.id for p in affected]}
 
 @router.post("/timeline/regroup/undo")
@@ -538,11 +537,17 @@ def undo_retroactive_regroup(payload: dict, db: Session = Depends(get_db), curre
     if not event or event.user_id != current_user.id or event.event_type != "timeline_retroactive_regroup":
         raise HTTPException(status_code=404, detail="Regroup event not found")
     before = (event.details_json or {}).get("before") or {}
+    batch_id = before.get("batch_id")
+    if batch_id:
+        batch = db.get(IntakePhotoBatch, int(batch_id))
+        if batch and batch.user_id == current_user.id:
+            batch.slate_id = before.get("batch_slate_id"); db.add(batch)
+    photo_states = before.get("photos") if isinstance(before, dict) else before
     restored = []
-    for photo_id, state in before.items():
+    for photo_id, state in (photo_states or {}).items():
         photo = db.get(IntakePhoto, int(photo_id))
         if not photo or photo.user_id != current_user.id: continue
-        photo.slate_id = state.get("slate_id"); photo.batch_id = state.get("batch_id"); photo.item_id = state.get("item_id"); db.add(photo); restored.append(photo.id)
+        photo.batch_id = state.get("batch_id"); photo.item_id = state.get("item_id"); db.add(photo); restored.append(photo.id)
     event.status = "undone"; event.details_json = {**(event.details_json or {}), "undone_at": datetime.now(UTC).isoformat(), "restored_photo_ids": restored}; db.commit()
     return {"status": "undone", "event_id": event.id, "restored_photo_ids": restored}
 
@@ -969,13 +974,13 @@ def classify_timeline_assets(payload: dict, db: Session = Depends(get_db), curre
     for row in rows:
         meta = dict(row.metadata_json or {}); before.append({"id": row.id, "metadata_json": meta, "is_slate": row.is_slate, "image_type": row.image_type, "is_internal_only": row.is_internal_only}); meta["classification_source"] = "MANUAL_OPERATOR"; meta["classification"] = classification; row.metadata_json = meta
         row.is_slate = classification != "PHOTO"; row.image_type = classification.lower(); row.is_internal_only = row.is_slate; db.add(row)
-        if row.is_slate and not row.slate_id:
+        if row.is_slate and not (meta.get("official_slate_id") or (row.batch_id and db.get(IntakePhotoBatch, row.batch_id) and db.get(IntakePhotoBatch, row.batch_id).slate_id)):
             slate_payload = {"retroactive": True, "item_id": str(row.item_id or f"SLATE-{row.id}"), "title": meta.get("title") or row.original_filename or "", "notes": meta.get("notes") or "", "location": meta.get("location") or ""}
             official_slate, _, _ = service.create_slate(db, user=current_user, payload=slate_payload)
-            row.slate_id = official_slate.id; db.add(row)
+            meta["official_slate_id"] = official_slate.id; row.metadata_json = meta; db.add(row)
     db.add(IntakeReconciliationEvent(user_id=current_user.id, event_type="timeline_classification_change", status="completed", details_json={"before": before, "after": {"classification": classification, "photo_ids": ids}, "scope": "selected"}))
     db.commit()
-    return {"updated": len(rows), "classification": classification, "official_slate_ids": [row.slate_id for row in rows if row.slate_id]}
+    return {"updated": len(rows), "classification": classification, "official_slate_ids": [(row.metadata_json or {}).get("official_slate_id") for row in rows if (row.metadata_json or {}).get("official_slate_id")]}
 
 @router.post("/timeline/reset-classifications")
 def reset_timeline_classifications(payload: dict, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
