@@ -7,7 +7,7 @@ export async function getServerSideProps() {
   try { gitSha = execFileSync('git', ['-C', path.resolve(process.cwd(), '..'), 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 1500 }).trim(); } catch {}
   let buildId = 'unknown';
   try { buildId = fs.readFileSync(path.join(process.cwd(), '.next', 'BUILD_ID'), 'utf8').trim(); } catch {}
-  return { props: { gitSha, buildId, buildTimestamp: new Date().toISOString(), sourcePath: process.cwd() } };
+  return { props: { gitSha: process.env.NEXT_PUBLIC_FRONTEND_GIT_SHA || gitSha, buildId, buildTimestamp: process.env.NEXT_PUBLIC_FRONTEND_BUILD_TIMESTAMP || 'unknown', sourcePath: process.cwd() } };
 }
 
 export default function FrontendDeployment({ gitSha, buildId, buildTimestamp, sourcePath }) {

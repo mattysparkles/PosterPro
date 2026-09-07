@@ -1,12 +1,12 @@
 CURRENT COMMIT
-pending (performance/UI truth changes uncommitted)
+915966a plus uncommitted timeline restoration/build identity changes
 LAST FULLY COMPLETED ACCEPTANCE GATE
-Timeline selected-Slate classification plus durable notification and visible highlighting; performance source audit/build passed.
+Source restoration and automated build for full timeline; live classification interaction remains runtime-required.
 EXACT NEXT FILE/FUNCTION TO OPEN
-frontend/components/layout/AppShell.js notification portal and frontend/hooks/useDashboardData.js static request cache.
+frontend/pages/intake/timeline.js and backend/app/api/intake.py classify route.
 EXACT NEXT ACTION TO EXECUTE
-Restart services when systemd access returns; curl `/frontend-deployment`; capture authenticated API latency/query/payload metrics; continue Jobs/Timeline runtime UI probes.
+Run timeline inverse classification tests and deploy; then perform authenticated runtime DOM/API proof.
 CURRENT BLOCKERS
-Public DNS, localhost services, systemd bus, and GitHub DNS unavailable in current harness; authenticated browser proof and production correction/Vine tests pending.
+Systemd/public DNS/browser runtime may be unavailable; live proof remains OPERATOR_TEST_REQUIRED if blocked.
 DO-NOT-REDO ITEMS
 Listings normalization source patch, taxonomy browser navigation/path persistence, correction queue ordering, basic Jobs details, timeline classification/zoom, eBay same-ID update anchor.

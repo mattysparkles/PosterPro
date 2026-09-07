@@ -40,7 +40,6 @@ from app.services.google_photos_oauth import (
     save_google_photos_connection,
 )
 from app.workers.tasks import drain_intake_provider_media_task
-from app.services.process_notifications import create_process_notification
 
 router = APIRouter(prefix="/intake", tags=["intake"])
 service = IntakeSlateService()
@@ -968,9 +967,8 @@ def classify_timeline_assets(payload: dict, db: Session = Depends(get_db), curre
         meta = dict(row.metadata_json or {}); before.append({"id": row.id, "metadata_json": meta, "is_slate": row.is_slate, "image_type": row.image_type, "is_internal_only": row.is_internal_only}); meta["classification_source"] = "MANUAL_OPERATOR"; meta["classification"] = classification; row.metadata_json = meta
         row.is_slate = classification != "PHOTO"; row.image_type = classification.lower(); row.is_internal_only = row.is_slate; db.add(row)
     db.add(IntakeReconciliationEvent(user_id=current_user.id, event_type="timeline_classification_change", status="completed", details_json={"before": before, "after": {"classification": classification, "photo_ids": ids}, "scope": "selected"}))
-    notice = create_process_notification(db, user_id=current_user.id, title="Timeline classification updated", message=f"Marked {len(rows)} asset(s) as {classification}.", notification_type="timeline_classification", href="/intake/timeline", metadata_json={"photo_ids": ids, "classification": classification})
     db.commit()
-    return {"updated": len(rows), "classification": classification, "notification_id": notice.id if notice else None}
+    return {"updated": len(rows), "classification": classification}
 
 @router.post("/timeline/reset-classifications")
 def reset_timeline_classifications(payload: dict, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):

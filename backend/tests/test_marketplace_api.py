@@ -5,7 +5,7 @@ import pytest
 
 from app.core import database as database_module
 from app.models.enums import EbayPublishStatus, ListingStatus, MarketplaceName
-from app.models.models import Cluster, Listing, Sale
+from app.models.models import Cluster, IntakePhoto, Listing, Sale
 from app.api import routes as listings_routes
 from app.api import marketplaces as marketplaces_api
 from app.services.listing_specificity import classify_listing_reviewability, is_bare_identifier_title, is_caption_like_title
@@ -53,6 +53,24 @@ async def test_need_a_correction_api_creates_authenticated_durable_job(async_cli
     assert response.json()["source_metadata"]["correction_job_id"] == job.id
     assert response.json()["source_metadata"]["correction_status"] in {"QUEUED", "QUEUED - DRAFTING PAUSED"}
     db.close()
+
+
+@pytest.mark.anyio
+async def test_timeline_manual_classification_round_trip(async_client):
+    register = await async_client.post("/auth/register", json={"full_name": "Timeline Owner", "email": f"timeline-{uuid4()}@example.com", "password": "supersecret123"})
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    db = database_module.SessionLocal()
+    photo = IntakePhoto(user_id=user_id, source_provider="test", source_photo_id=f"photo-{uuid4()}", local_path="/tmp/photo.jpg", image_type="photo", is_slate=False, metadata_json={})
+    db.add(photo); db.commit(); db.refresh(photo); photo_id = photo.id; db.close()
+    marked = await async_client.post("/intake/timeline/classify", json={"photo_ids": [photo_id], "classification": "SLATE"})
+    assert marked.status_code == 200 and marked.json()["updated"] == 1
+    db = database_module.SessionLocal(); row = db.get(IntakePhoto, photo_id)
+    assert row.is_slate is True and row.image_type == "slate" and row.metadata_json["classification_source"] == "MANUAL_OPERATOR"; db.close()
+    reset = await async_client.post("/intake/timeline/classify", json={"photo_ids": [photo_id], "classification": "PHOTO"})
+    assert reset.status_code == 200
+    db = database_module.SessionLocal(); row = db.get(IntakePhoto, photo_id)
+    assert row.is_slate is False and row.image_type == "photo" and row.metadata_json["classification"] == "PHOTO"; db.close()
 
 
 @pytest.mark.anyio
