@@ -55,7 +55,7 @@ from app.services.intake_slate import IntakeSlateService
 from app.services.ai_guard import release_waiting_for_reset, recover_stale_reservations
 from app.services.vine_import_service import VineImportService, VINE_IMAGE_BACKFILL_CUTOFF
 from app.services.ebay_service import EbayIntegrationError, get_active_ebay_listings, sync_ebay_active_listings, revise_ebay_listing
-from app.services.ebay_service import search_ebay_categories, get_or_refresh_account, build_ebay_item_specifics
+from app.services.ebay_service import search_ebay_categories, get_or_refresh_account, build_ebay_item_specifics, get_required_item_specifics, verify_ebay_category
 from app.workers.celery_app import celery_app
 from app.services.clustering import cluster_embeddings
 from app.services.rate_limiter import rate_limiter
@@ -82,6 +82,7 @@ def process_listing_correction_jobs_task(limit: int = 10) -> dict[str, Any]:
             before = dict(job.before_snapshot or {})
             changed = {}
             if listing:
+                listing.source_metadata = {**dict(listing.source_metadata or {}), "correction_status": "PROCESSING", "correction_job_id": job.id}
                 fields = {str(f).lower() for f in (job.fields or [])}
                 category_blocked = False
                 generated = None
@@ -108,22 +109,39 @@ def process_listing_correction_jobs_task(limit: int = 10) -> dict[str, Any]:
                     top_score = len(query_terms & set(re.findall(r"[a-z0-9]+", str((ranked[0] if ranked else {}).get('category_name') or '').lower()))) if ranked else 0
                     next_score = len(query_terms & set(re.findall(r"[a-z0-9]+", str((ranked[1] if len(ranked)>1 else {}).get('category_name') or '').lower()))) if len(ranked)>1 else -1
                     if ranked and ranked[0].get("category_id") and ranked[0].get("publishable") is True and (len(ranked) == 1 or top_score > next_score):
-                        chosen = ranked[0]; listing.category_id = str(chosen["category_id"]); listing.category_suggestion = chosen.get("category_name") or suggestion; listing.source_metadata = {**source_meta, "category_path": chosen.get("breadcrumb") or chosen.get("category_tree"), "category_provenance": "CORRECTION_TAXONOMY", "category_candidates": ranked}; changed["category"] = {"before": before.get("category_id"), "after": listing.category_id, "path_after": chosen.get("breadcrumb"), "validation": "taxonomy_leaf_candidate"}
-                        try:
-                            specifics = asyncio.run(build_ebay_item_specifics(listing, account, listing.category_id))
-                            known = dict(listing.item_specifics or {}); known.update({k: v for k, v in specifics.items() if v}); listing.item_specifics = known; changed["aspects"] = {"before": before.get("item_specifics"), "after": known, "missing_required": []}
-                        except Exception as exc:
-                            category_blocked = True; job.failure_reason = f"ASPECT_REQUIRED: {exc}"
+                        chosen = ranked[0]; cid = str(chosen["category_id"])
+                        verification = asyncio.run(verify_ebay_category(account, cid, str(chosen.get("taxonomy_tree_id") or "0"))) if account else {"verified": False, "publishable": False}
+                        if not verification.get("verified") or not verification.get("publishable"):
+                            category_blocked = True; job.result = {**(job.result or {}), "category_state": "CATEGORY_NON_LEAF" if verification.get("verified") else "CATEGORY_LOOKUP_FAILED"}
+                        else:
+                            listing.category_id = cid; listing.category_suggestion = chosen.get("category_name") or suggestion; path = chosen.get("breadcrumb") or chosen.get("category_tree") or chosen.get("category_name")
+                            listing.source_metadata = {**source_meta, "category_path": path, "category_name": chosen.get("category_name"), "taxonomy_tree_id": chosen.get("taxonomy_tree_id"), "leaf_verified": True, "publishable": True, "category_provenance": "CORRECTION_TAXONOMY", "category_candidates": ranked};
+                            changed["category"] = {"before": {"category_id": before.get("category_id"), "path": source_meta.get("category_path")}, "after": {"category_id": cid, "path": path}, "validation": "taxonomy_leaf_verified"}
+                        if verification.get("verified") and verification.get("publishable"):
+                            try:
+                                aspect_payload = asyncio.run(get_required_item_specifics(account.access_token, cid))
+                                required_names = [str(a.get("localizedAspectName") or "").strip() for a in (aspect_payload.get("aspects") or []) if (a.get("aspectConstraint") or {}).get("aspectRequired")]
+                                specifics = asyncio.run(build_ebay_item_specifics(listing, account, cid)); known = dict(listing.item_specifics or {}); known.update({k: v for k, v in specifics.items() if v}); listing.item_specifics = known
+                                missing = [name for name in required_names if not known.get(name)]
+                                changed["aspects"] = {"before": before.get("item_specifics"), "after": known, "required": required_names, "missing_required": missing};
+                                if missing: category_blocked = True; job.result = {**(job.result or {}), "category_state": "CATEGORY_FIXED_ASPECTS_MISSING", "missing_aspects": missing}
+                            except Exception as exc:
+                                category_blocked = True; job.failure_reason = f"ASPECT_REQUIRED: {exc}"
                     else:
                         category_blocked = True
                         job.result = {"category_state": "NEEDS_OPERATOR_REVIEW", "category_candidates": ranked[:10]}
                 job.after_snapshot = {"title": listing.title, "description": listing.description, "category_id": listing.category_id, "category_suggestion": listing.category_suggestion, "item_specifics": listing.item_specifics, "listing_price": listing.listing_price, "condition": listing.condition, "image_urls": listing.image_urls}
                 after_values = job.after_snapshot or {}
                 keymap = {"category": "category_id", "item specifics": "item_specifics", "aspects": "item_specifics", "price": "listing_price", "images": "image_urls"}
-                field_results = [{"field": f, "before": before.get(keymap.get(f, f)), "after": (changed.get(f) or {}).get("after") if f in changed else after_values.get(keymap.get(f, f)), "capability_used": "ListingAI" if f in {"title","description","identity"} else "taxonomy/readiness", "evidence_used": bool(evidence), "material_change": f in changed, "decision": "COMPLETE" if f in changed else "NO_PROGRESS"} for f in fields]
+                category_state = (job.result or {}).get("category_state")
+                field_results = []
+                for f in fields:
+                    key = keymap.get(f, f); entry = changed.get(f) or {}; unresolved = f == "category" and category_state in {"CATEGORY_FIXED_ASPECTS_MISSING", "CATEGORY_NON_LEAF", "CATEGORY_LOOKUP_FAILED", "NEEDS_OPERATOR_REVIEW"}
+                    field_results.append({"field": f, "before": entry.get("before", before.get(key)), "after": entry.get("after", after_values.get(key)), "capability_used": "ListingAI" if f in {"title","description","identity"} else "taxonomy/readiness", "evidence_used": bool(evidence), "validation_before": before.get(f"{key}_validation"), "validation_after": entry.get("validation") or category_state or ("changed" if f in changed else "unchanged"), "material_change": f in changed and not unresolved, "decision": "ASPECT_REQUIRED" if unresolved and category_state == "CATEGORY_FIXED_ASPECTS_MISSING" else ("NEEDS_REVIEW" if unresolved else ("COMPLETE" if f in changed else "NO_PROGRESS"))})
                 complete = bool(fields) and fields.issubset(changed.keys()) and not category_blocked
                 prior_result = dict(job.result or {}); prior_result.update({"fields_requested": list(fields), "fields_changed": list(changed), "field_results": field_results, "material_change": bool(changed), "decision": "COMPLETE" if complete else ("PARTIAL" if changed else "NO_PROGRESS")}); job.material_delta = changed; job.result = prior_result
-                job.status = "completed" if complete else "needs_review"; job.failure_reason = None if complete else "Requested corrections remain unresolved"
+                job.status = "completed" if complete else "needs_review"; job.failure_reason = None if complete else (job.failure_reason or "Requested corrections remain unresolved")
+                listing.source_metadata = {**dict(listing.source_metadata or {}), "correction_status": "COMPLETE" if complete else "NEEDS REVIEW", "correction_job_id": job.id}
             else:
                 job.status = "blocked"; job.failure_reason = "Listing not found"
             job.completed_at = datetime.now(UTC); db.commit(); processed.append({"job_id": job.id, "status": job.status, "material_change": bool(changed)})

@@ -114,3 +114,4 @@ Production eBay failure analysis found category-required aspect blockers, not
 missing Amazon data. Latest retry jobs 454-458 completed after safe Type/MPN
 mapping repair; job 458 was confirmed published. This does not close unrelated
 requirements above. Credentials were not rotated or printed.
+2026-09-07 continuation: Listings query comparison now canonicalizes state- and URL-shaped filters across lifecycle/source/page/sort keys, preventing hydration/poll refresh from restoring defaults. Listing Editor eBay taxonomy browser now supports clickable breadcrumb/back navigation, verified-leaf gating, and persists full manual category path/tree/provenance metadata. Correction worker category results now verify taxonomy leaf/publishability, evaluate required aspects, persist structured category states, and field results expose actual category/aspect before/after values. Source/build verification pending deployment/runtime acceptance.

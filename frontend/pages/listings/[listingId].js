@@ -652,6 +652,7 @@ export default function ListingWorkspacePage() {
       <details className="listing-editor-correction mb-5 rounded-[16px] border border-[#d9e2ef] bg-white">
         <summary className="cursor-pointer px-5 py-3 text-sm font-semibold text-[#344054]">Need a correction? Send this listing back to Drafts</summary>
         <div className="border-t border-[#e5e7eb] p-5">
+          {listing?.source_metadata?.correction_status ? <div className="mb-3 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-800">{String(listing.source_metadata.correction_status).replaceAll('_', ' ')}{listing.source_metadata.correction_job_id ? <span className="ml-2 text-xs font-normal">Job #{listing.source_metadata.correction_job_id}</span> : null}</div> : null}
           <p className="mb-3 text-sm text-[#667085]">Choose only the fields that need work. PosterPro records the request for the next AI revision.</p>
           <div className="flex flex-wrap gap-3">
             {['title', 'description', 'category', 'price', 'condition', 'photos', 'item specifics', 'shipping'].map((field) => <label key={field} className="flex items-center gap-2 text-sm"><input type="checkbox" checked={revisionFields.includes(field)} onChange={() => setRevisionFields((current) => current.includes(field) ? current.filter((item) => item !== field) : [...current, field])} /> Fix {field}</label>)}

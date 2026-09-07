@@ -2636,12 +2636,16 @@ def request_listing_revision(
     metadata["correction_status"] = "QUEUED - DRAFTING PAUSED" if getattr(settings, "drafting_paused", False) else "QUEUED"
     # Durable queue record; worker claim ordering is priority ASC, with newest priority-0 first.
     pending = db.execute(select(ListingCorrectionJob).where(ListingCorrectionJob.listing_id == listing.id, ListingCorrectionJob.status == "queued")).scalars().all()
+    overlapping = []
     for old in pending:
         old_fields = set(old.fields or []); new_fields = set(payload.fields or [])
         if old_fields & new_fields:
-            old.status = "superseded"
+            old.status = "superseded"; overlapping.append(old)
     correction = ListingCorrectionJob(user_id=current_user.id, listing_id=listing.id, requested_by=current_user.id, priority=priority, fields=list(dict.fromkeys(payload.fields or [])), operator_note=(payload.note or "").strip() or None, before_snapshot={"title": listing.title, "description": listing.description, "category_id": listing.category_id, "category_suggestion": listing.category_suggestion, "item_specifics": listing.item_specifics, "listing_price": listing.listing_price, "condition": listing.condition, "image_urls": listing.image_urls})
     db.add(correction)
+    db.flush()
+    for old in overlapping:
+        old.superseded_by = correction.id
     listing.source_metadata = metadata
     listing.status = "draft"
     listing.needs_review = False

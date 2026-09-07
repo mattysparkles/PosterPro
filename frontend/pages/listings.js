@@ -415,18 +415,27 @@ function buildListingsQuery({
 }
 
 function sameListingsQuery(left = {}, right = {}) {
-  const normalize = (value) => {
-    if (Array.isArray(value)) return value.join(',');
-    if (value == null) return '';
-    return String(value);
+  // Normalize state-shaped and router-shaped values through the same stable
+  // representation.  Detecting URL state from a small subset of keys caused
+  // status/page/sort-only URLs to be rebuilt with defaults during hydration.
+  const stateKeys = new Set(['tab', 'catalogPage', 'page', 'catalogPageSize', 'pageSize', 'search', 'market', 'source', 'readiness', 'sortBy', 'sortDir', 'view', 'workspace', 'refresh']);
+  const urlKeys = new Set(['tab', 'page', 'page_size', 'q', 'market', 'marketplace', 'source', 'readiness', 'status', 'queue', 'lifecycle', 'sort', 'view', 'workspace', 'refresh', 'attention']);
+  const normalize = (value) => Array.isArray(value) ? value.join(',') : value == null ? '' : String(value);
+  const canonical = (value) => {
+    const input = value || {};
+    const isState = Object.keys(input).some((key) => stateKeys.has(key) && !urlKeys.has(key));
+    const query = isState ? buildListingsQuery({
+      tab: input.tab || 'all', page: input.catalogPage ?? input.page ?? 1,
+      pageSize: input.catalogPageSize ?? input.pageSize ?? input.page_size ?? 25,
+      search: input.search ?? input.q ?? '', market: input.market ?? input.marketplace ?? 'all',
+      source: input.source || 'all', readiness: input.readiness || input.status || input.lifecycle || 'all',
+      sortBy: input.sortBy || 'updated', sortDir: input.sortDir || 'desc', view: input.view || 'table', workspace: input.workspace || 'results', refresh: input.refresh === true || input.refresh === '1',
+    }) : input;
+    return Object.keys(query).sort().reduce((out, key) => { const v = normalize(query[key]); if (v !== '') out[key] = v; return out; }, {});
   };
-  const leftQuery = Object.prototype.hasOwnProperty.call(left, 'q') || Object.prototype.hasOwnProperty.call(left, 'page_size') || Object.prototype.hasOwnProperty.call(left, 'source') ? left : buildListingsQuery(left);
-  const rightQuery = Object.prototype.hasOwnProperty.call(right, 'q') || Object.prototype.hasOwnProperty.call(right, 'page_size') || Object.prototype.hasOwnProperty.call(right, 'source') ? right : buildListingsQuery(right);
-  const keys = new Set([...Object.keys(leftQuery), ...Object.keys(rightQuery)]);
-  for (const key of keys) {
-    if (normalize(leftQuery[key]) !== normalize(rightQuery[key])) return false;
-  }
-  return true;
+  const a = canonical(left); const b = canonical(right);
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  return [...keys].every((key) => a[key] === b[key]);
 }
 
 export default function ListingsPage() {
