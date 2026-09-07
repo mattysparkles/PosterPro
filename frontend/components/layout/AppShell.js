@@ -167,15 +167,21 @@ export default function AppShell({
   const activeHref = router.asPath || activePath;
 
   const normalizeHref = (href) => (href || '').replace(/#.*$/, '');
+  const activeNavHref = navGroups
+    .flatMap((group) => (Array.isArray(group?.items) ? group.items : []))
+    .map((item) => item.href)
+    .filter((href) => {
+      const candidate = normalizeHref(href);
+      const current = normalizeHref(activeHref);
+      const [candidatePath, candidateQuery] = candidate.split('?');
+      const [currentPath, currentQuery] = current.split('?');
+      if (candidateQuery && candidateQuery !== currentQuery) return false;
+      return currentPath === candidatePath || currentPath.startsWith(`${candidatePath}/`);
+    })
+    .sort((a, b) => normalizeHref(b).length - normalizeHref(a).length)[0] || normalizeHref(activeHref);
   const isSelected = (href) => {
     const normalizedHref = normalizeHref(href);
-    const normalizedActive = normalizeHref(activeHref);
-    return (
-      normalizedActive === normalizedHref ||
-      activePath === normalizedHref ||
-      activePath.startsWith(`${normalizedHref}/`) ||
-      normalizedActive.startsWith(`${normalizedHref}?`)
-    );
+    return normalizedHref === activeNavHref || normalizeHref(activePath) === normalizedHref;
   };
   const activeNav = findActiveNavItem(navGroups, isSelected);
   const subnavSections = Array.isArray(subnav?.sections)
