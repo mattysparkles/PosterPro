@@ -59,14 +59,13 @@ export const MARKETPLACE_GUIDES = {
     ],
   },
   mercari: {
-    summary: 'Mercari uses an assisted workflow. PosterPro tracks the account identity, bridge session, and readiness for cross-post drafting and handoff.',
-    tooltip: 'Mercari is not a native OAuth/direct-API connector here. Use the bridge desktop to capture a real authenticated browser session.',
-    prerequisites: ['Bridge account key (mercari-main)', 'Store or closet name + handle', 'Operator posting notes (shipping, pricing, required fields)'],
+    summary: 'Mercari uses the browser-extension session handoff so PosterPro can capture the authenticated browser state and keep the account ready for assisted posting.',
+    tooltip: 'Install the PosterPro browser extension, capture the logged-in Mercari session, then save the browser-assist state into PosterPro.',
+    prerequisites: ['Install the PosterPro browser extension', 'Mercari store or closet name', 'Mercari handle', 'Internal posting notes for the operator'],
     steps: [
-      'Save a bridge account key and store the operator identity details.',
-      'Use Connect Mercari account to capture a valid browser session in Bridge Desktop.',
-      'Mark the channel Ready only after the session is valid and the workflow is confirmed.',
-      'Use listing previews + cross-post jobs to generate a structured handoff plan for Mercari.',
+      'Install the PosterPro browser extension into the browser you will use for assisted posting.',
+      'Open Mercari in that browser and save the authenticated session into PosterPro.',
+      'Document any posting or shipping rules in Workflow notes, then mark the workflow Ready.',
     ],
   },
   etsy: {

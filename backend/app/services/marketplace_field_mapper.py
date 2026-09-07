@@ -3,6 +3,17 @@ from __future__ import annotations
 from typing import Any
 
 from app.models.models import Listing
+from app.services.customer_description import sanitize_customer_description
+
+
+def _trim_to_word_limit(value: str | None, limit: int) -> str | None:
+    text = " ".join(str(value or "").split())
+    if not text:
+        return None
+    words = text.split(" ")
+    if len(words) <= limit:
+        return text
+    return " ".join(words[:limit]).strip()
 
 
 def _price(listing: Listing) -> float | None:
@@ -19,9 +30,11 @@ def _shared_payload(listing: Listing) -> dict[str, Any]:
         **shipping_profile,
         **marketplace_shipping,
     }
+    customer_description, removed_internal = sanitize_customer_description(listing.description)
     return {
         "title": listing.title,
-        "description": listing.description,
+        "description": customer_description,
+        "description_sanitized": bool(removed_internal),
         "price": _price(listing),
         "condition": listing.condition,
         "quantity": listing.quantity,
@@ -120,7 +133,7 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
         return {
             "marketplace": market,
             "title": shared["title"],
-            "description": shared["description"],
+            "description": _trim_to_word_limit(shared["description"], 1000),
             "price": shared["price"],
             "condition": shared["condition"],
             "category_hint": shared["category"],

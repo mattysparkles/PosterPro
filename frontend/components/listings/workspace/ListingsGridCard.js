@@ -40,20 +40,33 @@ export default function ListingsGridCard({
   const canPublish = workflowPreferences.review_before_publish ? bucket === 'ready' : bucket === 'drafts' || bucket === 'ready';
 
   return (
-    <div
-      role="button"
-      tabIndex={0}
-      onClick={() => setSelectedListingId(listing.id)}
-      onKeyDown={(event) => {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault();
-          setSelectedListingId(listing.id);
-        }
-      }}
-      className={`rounded-[16px] border bg-white p-4 text-left transition hover:border-[#bfd2ff] hover:bg-[#f8fbff] ${selected ? 'border-[#bfd2ff] ring-2 ring-[#dbe7ff]' : 'border-[#e5e7eb]'}`}
-    >
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-3">
+    <div className={`rounded-[16px] border bg-white p-4 text-left transition hover:border-[#bfd2ff] hover:bg-[#f8fbff] ${selected ? 'border-[#bfd2ff] ring-2 ring-[#dbe7ff]' : 'border-[#e5e7eb]'}`}>
+      <div className="flex items-start gap-3">
+        <div className="pt-1">
+          <input
+            type="checkbox"
+            checked={selected}
+            onChange={(event) => {
+              event.stopPropagation();
+              toggleRow(listing.id);
+            }}
+            onClick={(event) => event.stopPropagation()}
+            className="h-4 w-4 rounded border-[#cbd5e1] text-[#2563eb]"
+            aria-label={`Select ${getListingTitle(listing)}`}
+          />
+        </div>
+        <div
+          role="button"
+          tabIndex={0}
+          onClick={() => setSelectedListingId(listing.id)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault();
+              setSelectedListingId(listing.id);
+            }
+          }}
+          className="flex min-w-0 flex-1 items-start gap-3 rounded-[12px] outline-none transition focus:ring-2 focus:ring-[#dbe7ff]"
+        >
           <ListingsThumbnail src={getListingThumbnail(listing)} alt={getListingTitle(listing)} size="lg" />
           <div className="min-w-0">
             <p className="truncate text-sm font-semibold text-[#101828]">{getListingTitle(listing)}</p>
@@ -70,16 +83,6 @@ export default function ListingsGridCard({
             />
           </div>
         </div>
-        <input
-          type="checkbox"
-          checked={selected}
-          onChange={(event) => {
-            event.stopPropagation();
-            toggleRow(listing.id);
-          }}
-          onClick={(event) => event.stopPropagation()}
-          className="mt-1 h-4 w-4 rounded border-[#cbd5e1] text-[#2563eb]"
-        />
       </div>
       <div className="mt-4 flex flex-wrap gap-2">
         <StatusPill status={bucket} label={bucket.charAt(0).toUpperCase() + bucket.slice(1)} />
@@ -108,7 +111,7 @@ export default function ListingsGridCard({
             Approve
           </Button>
         ) : null}
-        {isAmazonVineSource(listing) && !isArchivedListing(listing) ? (
+        {!isArchivedListing(listing) ? (
           <Button variant="outline" size="sm" onClick={async (event) => { event.stopPropagation(); await archiveListing(listing.id); }}>
             Archive
           </Button>

@@ -5,30 +5,37 @@ import json
 import logging
 import mimetypes
 import re
-from datetime import datetime, timedelta, UTC
+from datetime import date, datetime, timedelta, UTC
 from pathlib import Path
 from typing import Any
 
 from celery import chord, group
-from sqlalchemy import select, update as sql_update
+from sqlalchemy import select, update as sql_update, case
 
 from app.core.config import settings
 from app.core.database import SessionLocal
+from app.core.config import settings
 from app.models.enums import ListingStatus, MarketplaceListingStatus, MarketplaceName
 from app.models.models import (
     BulkJob,
     Cluster,
     Image,
     Listing,
+    ListingRevision,
+    ListingCorrectionJob,
     MarketplaceAccount,
     MarketplaceCrosspostJob,
     MarketplaceImportJob,
     MarketplaceListing,
+    VineImportItem,
     StorageUnitBatch,
     User,
 )
 from app.services.listing_workspace import normalize_marketplace_data
+from app.services.listing_ai import ListingAIService
+from app.services.category_rules import suggest_category_from_text
 from app.services.listing_review import derive_condition_data, derive_shipping_profile, normalize_listing_images
+from app.services.listing_processing import ListingProcessingService
 from app.services.marketplace_execution import resolve_execution_mode
 from app.services.marketplace_field_mapper import build_marketplace_payload, normalize_import_payload
 from app.services.marketplace_preflight import MarketplacePreflightService
@@ -45,10 +52,14 @@ from app.services.multi_platform_publisher import get_enabled_platforms, multi_p
 from app.services.offer_service import OfferService
 from app.services.sale_detection_service import SaleDetectionService
 from app.services.intake_slate import IntakeSlateService
-from app.services.ebay_service import EbayIntegrationError, get_active_ebay_listings, sync_ebay_active_listings
+from app.services.ai_guard import release_waiting_for_reset, recover_stale_reservations
+from app.services.vine_import_service import VineImportService, VINE_IMAGE_BACKFILL_CUTOFF
+from app.services.ebay_service import EbayIntegrationError, get_active_ebay_listings, sync_ebay_active_listings, revise_ebay_listing
+from app.services.ebay_service import search_ebay_categories, get_or_refresh_account, build_ebay_item_specifics
 from app.workers.celery_app import celery_app
 from app.services.clustering import cluster_embeddings
 from app.services.rate_limiter import rate_limiter
+from scripts.repair_recovery_draft_copy import _needs_category_refresh, _product_listing_description
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +67,80 @@ STALE_IMPORT_JOB_AFTER = timedelta(minutes=20)
 
 sale_detection_service = SaleDetectionService()
 inventory_service = InventoryService()
+
+@celery_app.task(name="process_listing_correction_jobs")
+def process_listing_correction_jobs_task(limit: int = 10) -> dict[str, Any]:
+    """Claim manual corrections in durable priority order and record material deltas."""
+    db = SessionLocal(); processed = []
+    try:
+        for _ in range(max(1, min(limit, 50))):
+            q = select(ListingCorrectionJob).where(ListingCorrectionJob.status == "queued").order_by(ListingCorrectionJob.priority.asc(), case((ListingCorrectionJob.priority == 0, ListingCorrectionJob.created_at), else_=None).desc(), case((ListingCorrectionJob.priority != 0, ListingCorrectionJob.created_at), else_=None).asc()).with_for_update(skip_locked=True).limit(1)
+            job = db.execute(q).scalars().first()
+            if not job: break
+            job.status = "processing"; job.claimed_at = datetime.now(UTC); job.started_at = datetime.now(UTC); job.attempt_count = (job.attempt_count or 0) + 1
+            listing = db.get(Listing, job.listing_id)
+            before = dict(job.before_snapshot or {})
+            changed = {}
+            if listing:
+                fields = {str(f).lower() for f in (job.fields or [])}
+                category_blocked = False
+                generated = None
+                source_meta = dict(listing.source_metadata or {})
+                evidence = source_meta.get("amazon_evidence") or source_meta.get("amazon_product") or source_meta.get("source_evidence") or {}
+                if fields & {"title", "description", "identity", "condition"}:
+                    generated = ListingAIService().generate({"title_hint": listing.title, "source_type": listing.source_type, "image_count": len(listing.image_urls or []), "existing_specifics": listing.item_specifics or {}, "existing_condition": listing.condition, "source_evidence": evidence, "operator_instruction": job.operator_note}, db=db, user_id=job.user_id, listing_id=listing.id)
+                if generated and "title" in fields and generated.get("title"):
+                    value = str(generated["title"])[:80]
+                    if value != before.get("title"): listing.title = value; changed["title"] = {"before": before.get("title"), "after": value}
+                if generated and "description" in fields and generated.get("description"):
+                    from app.services.customer_description import sanitize_customer_description
+                    safe, _removed = sanitize_customer_description(generated["description"])
+                    if safe and safe != before.get("description"): listing.description = safe; changed["description"] = {"before": before.get("description"), "after": safe}
+                if "category" in fields:
+                    suggestion = listing.category_suggestion or listing.title or job.operator_note
+                    account = db.execute(select(MarketplaceAccount).where(MarketplaceAccount.user_id == job.user_id, MarketplaceAccount.marketplace == MarketplaceName.ebay)).scalars().first()
+                    try:
+                        candidates = asyncio.run(search_ebay_categories(str(suggestion or listing.title or ""), account)) if account else []
+                    except Exception as exc:
+                        candidates = []; category_blocked = True; job.result = {"category_state": "CATEGORY_LOOKUP_FAILED", "error": str(exc)[:500]}
+                    query_terms = set(re.findall(r"[a-z0-9]+", f"{listing.title or ''} {job.operator_note or ''}".lower()))
+                    ranked = sorted(candidates, key=lambda c: len(query_terms & set(re.findall(r"[a-z0-9]+", str(c.get('category_name') or '').lower()))), reverse=True)
+                    top_score = len(query_terms & set(re.findall(r"[a-z0-9]+", str((ranked[0] if ranked else {}).get('category_name') or '').lower()))) if ranked else 0
+                    next_score = len(query_terms & set(re.findall(r"[a-z0-9]+", str((ranked[1] if len(ranked)>1 else {}).get('category_name') or '').lower()))) if len(ranked)>1 else -1
+                    if ranked and ranked[0].get("category_id") and ranked[0].get("publishable") is True and (len(ranked) == 1 or top_score > next_score):
+                        chosen = ranked[0]; listing.category_id = str(chosen["category_id"]); listing.category_suggestion = chosen.get("category_name") or suggestion; listing.source_metadata = {**source_meta, "category_path": chosen.get("breadcrumb") or chosen.get("category_tree"), "category_provenance": "CORRECTION_TAXONOMY", "category_candidates": ranked}; changed["category"] = {"before": before.get("category_id"), "after": listing.category_id, "path_after": chosen.get("breadcrumb"), "validation": "taxonomy_leaf_candidate"}
+                        try:
+                            specifics = asyncio.run(build_ebay_item_specifics(listing, account, listing.category_id))
+                            known = dict(listing.item_specifics or {}); known.update({k: v for k, v in specifics.items() if v}); listing.item_specifics = known; changed["aspects"] = {"before": before.get("item_specifics"), "after": known, "missing_required": []}
+                        except Exception as exc:
+                            category_blocked = True; job.failure_reason = f"ASPECT_REQUIRED: {exc}"
+                    else:
+                        category_blocked = True
+                        job.result = {"category_state": "NEEDS_OPERATOR_REVIEW", "category_candidates": ranked[:10]}
+                job.after_snapshot = {"title": listing.title, "description": listing.description, "category_id": listing.category_id, "category_suggestion": listing.category_suggestion, "item_specifics": listing.item_specifics, "listing_price": listing.listing_price, "condition": listing.condition, "image_urls": listing.image_urls}
+                after_values = job.after_snapshot or {}
+                keymap = {"category": "category_id", "item specifics": "item_specifics", "aspects": "item_specifics", "price": "listing_price", "images": "image_urls"}
+                field_results = [{"field": f, "before": before.get(keymap.get(f, f)), "after": (changed.get(f) or {}).get("after") if f in changed else after_values.get(keymap.get(f, f)), "capability_used": "ListingAI" if f in {"title","description","identity"} else "taxonomy/readiness", "evidence_used": bool(evidence), "material_change": f in changed, "decision": "COMPLETE" if f in changed else "NO_PROGRESS"} for f in fields]
+                complete = bool(fields) and fields.issubset(changed.keys()) and not category_blocked
+                prior_result = dict(job.result or {}); prior_result.update({"fields_requested": list(fields), "fields_changed": list(changed), "field_results": field_results, "material_change": bool(changed), "decision": "COMPLETE" if complete else ("PARTIAL" if changed else "NO_PROGRESS")}); job.material_delta = changed; job.result = prior_result
+                job.status = "completed" if complete else "needs_review"; job.failure_reason = None if complete else "Requested corrections remain unresolved"
+            else:
+                job.status = "blocked"; job.failure_reason = "Listing not found"
+            job.completed_at = datetime.now(UTC); db.commit(); processed.append({"job_id": job.id, "status": job.status, "material_change": bool(changed)})
+        return {"processed": processed}
+    finally: db.close()
+
+
+@celery_app.task(name="resume_waiting_ai_work")
+def resume_waiting_ai_work_task(limit: int = 100) -> dict[str, int]:
+    """UTC reset maintenance; release bounded waiting work and stale claims."""
+    db = SessionLocal()
+    try:
+        released = release_waiting_for_reset(db, limit=limit)
+        recovered = recover_stale_reservations(db, limit=limit)
+        return {"released": released, "recovered": recovered}
+    finally:
+        db.close()
 
 
 def _json_safe(value: Any) -> Any:
@@ -75,6 +160,178 @@ def process_intake_reconciliation_jobs_task(user_id: int | None = None, limit: i
             limit=limit,
         )
         return {"processed": len(results), "results": results}
+    finally:
+        db.close()
+
+
+@celery_app.task(name="queue_due_intake_syncs")
+def queue_due_intake_syncs_task() -> dict[str, Any]:
+    """Lightweight scheduler that only enqueues per-user intake sync work.
+
+    The heavy Google Photos scan and reconciliation run in the existing
+    drain_intake_provider_media task.
+    """
+    db = SessionLocal()
+    queued_user_ids: list[int] = []
+    try:
+        service = IntakeSlateService()
+        users = db.execute(select(User).order_by(User.id.asc())).scalars().all()
+        now = datetime.now(UTC)
+        for user in users:
+            settings_payload = service.settings_for_user(user)
+            if not settings_payload.get("enabled"):
+                continue
+            source_url = str(settings_payload.get("album_url") or settings_payload.get("folder_id") or "").strip()
+            if not source_url:
+                continue
+            last_synced = service._parse_datetime(settings_payload.get("last_synced_at"))  # noqa: SLF001
+            poll_seconds = max(60, int(settings_payload.get("poll_interval_seconds") or 300))
+            if last_synced and (now - last_synced.astimezone(UTC)).total_seconds() < poll_seconds:
+                continue
+            drain_intake_provider_media_task.apply_async(args=[user.id], countdown=1)
+            queued_user_ids.append(int(user.id))
+        return {"queued": len(queued_user_ids), "queued_user_ids": queued_user_ids}
+    finally:
+        db.close()
+
+
+@celery_app.task(name="repair_recent_vine_images", bind=True, max_retries=None)
+def repair_recent_vine_images_task(self, user_id: int | None = None, chunk_size: int = 25) -> dict[str, Any]:
+    """Keep retrying recent Vine image repair until the backlog is cleared.
+
+    The task is intentionally chunked and re-runnable.  It only targets Vine
+    rows ordered on or after the backfill cutoff, so archived older inventory
+    is not reprocessed by the automatic loop.
+    """
+    db = SessionLocal()
+    try:
+        service = VineImportService()
+        target_users: list[int]
+        if user_id is not None:
+            target_users = [int(user_id)]
+        else:
+            rows = db.execute(
+                select(VineImportItem.user_id).join(
+                    Listing,
+                    (VineImportItem.listing_id == Listing.id) | (VineImportItem.inventory_item_id == Listing.id),
+                ).where(
+                    Listing.source_type == "amazon_vine",
+                    VineImportItem.order_date.is_not(None),
+                    VineImportItem.order_date >= VINE_IMAGE_BACKFILL_CUTOFF,
+                ).distinct()
+            ).all()
+            target_users = [int(row[0]) for row in rows if row and row[0] is not None]
+
+        totals = {
+            "updated": 0,
+            "removed_unsafe": 0,
+            "already_present": 0,
+            "missing_asin": 0,
+            "no_cache": 0,
+            "bridge_refetched": 0,
+            "bridge_failed": 0,
+            "processed": 0,
+            "target_users": target_users,
+            "chunk_size": max(1, int(chunk_size or 25)),
+            "cutoff": VINE_IMAGE_BACKFILL_CUTOFF.isoformat(),
+        }
+
+        total_backlog = 0
+        for target_user_id in target_users:
+            targets = service.list_recent_vine_listing_ids(
+                db,
+                user_id=target_user_id,
+                since_order_date=VINE_IMAGE_BACKFILL_CUTOFF,
+                include_archived=False,
+                only_missing_images=True,
+                limit=max(1, int(chunk_size or 25)),
+            )
+            if not targets:
+                continue
+            result = service.repair_vine_listing_images(
+                db,
+                user_id=target_user_id,
+                listing_ids=targets,
+                include_archived=False,
+                force_refresh=True,
+                use_bridge_session=True,
+                only_missing_images=True,
+                limit=None,
+            )
+            for key in ("updated", "removed_unsafe", "already_present", "missing_asin", "no_cache", "bridge_refetched", "bridge_failed", "processed"):
+                totals[key] += int(result.get(key) or 0)
+            total_backlog += service.count_recent_vine_image_backlog(
+                db,
+                user_id=target_user_id,
+                since_order_date=VINE_IMAGE_BACKFILL_CUTOFF,
+                include_archived=False,
+            )
+
+        totals["remaining_backlog"] = total_backlog
+        return totals
+    finally:
+        db.close()
+
+
+@celery_app.task(name="resume_incomplete_listings", bind=True, max_retries=None)
+def resume_incomplete_listings_task(self, user_id: int | None = None, limit: int = 25, dry_run: bool = False) -> dict[str, Any]:
+    """Resume incomplete listing-level work until the backlog drains."""
+    db = SessionLocal()
+    try:
+        service = ListingProcessingService()
+        result = service.resume_backlog(
+            db,
+            user_id=user_id,
+            limit=limit,
+            dry_run=dry_run,
+            worker_id="celery-listing-backfill",
+        )
+        remaining = int(result.get("queued", 0)) + int(result.get("processing", 0)) + int(result.get("retrying", 0))
+        if settings.historical_backlog_auto_resume_enabled and remaining > 0 and not dry_run:
+            self.apply_async(args=[user_id, limit, dry_run], countdown=15)
+        return result
+    finally:
+        db.close()
+
+
+@celery_app.task(name="resume_image_identification_backlog", bind=True, max_retries=None)
+def resume_image_identification_backlog_task(self, user_id: int | None = None, limit: int = 3, dry_run: bool = False) -> dict[str, Any]:
+    """Run bounded image-identification recovery for unresolved photographed inventory."""
+    db = SessionLocal()
+    try:
+        service = ListingProcessingService()
+        result = service.resume_image_identification_backlog(
+            db,
+            user_id=user_id,
+            limit=limit,
+            dry_run=dry_run,
+            worker_id="celery-image-identification",
+        )
+        remaining = int(result.get("queued", 0)) + int(result.get("processing", 0)) + int(result.get("retrying", 0))
+        if settings.historical_backlog_auto_resume_enabled and remaining > 0 and not dry_run:
+            self.apply_async(args=[user_id, limit, dry_run], countdown=30)
+        return result
+    finally:
+        db.close()
+
+
+@celery_app.task(name="resume_product_research_backlog", bind=True, max_retries=None)
+def resume_product_research_backlog_task(self, user_id: int | None = None, limit: int = 8, dry_run: bool = False) -> dict[str, Any]:
+    """Run bounded research for weak but evidence-rich review items."""
+    db = SessionLocal()
+    try:
+        service = ListingProcessingService()
+        result = service.resume_product_research_backlog(
+            db,
+            user_id=user_id,
+            limit=limit,
+            dry_run=dry_run,
+            worker_id="celery-product-research",
+        )
+        remaining = int(result.get("queued", 0)) + int(result.get("processing", 0)) + int(result.get("retrying", 0))
+        if settings.historical_backlog_auto_resume_enabled and remaining > 0 and not dry_run:
+            self.apply_async(args=[user_id, limit, dry_run], countdown=45)
+        return result
     finally:
         db.close()
 
@@ -721,6 +978,22 @@ def process_marketplace_crosspost_job_task(self, job_id: int) -> dict:
             db.expire_all()
             if _crosspost_job_canceled(db, job_id):
                 return {"job_id": job_id, "status": "canceled", "results": results}
+            operation = str((job.execution_plan or {}).get("operation") or "create").lower()
+            if operation == "update" and str(market).lower() == "ebay":
+                try:
+                    revised = asyncio.run(revise_ebay_listing(listing, db))
+                    results.append({"marketplace": market, "execution_mode": "direct_api", "operation": "UPDATE", "status": "UPDATED", "response": revised})
+                except Exception as exc:
+                    failed_markets.append(market)
+                    results.append({"marketplace": market, "execution_mode": "direct_api", "operation": "UPDATE", "status": "failed", "error": str(exc)})
+                continue
+            if operation == "update":
+                # Assisted marketplaces do not yet expose a safe revise
+                # contract. Never fall through to CREATE for a manual update;
+                # preserve the canonical save and surface an actionable retry.
+                failed_markets.append(market)
+                results.append({"marketplace": market, "execution_mode": "unsupported_update", "operation": "UPDATE", "status": "failed", "error": "UPDATE_NOT_SUPPORTED_FOR_MARKETPLACE"})
+                continue
             if _is_already_published_to_marketplace(db, listing, market):
                 results.append(
                     {
@@ -906,7 +1179,21 @@ def process_marketplace_crosspost_job_task(self, job_id: int) -> dict:
             return {"job_id": job_id, "status": "canceled", "results": results}
         job.status = "failed" if failed_markets else "completed"
         job.last_error = f"Cross-post execution failed for: {', '.join(failed_markets)}" if failed_markets else None
+        job.attempt_count = int(job.attempt_count or 0) + 1
+        if failed_markets:
+            # Lower numeric priority is higher priority; demote automatic
+            # failures so a bounded retry cannot starve fresh operator work.
+            job.priority = min(10, int(job.priority or 1) + 1)
+            job.next_attempt_at = datetime.now(UTC) + timedelta(minutes=min(120, 2 ** min(job.attempt_count, 6)))
         job.result_summary = {"results": results}
+        revision_id = (job.execution_plan or {}).get("revision_id")
+        if revision_id:
+            revision_row = db.get(ListingRevision, int(revision_id))
+            if revision_row:
+                revision_row.marketplace_results = {str(r.get("marketplace")): r for r in results}
+                revision_row.status = "failed" if failed_markets else "completed"
+                revision_row.sync_state = "partially_synced" if failed_markets and results else ("update_failed" if failed_markets else "synced")
+                db.add(revision_row)
         db.add(job)
         db.commit()
         return {"job_id": job_id, "status": job.status, "results": results}
@@ -1097,6 +1384,9 @@ def process_marketplace_import_job_task(self, job_id: int) -> dict:
             }
         except Exception as exc:
             job.status = "failed"
+            job.attempt_count = int(job.attempt_count or 0) + 1
+            job.priority = min(10, int(job.priority or 1) + 1)
+            job.next_attempt_at = datetime.now(UTC) + timedelta(minutes=min(120, 2 ** min(job.attempt_count, 6)))
             job.last_error = _friendly_import_failure_message(
                 source_marketplace=job.source_marketplace,
                 error=exc,
@@ -1120,19 +1410,34 @@ def process_marketplace_import_job_task(self, job_id: int) -> dict:
     name="sync_sold_everywhere",
 )
 def sync_sold_everywhere_task(self, listing_ids: list[int]) -> dict:
-    # Placeholder orchestration hook: in production this would look at order webhooks and marketplace statuses.
-    processed = []
+    # Reconcile sold or depleted inventory across connected marketplaces.
+    processed: list[int] = []
     with SessionLocal() as db:
         query = select(Listing)
         if listing_ids:
             query = query.where(Listing.id.in_(listing_ids))
         listings = db.execute(query).scalars().all()
         for listing in listings:
+            if listing.sold_at is None and int(listing.quantity or 0) > 0 and listing.sale_price is None:
+                continue
+            user = listing.user or db.get(User, listing.user_id)
+            if not user:
+                continue
+            asyncio.run(
+                sale_detection_service._fanout_quantity_adjustment(
+                    db,
+                    listing,
+                    user,
+                    sold_platform="manual",
+                    quantity_sold=max(1, int(listing.quantity or 1)),
+                    dry_run=False,
+                    sale_amount=listing.sale_price,
+                )
+            )
             rows = db.execute(select(MarketplaceListing).where(MarketplaceListing.listing_id == listing.id)).scalars().all()
             for row in rows:
-                if row.status == MarketplaceListingStatus.PUBLISHED:
-                    row.status = MarketplaceListingStatus.UPDATED
-                    row.raw_response = {**(row.raw_response or {}), "sold_sync": "queued"}
+                if row.status in {MarketplaceListingStatus.UPDATED, MarketplaceListingStatus.DELETED}:
+                    row.raw_response = {**(row.raw_response or {}), "sold_sync": "reconciled"}
                     db.add(row)
             processed.append(listing.id)
         db.commit()
@@ -1267,6 +1572,53 @@ def bulk_process_inventory_chunk(job_id: str, action: str, payload: dict, listin
                 elif action in {"refresh", "autobump"}:
                     listing.last_refreshed = datetime.utcnow()
                     listing.stale_flag = False
+                elif action == "repair_recovery_copy":
+                    if str(listing.source_type or "").strip() != "media_inventory_recovery":
+                        raise ValueError("Only media_inventory_recovery listings can be repaired by this action")
+                    current_shipping = listing.shipping_profile if isinstance(listing.shipping_profile, dict) else {}
+                    marketplace_data = dict(listing.marketplace_data or {})
+                    quality_summary = dict(marketplace_data.get("quality_summary") or {})
+                    title = str(listing.title or listing.suggested_title or "Recovered inventory item").strip()
+                    shipping = derive_shipping_profile(
+                        listing={
+                            "title": title,
+                            "description": listing.description or "",
+                            "listing_price": listing.listing_price or listing.suggested_price or listing.buy_it_now_price or listing.estimated_value,
+                        },
+                        item_specifics=listing.item_specifics or {},
+                        existing=current_shipping,
+                    )
+                    cleaned_description = _product_listing_description(
+                        title=title,
+                        listing=listing,
+                        shipping_profile=shipping,
+                    )
+                    suggestion, suggestion_reason = suggest_category_from_text(
+                        title,
+                        cleaned_description,
+                        listing.category_suggestion,
+                        " ".join((listing.tags or [])[:8]),
+                    )
+                    source = dict(listing.source_metadata or {})
+                    recovery = dict(source.get("recovery") or {})
+                    recovery["copy_repair"] = {
+                        "description_rewritten": cleaned_description != (listing.description or ""),
+                        "category_refresh_reason": suggestion_reason,
+                        "shipping_rule": "buyer_pays_under_10" if shipping.get("buyer_pays_shipping") else "seller_pays_10_and_over",
+                    }
+                    source["recovery"] = recovery
+                    quality_summary["ready_for_publish_queue"] = True
+                    quality_summary["status"] = "needs_review"
+                    marketplace_data["quality_summary"] = quality_summary
+                    if listing.description != cleaned_description:
+                        listing.description = cleaned_description
+                    if _needs_category_refresh(listing.category_suggestion) and suggestion and suggestion != "Other > Needs category review":
+                        listing.category_suggestion = suggestion
+                    if listing.shipping_profile != shipping:
+                        listing.shipping_profile = shipping
+                    listing.needs_review = True
+                    listing.marketplace_data = marketplace_data
+                    listing.source_metadata = source
                 else:
                     raise ValueError(f"Unsupported action: {action}")
                 if payload.get("marketplaces"):

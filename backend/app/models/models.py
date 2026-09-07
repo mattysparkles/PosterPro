@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, Enum, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Date, DateTime, Enum, Float, ForeignKey, Integer, SmallInteger, String, Text, UniqueConstraint
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -126,6 +126,18 @@ class Listing(Base, TimestampMixin):
     restricted_reasons: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     detected_category_guess: Mapped[str | None] = mapped_column(String(255), nullable=True)
     marketplace_allowed_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    processing_state: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    processing_stage: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    processing_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    processing_last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    processing_last_success_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    processing_next_retry_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    processing_attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    processing_last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    processing_error_stage: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    processing_blocking_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    processing_worker_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    processing_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
 
     user: Mapped["User"] = relationship(back_populates="listings")
     cluster: Mapped["Cluster | None"] = relationship(back_populates="listings")
@@ -133,6 +145,8 @@ class Listing(Base, TimestampMixin):
     marketplace_listings: Mapped[list["MarketplaceListing"]] = relationship(back_populates="listing")
     publish_attempts: Mapped[list["MarketplacePublishAttempt"]] = relationship(back_populates="listing")
     sales: Mapped[list["Sale"]] = relationship(back_populates="listing")
+    processing_events: Mapped[list["ListingProcessingEvent"]] = relationship(back_populates="listing")
+    revisions: Mapped[list["ListingRevision"]] = relationship(back_populates="listing", order_by="ListingRevision.revision")
 
 
 class StorageUnitBatch(Base, TimestampMixin):
@@ -149,6 +163,107 @@ class StorageUnitBatch(Base, TimestampMixin):
     pipeline_task_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     listings: Mapped[list["Listing"]] = relationship(back_populates="batch")
+
+
+class ListingProcessingEvent(Base, TimestampMixin):
+    __tablename__ = "listing_processing_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    listing_id: Mapped[int] = mapped_column(ForeignKey("listings.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    event_type: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(64), default="completed", index=True)
+    stage: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    details_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    listing: Mapped["Listing"] = relationship(back_populates="processing_events")
+
+
+class ListingRevision(Base, TimestampMixin):
+    """Durable operator edit/change-set and marketplace sync audit."""
+    __tablename__ = "listing_revisions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    listing_id: Mapped[int] = mapped_column(ForeignKey("listings.id"), index=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1, index=True)
+    operation: Mapped[str] = mapped_column(String(32), default="save", index=True)
+    changed_fields: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    marketplaces_targeted: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    marketplace_results: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    sync_state: Mapped[str] = mapped_column(String(32), default="local", index=True)
+    status: Mapped[str] = mapped_column(String(32), default="recorded", index=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    listing: Mapped["Listing"] = relationship(back_populates="revisions")
+
+
+class AIRequestLedger(Base, TimestampMixin):
+    """Non-secret accounting for AI work and convergence decisions."""
+    __tablename__ = "ai_request_ledger"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    listing_id: Mapped[int | None] = mapped_column(ForeignKey("listings.id"), nullable=True, index=True)
+    purpose: Mapped[str] = mapped_column(String(64), index=True)
+    provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    endpoint: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    input_signature: Mapped[str] = mapped_column(String(128), index=True)
+    attempt_number: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(32), default="started", index=True)
+    image_count: Mapped[int] = mapped_column(Integer, default=0)
+    before_quality: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    after_quality: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    changed_fields: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    no_progress_count: Mapped[int] = mapped_column(Integer, default=0)
+    tokens_input: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tokens_output: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tokens_cached: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    service_tier: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class AIDailyBudget(Base, TimestampMixin):
+    __tablename__ = "ai_daily_budgets"
+    __table_args__ = (UniqueConstraint("budget_date", "pool", name="uq_ai_daily_budget_pool"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    budget_date: Mapped[date] = mapped_column(Date, index=True)
+    pool: Mapped[str] = mapped_column(String(16), index=True)
+    safe_ceiling: Mapped[int] = mapped_column(Integer)
+    reserved_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    actual_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    waiting_count: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class AIRequestReservation(Base, TimestampMixin):
+    __tablename__ = "ai_request_reservations"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    input_signature: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    pool: Mapped[str] = mapped_column(String(16), index=True)
+    budget_date: Mapped[date] = mapped_column(Date, index=True)
+    reserved_tokens: Mapped[int] = mapped_column(Integer)
+    actual_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    state: Mapped[str] = mapped_column(String(48), default="RESERVED", index=True)
+    listing_id: Mapped[int | None] = mapped_column(ForeignKey("listings.id"), nullable=True, index=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    purpose: Mapped[str] = mapped_column(String(64), index=True)
+    result_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class AIProviderCircuit(Base, TimestampMixin):
+    __tablename__ = "ai_provider_circuit"
+    id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, default=1)
+    state: Mapped[str] = mapped_column(String(16), default="CLOSED")
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    opened_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    retry_after: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class IntakeSession(Base, TimestampMixin):
@@ -190,6 +305,7 @@ class IntakeSlate(Base, TimestampMixin):
     packed: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     internal_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     qr_payload_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     slate_image_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     listing_id: Mapped[int | None] = mapped_column(ForeignKey("listings.id"), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(64), default="draft", index=True)
@@ -290,7 +406,6 @@ class MediaRecoveryRun(Base, TimestampMixin):
     # Recovery-only control.  This is intentionally not shared with the normal
     # listing pipeline, which must remain available while recovery is audited.
     draft_creation_state: Mapped[str] = mapped_column(String(48), default="frozen_for_quality_audit", index=True)
-    result_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class MediaRecoveryMedia(Base, TimestampMixin):
@@ -609,6 +724,10 @@ class MarketplaceImportJob(Base, TimestampMixin):
     created_listing_id: Mapped[int | None] = mapped_column(ForeignKey("listings.id"), nullable=True, index=True)
     task_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    priority: Mapped[int] = mapped_column(Integer, default=1, index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    requested_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
 
 
 class MarketplaceCrosspostJob(Base, TimestampMixin):
@@ -625,6 +744,33 @@ class MarketplaceCrosspostJob(Base, TimestampMixin):
     result_summary: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     task_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    priority: Mapped[int] = mapped_column(Integer, default=1, index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    requested_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+
+class ListingCorrectionJob(Base, TimestampMixin):
+    __tablename__ = "listing_correction_jobs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    listing_id: Mapped[int] = mapped_column(ForeignKey("listings.id"), index=True)
+    requested_by: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    priority: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    fields: Mapped[list] = mapped_column(JSON, default=list)
+    operator_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source: Mapped[str] = mapped_column(String(64), default="MANUAL_CORRECTION")
+    status: Mapped[str] = mapped_column(String(64), default="queued", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    before_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    after_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    material_delta: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    superseded_by: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
 
 
 class MarketplacePublishAttempt(Base, TimestampMixin):

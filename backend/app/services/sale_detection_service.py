@@ -16,6 +16,7 @@ from app.models.models import Listing, MarketplaceListing, Sale, User
 from app.services.media_lifecycle import purge_listing_media
 from app.services.profit_service import ProfitService
 from app.services.rate_limiter import rate_limiter
+from app.services.process_notifications import create_process_notification
 
 logger = logging.getLogger(__name__)
 
@@ -162,81 +163,90 @@ class SaleDetectionService:
         outcomes: dict[str, dict] = {}
         prefs = self._sold_sync_preferences(user)
         sold_out = new_quantity <= 0
+        target_markets = {row.marketplace.value for row in listing.marketplace_listings}
 
         for row in listing.marketplace_listings:
             market = row.marketplace.value
             if market == sold_platform:
-                if sold_out:
-                    row.status = MarketplaceListingStatus.SOLD
+                action = "sold_on_marketplace" if sold_out else "quantity_adjust"
+                response = {"status": "DRY_RUN", "action": action, "quantity": new_quantity} if dry_run else {"status": "RECORDED_SOLD_SOURCE" if sold_out else "UPDATED_SOURCE", "action": action, "quantity": new_quantity}
+                if not dry_run:
+                    row.status = MarketplaceListingStatus.DELETED if sold_out else MarketplaceListingStatus.UPDATED
                     row.raw_response = {
                         **(row.raw_response or {}),
                         "sale_detection": {
-                            "action": "sold_on_marketplace",
+                            "action": action,
                             "new_quantity": new_quantity,
                             "dry_run": dry_run,
                             "executed_at": datetime.now(UTC).isoformat(),
-                            "response": {"status": "RECORDED_SOLD_SOURCE"},
+                            "response": response,
                         },
                     }
-                    outcomes[market] = {"action": "sold_on_marketplace", "response": {"status": "RECORDED_SOLD_SOURCE"}}
                     db.add(row)
+                outcomes[market] = {"action": action, "response": response}
                 continue
 
-            connector = get_connector(market)
-            rate_limiter.acquire(market)
-            if sold_out and prefs["sold_out_delist_everywhere"]:
-                action = "delist"
-                row.status = MarketplaceListingStatus.CLOSED
-                if dry_run:
-                    response = {"status": "DRY_RUN", "action": action}
-                else:
-                    response = await connector.delete(listing)
+            action = "delist" if sold_out and prefs["sold_out_delist_everywhere"] else "quantity_adjust"
+            if dry_run:
+                response = {"status": "DRY_RUN", "action": action, "quantity": new_quantity}
             else:
-                action = "quantity_adjust"
-                row.status = MarketplaceListingStatus.UPDATED
-                platform_quantities[market] = new_quantity
-                if dry_run:
-                    response = {"status": "DRY_RUN", "action": action, "quantity": new_quantity}
+                connector = get_connector(market)
+                rate_limiter.acquire(market)
+                if action == "delist":
+                    row.status = MarketplaceListingStatus.DELETED
+                    response = await connector.delete(listing)
                 else:
+                    row.status = MarketplaceListingStatus.UPDATED
                     response = await connector.update(listing)
+                row.raw_response = {
+                    **(row.raw_response or {}),
+                    "sale_detection": {
+                        "action": action,
+                        "new_quantity": new_quantity,
+                        "dry_run": dry_run,
+                        "executed_at": datetime.now(UTC).isoformat(),
+                        "response": response,
+                    },
+                }
+                db.add(row)
+            platform_quantities[market] = new_quantity
+            outcomes[market] = {"action": action, "response": response}
 
-            row.raw_response = {
-                **(row.raw_response or {}),
-                "sale_detection": {
-                    "action": action,
+        if not dry_run:
+            listing.quantity = new_quantity
+            for market in target_markets:
+                platform_quantities[market] = new_quantity
+            listing.platform_quantities = platform_quantities
+            if sold_out:
+                listing.sold_at = datetime.now(UTC).replace(tzinfo=None)
+                if sale_amount is not None:
+                    listing.sale_price = float(sale_amount)
+                if listing.status in {ListingStatus.ready, ListingStatus.draft, ListingStatus.posted}:
+                    listing.status = ListingStatus.posted
+                current_labels = {str(label).strip() for label in (listing.custom_labels or []) if str(label).strip()}
+                current_labels.add("archived_sold")
+                listing.custom_labels = sorted(current_labels)
+                archived_state = dict(listing.marketplace_data or {})
+                archived_state["archive_state"] = {
+                    "status": "sold",
+                    "sold_platform": sold_platform,
+                    "sold_at": datetime.now(UTC).replace(tzinfo=None).isoformat(),
+                    "quantity_sold": quantity_sold,
+                    "dry_run": dry_run,
+                }
+                archived_state["sale_reconciliation"] = {
+                    "sold_platform": sold_platform,
+                    "quantity_sold": max(1, int(quantity_sold or 1)),
                     "new_quantity": new_quantity,
                     "dry_run": dry_run,
+                    "adjusted_marketplaces": sorted(outcomes.keys()),
                     "executed_at": datetime.now(UTC).isoformat(),
-                    "response": response,
-                },
-            }
-            outcomes[market] = {"action": action, "response": response}
-            db.add(row)
-
-        listing.quantity = new_quantity
-        listing.platform_quantities = platform_quantities
-        if sold_out:
-            listing.sold_at = datetime.now(UTC).replace(tzinfo=None)
-            if sale_amount is not None:
-                listing.sale_price = float(sale_amount)
-            if listing.status in {ListingStatus.ready, ListingStatus.draft, ListingStatus.posted}:
-                listing.status = ListingStatus.posted
-            current_labels = {str(label).strip() for label in (listing.custom_labels or []) if str(label).strip()}
-            current_labels.add("archived_sold")
-            listing.custom_labels = sorted(current_labels)
-            archived_state = dict(listing.marketplace_data or {})
-            archived_state["archive_state"] = {
-                "status": "sold",
-                "sold_platform": sold_platform,
-                "sold_at": datetime.now(UTC).replace(tzinfo=None).isoformat(),
-                "quantity_sold": quantity_sold,
-                "dry_run": dry_run,
-            }
-            listing.marketplace_data = archived_state
-        if sold_out and not dry_run and prefs["remove_media_on_sold_out"]:
-            cleanup = purge_listing_media(db, listing, clear_references=True)
-            outcomes["media_cleanup"] = cleanup
-        db.add(listing)
+                }
+                listing.marketplace_data = archived_state
+            if sold_out and prefs["remove_media_on_sold_out"]:
+                cleanup = purge_listing_media(db, listing, clear_references=True)
+                outcomes["media_cleanup"] = cleanup
+            db.add(listing)
         return outcomes
 
     def poll_user_sales(self, db: Session, user: User, *, dry_run: bool = True, lookback_minutes: int = 30) -> dict:
@@ -263,6 +273,7 @@ class SaleDetectionService:
 
         detected = 0
         adjusted = 0
+        seen_event_keys: set[tuple[str, str, str]] = set()
         for event in events:
             if event.get("status") == "stub":
                 logger.info(
@@ -273,6 +284,14 @@ class SaleDetectionService:
             platform = str(event.get("marketplace") or "").lower()
             if platform not in MarketplaceName._value2member_map_:
                 continue
+            event_key = (
+                platform,
+                str(event.get("marketplace_order_id") or "").strip(),
+                str(event.get("marketplace_listing_id") or "").strip(),
+            )
+            if event_key in seen_event_keys:
+                continue
+            seen_event_keys.add(event_key)
             if self._already_processed(db, platform, event.get("marketplace_order_id"), event.get("marketplace_listing_id")):
                 continue
 
@@ -305,6 +324,16 @@ class SaleDetectionService:
                 adjusted += len(outcome)
                 sale.status = "DRY_RUN" if dry_run else "SYNCED"
                 sale.details = {**(sale.details or {}), "fanout": outcome}
+                if not dry_run:
+                    create_process_notification(
+                        db,
+                        user_id=user.id,
+                        title="SOLD - NEEDS SHIPPING",
+                        message=f"{listing.title or 'Listing'} sold on {platform} for ${event.get('amount') or '—'}. Order {event.get('marketplace_order_id') or 'unknown'}.",
+                        notification_type="sale_needs_shipping",
+                        href=f"/sales?sale={sale.id}",
+                        metadata_json={"sale_id": sale.id, "order_id": event.get("marketplace_order_id"), "marketplace": platform, "shipping_state": "NEEDS_SHIPPING"},
+                    )
             else:
                 sale.status = "UNMATCHED"
 

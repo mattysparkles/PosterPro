@@ -1,12 +1,14 @@
+from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
 
 from app.core import database as database_module
-from app.models.enums import EbayPublishStatus, MarketplaceName
+from app.models.enums import EbayPublishStatus, ListingStatus, MarketplaceName
 from app.models.models import Cluster, Listing, Sale
 from app.api import routes as listings_routes
 from app.api import marketplaces as marketplaces_api
+from app.services.listing_specificity import classify_listing_reviewability, is_bare_identifier_title, is_caption_like_title
 from app.workers import tasks
 
 
@@ -17,6 +19,16 @@ def seed_listing(user_id: int) -> int:
     db.commit()
     db.refresh(cluster)
     listing = Listing(user_id=user_id, cluster_id=cluster.id, title="Shoes", description="Clean")
+    db.add(listing)
+    db.commit()
+    db.refresh(listing)
+    db.close()
+    return listing.id
+
+
+def seed_bucket_listing(user_id: int, **kwargs) -> int:
+    db = database_module.SessionLocal()
+    listing = Listing(user_id=user_id, **kwargs)
     db.add(listing)
     db.commit()
     db.refresh(listing)
@@ -68,6 +80,393 @@ async def test_marketplace_discovery_and_publish_queue(async_client, monkeypatch
 
 
 @pytest.mark.anyio
+async def test_listing_queue_filters_match_operator_ready_contract(async_client):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "Queue Contract Owner",
+            "email": f"queue-contract-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+
+    review_ready_id = seed_bucket_listing(
+        user_id,
+        status=ListingStatus.ready,
+        title="Review Ready Item",
+        description="Complete draft awaiting manual approval.",
+        listing_price=19.99,
+        condition="New",
+        category_id="123",
+        needs_review=True,
+        source_type="amazon_vine",
+        marketplace_data={
+            "quality_summary": {"ready_for_publish_queue": True},
+            "targets": ["ebay"],
+            "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "ready"}}},
+        },
+        source_metadata={},
+    )
+    recovery_attention_id = seed_bucket_listing(
+        user_id,
+        status=ListingStatus.draft,
+        title="Recovered Inventory Needs Attention",
+        description="Still being worked on automatically.",
+        listing_price=29.99,
+        condition="Needs review",
+        category_id="456",
+        needs_review=False,
+        source_type="media_inventory_recovery",
+        processing_state="needs_attention",
+        processing_stage="quality_gate",
+        processing_blocking_reason="needs_grouping_review",
+        marketplace_data={
+            "quality_summary": {"ready_for_publish_queue": False},
+            "targets": ["ebay"],
+            "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "blocked"}}},
+        },
+        source_metadata={},
+    )
+    ready_id = seed_bucket_listing(
+        user_id,
+        status=ListingStatus.ready,
+        title="Approved Ready Item",
+        description="Manually approved and waiting for publish.",
+        listing_price=39.99,
+        condition="New",
+        category_id="789",
+        needs_review=False,
+        source_type="amazon_vine",
+        marketplace_data={
+            "quality_summary": {"ready_for_publish_queue": True},
+            "targets": ["ebay"],
+            "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "ready"}}},
+        },
+        source_metadata={"operator_approved_at": "2026-08-12T12:00:00Z"},
+    )
+    blocked_id = seed_bucket_listing(
+        user_id,
+        status=ListingStatus.draft,
+        title="Blocked Draft Item",
+        description="Missing key facts and still in progress.",
+        listing_price=15.99,
+        condition="Needs review",
+        category_id="555",
+        needs_review=False,
+        source_type="amazon_vine",
+        marketplace_data={
+            "quality_summary": {"ready_for_publish_queue": False},
+            "targets": ["ebay"],
+            "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "blocked"}}},
+        },
+        source_metadata={},
+    )
+    sold_id = seed_bucket_listing(
+        user_id,
+        status=ListingStatus.ready,
+        title="Sold Item",
+        description="This item has been sold and should only appear in Sold.",
+        listing_price=49.99,
+        condition="Used",
+        category_id="999",
+        needs_review=False,
+        source_type="amazon_vine",
+        sold_at=datetime(2026, 8, 12, 12, 30, tzinfo=timezone.utc),
+        quantity=0,
+        custom_labels=["sold"],
+        marketplace_data={
+            "quality_summary": {"ready_for_publish_queue": False},
+            "targets": ["ebay"],
+            "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "published"}}},
+        },
+        source_metadata={"operator_approved_at": "2026-08-12T12:00:00Z"},
+    )
+    archived_id = seed_bucket_listing(
+        user_id,
+        status=ListingStatus.ready,
+        title="Archived Item",
+        description="This item is archived and should only appear in Archived.",
+        listing_price=59.99,
+        condition="Used",
+        category_id="998",
+        needs_review=False,
+        source_type="amazon_vine",
+        custom_labels=["archived_vine"],
+        marketplace_data={
+            "quality_summary": {"ready_for_publish_queue": False},
+            "targets": ["ebay"],
+            "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "ready"}}},
+        },
+        source_metadata={"operator_approved_at": "2026-08-12T12:00:00Z"},
+    )
+
+    review_resp = await async_client.get("/listings?queue=review&page_size=50")
+    assert review_resp.status_code == 200
+    review_payload = review_resp.json()
+    review_ids = {row["id"] for row in review_payload["items"]}
+    assert review_ids == {review_ready_id}
+    assert review_payload["total"] == 1
+
+    attention_resp = await async_client.get("/listings?queue=attention&page_size=50")
+    assert attention_resp.status_code == 200
+    attention_payload = attention_resp.json()
+    attention_ids = {row["id"] for row in attention_payload["items"]}
+    assert recovery_attention_id in attention_ids
+    assert attention_payload["total"] >= 1
+
+    ready_resp = await async_client.get("/listings?queue=ready&page_size=50")
+    assert ready_resp.status_code == 200
+    ready_payload = ready_resp.json()
+    ready_ids = {row["id"] for row in ready_payload["items"]}
+    assert ready_ids == {ready_id}
+    assert ready_payload["total"] == 1
+
+    drafts_resp = await async_client.get("/listings?queue=drafts&page_size=50")
+    assert drafts_resp.status_code == 200
+    drafts_payload = drafts_resp.json()
+    draft_ids = {row["id"] for row in drafts_payload["items"]}
+    assert blocked_id in draft_ids
+    assert recovery_attention_id not in draft_ids
+
+    all_resp = await async_client.get("/listings?page_size=50")
+    assert all_resp.status_code == 200
+    all_payload = all_resp.json()
+    all_ids = {row["id"] for row in all_payload["items"]}
+    assert sold_id not in all_ids
+    assert archived_id not in all_ids
+
+    vine_resp = await async_client.get("/listings?queue=vine&page_size=50")
+    assert vine_resp.status_code == 200
+    vine_payload = vine_resp.json()
+    vine_ids = {row["id"] for row in vine_payload["items"]}
+    assert sold_id not in vine_ids
+    assert archived_id not in vine_ids
+
+    published_resp = await async_client.get("/listings?queue=published&page_size=50")
+    assert published_resp.status_code == 200
+    published_payload = published_resp.json()
+    published_ids = {row["id"] for row in published_payload["items"]}
+    assert sold_id not in published_ids
+    assert archived_id not in published_ids
+
+    sold_resp = await async_client.get("/listings?queue=sold&page_size=50")
+    assert sold_resp.status_code == 200
+    sold_payload = sold_resp.json()
+    sold_ids = {row["id"] for row in sold_payload["items"]}
+    assert sold_ids == {sold_id}
+    assert sold_payload["total"] == 1
+
+    archived_resp = await async_client.get("/listings?queue=archived&page_size=50")
+    assert archived_resp.status_code == 200
+    archived_payload = archived_resp.json()
+    archived_ids = {row["id"] for row in archived_payload["items"]}
+    assert archived_ids == {archived_id}
+    assert archived_payload["total"] == 1
+
+
+@pytest.mark.anyio
+async def test_listing_queue_hides_generic_caption_rows_and_merged_child_projections(async_client):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "Generic Queue Owner",
+            "email": f"generic-queue-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+
+    generic_review_id = seed_bucket_listing(
+        user_id,
+        status=ListingStatus.ready,
+        title="Circuit Board",
+        description="Bare caption only.",
+        listing_price=19.99,
+        condition="Needs review",
+        category_id="",
+        needs_review=True,
+        source_type="media_inventory_recovery",
+        processing_state="complete",
+        processing_stage="quality_gate",
+        source_metadata={"recovery": {"item_id": "REC-1"}},
+    )
+    merged_child_id = seed_bucket_listing(
+        user_id,
+        status=ListingStatus.ready,
+        title="Merged child listing",
+        description="Should not appear as a standalone item.",
+        listing_price=29.99,
+        condition="Needs review",
+        category_id="",
+        needs_review=False,
+        source_type="media_inventory_recovery",
+        processing_state="complete",
+        processing_stage="quality_gate",
+        source_metadata={
+            "recovery": {
+                "item_id": "REC-2",
+                "merged_into_recovery_item_id": "REC-1",
+                "merged_into_recovery_group_id": 99,
+            }
+        },
+    )
+
+    review_resp = await async_client.get("/listings?queue=review&page_size=50")
+    assert review_resp.status_code == 200
+    review_payload = review_resp.json()
+    review_ids = {row["id"] for row in review_payload["items"]}
+    assert generic_review_id not in review_ids
+
+    all_resp = await async_client.get("/listings?page_size=50")
+    assert all_resp.status_code == 200
+    all_payload = all_resp.json()
+    all_ids = {row["id"] for row in all_payload["items"]}
+    assert merged_child_id not in all_ids
+
+
+def test_reviewability_classifier_is_consistent_across_example_titles():
+    examples = [
+        (
+            "Circuit Board",
+            "weak",
+            {},
+            {},
+        ),
+        (
+            "Whirlpool W11478526 Washer Main Control Board OEM Replacement Part",
+            "pass",
+            {"Brand": "Whirlpool", "MPN": "W11478526", "Type": "Washer Main Control Board"},
+            {},
+        ),
+        (
+            "35541-10020",
+            "weak",
+            {},
+            {},
+        ),
+        (
+            "Volvo 106 213 G Pipe",
+            "pass",
+            {"Brand": "Volvo", "MPN": "106 213 G", "Type": "Pipe"},
+            {"recovery": {"identity": {"title": "Volvo Pipe", "brand": "Volvo", "mpn": "106 213 G"}}},
+        ),
+        (
+            "Product Packaging",
+            "weak",
+            {},
+            {},
+        ),
+    ]
+    for title, expected, item_specifics, source_metadata in examples:
+        result = classify_listing_reviewability(title=title, description=None, category=None, item_specifics=item_specifics, source_metadata=source_metadata, has_images=True)
+        assert result["reviewability_class"] == expected
+        assert is_caption_like_title(title) == (expected == "weak" and title.lower() in {"circuit board", "product packaging"})
+        assert is_bare_identifier_title(title) == (title == "35541-10020")
+        if expected == "pass":
+            assert result["is_specific_sellable_identity"] is True
+        dummy = Listing(
+            title=title,
+            description="",
+            source_type="media_inventory_recovery",
+            category_suggestion="",
+            item_specifics=item_specifics,
+            source_metadata=source_metadata,
+            image_urls=["/media/example.jpg"],
+            status=ListingStatus.ready,
+            needs_review=True,
+            processing_state="complete",
+        )
+        bucket = listings_routes._listing_bucket(dummy)
+        assert bucket == ("needs_attention" if expected == "weak" else "review")
+
+
+@pytest.mark.anyio
+async def test_listing_source_and_queue_filters_compose(async_client):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "Composed Filter Owner",
+            "email": f"composed-filter-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+
+    vine_review_id = seed_bucket_listing(
+        user_id,
+        status=ListingStatus.draft,
+        title="Vine Review Item",
+        description="Amazon Vine item awaiting review.",
+        listing_price=19.99,
+        condition="New",
+        category_id="123",
+        needs_review=True,
+        source_type="amazon_vine",
+        marketplace_data={
+            "quality_summary": {"ready_for_publish_queue": True},
+            "targets": ["ebay"],
+            "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "ready"}}},
+        },
+    )
+    vine_published_id = seed_bucket_listing(
+        user_id,
+        status=ListingStatus.ready,
+        title="Vine Published Item",
+        description="Amazon Vine item already published.",
+        listing_price=29.99,
+        condition="New",
+        category_id="124",
+        needs_review=False,
+        source_type="amazon_vine",
+        ebay_publish_status=EbayPublishStatus.POSTED,
+        ebay_listing_id="EBAY12345",
+        marketplace_data={
+            "quality_summary": {"ready_for_publish_queue": True},
+            "targets": ["ebay"],
+            "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "published"}}},
+        },
+    )
+    photo_review_id = seed_bucket_listing(
+        user_id,
+        status=ListingStatus.draft,
+        title="Photo Review Item",
+        description="Google Photos item awaiting review.",
+        listing_price=9.99,
+        condition="Used",
+        category_id="125",
+        needs_review=True,
+        source_type="google_photos_album",
+        marketplace_data={
+            "quality_summary": {"ready_for_publish_queue": True},
+            "targets": ["ebay"],
+            "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "ready"}}},
+        },
+    )
+
+    vine_review_resp = await async_client.get("/listings?queue=review&source_type=amazon_vine&page_size=50")
+    assert vine_review_resp.status_code == 200
+    vine_review_payload = vine_review_resp.json()
+    vine_review_ids = {row["id"] for row in vine_review_payload["items"]}
+    assert vine_review_ids == {vine_review_id}
+
+    vine_published_resp = await async_client.get("/listings?queue=published&source_type=amazon_vine&page_size=50")
+    assert vine_published_resp.status_code == 200
+    vine_published_payload = vine_published_resp.json()
+    vine_published_ids = {row["id"] for row in vine_published_payload["items"]}
+    assert vine_published_ids == {vine_published_id}
+
+    photo_review_resp = await async_client.get("/listings?queue=review&source_type=google_photos_album&page_size=50")
+    assert photo_review_resp.status_code == 200
+    photo_review_payload = photo_review_resp.json()
+    photo_review_ids = {row["id"] for row in photo_review_payload["items"]}
+    assert photo_review_ids == {photo_review_id}
+
+
+@pytest.mark.anyio
 async def test_published_ebay_listing_queues_facebook_only(async_client, monkeypatch):
     register = await async_client.post(
         "/auth/register",
@@ -98,6 +497,72 @@ async def test_published_ebay_listing_queues_facebook_only(async_client, monkeyp
     results = response.json()["results"]
     assert any(item["marketplace"] == "ebay" and item["status"] == "SKIPPED_ALREADY_PUBLISHED" for item in results)
     assert any(item["marketplace"] == "facebook" and item["status"] == "QUEUED" for item in results)
+
+
+@pytest.mark.anyio
+async def test_marketplace_jobs_overview_includes_system_status_snapshot(async_client):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "Status Snapshot Owner",
+            "email": f"status-snapshot-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+
+    seed_bucket_listing(
+        user_id,
+        status=ListingStatus.draft,
+        title="Draft Item",
+        description="A draft item.",
+        listing_price=11.0,
+        category_id="100",
+        source_type="amazon_vine",
+    )
+    seed_bucket_listing(
+        user_id,
+        status=ListingStatus.ready,
+        title="Ready Item",
+        description="A ready item.",
+        listing_price=12.0,
+        category_id="101",
+        source_type="amazon_vine",
+        source_metadata={"operator_approved_at": "2026-08-12T12:00:00Z"},
+    )
+    seed_bucket_listing(
+        user_id,
+        status=ListingStatus.ready,
+        title="Sold Item",
+        description="A sold item.",
+        listing_price=13.0,
+        category_id="102",
+        source_type="amazon_vine",
+        sold_at=datetime(2026, 8, 12, 13, 0, tzinfo=timezone.utc),
+        quantity=0,
+        custom_labels=["sold"],
+    )
+    seed_bucket_listing(
+        user_id,
+        status=ListingStatus.ready,
+        title="Archived Item",
+        description="An archived item.",
+        listing_price=14.0,
+        category_id="103",
+        source_type="amazon_vine",
+        custom_labels=["archived_vine"],
+    )
+
+    response = await async_client.get("/marketplace-jobs/overview?compact=true&limit=5")
+    assert response.status_code == 200
+    payload = response.json()
+    status = payload["system_status"]
+    assert status["catalog_total"] == 4
+    assert status["catalog_sold"] == 1
+    assert status["catalog_archived"] == 1
+    assert status["catalog_visible"] == 2
+    assert "status_message" in status
 
 
 @pytest.mark.anyio
@@ -654,3 +1119,58 @@ async def test_ebay_inventory_sync_alias_uses_active_listing_sync(async_client, 
     assert response.status_code == 200
     assert response.json()["checked"] == 1
     assert called and called[0][1] == 25
+
+
+@pytest.mark.anyio
+async def test_public_storefront_lists_only_published_items(async_client):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "Storefront Owner",
+            "email": f"storefront-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+
+    published_id = seed_bucket_listing(
+        user_id,
+        status=ListingStatus.PUBLISHED,
+        title="Live Storefront Item",
+        description="This item is publicly published.",
+        listing_price=24.99,
+        image_urls=["/media/storefront/live-item.jpg"],
+        listing_images=[
+            {
+                "storage_path": "/media/storefront/live-item.jpg",
+                "role": "primary",
+                "operator_state": "approved",
+                "is_reference": False,
+                "display_order": 0,
+            }
+        ],
+        ebay_listing_id="1234567890",
+        ebay_publish_status=EbayPublishStatus.POSTED,
+        source_type="amazon_vine",
+    )
+    draft_id = seed_bucket_listing(
+        user_id,
+        status=ListingStatus.draft,
+        title="Hidden Draft Item",
+        description="This draft should not appear on the storefront.",
+        listing_price=19.99,
+        source_type="amazon_vine",
+    )
+
+    response = await async_client.get("/public/storefront/listings?page_size=50")
+    assert response.status_code == 200
+    payload = response.json()
+    item_ids = {row["id"] for row in payload["items"]}
+    assert published_id in item_ids
+    assert draft_id not in item_ids
+    storefront_item = next(row for row in payload["items"] if row["id"] == published_id)
+    assert storefront_item["title"] == "Live Storefront Item"
+    assert storefront_item["price"] == 24.99
+    assert storefront_item["thumbnail_url"]
+    assert "ebay" in storefront_item["marketplaces"]

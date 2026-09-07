@@ -25,6 +25,7 @@ import {
   fetchVineMedia,
   applyEbayLaunchRepair,
   repairVineImages,
+  refreshVineDraftMetadata,
   toggleAutonomousMode,
   updateCurrentUser,
   updateVineItem,
@@ -81,6 +82,7 @@ export default function VineImportPage() {
   const [loadError, setLoadError] = useState('');
   const [enforceSixMonthLock, setEnforceSixMonthLock] = useState(true);
   const [draftProgress, setDraftProgress] = useState(null);
+  const [workflowStage, setWorkflowStage] = useState('');
   const [filterMode, setFilterMode] = useState('all');
 
   const runAutoBuild = async (batchId, options = {}) => {
@@ -236,7 +238,7 @@ export default function VineImportPage() {
             <div>
               <p className="text-sm font-semibold text-[#101828]">6-month eligibility lock</p>
               <p className="mt-1 text-xs text-[#667085]">
-                Keep this on to enforce lock windows. Turn it off to mark rows eligible by default while still recording and showing each row&apos;s &quot;Eligible After&quot; date.
+                Keep this on to enforce lock windows. Turn it off to treat lock dates as informational only; rows still draft and keep their &quot;Eligible After&quot; date for reference.
               </p>
             </div>
             <label className="inline-flex items-center gap-2 text-sm font-medium text-[#344054]">
@@ -267,23 +269,30 @@ export default function VineImportPage() {
             accept=".xlsx,.csv,.pdf"
             className="hidden"
             onChange={async (event) => {
-              const file = event.target.files?.[0];
-              if (!file) return;
-              setUploading(true);
-              try {
-                const batch = await uploadVineReport(file);
-                setActiveBatch(batch);
-                setSelectedIds([]);
-                const duplicateRows = Number(batch?.stats_json?.rows_duplicate || 0);
-                const newRows = Number(batch?.stats_json?.rows_new || 0);
+      const file = event.target.files?.[0];
+      if (!file) return;
+      setUploading(true);
+      setWorkflowStage('Uploading and parsing the Vine report…');
+      try {
+        const batch = await uploadVineReport(file);
+        setWorkflowStage(`Batch #${batch.id} created. Building drafts and repairing images…`);
+        setActiveBatch(batch);
+        setSelectedIds([]);
+        const duplicateRows = Number(batch?.stats_json?.rows_duplicate || 0);
+        const newRows = Number(batch?.stats_json?.rows_new || 0);
                 toast.success(
                   duplicateRows
-                    ? `Vine report parsed (${newRows} new, ${duplicateRows} duplicate row${duplicateRows === 1 ? '' : 's'} ignored).`
-                    : 'Vine report parsed.',
+                ? `Vine report parsed (${newRows} new, ${duplicateRows} duplicate row${duplicateRows === 1 ? '' : 's'} ignored).`
+                : 'Vine report parsed.',
                 );
+                setWorkflowStage(`Batch #${batch.id} uploaded. Auto-building drafts…`);
                 await runAutoBuild(batch.id, { newOnly: true, includeCancelled: true });
+                setWorkflowStage(`Batch #${batch.id} auto-build complete. Refreshing batch view…`);
+                await loadBatches(batch.id);
+                setWorkflowStage(`Batch #${batch.id} ready for review.`);
               } catch (error) {
                 toast.error(error.message);
+                setWorkflowStage(`Vine import failed: ${error.message || 'unknown error'}`);
               } finally {
                 setUploading(false);
                 event.target.value = '';
@@ -293,6 +302,10 @@ export default function VineImportPage() {
           <div>
             <p className="text-sm font-medium text-[#101828]">Upload Amazon Vine itemized report</p>
             <p className="mt-1 text-sm text-[#667085]">Use XLSX or CSV when possible. PDF imports stay in manual-review mode until you verify the parse.</p>
+            {workflowStage ? <p className="mt-2 text-sm font-medium text-[#2563eb]">{workflowStage}</p> : null}
+          </div>
+          <div className="ml-auto">
+            <StatusPill status={uploading || busyAction ? 'info' : 'default'} label={uploading ? 'Uploading' : busyAction ? 'Working' : 'Idle'} />
           </div>
         </div>
       </CollapsiblePanel>
@@ -358,7 +371,7 @@ export default function VineImportPage() {
           <>
             {!enforceSixMonthLock ? (
               <div className="mb-3 rounded-[10px] border border-[#fec84b] bg-[#fffaeb] px-3 py-2 text-xs text-[#7a2e0e]">
-                Lock enforcement is currently off for your account. Rows are marked eligible by default; review each row&apos;s <strong>Eligible After</strong> date before posting.
+                Lock enforcement is currently off for your account. Lock dates are recorded for reference only; rows still flow into drafts while keeping their <strong>Eligible After</strong> date visible.
               </div>
             ) : null}
             <div className="mb-4 flex flex-wrap items-center gap-2">
@@ -371,9 +384,11 @@ export default function VineImportPage() {
               <Button size="sm" variant={filterMode === 'eligible' ? 'default' : 'outline'} onClick={() => setFilterMode('eligible')}>
                 Eligible ({activeBatch.eligible_count})
               </Button>
-              <Button size="sm" variant={filterMode === 'locked' ? 'default' : 'outline'} onClick={() => setFilterMode('locked')}>
-                Locked ({activeBatch.locked_count})
-              </Button>
+              {enforceSixMonthLock ? (
+                <Button size="sm" variant={filterMode === 'locked' ? 'default' : 'outline'} onClick={() => setFilterMode('locked')}>
+                  Locked ({activeBatch.locked_count})
+                </Button>
+              ) : null}
               <Button size="sm" variant={filterMode === 'cancelled' ? 'default' : 'outline'} onClick={() => setFilterMode('cancelled')}>
                 Cancelled ({activeBatch.cancelled_count})
               </Button>
@@ -458,6 +473,27 @@ export default function VineImportPage() {
                   }}
                 >
                   Repair Amazon images
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!!busyAction || !activeBatch}
+                  onClick={async () => {
+                    setBusyAction('refresh-metadata');
+                    try {
+                      const result = await refreshVineDraftMetadata(activeBatch.id);
+                      await loadBatches(activeBatch.id);
+                      toast.success(
+                        `Draft metadata refreshed: ${Number(result?.updated || 0)} updated, ${Number(result?.missing_facts || 0)} missing-fact row(s).`,
+                      );
+                    } catch (error) {
+                      toast.error(error.message);
+                    } finally {
+                      setBusyAction('');
+                    }
+                  }}
+                >
+                  Refresh categories & condition
                 </Button>
                 <Button
                   size="sm"

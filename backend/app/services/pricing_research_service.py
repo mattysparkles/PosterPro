@@ -3,13 +3,14 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.models import Listing
+from app.services.listing_specificity import assess_listing_specificity
 from app.services.listing_review import summarize_listing_readiness
 
 STALE_PRICING_DAYS = 14
@@ -58,6 +59,22 @@ def _extract_identifiers(listing: Listing) -> dict[str, str]:
 def _condition_bucket(listing: Listing) -> str:
     condition_data = listing.condition_data if isinstance(listing.condition_data, dict) else {}
     return str(condition_data.get("condition_bucket") or listing.condition or "needs_review").strip().lower()
+
+
+def _specificity_summary(listing: Listing) -> dict[str, Any]:
+    readiness = getattr(listing, "readiness_summary", None) or {}
+    has_images = bool(
+        (isinstance(readiness, dict) and (readiness.get("actual_image_count") or readiness.get("primary_image_present")))
+        or (listing.image_urls or [])
+    )
+    return assess_listing_specificity(
+        title=listing.title,
+        description=listing.description,
+        category=listing.category_suggestion,
+        item_specifics=listing.item_specifics if isinstance(listing.item_specifics, dict) else {},
+        source_metadata=listing.source_metadata if isinstance(listing.source_metadata, dict) else {},
+        has_images=has_images,
+    )
 
 
 def _source_price_comp(listing: Listing) -> dict | None:
@@ -484,7 +501,9 @@ class PricingResearchService:
             ts = datetime.fromisoformat(str(generated_at))
         except ValueError:
             return True
-        return ts < datetime.utcnow() - timedelta(days=STALE_PRICING_DAYS)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        return ts < datetime.now(UTC) - timedelta(days=STALE_PRICING_DAYS)
 
     @staticmethod
     def _build_explanation(*, included: list[dict], sold: list[dict], active: list[dict], condition_adjustment: float, shipping_note: str, warning: str | None) -> str:
@@ -536,12 +555,17 @@ def compute_listing_quality_summary(listing: Listing, pricing_analysis: dict | N
     if listing.ebay_listing_id:
         score = 100
 
+    specificity = _specificity_summary(listing)
+    blockers.extend(specificity.get("blockers") or [])
+    if specificity.get("status") != "trusted_for_draft":
+        score = min(score, 35)
+
     if listing.ebay_listing_id:
         status = "published"
+    elif specificity.get("status") != "trusted_for_draft":
+        status = "blocked"
     elif blockers:
         status = "blocked"
-    elif listing.needs_review or listing.restricted_review_required:
-        status = "needs_review"
     elif (pricing_analysis.get("price_confidence") or 0) < 0.45:
         status = "research_partial"
     elif not shipping_profile.get("manual_measurement_needed", True):
@@ -555,6 +579,10 @@ def compute_listing_quality_summary(listing: Listing, pricing_analysis: dict | N
         "status": status if not ready_for_publish_queue else "ready_for_publish_queue",
         "blockers": blockers,
         "warnings": warnings,
+        "specificity_status": specificity.get("status"),
+        "specificity_score": specificity.get("score"),
+        "specificity_blockers": specificity.get("blockers") or [],
+        "specificity_evidence": specificity.get("specificity_evidence") or [],
         "ready_for_ebay": not blockers and not shipping_profile.get("manual_measurement_needed", True) and bool(pricing_analysis.get("current_price")),
         "ready_for_facebook": not blockers and bool(pricing_analysis.get("current_price")) and bool(listing.description) and bool((listing.image_urls or [])),
         "ready_for_publish_queue": ready_for_publish_queue,
@@ -578,6 +606,8 @@ def validate_marketplace_readiness(*, listing: Listing, marketplace: str, pricin
         readiness = {}
     blockers = list(readiness.get("blockers") or [])
     shipping = listing.shipping_profile if isinstance(listing.shipping_profile, dict) else {}
+    specificity = _specificity_summary(listing)
+    blockers.extend(specificity.get("blockers") or [])
 
     if not listing.title or len(listing.title.strip()) < 8:
         blockers.append("Title missing or too short")

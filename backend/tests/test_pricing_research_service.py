@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 from app.models.enums import ListingStatus
 from app.models.models import Listing, User
@@ -103,6 +103,36 @@ def test_listing_quality_and_marketplace_blockers(db_session):
     assert all("Shipping" not in blocker for blocker in facebook_blockers)
 
 
+def test_generic_placeholder_titles_block_review_queue(db_session):
+    user = User(email="generic-placeholder@example.com")
+    db_session.add(user)
+    db_session.flush()
+    listing = Listing(
+        user_id=user.id,
+        status=ListingStatus.ready,
+        title="Automotive Parts",
+        description="Recovered from preserved inventory photos.",
+        category_suggestion="Automotive Parts",
+        condition="Needs review",
+        item_specifics={},
+        image_urls=["/media/uploads/part.jpg"],
+        listing_images=[{"storage_path":"/media/uploads/part.jpg","source_platform":"upload","role":"primary","operator_state":"approved","display_order":0,"is_reference":False,"confidence":1.0}],
+        condition_data={"condition_bucket": "needs_review", "operator_review_required": True},
+        shipping_profile={"package_weight": 3.0, "package_dimensions": {"length": 12, "width": 10, "height": 8}, "manual_measurement_needed": False},
+    )
+    db_session.add(listing)
+    db_session.commit()
+
+    pricing = PricingIntelligenceService().recommend_price(db_session, listing.id)
+    quality = compute_listing_quality_summary(listing, pricing_analysis=pricing)
+    blockers = validate_marketplace_readiness(listing=listing, marketplace="ebay", pricing_analysis=pricing)
+
+    assert quality["specificity_status"] == "blocked_placeholder_data"
+    assert quality["ready_for_publish_queue"] is False
+    assert any("generic" in blocker.lower() or "specific" in blocker.lower() for blocker in quality["blockers"])
+    assert any("generic" in blocker.lower() or "specific" in blocker.lower() for blocker in blockers)
+
+
 def test_listing_ai_avoids_unsupported_claims():
     service = ListingAIService()
     generated = service._sanitize_claims(
@@ -113,3 +143,99 @@ def test_listing_ai_avoids_unsupported_claims():
     assert "authentic" not in lowered
     assert "oem" not in lowered
     assert "warranty" not in lowered
+
+
+def test_listing_ai_fallback_category_uses_product_keywords():
+    service = ListingAIService()
+    generated = service._fallback_generation(
+        {
+            "title_hint": "Pool Booster Pump Replacement",
+            "source_type": "amazon_vine",
+            "photo_keywords": ["pool", "pump"],
+        }
+    )
+    assert "Collectibles" not in generated["category_suggestion"]
+    assert "Pool Pumps" in generated["category_suggestion"]
+
+
+def test_listing_ai_generate_exposes_structured_contract(monkeypatch):
+    service = ListingAIService()
+
+    def fake_llm(_signals):
+        return {
+            "result": {
+                "schema_version": "posterpro_listing_intelligence_v1",
+                "title": "Whirlpool Refrigerator Control Board",
+                "description": "Structured draft description.",
+                "category_suggestion": "Appliances > Parts & Accessories",
+                "condition": "New - Open Box",
+                "item_specifics": {"Brand": "Whirlpool", "Model": "W11478526"},
+                "tags": ["whirlpool", "control board"],
+                "missing_information": ["Verify exact part number from photos."],
+                "photo_notes": ["Package label visible."],
+                "research_queries": ["Whirlpool W11478526"],
+                "estimated_value": 74.5,
+                "draft_quality": "strong",
+                "marketplace_targets": ["ebay", "facebook", "mercari"],
+                "marketplace_drafts": {
+                    "ebay": {"title": "Whirlpool Refrigerator Control Board"},
+                    "mercari": {"description": "Mercari copy"},
+                },
+                "identity": {"product_name": "Whirlpool Refrigerator Control Board", "brand": "Whirlpool", "model": "W11478526", "confidence": 0.94},
+                "inventory": {"quantity_on_hand": 1, "pack_size": 1, "units_per_sale": 1, "listing_quantity": 1, "bundle_strategy": "single"},
+                "condition_details": {"canonical_condition": "New - Open Box", "defects": [], "included_items": ["Board"], "missing_items": []},
+                "research": {"photo_research_required": True, "identifiers_to_verify": ["W11478526"], "research_instructions": ["Verify part number"], "pricing_instructions": ["Research sold comps"]},
+                "canonical_listing": {"human_readable_name": "Whirlpool Refrigerator Control Board", "master_title": "Whirlpool Refrigerator Control Board", "master_description": "Structured draft description.", "keywords": ["whirlpool"], "features": ["OEM replacement"], "specifications": {"Brand": "Whirlpool"}, "category_candidates": ["Appliances > Parts & Accessories"]},
+                "pricing": {"strategy": "compare_sold_comps", "price_hint": 74.5, "minimum_price": 49.99, "comparison_instruction": "Research sold comps"},
+                "evidence": {"facts_from_user": ["Whirlpool"], "facts_inferred": ["Control board"], "facts_needing_verification": ["Exact part number"], "contradictions": []},
+                "quality": {"overall_confidence": 0.94, "ready_for_photo_enrichment": True, "ready_for_draft": True, "blocking_questions": []},
+            },
+            "metadata": {
+                "request_id": "req-123",
+                "request_timestamp": "2026-09-02T12:00:00+00:00",
+                "latency_ms": 42,
+                "validation_status": "validated",
+                "validation_errors": [],
+                "response_provider": "openai",
+                "raw_request_preview": "Whirlpool refrigerator control board",
+            },
+        }
+
+    monkeypatch.setattr(service, "_llm_generation", fake_llm)
+
+    generated = service.generate(
+        {
+            "title_hint": "Whirlpool refrigerator control board",
+            "source_type": "intake_voice",
+            "voice_transcript": "Whirlpool refrigerator control board, new open box.",
+            "voice_notes": "Sell individually.",
+            "photo_keywords": ["whirlpool", "control", "board"],
+            "existing_specifics": {"Brand": "", "Model": ""},
+            "source_metadata": {"session": {"default_location": "Storage"}},
+        }
+    )
+
+    assert generated["schema_version"] == "posterpro_listing_intelligence_v1"
+    assert generated["structured_listing_json"]["identity"]["product_name"] == "Whirlpool Refrigerator Control Board"
+    assert generated["marketplace_drafts"]["mercari"]["description"] == "Mercari copy"
+    assert generated["ai_metadata"]["request_id"] == "req-123"
+    assert generated["intelligence_state"]["fields_populated"] is True
+    assert generated["marketplace_targets"] == ["ebay", "facebook", "mercari"]
+
+
+def test_pricing_research_handles_timezone_aware_staleness(db_session):
+    _, listing = _seed_listing(db_session, title="Keurig Coffee Maker", category="Kitchen")
+    listing.marketplace_data = {
+        "pricing_analysis": {
+            "generated_at": (datetime.now(UTC) - timedelta(days=30)).isoformat(),
+            "current_price": 49.99,
+            "price_confidence": 0.8,
+        }
+    }
+    db_session.add(listing)
+    db_session.commit()
+
+    result = PricingResearchService().build_research(db_session, listing)
+
+    assert result["stale"] is True
+    assert result["current_price"] > 0

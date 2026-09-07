@@ -3,6 +3,32 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 
+def _normalize_shipping_policy(policy: dict | None) -> dict:
+    policy = policy if isinstance(policy, dict) else {}
+    threshold = policy.get("shipping_price_threshold", 10)
+    try:
+        threshold_value = float(threshold)
+    except (TypeError, ValueError):
+        threshold_value = 10.0
+    under_mode = str(policy.get("shipping_under_threshold_mode") or "buyer_pays_shipping").strip().lower()
+    over_mode = str(policy.get("shipping_at_or_above_threshold_mode") or "free_shipping").strip().lower()
+    if under_mode not in {"buyer_pays_shipping", "free_shipping"}:
+        under_mode = "buyer_pays_shipping"
+    if over_mode not in {"buyer_pays_shipping", "free_shipping"}:
+        over_mode = "free_shipping"
+    return {
+        "shipping_price_threshold": threshold_value,
+        "shipping_under_threshold_mode": under_mode,
+        "shipping_at_or_above_threshold_mode": over_mode,
+    }
+
+
+def shipping_policy_for_user(user) -> dict:
+    settings_json = getattr(user, "settings_json", None) or {}
+    workflow = settings_json.get("workflow_preferences")
+    return _normalize_shipping_policy(workflow if isinstance(workflow, dict) else None)
+
+
 def _safe_list(value) -> list:
     return [item for item in (value or []) if item]
 
@@ -139,10 +165,12 @@ def derive_shipping_profile(
     listing: dict | None = None,
     item_specifics: dict | None = None,
     existing: dict | None = None,
+    policy: dict | None = None,
 ) -> dict:
     listing = listing or {}
     item_specifics = item_specifics if isinstance(item_specifics, dict) else {}
     existing = existing if isinstance(existing, dict) else {}
+    policy = _normalize_shipping_policy(policy)
     title = str(listing.get("title") or "").strip()
     description = str(listing.get("description") or "").strip()
     tokens = set(_slug_tokens(title, description, item_specifics.get("Type"), item_specifics.get("Model")))
@@ -156,13 +184,49 @@ def derive_shipping_profile(
     package_dimensions = existing.get("package_dimensions") if isinstance(existing.get("package_dimensions"), dict) else {}
     missing_weight = not package_weight
     missing_dimensions = not any(package_dimensions.get(key) for key in ("length", "width", "height"))
+    # Every draft needs a usable shipping shape, even before the operator has
+    # measured the packed item.  Use conservative category/title estimates as
+    # a fallback and retain explicit measured values when present.  The
+    # provenance marker makes the estimate visible to reviewers and lets a
+    # later measurement replace it without losing history.
+    if missing_weight:
+        if any(token in tokens for token in {"charger", "adapter", "cable", "controller", "mouse", "keyboard", "sensor"}):
+            package_weight = 1.0
+        elif any(token in tokens for token in {"laptop", "monitor", "printer", "screen", "router"}):
+            package_weight = 3.5
+        elif any(token in tokens for token in {"bag", "backpack", "shoes", "boot", "purse"}):
+            package_weight = 2.5
+        else:
+            package_weight = 2.0
+    if missing_dimensions:
+        if any(token in tokens for token in {"laptop", "monitor", "printer", "screen", "router"}):
+            package_dimensions = {"length": 16, "width": 12, "height": 6}
+        elif any(token in tokens for token in {"bag", "backpack", "shoes", "boot", "purse"}):
+            package_dimensions = {"length": 14, "width": 12, "height": 6}
+        elif any(token in tokens for token in {"charger", "adapter", "cable", "controller", "mouse", "keyboard", "sensor"}):
+            package_dimensions = {"length": 10, "width": 8, "height": 4}
+        else:
+            package_dimensions = {"length": 12, "width": 10, "height": 6}
+    estimated_fields = list(existing.get("estimated_fields") or [])
+    provenance = dict(existing.get("provenance") or {}) if isinstance(existing.get("provenance"), dict) else {}
+    if missing_weight:
+        estimated_fields.append("package_weight")
+        provenance.setdefault("package_weight", "title_category_estimate")
+    if missing_dimensions:
+        estimated_fields.append("package_dimensions")
+        provenance.setdefault("package_dimensions", "title_category_estimate")
     estimated = bool(existing.get("estimated", missing_weight or missing_dimensions))
     raw_price = listing.get("listing_price") or listing.get("suggested_price") or listing.get("buy_it_now_price") or listing.get("estimated_value")
     try:
         price = float(raw_price)
     except (TypeError, ValueError):
         price = None
-    buyer_pays_shipping = bool(price is not None and 0 < price < 10)
+    threshold = float(policy["shipping_price_threshold"])
+    under_mode = policy["shipping_under_threshold_mode"]
+    over_mode = policy["shipping_at_or_above_threshold_mode"]
+    under_threshold = bool(price is not None and price > 0 and price < threshold)
+    selected_mode = under_mode if under_threshold else over_mode
+    buyer_pays_shipping = selected_mode == "buyer_pays_shipping"
     return {
         "item_weight": existing.get("item_weight"),
         "package_weight": package_weight,
@@ -177,13 +241,18 @@ def derive_shipping_profile(
         "hazmat": bool(existing.get("hazmat", battery or aerosol)),
         "oversize": bool(existing.get("oversize", oversize)),
         "local_pickup_recommended": bool(existing.get("local_pickup_recommended", local_pickup)),
-        "manual_measurement_needed": bool(existing.get("manual_measurement_needed", missing_weight or missing_dimensions)),
+        "manual_measurement_needed": bool(existing.get("manual_measurement_needed", False)),
         "shipping_notes": str(existing.get("shipping_notes") or "").strip() or None,
         "buyer_pays_shipping": bool(existing.get("buyer_pays_shipping", buyer_pays_shipping)),
         "shipping_charge_mode": str(existing.get("shipping_charge_mode") or ("calculated" if buyer_pays_shipping else "included")),
         "free_shipping": bool(existing.get("free_shipping", not buyer_pays_shipping)),
         "source_confidence": existing.get("source_confidence") or {},
         "estimated": estimated,
+        "estimated_fields": list(dict.fromkeys(estimated_fields)),
+        "provenance": provenance,
+        "shipping_price_threshold": threshold,
+        "shipping_under_threshold_mode": under_mode,
+        "shipping_at_or_above_threshold_mode": over_mode,
     }
 
 
@@ -193,8 +262,10 @@ def summarize_listing_readiness(
     condition_data: dict | None,
     shipping_profile: dict | None,
     listing: dict | None = None,
+    source_type: str | None = None,
 ) -> dict:
     listing = listing or {}
+    source_type_value = str(source_type or listing.get("source_type") or "").strip().lower()
     images = [item for item in _safe_list(listing_images) if isinstance(item, dict)]
     condition_data = condition_data if isinstance(condition_data, dict) else {}
     shipping_profile = shipping_profile if isinstance(shipping_profile, dict) else {}
@@ -207,7 +278,10 @@ def summarize_listing_readiness(
     if not approved_images:
         blockers.append("No images attached")
     elif not actual_item_images:
-        blockers.append("Only source/reference images attached")
+        if source_type_value == "amazon_vine":
+            warnings.append("Only source/reference images attached")
+        else:
+            blockers.append("Only source/reference images attached")
     if not primary_image:
         blockers.append("Primary image not set")
     if condition_data.get("operator_review_required", True):
@@ -278,10 +352,10 @@ def sync_listing_review_state(*, listing) -> None:
         source_page_url=source_metadata.get("amazon_source_page_url"),
         source_platform=listing.source_type or "upload",
         default_is_reference=bool(
-            source_type_value in {"amazon_vine", "google_photos_album"}
+            source_type_value in {"google_photos_album"}
             or str(source_metadata.get("source_marketplace") or "").strip()
         ),
-        approved=source_type_value in {"upload", "storage_batch"},
+        approved=source_type_value in {"upload", "storage_batch", "amazon_vine"},
     )
     listing.image_urls = [item["storage_path"] for item in (listing.listing_images or []) if item.get("operator_state") != "rejected"]
     listing.condition_data = derive_condition_data(

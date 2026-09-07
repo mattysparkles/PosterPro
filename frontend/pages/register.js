@@ -27,6 +27,7 @@ export default function RegisterPage() {
     >
       <form
         className="pp-auth-form"
+        method="post"
         onSubmit={async (event) => {
           event.preventDefault();
           setSubmitting(true);
@@ -59,12 +60,12 @@ export default function RegisterPage() {
 
         <div className="pp-field">
           <label htmlFor="register-email">Email</label>
-          <Input id="register-email" name="email" type="email" required placeholder="you@example.com" />
+          <Input id="register-email" name="email" type="email" autoComplete="email" required placeholder="you@example.com" />
         </div>
 
         <div className="pp-field">
           <label htmlFor="register-password">Password</label>
-          <Input id="register-password" name="password" type="password" required minLength={8} placeholder="Create a password" />
+          <Input id="register-password" name="password" type="password" autoComplete="new-password" required minLength={8} placeholder="Create a password" />
         </div>
 
         <div className="pp-field">
@@ -73,6 +74,7 @@ export default function RegisterPage() {
             id="register-password-confirm"
             name="password_confirm"
             type="password"
+            autoComplete="new-password"
             required
             minLength={8}
             value={confirmPassword}

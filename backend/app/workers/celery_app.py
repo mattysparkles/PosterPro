@@ -11,7 +11,18 @@ celery_app.conf.update(
     task_default_queue="posterpro",
     task_default_exchange="posterpro",
     task_default_routing_key="posterpro",
-    task_routes={"*": {"queue": "posterpro", "routing_key": "posterpro"}},
+    task_queue_max_priority=10,
+    task_default_priority=5,
+    task_routes={
+        "drain_intake_provider_media": {"queue": "posterpro", "routing_key": "posterpro", "priority": 9},
+        "queue_due_intake_syncs": {"queue": "posterpro", "routing_key": "posterpro", "priority": 9},
+        "process_intake_reconciliation_jobs": {"queue": "posterpro", "routing_key": "posterpro", "priority": 9},
+        "repair_recent_vine_images": {"queue": "posterpro", "routing_key": "posterpro", "priority": 7},
+        "resume_product_research_backlog": {"queue": "posterpro", "routing_key": "posterpro", "priority": 1},
+        "resume_image_identification_backlog": {"queue": "posterpro", "routing_key": "posterpro", "priority": 1},
+        "resume_incomplete_listings": {"queue": "posterpro", "routing_key": "posterpro", "priority": 1},
+        "*": {"queue": "posterpro", "routing_key": "posterpro"},
+    },
     imports=("app.workers.tasks",),
     beat_schedule={
         "adjust-active-listing-prices-every-24h": {
@@ -50,5 +61,19 @@ celery_app.conf.update(
             "task": "process_intake_reconciliation_jobs",
             "schedule": crontab(minute="*"),
         },
+        "queue-due-intake-syncs-every-5m": {
+            "task": "queue_due_intake_syncs",
+            "schedule": crontab(minute="*/5"),
+        },
+        "repair-recent-vine-images-every-5m": {
+            "task": "repair_recent_vine_images",
+            "schedule": crontab(minute="*/5"),
+        },
+        "resume-waiting-ai-work-every-minute": {
+            "task": "resume_waiting_ai_work",
+            "schedule": crontab(minute="*"),
+        },
+        # Historical cleanup jobs stay available for manual use but are not
+        # self-requeued by default on the 2 GB field host.
     },
 )

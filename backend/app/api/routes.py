@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 import io
 import json
 import zipfile
@@ -9,8 +9,9 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import asc, and_, case, delete, desc, exists, func, not_, or_, select, update, cast, String
 from sqlalchemy.orm import Session
+from sqlalchemy.orm import selectinload
 
 from app.api.schemas import (
     BatchStorageUnitUrlRequest,
@@ -43,6 +44,8 @@ from app.models.models import (
     EbayOfferHistory,
     Image,
     Listing,
+    ListingRevision,
+    ListingCorrectionJob,
     ListingABTestVariant,
     ListingPrediction,
     ListingTemplate,
@@ -57,12 +60,14 @@ from app.models.models import (
     VineImportItem,
 )
 from app.services.ebay import EbayService
+from app.services.ebay_service import revise_ebay_listing
 from app.services.embedding import fake_clip_embedding
 from app.services.google_photos import GooglePhotosService
 from app.services.image_pipeline import ImagePipelineService
 from app.services.inventory_service import InventorySafetyError, InventoryService
 from app.services.intake_slate import IntakeSlateService
 from app.services.listing_ai import ListingAIService
+from app.services.listing_provenance import mark_manual_field_provenance
 from app.services.listing_review import (
     derive_condition_data,
     derive_shipping_profile,
@@ -70,12 +75,14 @@ from app.services.listing_review import (
     summarize_listing_readiness,
     sync_listing_review_state,
 )
+from app.services.listing_specificity import GENERIC_CAPTION_TITLES, classify_listing_reviewability
 from app.services.media_lifecycle import purge_listing_media
 from app.services.listing_workspace import normalize_marketplace_data
 from app.services.marketplace_orchestrator import enqueue_crosspost_job, queue_publish
 from app.services.marketplace_preflight import MarketplacePreflightService
 from app.services.operator_command_service import OperatorCommandService
 from app.services.profit_service import ProfitService
+from app.services.process_notifications import create_process_notification
 from app.services.storage import LocalStorage
 from app.services.pricing_service import PricingService
 from app.services.pricing_intelligence_service import PricingIntelligenceService
@@ -85,13 +92,15 @@ from app.services.listing_templates_service import listing_template_service
 from app.services.amazon_media import AmazonProductMediaProvider
 from app.services.amazon_product_discovery import AmazonProductDiscoveryService
 from app.services.automation_bridge import AutomationBridgeError, submit_bridge_job, wait_for_bridge_job
-from app.models.enums import ListingStatus, MarketplaceListingStatus, MarketplaceName
+from app.services.vine_import_service import VineImportService
+from app.models.enums import EbayPublishStatus, ListingStatus, MarketplaceListingStatus, MarketplaceName
 from app.workers.tasks import (
     cluster_images_task,
     enqueue_storage_unit_batch_pipeline,
     process_overnight_storage_batches,
     process_photo_batch,
     process_marketplace_crosspost_job_task,
+    process_listing_correction_jobs_task,
 )
 
 router = APIRouter()
@@ -99,6 +108,228 @@ inventory_service = InventoryService()
 photo_editor_service = PhotoEditorService()
 operator_command_service = OperatorCommandService()
 intake_slate_service = IntakeSlateService()
+vine_import_service = VineImportService()
+
+
+def _is_merged_recovery_child(listing: Listing) -> bool:
+    source_metadata = listing.source_metadata if isinstance(listing.source_metadata, dict) else {}
+    recovery = source_metadata.get("recovery") if isinstance(source_metadata.get("recovery"), dict) else {}
+    return bool(recovery.get("merged_into_recovery_item_id") or recovery.get("merged_into_recovery_group_id"))
+
+
+def _listing_bucket_expression():
+    custom_labels_text = func.coalesce(func.lower(cast(Listing.custom_labels, String)), "")
+    generic_caption = func.lower(func.trim(cast(Listing.title, String))).in_(
+        sorted(GENERIC_CAPTION_TITLES)
+    )
+    return case(
+        (or_(Listing.sold_at.is_not(None), Listing.quantity <= 0), "sold"),
+        (custom_labels_text.contains("archived_vine"), "archived"),
+        (or_(Listing.processing_state == "needs_attention", Listing.processing_state == "blocked"), "needs_attention"),
+        (generic_caption, "needs_attention"),
+        (or_(Listing.status == ListingStatus.FAILED, Listing.ebay_publish_status == "FAILED"), "failed"),
+        (or_(Listing.status == ListingStatus.PUBLISHED, Listing.ebay_publish_status == "POSTED", Listing.ebay_listing_id.is_not(None)), "published"),
+        (or_(Listing.restricted_review_required.is_(True), Listing.needs_review.is_(True)), "review"),
+        (and_(
+            Listing.status == ListingStatus.ready,
+            Listing.source_metadata["operator_approved_at"].as_string().is_not(None),
+        ), "ready"),
+        else_="drafts",
+    )
+
+
+def _listing_bucket(listing: Listing) -> str:
+    labels = {str(value).strip().lower() for value in (listing.custom_labels or [])}
+    marketplace_data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}
+    source_metadata = listing.source_metadata if isinstance(listing.source_metadata, dict) else {}
+    explicitly_approved = bool(source_metadata.get("operator_approved_at"))
+    reviewability = classify_listing_reviewability(
+        title=listing.title,
+        description=listing.description,
+        category=listing.category_suggestion,
+        item_specifics=listing.item_specifics if isinstance(listing.item_specifics, dict) else {},
+        source_metadata=source_metadata,
+        has_images=bool(listing.image_urls or []),
+    )
+    if listing.sold_at is not None or int(listing.quantity or 1) <= 0:
+        return "sold"
+    if {"archived_vine", "archived_sold"} & labels:
+        return "archived"
+    if str(listing.ebay_publish_status or "").upper() == "POSTED" or bool(listing.ebay_listing_id):
+        return "published"
+    if str(listing.processing_state or "").strip().lower() in {"needs_attention", "blocked"}:
+        return "needs_attention"
+    if reviewability.get("caption_like_title") or reviewability.get("bare_identifier_title"):
+        return "needs_attention"
+    if str(listing.status).lower() == "error" or str(listing.ebay_publish_status or "").upper() == "FAILED":
+        return "failed"
+    if not bool(listing.image_urls or []):
+        return "drafts"
+    if (listing.restricted_review_required or listing.needs_review) and not explicitly_approved:
+        return "review"
+    if listing.status == ListingStatus.ready:
+        preflight_state = marketplace_data.get("marketplace_preflight") if isinstance(marketplace_data, dict) else {}
+        by_marketplace = preflight_state.get("by_marketplace") if isinstance(preflight_state, dict) else {}
+        target_markets = [str(value).strip().lower() for value in marketplace_data.get("targets") or [] if str(value).strip()]
+        approved_target = any(
+            isinstance(by_marketplace, dict)
+            and str((by_marketplace.get(market) or {}).get("status") or "").strip().lower() in {"ready", "ready_with_warnings", "published"}
+            for market in target_markets
+        )
+        return "ready" if explicitly_approved and approved_target else "drafts"
+    return "drafts"
+
+
+def _listing_marketplace_names(listing: Listing) -> set[str]:
+    names: set[str] = set()
+    if listing.ebay_publish_status or listing.ebay_listing_id:
+        names.add("ebay")
+    marketplace_data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}
+    for value in marketplace_data.get("targets") or []:
+        name = str(value or "").strip().lower()
+        if name:
+            names.add(name)
+    for row in getattr(listing, "marketplace_listings", None) or []:
+        name = str(getattr(row, "marketplace", "") or getattr(row, "marketplace_name", "") or "").strip().lower()
+        if name:
+            names.add(name)
+    return names
+
+
+def _is_vine_source(listing: Listing) -> bool:
+    source = str(listing.source_type or "").strip().lower()
+    hint = ""
+    source_metadata = listing.source_metadata if isinstance(listing.source_metadata, dict) else {}
+    for key in ("source", "ingest_source", "marketplace_source"):
+        value = str(source_metadata.get(key) or "").strip().lower()
+        if value:
+            hint = value
+            break
+    return "vine" in source or "vine" in hint
+
+
+def _matches_marketplace_filter(listing: Listing, marketplace: str | None) -> bool:
+    normalized = str(marketplace or "").strip().lower()
+    if not normalized or normalized == "all":
+        return True
+    return normalized in _listing_marketplace_names(listing)
+
+
+def _matches_readiness_filter(listing: Listing, filter_value: str | None) -> bool:
+    normalized = str(filter_value or "").strip().lower()
+    if not normalized or normalized == "all":
+        return True
+    summary = summarize_listing_readiness(
+        listing_images=listing.listing_images,
+        condition_data=listing.condition_data,
+        shipping_profile=listing.shipping_profile,
+        listing={
+            "category_id": listing.category_id,
+            "category_suggestion": listing.category_suggestion,
+            "listing_price": listing.listing_price,
+            "suggested_price": listing.suggested_price,
+        },
+    )
+    condition_data = listing.condition_data if isinstance(listing.condition_data, dict) else {}
+    shipping_profile = listing.shipping_profile if isinstance(listing.shipping_profile, dict) else {}
+    pricing = (listing.marketplace_data or {}).get("pricing_analysis") if isinstance(listing.marketplace_data, dict) else {}
+    quality = listing.quality_summary if isinstance(listing.quality_summary, dict) else {}
+    preflight_root = (listing.marketplace_data or {}).get("marketplace_preflight") if isinstance(listing.marketplace_data, dict) else {}
+    by_marketplace = preflight_root.get("by_marketplace") if isinstance(preflight_root, dict) else {}
+    ebay_preflight = by_marketplace.get("ebay") if isinstance(by_marketplace, dict) else None
+    facebook_preflight = by_marketplace.get("facebook") if isinstance(by_marketplace, dict) else None
+
+    def _preflight_ready(summary_row: dict | None) -> bool:
+        return bool(summary_row and str(summary_row.get("status") or "").lower() in {"ready", "ready_with_warnings", "published"})
+
+    def _preflight_blocked(summary_row: dict | None, tokens: tuple[str, ...]) -> bool:
+        if not summary_row:
+            return False
+        return any(any(token in str(code) for token in tokens) for code in (summary_row.get("blocker_codes") or []))
+
+    if normalized == "missing_photos":
+        return bool(summary.get("images_missing") or summary.get("manual_photo_needed"))
+    if normalized == "reference_only":
+        return bool(summary.get("reference_image_count")) and not summary.get("actual_image_count")
+    if normalized == "missing_weight":
+        return not shipping_profile.get("package_weight")
+    if normalized == "missing_dimensions":
+        package_dimensions = shipping_profile.get("package_dimensions") if isinstance(shipping_profile.get("package_dimensions"), dict) else {}
+        return not any(package_dimensions.get(key) for key in ("length", "width", "height"))
+    if normalized == "missing_condition":
+        return bool(condition_data.get("operator_review_required")) or not listing.condition
+    if normalized == "missing_category":
+        return not (listing.category_id or listing.category_suggestion)
+    if normalized == "missing_price":
+        return not (listing.listing_price or listing.suggested_price)
+    if normalized == "weak_pricing":
+        return float(pricing.get("price_confidence") or pricing.get("confidence") or 0) < 0.45
+    if normalized == "stale_pricing":
+        return bool(pricing.get("stale"))
+    if normalized == "ready_for_ebay":
+        return bool(quality.get("ready_for_ebay"))
+    if normalized == "ready_for_facebook":
+        return bool(quality.get("ready_for_facebook"))
+    if normalized == "high_confidence_ready":
+        return bool(quality.get("ready_for_publish_queue")) and float(pricing.get("price_confidence") or pricing.get("confidence") or 0) >= 0.7
+    if normalized == "likely_low_value":
+        recommended = float(pricing.get("recommended_price") or listing.listing_price or 0)
+        return recommended > 0 and recommended <= 20
+    if normalized == "oversize_low_margin":
+        recommended = float(pricing.get("recommended_price") or listing.listing_price or 0)
+        return bool((shipping_profile.get("oversize") or shipping_profile.get("local_pickup_recommended")) and recommended <= 40)
+    if normalized == "ebay_ready":
+        return _preflight_ready(ebay_preflight)
+    if normalized == "ebay_blocked":
+        return bool(ebay_preflight and (str(ebay_preflight.get("status") or "").lower() == "blocked" or (ebay_preflight.get("blocker_count") or 0) > 0))
+    if normalized == "ebay_warning_only":
+        return bool(ebay_preflight and (str(ebay_preflight.get("status") or "").lower() == "ready_with_warnings" or (not (ebay_preflight.get("blocker_count") or 0) and (ebay_preflight.get("warning_count") or 0) > 0)))
+    if normalized == "ebay_missing_category":
+        return bool(not ebay_preflight or any("category" in str(field).lower() for field in (ebay_preflight.get("missing_fields") or [])))
+    if normalized == "ebay_missing_aspects":
+        return bool(ebay_preflight and any(code == "EBAY_REQUIRED_ASPECT_MISSING" for code in (ebay_preflight.get("blocker_codes") or [])))
+    if normalized == "ebay_missing_policies":
+        return bool(ebay_preflight and any("POLICY" in str(code) for code in (ebay_preflight.get("blocker_codes") or [])))
+    if normalized == "ebay_missing_shipping":
+        return bool(ebay_preflight and _preflight_blocked(ebay_preflight, ("SHIPPING", "WEIGHT", "DIMENSIONS")))
+    if normalized == "ebay_missing_photos":
+        return bool(ebay_preflight and _preflight_blocked(ebay_preflight, ("PHOTOS", "IMAGE")))
+    if normalized == "facebook_ready":
+        return _preflight_ready(facebook_preflight)
+    if normalized == "facebook_blocked":
+        return bool(facebook_preflight and (str(facebook_preflight.get("status") or "").lower() == "blocked" or (facebook_preflight.get("blocker_count") or 0) > 0))
+    if normalized == "facebook_warning_only":
+        return bool(facebook_preflight and (str(facebook_preflight.get("status") or "").lower() == "ready_with_warnings" or (not (facebook_preflight.get("blocker_count") or 0) and (facebook_preflight.get("warning_count") or 0) > 0)))
+    if normalized == "facebook_missing_photos":
+        return bool(facebook_preflight and _preflight_blocked(facebook_preflight, ("PHOTOS", "IMAGE")))
+    if normalized == "facebook_missing_price":
+        return bool(facebook_preflight and _preflight_blocked(facebook_preflight, ("PRICE",)))
+    if normalized == "facebook_missing_category":
+        return bool(facebook_preflight and _preflight_blocked(facebook_preflight, ("CATEGORY",)))
+    if normalized == "ready_except_shipping":
+        return bool((_preflight_ready(ebay_preflight) or _preflight_ready(facebook_preflight)) and (_preflight_blocked(ebay_preflight, ("SHIPPING", "WEIGHT", "DIMENSIONS")) or _preflight_blocked(facebook_preflight, ("SHIPPING", "WEIGHT", "DIMENSIONS"))))
+    if normalized == "ready_except_photos":
+        return bool((_preflight_ready(ebay_preflight) or _preflight_ready(facebook_preflight)) and (_preflight_blocked(ebay_preflight, ("PHOTOS", "IMAGE")) or _preflight_blocked(facebook_preflight, ("PHOTOS", "IMAGE"))))
+    if normalized == "ready_except_policies":
+        return bool((_preflight_ready(ebay_preflight) or _preflight_ready(facebook_preflight)) and (_preflight_blocked(ebay_preflight, ("POLICY",)) or _preflight_blocked(facebook_preflight, ("POLICY",))))
+    return True
+
+
+def _listing_visibility_filter(normalized_queue: str | None):
+    labels = func.coalesce(func.lower(cast(Listing.custom_labels, String)), "")
+    sold = or_(Listing.sold_at.is_not(None), Listing.quantity <= 0)
+    archived = or_(labels.contains("archived_vine"), labels.contains("archived_sold"))
+    recovery = Listing.source_metadata["recovery"]
+    merged_child = or_(
+        recovery["merged_into_recovery_item_id"].as_string().is_not(None),
+        recovery["merged_into_recovery_group_id"].as_string().is_not(None),
+    )
+    normalized = str(normalized_queue or "").strip().lower()
+    if normalized == "sold":
+        return and_(sold, not_(merged_child))
+    if normalized == "archived":
+        return and_(archived, not_(sold), not_(merged_child))
+    return and_(not_(sold), not_(archived), not_(merged_child))
 
 _DEFAULT_WORKFLOW_PREFERENCES = {
     "review_before_publish": True,
@@ -106,6 +337,9 @@ _DEFAULT_WORKFLOW_PREFERENCES = {
     "bulk_approval_enabled": True,
     "listing_preview_mode": "marketplace",
     "default_preview_marketplace": "ebay",
+    "shipping_price_threshold": 10.0,
+    "shipping_under_threshold_mode": "buyer_pays_shipping",
+    "shipping_at_or_above_threshold_mode": "free_shipping",
 }
 
 _GOOGLE_PHOTOS_WATCH_KEY = "google_photos_watch"
@@ -123,6 +357,9 @@ def _workflow_preferences(user: User | None) -> dict:
         "bulk_approval_enabled": bool(stored.get("bulk_approval_enabled", _DEFAULT_WORKFLOW_PREFERENCES["bulk_approval_enabled"])),
         "listing_preview_mode": str(stored.get("listing_preview_mode") or _DEFAULT_WORKFLOW_PREFERENCES["listing_preview_mode"]),
         "default_preview_marketplace": str(stored.get("default_preview_marketplace") or _DEFAULT_WORKFLOW_PREFERENCES["default_preview_marketplace"]),
+        "shipping_price_threshold": float(stored.get("shipping_price_threshold", _DEFAULT_WORKFLOW_PREFERENCES["shipping_price_threshold"])),
+        "shipping_under_threshold_mode": str(stored.get("shipping_under_threshold_mode") or _DEFAULT_WORKFLOW_PREFERENCES["shipping_under_threshold_mode"]),
+        "shipping_at_or_above_threshold_mode": str(stored.get("shipping_at_or_above_threshold_mode") or _DEFAULT_WORKFLOW_PREFERENCES["shipping_at_or_above_threshold_mode"]),
     }
 
 
@@ -240,6 +477,160 @@ def _serialize_listing_response(listing: Listing) -> dict:
     return base
 
 
+def _serialize_listing_summary(listing: Listing) -> dict:
+    sync_listing_review_state(listing=listing)
+    base = ListingResponse.model_validate(listing).model_dump()
+    base.pop("marketplace_statuses", None)
+    base.pop("latest_publish_attempt", None)
+    return base
+
+
+def _serialize_public_storefront_listing(listing: Listing) -> dict:
+    marketplace_rows = []
+    for row in sorted(
+        listing.marketplace_listings or [],
+        key=lambda item: (
+            item.updated_at.isoformat() if item.updated_at else "",
+            item.id or 0,
+        ),
+        reverse=True,
+    ):
+        status = str(row.status.value if hasattr(row.status, "value") else row.status or "").strip().upper()
+        if status not in {"PUBLISHED", "UPDATED"}:
+            continue
+        marketplace_rows.append(row)
+
+    public_images = normalize_listing_images(
+        listing_images=listing.listing_images,
+        image_urls=listing.image_urls,
+        source_url=(listing.source_metadata or {}).get("source_image_url") if isinstance(listing.source_metadata, dict) else None,
+        source_page_url=(listing.source_metadata or {}).get("amazon_source_page_url") if isinstance(listing.source_metadata, dict) else None,
+        source_platform=listing.source_type or "storefront",
+        default_is_reference=False,
+        approved=True,
+    )
+    public_images = [image for image in public_images if image.get("operator_state") != "rejected"]
+    public_image_urls = [
+        _to_public_image_url(image.get("storage_path"))
+        for image in public_images
+        if str(image.get("storage_path") or "").strip()
+    ]
+    primary_image = next((image for image in public_images if image.get("role") == "primary" and image.get("storage_path")), None)
+    thumbnail_path = (
+        primary_image.get("storage_path")
+        if primary_image
+        else next((image.get("storage_path") for image in public_images if image.get("storage_path")), None)
+    )
+
+    marketplace_names = sorted({
+        str(row.marketplace.value if hasattr(row.marketplace, "value") else row.marketplace).strip().lower()
+        for row in marketplace_rows
+        if str(row.marketplace.value if hasattr(row.marketplace, "value") else row.marketplace).strip()
+    })
+    if listing.ebay_listing_id or str(listing.ebay_publish_status or "").upper() == EbayPublishStatus.POSTED.value:
+        marketplace_names = sorted({*marketplace_names, "ebay"})
+    marketplace_urls: dict[str, str] = {}
+    for row in marketplace_rows:
+        marketplace = str(row.marketplace.value if hasattr(row.marketplace, "value") else row.marketplace).strip().lower()
+        if not marketplace or marketplace in marketplace_urls:
+            continue
+        raw_response = row.raw_response if isinstance(row.raw_response, dict) else {}
+        url = str(raw_response.get("listing_url") or raw_response.get("url") or "").strip()
+        if marketplace == "ebay" and not url and listing.ebay_listing_id:
+            url = f"https://www.ebay.com/itm/{listing.ebay_listing_id}"
+        if url:
+            marketplace_urls[marketplace] = url
+
+    if listing.ebay_listing_id and "ebay" not in marketplace_urls:
+        marketplace_urls["ebay"] = f"https://www.ebay.com/itm/{listing.ebay_listing_id}"
+
+    return {
+        "id": listing.id,
+        "title": listing.title or listing.suggested_title or f"Listing #{listing.id}",
+        "description": listing.description or "",
+        "price": float(listing.listing_price or listing.suggested_price or 0.0),
+        "quantity": int(listing.quantity or 1),
+        "condition": listing.condition,
+        "category_id": listing.category_id,
+        "category_suggestion": listing.category_suggestion,
+        "thumbnail_url": _to_public_image_url(thumbnail_path) if thumbnail_path else "",
+        "image_urls": public_image_urls or [_to_public_image_url(path) for path in (listing.image_urls or []) if str(path or "").strip()],
+        "marketplaces": marketplace_names,
+        "marketplace_urls": marketplace_urls,
+        "updated_at": listing.updated_at.isoformat() if listing.updated_at else None,
+        "created_at": listing.created_at.isoformat() if listing.created_at else None,
+        "sku": getattr(listing, "sku", None),
+        "listing_url": marketplace_urls.get("ebay") or next(iter(marketplace_urls.values()), ""),
+    }
+
+
+@router.get("/public/storefront/listings")
+def get_public_storefront_listings(
+    page: int | None = Query(default=1, ge=1),
+    page_size: int | None = Query(default=25, ge=1, le=250),
+    search: str | None = Query(default=None, max_length=200),
+    sort_by: str | None = Query(default="updated", max_length=32),
+    sort_dir: str | None = Query(default="desc", max_length=4),
+    db: Session = Depends(get_db),
+):
+    filters = []
+    normalized_search = str(search or "").strip()
+    if normalized_search:
+        pattern = f"%{normalized_search}%"
+        filters.append(or_(Listing.title.ilike(pattern), Listing.description.ilike(pattern)))
+
+    published_filters = or_(
+        Listing.status == ListingStatus.PUBLISHED,
+        Listing.ebay_publish_status == EbayPublishStatus.POSTED,
+        Listing.ebay_listing_id.is_not(None),
+        exists(
+            select(1).where(
+                and_(
+                    MarketplaceListing.listing_id == Listing.id,
+                    MarketplaceListing.status.in_([MarketplaceListingStatus.PUBLISHED, MarketplaceListingStatus.UPDATED]),
+                )
+            )
+        ),
+    )
+    visibility_filter = _listing_visibility_filter("published")
+    statement = (
+        select(Listing)
+        .options(selectinload(Listing.marketplace_listings))
+        .where(*filters, published_filters, visibility_filter)
+    )
+    sort_map = {
+        "updated": Listing.updated_at,
+        "created": Listing.created_at,
+        "price": Listing.listing_price,
+        "title": Listing.title,
+        "source": Listing.source_type,
+    }
+    resolved_sort_by = str(sort_by or "updated").strip().lower()
+    sort_column = sort_map.get(resolved_sort_by, Listing.updated_at)
+    resolved_sort_dir = str(sort_dir or "desc").strip().lower()
+    sort_expr = asc(sort_column) if resolved_sort_dir == "asc" else desc(sort_column)
+
+    resolved_page_size = page_size or 25
+    resolved_page = page or 1
+    rows = db.execute(statement.order_by(sort_expr, desc(Listing.updated_at))).scalars().all()
+    visible_rows = []
+    for listing in rows:
+        public_listing = _serialize_public_storefront_listing(listing)
+        if public_listing.get("thumbnail_url") or public_listing.get("image_urls"):
+            visible_rows.append(public_listing)
+    total = len(visible_rows)
+    start = (resolved_page - 1) * resolved_page_size
+    end = start + resolved_page_size
+    page_rows = visible_rows[start:end]
+    return {
+        "items": page_rows,
+        "total": total,
+        "page": resolved_page,
+        "page_size": resolved_page_size,
+        "total_pages": max(1, (total + resolved_page_size - 1) // resolved_page_size),
+    }
+
+
 def _apply_listing_review_defaults(listing: Listing) -> None:
     listing.listing_images = normalize_listing_images(
         listing_images=listing.listing_images,
@@ -269,6 +660,7 @@ def _apply_listing_review_defaults(listing: Listing) -> None:
 
 def _delete_listing_for_user(db: Session, *, listing: Listing, current_user: User) -> dict:
     ensure_user_owns_resource(current_user, listing.user_id)
+    before = {field: getattr(listing, field, None) for field in ("title", "description", "listing_price", "suggested_price", "quantity", "condition", "category_id", "category_suggestion", "item_specifics", "image_urls", "marketplace_data", "platform_quantities", "custom_labels")}
     media_cleanup = purge_listing_media(db, listing)
 
     db.execute(delete(MarketplaceListing).where(MarketplaceListing.listing_id == listing.id))
@@ -345,6 +737,32 @@ def _approve_listing_for_user(
     if blockers_by_market:
         source_metadata["approval_blockers"] = blockers_by_market
     listing.source_metadata = source_metadata
+
+    if blockers_by_market:
+        blocker_lines: list[str] = []
+        for market, blockers in blockers_by_market.items():
+            fix_hint = next(
+                (
+                    str(blocker.get("fix_hint") or blocker.get("message") or "").strip()
+                    for blocker in blockers
+                    if str(blocker.get("fix_hint") or blocker.get("message") or "").strip()
+                ),
+                None,
+            )
+            blocker_lines.append(f"{market}: {fix_hint or (blockers[0].get('message') if blockers else 'preflight blocked')}")
+        create_process_notification(
+            db,
+            user_id=current_user.id,
+            notification_type="listing_approval_blocked",
+            title=f"Listing #{listing.id} blocked by marketplace preflight",
+            message="\n".join(blocker_lines[:5]),
+            href=f"/listings/{listing.id}",
+            metadata_json={
+                "listing_id": listing.id,
+                "approval_blockers": blockers_by_market,
+                "targets": targets,
+            },
+        )
 
     if publish_ready:
         listing.status = ListingStatus.ready
@@ -573,7 +991,7 @@ def _import_google_photos_album(
 
 def _is_archived_vine_listing(listing: Listing) -> bool:
     labels = {str(label).strip().lower() for label in (listing.custom_labels or [])}
-    return "archived_vine" in labels or str(listing.status).lower() == "rejected"
+    return "archived_vine" in labels
 
 
 def _create_storage_batch(
@@ -641,6 +1059,7 @@ class DashboardOperatorCommandRequest(BaseModel):
     prompt: str
     dry_run: bool = True
     apply_live: bool = False
+    confirm_live_apply: bool = False
     confirmation_phrase: str | None = None
 
 
@@ -777,6 +1196,27 @@ def run_google_photos_watch(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.post("/import/google-photos/watch/rebuild-bad-drafts")
+def rebuild_bad_google_photos_drafts(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        result = intake_slate_service.purge_and_regenerate_bad_google_photos_drafts(
+            db,
+            user=None if getattr(current_user, "is_admin", False) else current_user,
+            rebuild_user=current_user,
+        )
+        return {
+            "purged_count": int(result.get("purged_count") or 0),
+            "purged_listing_ids": result.get("purged_listing_ids") or [],
+            "preserved_count": int(result.get("preserved_count") or 0),
+            "rebuild_result": result.get("rebuild_result") or {},
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/clusters")
 def get_clusters(
     db: Session = Depends(get_db),
@@ -791,8 +1231,13 @@ def get_listings(
     page: int | None = Query(default=None, ge=1),
     page_size: int | None = Query(default=None, ge=1, le=250),
     source_type: str | None = Query(default=None),
+    marketplace: str | None = Query(default=None, max_length=32),
+    readiness: str | None = Query(default=None, max_length=32),
     queue: str | None = Query(default=None, max_length=32),
     search: str | None = Query(default=None, max_length=200),
+    sort_by: str | None = Query(default="updated", max_length=32),
+    sort_dir: str | None = Query(default="desc", max_length=4),
+    summary_only: bool = Query(default=False),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -811,16 +1256,19 @@ def get_listings(
         pattern = f"%{normalized_search}%"
         filters.append(or_(Listing.title.ilike(pattern), Listing.description.ilike(pattern)))
     statement = select(Listing).where(*filters)
+    if not summary_only:
+        statement = statement.options(
+            selectinload(Listing.marketplace_listings),
+            selectinload(Listing.publish_attempts),
+        )
 
     def _bucket(listing: Listing) -> str:
         """Resolve catalog queues before pagination so totals remain honest."""
         labels = {str(value).strip().lower() for value in (listing.custom_labels or [])}
         if listing.sold_at is not None or int(listing.quantity or 1) <= 0:
             return "sold"
-        if listing.status == ListingStatus.rejected or {"archived_vine", "archived_sold"} & labels:
+        if {"archived_vine", "archived_sold"} & labels:
             return "archived"
-        if listing.status == ListingStatus.draft:
-            return "drafts"
         if str(listing.status).lower() == "error" or str(listing.ebay_publish_status or "").upper() == "FAILED":
             return "failed"
         if str(listing.ebay_publish_status or "").upper() == "POSTED" or bool(listing.ebay_listing_id):
@@ -828,10 +1276,12 @@ def get_listings(
         source_metadata = listing.source_metadata if isinstance(listing.source_metadata, dict) else {}
         is_recovery = str(listing.source_type or "") == "media_inventory_recovery"
         explicitly_approved = bool(source_metadata.get("operator_approved_at"))
-        if is_recovery and not explicitly_approved:
-            return "drafts"
+        if is_recovery and listing.status == ListingStatus.draft:
+            return "review"
         if listing.restricted_review_required or listing.needs_review:
             return "review"
+        if listing.status == ListingStatus.draft:
+            return "drafts"
         if listing.status == ListingStatus.ready:
             preflight_state = (listing.marketplace_data or {}).get("marketplace_preflight") if isinstance(listing.marketplace_data, dict) else {}
             by_marketplace = preflight_state.get("by_marketplace") if isinstance(preflight_state, dict) else {}
@@ -845,35 +1295,146 @@ def get_listings(
         return "review"
 
     normalized_queue = str(queue or "").strip().lower()
-    if page is None and page_size is None:
-        rows = db.execute(statement.order_by(Listing.updated_at.desc())).scalars().all()
-        if normalized_queue and normalized_queue != "all":
-            rows = [row for row in rows if _bucket(row) == normalized_queue]
-        return [_serialize_listing_response(listing) for listing in rows]
+    # The frontend's public tab key is `attention`; normalize it to the
+    # canonical lifecycle bucket used by the API and database.
+    if normalized_queue == "attention":
+        normalized_queue = "needs_attention"
+    queue_filters = []
+    if normalized_queue and normalized_queue != "all":
+        if normalized_queue == "sold":
+            queue_filters.append(or_(Listing.sold_at.is_not(None), Listing.quantity <= 0))
+        elif normalized_queue == "archived":
+            queue_filters.append(and_(
+                or_(
+                    func.coalesce(func.lower(cast(Listing.custom_labels, String)), "").contains("archived_vine"),
+                    func.coalesce(func.lower(cast(Listing.custom_labels, String)), "").contains("archived_sold"),
+                ),
+                not_(or_(Listing.sold_at.is_not(None), Listing.quantity <= 0)),
+            ))
+        elif normalized_queue == "drafts":
+            queue_filters.append(and_(Listing.status == ListingStatus.draft, Listing.needs_review.is_(False), Listing.restricted_review_required.is_(False)))
+        elif normalized_queue == "failed":
+            queue_filters.append(or_(Listing.status == ListingStatus.FAILED, Listing.ebay_publish_status == "FAILED"))
+        elif normalized_queue == "needs_attention":
+            # Attention is strictly an unpublished repair queue.  A listing
+            # that has already gone live belongs in Published even if an old
+            # processing blocker was left behind on the row.
+            queue_filters.append(and_(
+                or_(Listing.processing_state == "needs_attention", Listing.processing_state == "blocked"),
+                Listing.status != ListingStatus.PUBLISHED,
+                or_(Listing.ebay_publish_status.is_(None), Listing.ebay_publish_status != "POSTED"),
+                Listing.ebay_listing_id.is_(None),
+            ))
+        elif normalized_queue == "published":
+            queue_filters.append(or_(
+                Listing.status == ListingStatus.PUBLISHED,
+                Listing.ebay_publish_status == "POSTED",
+                Listing.ebay_listing_id.is_not(None),
+            ))
+        elif normalized_queue == "ready":
+            queue_filters.append(and_(Listing.status == ListingStatus.ready, Listing.source_metadata["operator_approved_at"].as_string().is_not(None)))
+        elif normalized_queue == "review":
+            # Needs Review is an approval queue, not a holding area for
+            # unpublished/photo-less or already-published records.
+            queue_filters.append(
+                and_(
+                    or_(Listing.needs_review.is_(True), Listing.restricted_review_required.is_(True)),
+                    Listing.sold_at.is_(None),
+                    Listing.status != ListingStatus.PUBLISHED,
+                    Listing.ebay_listing_id.is_(None),
+                    or_(Listing.ebay_publish_status.is_(None), Listing.ebay_publish_status != "POSTED"),
+                    Listing.image_urls.is_not(None),
+                )
+            )
+
+    if queue_filters:
+        statement = statement.where(*queue_filters)
+    visibility_filter = _listing_visibility_filter(normalized_queue)
+    statement = statement.where(visibility_filter)
+    all_filters = [*filters, *queue_filters, visibility_filter]
+    normalized_marketplace = str(marketplace or "").strip().lower()
+    normalized_readiness = str(readiness or "").strip().lower()
+    needs_python_filtering = (
+        (normalized_marketplace and normalized_marketplace != "all")
+        or (normalized_readiness and normalized_readiness != "all")
+        or normalized_queue in {"drafts", "ready", "review", "needs_attention", "published", "failed"}
+    )
+
+    sort_map = {
+        "updated": Listing.updated_at,
+        "created": Listing.created_at,
+        "price": Listing.listing_price,
+        "source": Listing.source_type,
+        "status": Listing.status,
+        "title": Listing.title,
+    }
+    resolved_sort_by = str(sort_by or "updated").strip().lower()
+    sort_column = sort_map.get(resolved_sort_by, Listing.updated_at)
+    resolved_sort_dir = str(sort_dir or "desc").strip().lower()
+    sort_expr = asc(sort_column) if resolved_sort_dir == "asc" else desc(sort_column)
+
+    if page is None and page_size is None and not needs_python_filtering:
+        rows = db.execute(statement.order_by(desc(Listing.updated_at))).scalars().all()
+        serializer = _serialize_listing_summary if summary_only else _serialize_listing_response
+        return [serializer(listing) for listing in rows]
 
     resolved_page = page or 1
     resolved_page_size = page_size or 25
-    if normalized_queue and normalized_queue != "all":
-        matching_rows = [
-            row for row in db.execute(statement.order_by(Listing.updated_at.desc())).scalars().all()
-            if _bucket(row) == normalized_queue
-        ]
-        total = len(matching_rows)
-        start = (resolved_page - 1) * resolved_page_size
-        rows = matching_rows[start:start + resolved_page_size]
-    else:
-        total = int(db.execute(select(func.count()).select_from(Listing).where(*filters)).scalar_one())
+    if needs_python_filtering:
         rows = db.execute(
-            statement.order_by(Listing.updated_at.desc())
+            statement.order_by(sort_expr, desc(Listing.updated_at))
+        ).scalars().all()
+        rows = [
+            listing
+            for listing in rows
+            if _matches_marketplace_filter(listing, normalized_marketplace)
+            and _matches_readiness_filter(listing, normalized_readiness)
+            and (
+                normalized_queue in {"", "all"}
+                or _listing_bucket(listing) == normalized_queue
+            )
+        ]
+        total = len(rows)
+        bucket_counts: dict[str, int] = {}
+        for listing in rows:
+            bucket = _listing_bucket(listing)
+            bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
+        bucket_counts["all"] = total
+        bucket_counts["attention"] = bucket_counts.get("needs_attention", 0)
+        bucket_counts["vine"] = sum(1 for listing in rows if _is_vine_source(listing))
+        start = (resolved_page - 1) * resolved_page_size
+        rows = rows[start : start + resolved_page_size]
+    else:
+        total = int(db.execute(select(func.count()).select_from(Listing).where(*all_filters)).scalar_one())
+        bucket_counts_rows = db.execute(
+            select(_listing_bucket_expression().label("bucket"), func.count())
+            .select_from(Listing)
+            .where(*all_filters)
+            .group_by("bucket")
+        ).all()
+        bucket_counts = {str(bucket): int(count) for bucket, count in bucket_counts_rows}
+        bucket_counts["all"] = total
+        bucket_counts["attention"] = bucket_counts.get("needs_attention", 0)
+        bucket_counts["vine"] = int(
+            db.execute(
+                select(func.count())
+                .select_from(Listing)
+                .where(*all_filters, or_(Listing.source_type == "amazon_vine", Listing.source_type.ilike("%vine%")))
+            ).scalar_one()
+        )
+        rows = db.execute(
+            statement.order_by(sort_expr, desc(Listing.updated_at))
             .offset((resolved_page - 1) * resolved_page_size)
             .limit(resolved_page_size)
         ).scalars().all()
+    serializer = _serialize_listing_summary if summary_only else _serialize_listing_response
     return {
-        "items": [_serialize_listing_response(listing) for listing in rows],
+        "items": [serializer(listing) for listing in rows],
         "total": total,
         "page": resolved_page,
         "page_size": resolved_page_size,
         "total_pages": max(1, (total + resolved_page_size - 1) // resolved_page_size),
+        "bucket_counts": bucket_counts,
     }
 
 
@@ -884,7 +1445,9 @@ def backfill_vine_listing_images(
     strict_match: bool = True,
     use_bridge_session: bool = True,
     only_missing_images: bool = False,
+    since_order_date: date | None = None,
     limit: int | None = None,
+    listing_ids: list[int] | None = Query(default=None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -931,12 +1494,26 @@ def backfill_vine_listing_images(
             bridge_failed += 1
             return None
 
-    listings = db.execute(
-        select(Listing).where(
-            Listing.user_id == current_user.id,
-            Listing.source_type == "amazon_vine",
-        )
-    ).scalars().all()
+    query = select(Listing).where(
+        Listing.user_id == current_user.id,
+        Listing.source_type == "amazon_vine",
+    )
+    if listing_ids:
+        query = query.where(Listing.id.in_(listing_ids))
+    listings = db.execute(query).scalars().all()
+    if since_order_date is not None:
+        listings = [
+            listing
+            for listing in listings
+            if any(
+                item.order_date and item.order_date >= since_order_date
+                for item in db.execute(
+                    select(VineImportItem).where(
+                        (VineImportItem.listing_id == listing.id) | (VineImportItem.inventory_item_id == listing.id)
+                    )
+                ).scalars().all()
+            )
+        ]
     updated = 0
     discovered = 0
     missing_asin = 0
@@ -1156,6 +1733,72 @@ def backfill_vine_listing_images(
         "include_archived": include_archived,
         "force_refresh": force_refresh,
         "strict_match": strict_match,
+        "listing_ids": listing_ids or [],
+    }
+
+
+@router.post("/listings/vine/refresh-metadata")
+def refresh_vine_listing_metadata(
+    include_archived: bool = False,
+    since_order_date: date | None = None,
+    limit: int | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    listings = db.execute(
+        select(Listing).where(
+            Listing.user_id == current_user.id,
+            Listing.source_type == "amazon_vine",
+        )
+    ).scalars().all()
+    if not include_archived:
+        listings = [listing for listing in listings if not _is_archived_vine_listing(listing)]
+    listing_ids = [listing.id for listing in listings]
+    result = service.refresh_vine_listing_metadata(
+        db,
+        user_id=current_user.id,
+        listing_ids=listing_ids or None,
+        since_order_date=since_order_date,
+        limit=limit,
+    )
+    return {
+        **result,
+        "listing_ids": listing_ids[: max(0, limit)] if limit is not None else listing_ids,
+        "total_vine_listings": len(listings),
+        "include_archived": include_archived,
+        "since_order_date": since_order_date.isoformat() if since_order_date else None,
+    }
+
+
+@router.post("/listings/vine/repair-all-images")
+def repair_all_vine_listing_images(
+    include_archived: bool = False,
+    force_refresh: bool = True,
+    use_bridge_session: bool = True,
+    only_missing_images: bool = True,
+    limit: int | None = None,
+    chunk_size: int = 50,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = vine_import_service.repair_all_vine_listing_images(
+        db,
+        user_id=current_user.id,
+        include_archived=include_archived,
+        force_refresh=force_refresh,
+        use_bridge_session=use_bridge_session,
+        only_missing_images=only_missing_images,
+        limit=limit,
+        chunk_size=chunk_size,
+    )
+    return {
+        **result,
+        "include_archived": include_archived,
+        "force_refresh": force_refresh,
+        "use_bridge_session": use_bridge_session,
+        "only_missing_images": only_missing_images,
+        "limit": limit,
+        "chunk_size": chunk_size,
     }
 
 
@@ -1223,6 +1866,11 @@ def create_listing(
     db.add(listing)
     db.commit()
     db.refresh(listing)
+    metadata = dict(listing.source_metadata or {})
+    metadata["correction_job_id"] = correction.id
+    listing.source_metadata = metadata
+    db.commit()
+    db.refresh(listing)
     return _serialize_listing_response(listing)
 
 
@@ -1237,6 +1885,7 @@ def update_listing(
     if not listing:
         raise HTTPException(status_code=404, detail="Listing not found")
     ensure_user_owns_resource(current_user, listing.user_id)
+    before = {field: getattr(listing, field, None) for field in ("title", "description", "listing_price", "suggested_price", "quantity", "condition", "category_id", "category_suggestion", "item_specifics", "image_urls", "marketplace_data", "platform_quantities", "custom_labels")}
     direct_updates = payload.model_dump(
         exclude_none=True,
         exclude={"quantity", "platform_quantities", "custom_labels", "marketplace_data"},
@@ -1245,6 +1894,10 @@ def update_listing(
         direct_updates["status"] = ListingStatus(direct_updates["status"])
     for key, value in direct_updates.items():
         setattr(listing, key, value)
+    manual_fields = [field for field in ("title", "description", "category_suggestion", "item_specifics", "condition", "estimated_value", "suggested_price", "listing_price", "buy_it_now_price") if field in direct_updates]
+    if manual_fields:
+        source_metadata = mark_manual_field_provenance(dict(listing.source_metadata or {}), manual_fields)
+        listing.source_metadata = source_metadata
     if payload.marketplace_data is not None:
         listing.marketplace_data = normalize_marketplace_data(payload.marketplace_data)
     _apply_listing_review_defaults(listing)
@@ -1260,9 +1913,71 @@ def update_listing(
     if payload.sale_price is not None:
         listing.sold_at = datetime.utcnow()
         ProfitService().update_profit_on_sale_event(listing, "ebay")
+    changed_fields = [field for field in before if before[field] != getattr(listing, field, None)]
+    if changed_fields or payload.quantity is not None or payload.platform_quantities is not None:
+        md = dict(listing.marketplace_data or {})
+        revision = int(md.get("posterpro_revision") or 0) + 1
+        md["posterpro_revision"] = revision
+        active_exists = db.scalar(select(exists().where(and_(MarketplaceListing.listing_id == listing.id, MarketplaceListing.status.in_([MarketplaceListingStatus.PUBLISHED, MarketplaceListingStatus.UPDATED])))))
+        md["sync_state"] = "local_changes_not_published" if active_exists else md.get("sync_state", "local")
+        listing.marketplace_data = md
+        db.add(ListingRevision(listing_id=listing.id, user_id=current_user.id, revision=revision, operation="save", changed_fields={f: {"before": before[f], "after": getattr(listing, f, None)} for f in changed_fields}, marketplaces_targeted=[], sync_state=md.get("sync_state", "local"), status="recorded"))
     db.commit()
     db.refresh(listing)
     return _serialize_listing_response(listing)
+
+
+@router.post("/listings/{listing_id}/save-publish-changes")
+async def save_publish_listing_changes(
+    listing_id: int,
+    payload: ListingUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Persist a manual edit and queue marketplace updates for this revision."""
+    listing = db.get(Listing, listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    ensure_user_owns_resource(current_user, listing.user_id)
+    before = {field: getattr(listing, field, None) for field in ("title", "description", "listing_price", "suggested_price", "quantity", "condition", "category_id", "category_suggestion", "item_specifics", "image_urls", "marketplace_data", "platform_quantities", "custom_labels")}
+    direct_updates = payload.model_dump(exclude_none=True, exclude={"quantity", "platform_quantities", "custom_labels", "marketplace_data"})
+    if "status" in direct_updates:
+        direct_updates["status"] = ListingStatus(direct_updates["status"])
+    for key, value in direct_updates.items():
+        setattr(listing, key, value)
+    if payload.marketplace_data is not None:
+        listing.marketplace_data = normalize_marketplace_data(payload.marketplace_data)
+    try:
+        inventory_service.update_listing_inventory(listing, quantity=payload.quantity, platform_quantities=payload.platform_quantities, labels_to_add=payload.custom_labels)
+    except InventorySafetyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    manual_fields = [field for field in before if before[field] != getattr(listing, field, None)]
+    if manual_fields:
+        listing.source_metadata = mark_manual_field_provenance(dict(listing.source_metadata or {}), manual_fields)
+    active_rows = db.execute(select(MarketplaceListing.marketplace, MarketplaceListing.marketplace_listing_id).where(MarketplaceListing.listing_id == listing.id, MarketplaceListing.status.in_([MarketplaceListingStatus.PUBLISHED, MarketplaceListingStatus.UPDATED]))).all()
+    active = {str(value.value if hasattr(value, "value") else value).lower(): identity for value, identity in active_rows if identity}
+    targets = list(active.keys())
+    md_before = dict(before.get("marketplace_data") or {})
+    revision = int(md_before.get("posterpro_revision") or 0) + 1
+    changed_set = {field: {"before": before[field], "after": getattr(listing, field, None)} for field in manual_fields}
+    # Idempotent rapid double-submit: reuse the most recent identical manual
+    # save/publish revision instead of creating duplicate jobs.
+    recent_revision = db.execute(select(ListingRevision).where(ListingRevision.listing_id == listing.id, ListingRevision.user_id == current_user.id, ListingRevision.operation == "save_publish").order_by(ListingRevision.id.desc()).limit(1)).scalar_one_or_none()
+    if recent_revision and recent_revision.changed_fields == changed_set:
+        existing_jobs = db.execute(select(MarketplaceCrosspostJob.id, MarketplaceCrosspostJob.target_marketplaces, MarketplaceCrosspostJob.task_id).where(MarketplaceCrosspostJob.listing_id == listing.id, MarketplaceCrosspostJob.execution_plan["revision_id"].as_integer() == recent_revision.id)).all()
+        return {"listing": _serialize_listing_response(listing), "changed_fields": manual_fields, "jobs": [{"job_id": j.id, "marketplace": (j.target_marketplaces or [None])[0], "task_id": j.task_id} for j in existing_jobs], "sync_state": (listing.marketplace_data or {}).get("sync_state", "synced"), "deduplicated": True}
+    revision_row = ListingRevision(listing_id=listing.id, user_id=current_user.id, revision=revision, operation="save_publish", changed_fields=changed_set, marketplaces_targeted=targets, marketplace_results={}, sync_state="update_queued" if targets else "synced", status="queued")
+    db.add(revision_row); db.flush()
+    db.commit(); db.refresh(listing)
+    jobs = []
+    for market in targets:
+        job = MarketplaceCrosspostJob(user_id=current_user.id, listing_id=listing.id, source_marketplace="posterpro", target_marketplaces=[market], requested_mode="manual_update", status="queued", priority=0, requested_by=current_user.id, execution_plan={"operation": "update", "revision": revision, "revision_id": revision_row.id, "external_listing_id": active.get(market), "changed_fields": changed_set})
+        db.add(job); db.flush()
+        from app.api.marketplace_jobs import _enqueue_priority
+        task = _enqueue_priority(process_marketplace_crosspost_job_task, job.id, job.priority); job.task_id = task.id; jobs.append({"job_id": job.id, "marketplace": market, "task_id": task.id})
+    md = dict(listing.marketplace_data or {}); md["posterpro_revision"] = revision; md["sync_state"] = "update_queued" if jobs else "synced"; listing.marketplace_data = md
+    db.commit(); db.refresh(listing)
+    return {"listing": _serialize_listing_response(listing), "changed_fields": manual_fields, "jobs": jobs, "sync_state": md["sync_state"]}
 
 
 @router.post("/listings/approve-and-queue")
@@ -1865,6 +2580,7 @@ async def run_dashboard_operator_command(
         prompt=payload.prompt,
         dry_run=payload.dry_run,
         apply_live=payload.apply_live,
+        confirm_live_apply=payload.confirm_live_apply,
         confirmation_phrase=payload.confirmation_phrase,
     )
 
@@ -1884,6 +2600,20 @@ def get_listing_pricing(
     return PricingService().get_pricing(db, listing_id)
 
 
+@router.get("/listings/{listing_id}/revisions")
+def get_listing_revisions(
+    listing_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    listing = db.get(Listing, listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    ensure_user_owns_resource(current_user, listing.user_id)
+    rows = db.execute(select(ListingRevision).where(ListingRevision.listing_id == listing_id).order_by(desc(ListingRevision.revision), desc(ListingRevision.created_at))).scalars().all()
+    return [{"id": row.id, "revision": row.revision, "operation": row.operation, "changed_fields": row.changed_fields or {}, "marketplaces_targeted": row.marketplaces_targeted or [], "marketplace_results": row.marketplace_results or {}, "sync_state": row.sync_state, "status": row.status, "reason": row.reason, "requested_by": row.user_id, "created_at": row.created_at.isoformat() if row.created_at else None} for row in rows]
+
+
 @router.post("/listings/{listing_id}/request-revision", response_model=ListingResponse)
 def request_listing_revision(
     listing_id: int,
@@ -1897,13 +2627,31 @@ def request_listing_revision(
     ensure_user_owns_resource(current_user, listing.user_id)
     metadata = dict(listing.source_metadata or {})
     history = list(metadata.get("operator_revision_requests") or [])
-    history.append({"fields": list(dict.fromkeys(payload.fields or [])), "note": (payload.note or "").strip() or None, "requested_at": datetime.utcnow().isoformat()})
+    priority = max(0, int(payload.priority or 0))
+    history.append({"fields": list(dict.fromkeys(payload.fields or [])), "note": (payload.note or "").strip() or None, "priority": priority, "source": "MANUAL_CORRECTION", "requested_by": current_user.id, "requested_at": datetime.utcnow().isoformat(), "status": "QUEUED"})
     metadata["operator_revision_requests"] = history[-20:]
     metadata["rework_state"] = "queued_for_ai_revision"
+    metadata["correction_priority"] = priority
+    metadata["correction_requested_at"] = datetime.utcnow().isoformat()
+    metadata["correction_status"] = "QUEUED - DRAFTING PAUSED" if getattr(settings, "drafting_paused", False) else "QUEUED"
+    # Durable queue record; worker claim ordering is priority ASC, with newest priority-0 first.
+    pending = db.execute(select(ListingCorrectionJob).where(ListingCorrectionJob.listing_id == listing.id, ListingCorrectionJob.status == "queued")).scalars().all()
+    for old in pending:
+        old_fields = set(old.fields or []); new_fields = set(payload.fields or [])
+        if old_fields & new_fields:
+            old.status = "superseded"
+    correction = ListingCorrectionJob(user_id=current_user.id, listing_id=listing.id, requested_by=current_user.id, priority=priority, fields=list(dict.fromkeys(payload.fields or [])), operator_note=(payload.note or "").strip() or None, before_snapshot={"title": listing.title, "description": listing.description, "category_id": listing.category_id, "category_suggestion": listing.category_suggestion, "item_specifics": listing.item_specifics, "listing_price": listing.listing_price, "condition": listing.condition, "image_urls": listing.image_urls})
+    db.add(correction)
     listing.source_metadata = metadata
     listing.status = "draft"
     listing.needs_review = False
     db.add(listing)
+    db.commit()
+    process_listing_correction_jobs_task.delay(limit=1)
+    db.refresh(listing)
+    metadata = dict(listing.source_metadata or {})
+    metadata["correction_job_id"] = correction.id
+    listing.source_metadata = metadata
     db.commit()
     db.refresh(listing)
     return _serialize_listing_response(listing)

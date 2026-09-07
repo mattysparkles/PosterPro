@@ -10,6 +10,8 @@ from typing import Any
 import httpx
 
 from app.core.config import settings
+from app.services.ai_guard import allow as ai_allow, mark_completed as ai_mark_completed, signature as ai_signature, open_circuit as ai_open_circuit
+from app.services.listing_specificity import assess_listing_specificity
 from app.prompts.templates import get_prompt_template
 
 logger = logging.getLogger(__name__)
@@ -20,6 +22,18 @@ PHOTO_EVIDENCE_PIPELINE_VERSION = "recovery_photo_evidence_v2"
 FULL_GROUP_EVIDENCE_PIPELINE_VERSION = "recovery_full_group_evidence_v3"
 _IDENTIFIER_RE = re.compile(r"(?<!\d)(\d{12,14}|\d{9}[\dXx])(?!\d)")
 _MODEL_RE = re.compile(r"\b(?:MODEL|MFG\s*PART|MPN|PART\s*(?:NO|NUMBER))\s*[:#-]?\s*([A-Z0-9][A-Z0-9._/-]{2,})", re.I)
+_GENERIC_TITLE_PHRASES = {
+    "packaging",
+    "product information",
+    "electronic components",
+    "miscellaneous items",
+    "shipping boxes",
+    "art and decor",
+    "box",
+    "package",
+    "packaged item",
+    "miscellaneous",
+}
 
 
 def classify_barcode(value: str | None) -> str | None:
@@ -41,6 +55,17 @@ def quality_gate(synthesis: dict[str, Any]) -> str:
         return "needs_identity_review"
     if not synthesis.get("identity") or synthesis.get("identity_confidence", 0) < 0.45:
         return "needs_identity_review"
+    specificity = assess_listing_specificity(
+        title=(synthesis.get("identity") or {}).get("title"),
+        description=synthesis.get("description"),
+        category=synthesis.get("category"),
+        item_specifics=synthesis.get("item_specifics") if isinstance(synthesis.get("item_specifics"), dict) else {},
+        source_metadata=synthesis,
+        has_images=bool(synthesis.get("usable_media_ids")),
+    )
+    synthesis["specificity"] = specificity
+    if specificity["status"] != "trusted_for_draft":
+        return specificity["status"]
     placeholders = set(synthesis.get("placeholders") or [])
     if {"price", "weight", "dimensions"} & placeholders:
         return "blocked_placeholder_data"
@@ -54,6 +79,9 @@ class PhotoEnrichmentService:
         self.model = model
 
     def enrich_photo(self, photo_path: str) -> dict[str, Any]:
+        guard_key = ai_signature(purpose="photo", payload={"path": photo_path, "model": self.model})
+        if not ai_allow(guard_key):
+            return {"status": "skipped", "reason": "duplicate_or_provider_circuit_open", "photo_path": photo_path}
         if not settings.openai_api_key:
             raise RuntimeError("OPENAI_API_KEY is not configured")
 
@@ -70,13 +98,17 @@ class PhotoEnrichmentService:
         outputs["tags"] = keywords.get("keywords") or []
         outputs["item_specifics"] = keywords.get("item_specifics") or {}
         outputs["estimated_value"] = _safe_float(keywords.get("estimated_value"))
+        ai_mark_completed(guard_key)
         return outputs
 
     def enrich_group(self, photo_paths: list[str]) -> dict[str, Any]:
         """Compatibility wrapper: evaluate all photos and synthesize, never select a lead photo."""
+        guard_key = ai_signature(purpose="photo_group", payload={"paths": sorted(photo_paths), "model": self.model})
+        if not ai_allow(guard_key):
+            return {"status": "skipped", "reason": "duplicate_or_provider_circuit_open", "photos_evaluated": 0, "group_synthesis": {}}
         records = [self.extract_photo_evidence(path, media_id=index + 1) for index, path in enumerate(photo_paths)]
         synthesis = self.synthesize_group_evidence(records)
-        return {
+        result = {
             "title": synthesis.get("identity", {}).get("title"),
             "description": synthesis.get("description"),
             "category_suggestion": synthesis.get("category"),
@@ -89,6 +121,8 @@ class PhotoEnrichmentService:
             "photos_excluded": [item for item in records if item.get("error_status") or item.get("excluded_reason")],
             "group_synthesis": synthesis,
         }
+        ai_mark_completed(guard_key)
+        return result
 
     def extract_photo_evidence(self, photo_path: str, *, media_id: int | None = None, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
         """Photo-local OCR/barcode/vision facts. Errors are durable evidence too."""
@@ -149,39 +183,65 @@ class PhotoEnrichmentService:
         models = self._distinct_values(usable, "model", fallback="mpn")
         product_types = self._distinct_values(usable, "product_type")
         intentional_set = bool(usable) and all(bool(record.get("intentional_set")) for record in usable)
+        has_product_title = any(str(record.get("product_name") or "").strip() for record in usable)
+        has_visual_title = any(str(record.get("visual_title") or "").strip() for record in usable)
+        has_packaging_identity = any(str(record.get("packaging_identity") or "").strip() for record in usable)
+        complementary_label_context = (
+            not intentional_set
+            and (has_product_title or has_visual_title)
+            and has_packaging_identity
+            and len(barcode_values) <= 1
+            and len(models) <= 1
+        )
+        title_candidates = self._title_candidates(usable)
         conflicts: list[str] = []
+        review_flags: list[str] = []
         if len(barcode_values) > 1 and not intentional_set:
             conflicts.append("multiple_incompatible_barcodes")
         if len(models) > 1 and not intentional_set:
             conflicts.append("multiple_model_labels")
         # Brand/type disagreement is a strong warning only when there is no
         # shared model/barcode evidence that would explain accessories/views.
-        if len(brands) > 1 and not intentional_set and not (len(barcode_values) == 1 or len(models) == 1):
+        if len(brands) > 1 and not intentional_set and not complementary_label_context and not (len(barcode_values) == 1 or len(models) == 1):
             conflicts.append("multiple_brands")
-        if len(product_types) > 1 and not intentional_set and not (len(barcode_values) == 1 or len(models) == 1):
+        if len(product_types) > 1 and not intentional_set and not complementary_label_context and not (len(barcode_values) == 1 or len(models) == 1):
             conflicts.append("multiple_product_types")
+        if len(title_candidates) > 1 and not intentional_set and self._title_candidates_conflict(title_candidates):
+            review_flags.append("multiple_title_candidates")
         group_kind = "intentional_set" if intentional_set else ("multiple_unrelated_products" if conflicts else "one_item")
 
         selected_facts = {
             field: self._select_fact(usable, field, fallback=fallback)
             for field, fallback in (
                 ("decoded_barcode_value", None), ("brand", None), ("model", "mpn"), ("mpn", "model"),
-                ("product_name", "packaging_identity"), ("packaging_identity", "product_name"),
+                ("product_name", None), ("visual_title", None), ("packaging_identity", None),
                 ("category", None), ("condition_evidence", None), ("testing_evidence", None),
             )
         }
         identifier_fact = selected_facts["decoded_barcode_value"]
         model_fact = selected_facts["model"]
         name_fact = selected_facts["product_name"]
+        visual_fact = selected_facts["visual_title"]
         packaging_fact = selected_facts["packaging_identity"]
         brand_fact = selected_facts["brand"]
-        title = name_fact["value"] or packaging_fact["value"]
-        if not title and brand_fact["value"] and product_types:
-            title = f"{brand_fact['value']} {product_types[0]}"
+        title = self._best_identity_title(
+            name_fact=name_fact,
+            visual_fact=visual_fact,
+            packaging_fact=packaging_fact,
+            brand_fact=brand_fact,
+            model_fact=model_fact,
+            product_types=product_types,
+        )
         identifier = identifier_fact["value"] or model_fact["value"] or selected_facts["mpn"]["value"]
         supporting = {field: fact["media_ids"] for field, fact in selected_facts.items()}
         field_confidence = {field: fact["confidence"] for field, fact in selected_facts.items()}
-        identity_confidence = max(identifier_fact["confidence"], model_fact["confidence"], name_fact["confidence"], packaging_fact["confidence"])
+        identity_confidence = max(
+            identifier_fact["confidence"],
+            model_fact["confidence"],
+            name_fact["confidence"],
+            visual_fact["confidence"],
+            packaging_fact["confidence"],
+        )
         specifics = self._merge_specifications(usable)
         placeholders = []
         if not any(record.get("price_research") for record in usable): placeholders.append("price")
@@ -198,7 +258,7 @@ class PhotoEnrichmentService:
             "field_confidence": field_confidence,
             "reason_selected": "field-by-field evidence synthesis: decoded barcode, readable model/MPN, packaging identity, corroborated facts, then visual evidence",
             "identity_candidates": self._identity_candidates(sorted(usable, key=self._evidence_rank, reverse=True)),
-            "placeholders": placeholders, "review_flags": ["measurements"] if "dimensions" in placeholders else [],
+            "placeholders": placeholders, "review_flags": (["measurements"] if "dimensions" in placeholders else []) + review_flags,
         }
         synthesis["quality_gate"] = quality_gate(synthesis)
         return synthesis
@@ -222,6 +282,9 @@ class PhotoEnrichmentService:
             key = str(value).strip().casefold()
             rank = self._evidence_rank(record)
             confidence = self._confidence_value(record.get("confidence"), default=0.45)
+            if field in {"product_name", "packaging_identity"} and self._is_generic_title(value):
+                rank = max(5, int(rank * 0.6))
+                confidence = min(confidence, 0.55)
             item = candidates.setdefault(key, {"value": value, "score": 0.0, "media_ids": [], "best_rank": 0, "confidence": 0.0})
             item["score"] += rank * max(confidence, 0.25)
             item["best_rank"] = max(item["best_rank"], rank)
@@ -234,6 +297,53 @@ class PhotoEnrichmentService:
         corroboration = min(0.12 * max(0, len(winner["media_ids"]) - 1), 0.24)
         winner["confidence"] = round(min(1.0, winner["confidence"] + corroboration), 3)
         return winner
+
+    @staticmethod
+    def _is_generic_title(value: Any) -> bool:
+        text = re.sub(r"\s+", " ", str(value or "").strip().lower())
+        if not text:
+            return True
+        if text in _GENERIC_TITLE_PHRASES:
+            return True
+        if len(text) <= 3:
+            return True
+        return any(token in text for token in ("packaging", "miscellaneous", "product information", "shipping boxes", "art and decor", "electronic components"))
+
+    def _best_identity_title(
+        self,
+        *,
+        name_fact: dict[str, Any],
+        visual_fact: dict[str, Any],
+        packaging_fact: dict[str, Any],
+        brand_fact: dict[str, Any],
+        model_fact: dict[str, Any],
+        product_types: list[str],
+    ) -> str | None:
+        name_value = str(name_fact.get("value") or "").strip()
+        if name_value and not self._is_generic_title(name_value):
+            return name_value
+        visual_value = str(visual_fact.get("value") or "").strip()
+        if visual_value and not self._is_generic_title(visual_value):
+            return visual_value
+        packaging_value = str(packaging_fact.get("value") or "").strip()
+        if packaging_value and not self._is_generic_title(packaging_value):
+            return packaging_value
+        brand = str(brand_fact.get("value") or "").strip()
+        model = str(model_fact.get("value") or "").strip()
+        product_type = str(product_types[0]).strip() if product_types else ""
+        if brand and model:
+            return f"{brand} {model}"
+        if model:
+            return model
+        if brand and product_type:
+            return f"{brand} {product_type}"
+        if product_type:
+            return product_type
+        if name_value:
+            return name_value
+        if packaging_value:
+            return packaging_value
+        return None
 
     @staticmethod
     def _merge_specifications(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -286,6 +396,32 @@ class PhotoEnrichmentService:
                 candidates.append({"title": title, "brand": record.get("brand"), "model": record.get("model"), "confidence": min(PhotoEnrichmentService._evidence_rank(record) / 100, 1.0), "media_id": record.get("media_id")})
         return candidates[:3]
 
+    @staticmethod
+    def _title_candidates(records: list[dict[str, Any]]) -> list[str]:
+        candidates: list[str] = []
+        for record in records:
+            for field in ("product_name", "visual_title", "packaging_identity"):
+                value = str(record.get(field) or "").strip()
+                if value and value not in candidates and not PhotoEnrichmentService._is_generic_title(value):
+                    candidates.append(value)
+                    break
+        return candidates
+
+    @staticmethod
+    def _title_candidates_conflict(candidates: list[str]) -> bool:
+        if len(candidates) < 2:
+            return False
+        normalized = [re.sub(r"[^a-z0-9]+", " ", candidate.lower()).split() for candidate in candidates]
+        if not normalized:
+            return False
+        leader = normalized[0]
+        for tokens in normalized[1:]:
+            shared = len(set(leader) & set(tokens))
+            total = max(len(set(leader) | set(tokens)), 1)
+            if shared / total < 0.45:
+                return True
+        return False
+
     def _barcode_attempts(self, image: Any) -> tuple[list[dict[str, Any]], list[str]]:
         try:
             import cv2
@@ -317,11 +453,24 @@ class PhotoEnrichmentService:
         try:
             import cv2, pytesseract
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            frames = [gray, cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC), cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]]
+            height, width = gray.shape[:2]
+            half = max(1, height // 2)
+            frames = [
+                gray,
+                cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC),
+                cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
+                cv2.Canny(gray, 50, 150),
+                gray[:half, :],
+                gray[half:, :],
+                gray[:, : max(1, width // 2)],
+                gray[:, max(1, width // 2):],
+            ]
             chunks = []
             for frame in frames:
-                text = str(pytesseract.image_to_string(frame, config="--oem 3 --psm 6") or "").strip()
-                if text and text not in chunks: chunks.append(text)
+                for psm in (6, 11, 12):
+                    text = str(pytesseract.image_to_string(frame, config=f"--oem 3 --psm {psm}") or "").strip()
+                    if text and text not in chunks:
+                        chunks.append(text)
             return "\n".join(chunks)
         except Exception:
             return ""
@@ -330,6 +479,7 @@ class PhotoEnrichmentService:
         image_b64 = base64.b64encode(Path(photo_path).read_bytes()).decode("utf-8")
         prompt = ("Return strict JSON for this one inventory photograph: photo_role, brand, product_name, product_type, model, mpn, manufacturer_sku, "
                   "packaging_identity, specifications, included_components, damage, condition_evidence, measurement_evidence, testing_evidence, category, visual_title, confidence. "
+                  "Inspect labels, UPCs, barcodes, etched or embossed text, compatibility clues, and packaging identity. "
                   "Do not invent identifiers. State only visible facts.")
         payload = {"model": self.model, "response_format": {"type": "json_object"}, "messages": [{"role": "system", "content": prompt}, {"role": "user", "content": [{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}]}], "temperature": 0}
         with httpx.Client(timeout=90) as client:
@@ -375,6 +525,9 @@ class PhotoEnrichmentService:
         return parsed if isinstance(parsed, dict) else {}
 
     def _extract_json(self, photo_path: str, image_b64: str, template_name: str) -> dict[str, Any]:
+        guard_key = ai_signature(purpose=f"photo_extract:{template_name}", payload={"path": photo_path, "model": self.model})
+        if not ai_allow(guard_key):
+            raise RuntimeError("AI provider circuit open or duplicate photo extraction")
         prompt = get_prompt_template(template_name)
         payload = {
             "model": self.model,
@@ -394,6 +547,8 @@ class PhotoEnrichmentService:
         headers = {"Authorization": f"Bearer {settings.openai_api_key}", "Content-Type": "application/json"}
         with httpx.Client(timeout=60) as client:
             response = client.post("https://api.openai.com/v1/chat/completions", json=payload, headers=headers)
+            if response.status_code == 429:
+                ai_open_circuit()
             response.raise_for_status()
             data = response.json()
 
@@ -401,6 +556,7 @@ class PhotoEnrichmentService:
         try:
             parsed = json.loads(content)
             if isinstance(parsed, dict):
+                ai_mark_completed(guard_key)
                 return parsed
             return {}
         except json.JSONDecodeError:

@@ -20,6 +20,7 @@ class IntakeSettingsRequest(BaseModel):
     folder_id: str | None = None
     enabled: bool = True
     auto_draft_listing: bool = True
+    drafting_paused: bool = False
     require_manual_review_before_publish: bool = True
     default_item_prefix: str = "SP"
     default_box_prefix: str = "BX"
@@ -32,7 +33,20 @@ class IntakeSettingsRequest(BaseModel):
     internal_box_photos_default: bool = True
     image_seo_filename_pattern: str = "{item_id}_{seo_title}_{photo_number}"
     poll_interval_seconds: int = 300
+    max_new_items_per_run: int | None = None
     marketplace_defaults: dict | None = None
+
+
+class IntakeVoiceIntelligenceRequest(BaseModel):
+    transcript: str = ""
+    notes: str | None = None
+    current_form: dict | None = None
+    current_session: dict | None = None
+
+
+class IntakeVoiceTranscriptionRequest(BaseModel):
+    voice_audio_data_url: str
+    voice_notes: str | None = None
 
 
 class IntakeSessionCreateRequest(BaseModel):
@@ -47,6 +61,10 @@ class IntakeSessionCreateRequest(BaseModel):
 
 
 class IntakeSlateCreateRequest(BaseModel):
+    after_photo_id: int | None = None
+    before_photo_id: int | None = None
+    effective_boundary_at: str | None = None
+    retroactive: bool = False
     session_id: str | None = None
     item_id: str | None = None
     item_prefix: str | None = None
@@ -69,6 +87,12 @@ class IntakeSlateCreateRequest(BaseModel):
     mark_packed: bool = False
     increment_box: bool = False
     same_box: bool = False
+    voice_transcript: str | None = None
+    voice_notes: str | None = None
+    voice_audio_data_url: str | None = None
+    voice_intelligence: dict | None = None
+    label_copies: int | None = None
+    quantity: str | None = None
 
 
 class IntakeSlateUpdateRequest(BaseModel):
@@ -188,6 +212,7 @@ class IntakeSlateResponse(BaseModel):
     packed: bool = False
     internal_notes: str | None = None
     qr_payload_json: dict | None = None
+    metadata_json: dict | None = None
     slate_image_id: int | None = None
     listing_id: int | None = None
     status: str
@@ -255,6 +280,7 @@ class ListingGenerateRequest(BaseModel):
 class ListingRevisionRequest(BaseModel):
     fields: list[str] = []
     note: str | None = None
+    priority: int = 0
 
 
 class ListingApproveQueueRequest(BaseModel):
@@ -365,6 +391,18 @@ class ListingResponse(BaseModel):
     readiness_summary: dict = Field(default_factory=dict)
     quality_summary: dict = Field(default_factory=dict)
     latest_publish_attempt: dict | None = None
+
+    class Config:
+        from_attributes = True
+
+
+class ListingPageResponse(BaseModel):
+    items: list[ListingResponse]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    bucket_counts: dict[str, int] = Field(default_factory=dict)
 
     class Config:
         from_attributes = True
@@ -866,6 +904,12 @@ class InventoryBulkRequest(BaseModel):
     user_id: int = 1
 
 
+class RecoveryCopyRepairRequest(BaseModel):
+    listing_ids: list[int] = Field(default_factory=list)
+    filters: InventoryFilterRequest | None = None
+    payload: dict | None = None
+
+
 class BulkJobResponse(BaseModel):
     job_id: str
     action: str
@@ -973,6 +1017,7 @@ class UserResponse(BaseModel):
     vine_enforce_six_month_lock: bool = True
     sold_sync_preferences: dict = Field(default_factory=dict)
     ebay_marketplace_policy_settings: dict = Field(default_factory=dict)
+    profile_preferences: dict = Field(default_factory=dict)
 
     class Config:
         from_attributes = True
@@ -985,11 +1030,18 @@ class AuthSessionResponse(BaseModel):
 
 class UserUpdateRequest(BaseModel):
     full_name: str | None = None
+    avatar_url: str | None = None
+    phone_number: str | None = None
+    marketing_email_consent: bool | None = None
+    marketing_sms_consent: bool | None = None
     review_before_publish: bool | None = None
     auto_publish_after_approval: bool | None = None
     bulk_approval_enabled: bool | None = None
     listing_preview_mode: str | None = None
     default_preview_marketplace: str | None = None
+    shipping_price_threshold: float | None = None
+    shipping_under_threshold_mode: str | None = None
+    shipping_at_or_above_threshold_mode: str | None = None
     vine_enforce_six_month_lock: bool | None = None
     sold_out_delist_everywhere: bool | None = None
     out_of_stock_delist_everywhere: bool | None = None
@@ -1005,6 +1057,9 @@ class ServerSettingsUpdateRequest(BaseModel):
     ebay_client_secret: str | None = None
     ebay_runame: str | None = None
     ebay_redirect_uri: str | None = None
+    google_photos_client_id: str | None = None
+    google_photos_client_secret: str | None = None
+    google_photos_redirect_uri: str | None = None
     storage_root: str | None = None
     environment: str | None = None
     autonomous_dry_run: bool | None = None
@@ -1130,6 +1185,24 @@ class MarketplaceConnectionUpdateRequest(BaseModel):
     import_listing_limit: int | None = None
 
 
+class BrowserExtensionSessionImportRequest(BaseModel):
+    marketplace: str
+    account_key: str
+    display_name: str | None = None
+    login_handle: str | None = None
+    notes: str | None = None
+    workflow_state: str | None = None
+    import_mode: str | None = None
+    publish_mode: str | None = None
+    shipping_scope: str | None = None
+    renewal_mode: str | None = None
+    support_url: str | None = None
+    import_listing_limit: int | None = None
+    bridge_session_state: str | None = None
+    session_payload: dict = Field(default_factory=dict)
+    credential_secret: str | None = None
+
+
 class CrosspostQueueRequest(BaseModel):
     marketplaces: list[str] = Field(default_factory=list)
     requested_mode: str | None = None
@@ -1145,6 +1218,7 @@ class CrosspostPreviewEntry(BaseModel):
 class CrosspostJobResponse(BaseModel):
     id: int
     user_id: int
+    operator_email: str | None = None
     listing_id: int
     source_marketplace: str | None = None
     target_marketplaces: list[str] = Field(default_factory=list)
@@ -1167,6 +1241,10 @@ class CrosspostJobResponse(BaseModel):
     ui_secondary_actions: list[str] = Field(default_factory=list)
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    priority: int = 1
+    attempt_count: int = 0
+    next_attempt_at: datetime | None = None
+    requested_by: int | None = None
 
     class Config:
         from_attributes = True
@@ -1188,6 +1266,7 @@ class MarketplaceBulkImportRequest(BaseModel):
 class MarketplaceImportJobResponse(BaseModel):
     id: int
     user_id: int
+    operator_email: str | None = None
     source_marketplace: str
     source_listing_reference: str | None = None
     import_mode: str
@@ -1209,6 +1288,10 @@ class MarketplaceImportJobResponse(BaseModel):
     ui_secondary_actions: list[str] = Field(default_factory=list)
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    priority: int = 1
+    attempt_count: int = 0
+    next_attempt_at: datetime | None = None
+    requested_by: int | None = None
 
     class Config:
         from_attributes = True
@@ -1238,11 +1321,35 @@ class MarketplaceJobsStatusSummary(BaseModel):
     canceled: int = 0
 
 
+class SystemStatusSummary(BaseModel):
+    catalog_total: int = 0
+    catalog_visible: int = 0
+    catalog_drafts: int = 0
+    catalog_review: int = 0
+    catalog_ready: int = 0
+    catalog_published: int = 0
+    catalog_sold: int = 0
+    catalog_archived: int = 0
+    intake_batches_active: int = 0
+    intake_batches_ready: int = 0
+    intake_batches_drafted: int = 0
+    intake_photos_processing: int = 0
+    intake_photos_processed: int = 0
+    intake_photos_retry: int = 0
+    queued_jobs: int = 0
+    running_jobs: int = 0
+    failed_jobs: int = 0
+    unread_notifications: int = 0
+    status_message: str | None = None
+
+
 class MarketplaceJobsOverviewResponse(BaseModel):
     import_jobs: list[MarketplaceImportJobResponse] = Field(default_factory=list)
     crosspost_jobs: list[CrosspostJobResponse] = Field(default_factory=list)
+    correction_jobs: list[dict] = Field(default_factory=list)
     import_summary: MarketplaceJobsStatusSummary = Field(default_factory=MarketplaceJobsStatusSummary)
     crosspost_summary: MarketplaceJobsStatusSummary = Field(default_factory=MarketplaceJobsStatusSummary)
+    system_status: SystemStatusSummary = Field(default_factory=SystemStatusSummary)
 
 
 class AutomationBridgeSmokeTestResponse(BaseModel):
@@ -1353,6 +1460,7 @@ class ServerReadinessResponse(BaseModel):
     openai_configured: bool = False
     photoroom_configured: bool = False
     ebay_oauth_configured: bool = False
+    google_photos_oauth_configured: bool = False
     storage_root_configured: bool = False
     session_secret_configured: bool = False
     amazon_vine_import_enabled: bool = False

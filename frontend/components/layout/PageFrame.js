@@ -7,7 +7,7 @@ export function PageFrame({ children, className }) {
 export function PageSplit({
   children,
   className,
-  columnsClassName = 'xl:grid-cols-[minmax(0,1fr)_360px]',
+  columnsClassName = 'sm:grid-cols-[minmax(0,1fr)_360px]',
   gapClassName = 'gap-6',
 }) {
   return <div className={cn('grid items-start', gapClassName, columnsClassName, className)}>{children}</div>;
@@ -19,7 +19,7 @@ export function PageMain({ children, className }) {
 
 export function PageAside({ children, className, sticky = true, stickyTopClassName = 'xl:top-[96px]' }) {
   return (
-    <aside className={cn('min-w-0 space-y-6', sticky && 'xl:sticky', sticky && stickyTopClassName, className)}>
+    <aside className={cn('min-w-0 space-y-6', sticky && 'sm:sticky', sticky && (stickyTopClassName.includes('xl:') ? stickyTopClassName.replace(/^xl:/, 'sm:') : stickyTopClassName), className)}>
       {children}
     </aside>
   );

@@ -86,6 +86,7 @@ def test_ocr_variations_and_safe_segment_substitution_are_normalized(db_session)
     assert candidates[spacing.id].classification == "probable_slate"
     assert candidates[spacing.id].normalized_item_id == "SP-20260708-0006"
     assert candidates[corrected.id].normalized_item_id == "SP-20260708-0006"
+    assert service.normalize_recovery_item_id("SP-0626-0001") == "SP-0626-0001"
     assert service.normalize_recovery_item_id("XP-2O26O7O8-OOO6") is None
     assert service.normalize_recovery_item_id("SP-2026070X-0006") is None
 

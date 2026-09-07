@@ -21,6 +21,7 @@ import {
   queueCrosspostJob,
   generateListing,
   requestListingRevision,
+  savePublishListingChanges,
   toggleAutonomousMode,
   updateListing,
 } from "../../lib/api";
@@ -62,7 +63,7 @@ function MarketplaceVisualPreview({ entry, imageUrls, formatMoney }) {
       </div>
       <div className="grid gap-4 p-4 md:grid-cols-[minmax(0,1.05fr)_minmax(220px,0.95fr)]">
         <div>
-          <div className="aspect-square overflow-hidden rounded-[12px] bg-[#f2f4f7]">
+          <div className="marketplace-preview-image overflow-hidden rounded-[12px] bg-[#f2f4f7]">
             {images[0] ? <img src={images[0]} alt={payload.title || 'Listing preview'} className="h-full w-full object-contain" /> : <div className="flex h-full items-center justify-center text-sm text-[#667085]">No selected product image</div>}
           </div>
           {images.length > 1 ? (
@@ -72,7 +73,7 @@ function MarketplaceVisualPreview({ entry, imageUrls, formatMoney }) {
           ) : null}
         </div>
         <div className="min-w-0">
-          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[#667085]">{payload.category_hint || payload.category_id || 'Marketplace category pending review'}</p>
+          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[#667085]">{payload.category_name || payload.category_hint || (String(payload.category_id || '').match(/^\d+$/) ? `Category ID ${payload.category_id}` : payload.category_id) || 'Marketplace category pending review'}</p>
           <h3 className="mt-2 text-xl font-semibold leading-7 tracking-[-0.025em] text-[#101828]">{payload.title || 'Untitled listing'}</h3>
           <p className={`mt-4 text-2xl font-bold ${style.price}`}>{formatMoney(price)}</p>
           <div className="mt-4 space-y-2 text-sm text-[#475467]">
@@ -197,6 +198,7 @@ export default function ListingWorkspacePage() {
   const [generating, setGenerating] = useState(false);
   const [revisionFields, setRevisionFields] = useState([]);
   const [revisionNote, setRevisionNote] = useState("");
+  const [revisionPriority, setRevisionPriority] = useState(0);
   const [queueingCrosspost, setQueueingCrosspost] = useState(false);
   const [importing, setImporting] = useState(false);
   const [listing, setListing] = useState(null);
@@ -208,6 +210,7 @@ export default function ListingWorkspacePage() {
     default_preview_marketplace: 'ebay',
   });
   const [previewMarketplace, setPreviewMarketplace] = useState('ebay');
+  const [selectedImageIndex, setSelectedImageIndex] = useState(0);
   const [form, setForm] = useState(() => normalizeListingForm(null));
   const [importForm, setImportForm] = useState({
     source_marketplace: "facebook",
@@ -235,6 +238,7 @@ export default function ListingWorkspacePage() {
         setPreviewMarketplace(String(panels?.workflow?.default_preview_marketplace || 'ebay').toLowerCase());
         setListing(fetchedListing);
         setForm(normalizeListingForm(fetchedListing));
+        setSelectedImageIndex(0);
         if (fetchedListing?.id) {
           const targets = (fetchedListing.marketplace_data?.targets || []).filter(Boolean);
           const [preview, jobs] = await Promise.all([
@@ -281,6 +285,15 @@ export default function ListingWorkspacePage() {
     if (isNew) return "New Item";
     return listing?.title || `Listing #${listing?.id || listingId}`;
   }, [isNew, listing, listingId]);
+
+  const editorImageUrls = useMemo(
+    () => form.image_urls.split("\n").map((value) => value.trim()).filter(Boolean).slice(0, 24),
+    [form.image_urls],
+  );
+
+  useEffect(() => {
+    if (selectedImageIndex >= editorImageUrls.length) setSelectedImageIndex(0);
+  }, [editorImageUrls.length, selectedImageIndex]);
 
   const setChannelField = (channel, key, value) => {
     setForm((current) => ({
@@ -485,11 +498,12 @@ export default function ListingWorkspacePage() {
       return;
     }
     try {
-      const revised = await requestListingRevision(listing.id, revisionFields, revisionNote);
+      const revised = await requestListingRevision(listing.id, revisionFields, revisionNote, revisionPriority);
       setListing(revised);
       setForm(normalizeListingForm(revised));
       setRevisionFields([]);
       setRevisionNote("");
+      setRevisionPriority(0);
       await reloadDashboard();
       toast.success("Returned to Drafts with your correction request.");
     } catch (error) {
@@ -518,6 +532,23 @@ export default function ListingWorkspacePage() {
       toast.error(error.message);
     } finally {
       setQueueingCrosspost(false);
+    }
+  };
+
+  const saveAndPublishChanges = async () => {
+    if (!listing?.id) return;
+    setSaving(true);
+    try {
+      const result = await savePublishListingChanges(listing.id, buildPayload(listing.status));
+      const saved = result?.listing || result;
+      setListing(saved);
+      setForm(normalizeListingForm(saved));
+      toast.success(`${result?.jobs?.length || 0} marketplace update job(s) queued.`);
+      await reloadDashboard();
+    } catch (error) {
+      toast.error(error.message || "Could not publish changes.");
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -573,6 +604,8 @@ export default function ListingWorkspacePage() {
       contentWidth="wide"
     >
       <PageHeader
+        compact
+        className="listing-editor-page-header"
         title={title}
         description="One source-of-truth item record for manual entry, imported marketplace listings, AI-generated drafts, and cross-post planning."
         actions={
@@ -586,6 +619,10 @@ export default function ListingWorkspacePage() {
               <Save size={16} />
               {saving ? "Saving..." : "Save draft"}
             </Button>
+            {!isNew ? <Button onClick={saveAndPublishChanges} disabled={saving} title="Save PosterPro changes and queue updates for active marketplaces.">
+              <Sparkles size={16} />
+              {saving ? "Saving..." : "Save & publish changes"}
+            </Button> : null}
             <Button variant="outline" onClick={queueCrosspost} disabled={queueingCrosspost}>
               {queueingCrosspost ? "Queueing..." : "Queue cross-post"}
             </Button>
@@ -597,15 +634,35 @@ export default function ListingWorkspacePage() {
         }
       />
 
-      <SectionPanel title="Send back to Drafts for correction" description="Choose the parts that need work. PosterPro records your request, moves the listing to Drafts, and uses your notes on the next AI revision.">
-        <div className="flex flex-wrap gap-3">
-          {['title', 'description', 'category', 'price', 'condition', 'photos', 'item specifics', 'shipping'].map((field) => <label key={field} className="flex items-center gap-2 text-sm"><input type="checkbox" checked={revisionFields.includes(field)} onChange={() => setRevisionFields((current) => current.includes(field) ? current.filter((item) => item !== field) : [...current, field])} /> Fix {field}</label>)}
+      <section className="listing-editor-identity mb-5 grid gap-5 rounded-[18px] border border-[#d9e2ef] bg-gradient-to-br from-[#f8fbff] to-white p-5 lg:grid-cols-[minmax(260px,0.8fr)_minmax(0,1.2fr)] lg:items-start">
+        <div>
+          <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#667085]">Product photos</p>
+          <div className="mt-2 aspect-[4/3] overflow-hidden rounded-[14px] border border-[#dbe4f0] bg-[#eef3f8]">
+            {editorImageUrls[selectedImageIndex] ? <img src={editorImageUrls[selectedImageIndex]} alt={`Product photo ${selectedImageIndex + 1}`} className="h-full w-full object-contain" /> : <div className="flex h-full items-center justify-center p-6 text-center text-sm font-semibold text-[#667085]">Add product photos before publishing</div>}
+          </div>
+          {editorImageUrls.length > 1 ? <div className="mt-3 flex gap-2 overflow-x-auto pb-1" aria-label="Product photo thumbnails">{editorImageUrls.map((url, index) => <button key={`${url}-${index}`} type="button" onClick={() => setSelectedImageIndex(index)} className={`shrink-0 rounded-lg border-2 p-0.5 transition ${selectedImageIndex === index ? "border-[#2563eb] ring-2 ring-[#2563eb]/20" : "border-[#dbe4f0] hover:border-[#94a3b8]"}`} aria-label={`View product photo ${index + 1}`}><img src={url} alt={`Product photo ${index + 1}`} style={{ width: 56, height: 56, minWidth: 56, objectFit: "cover" }} className="rounded-md" /></button>)}</div> : null}
         </div>
-        <textarea value={revisionNote} onChange={(event) => setRevisionNote(event.target.value)} className="mt-3 min-h-20 w-full rounded-[10px] border border-[#e5e7eb] p-3 text-sm" placeholder="Optional: describe what is wrong or point the AI to a label/photo." />
-        <div className="mt-3"><Button variant="outline" onClick={requestRevision}>Send to Drafts &amp; request AI correction</Button></div>
-      </SectionPanel>
+        <div className="min-w-0">
+          <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#667085]">Listing identity</p>
+          <h2 className="mt-1 text-2xl font-bold tracking-tight text-[#101828]">{form.title || "Draft title pending"}</h2>
+          <div className="mt-4 grid gap-3 sm:grid-cols-3"><div><p className="text-xs font-bold uppercase tracking-wide text-[#667085]">Brand</p><p className="mt-1 font-semibold text-[#101828]">{listing?.brand || "Pending"}</p></div><div><p className="text-xs font-bold uppercase tracking-wide text-[#667085]">Condition</p><p className="mt-1 font-semibold text-[#101828]">{form.condition || "Pending"}</p></div><div><p className="text-xs font-bold uppercase tracking-wide text-[#667085]">Price</p><p className="mt-1 font-semibold text-[#101828]">{form.listing_price ? `$${Number(form.listing_price).toFixed(2)}` : "Pending"}</p></div></div>
+        </div>
+      </section>
 
-      <div className="grid gap-5 xl:grid-cols-[minmax(0,1.25fr)_minmax(340px,0.75fr)]">
+      <details className="listing-editor-correction mb-5 rounded-[16px] border border-[#d9e2ef] bg-white">
+        <summary className="cursor-pointer px-5 py-3 text-sm font-semibold text-[#344054]">Need a correction? Send this listing back to Drafts</summary>
+        <div className="border-t border-[#e5e7eb] p-5">
+          <p className="mb-3 text-sm text-[#667085]">Choose only the fields that need work. PosterPro records the request for the next AI revision.</p>
+          <div className="flex flex-wrap gap-3">
+            {['title', 'description', 'category', 'price', 'condition', 'photos', 'item specifics', 'shipping'].map((field) => <label key={field} className="flex items-center gap-2 text-sm"><input type="checkbox" checked={revisionFields.includes(field)} onChange={() => setRevisionFields((current) => current.includes(field) ? current.filter((item) => item !== field) : [...current, field])} /> Fix {field}</label>)}
+          </div>
+          <textarea value={revisionNote} onChange={(event) => setRevisionNote(event.target.value)} className="mt-3 min-h-20 w-full rounded-[10px] border border-[#e5e7eb] p-3 text-sm" placeholder="Optional: describe what is wrong or point the AI to a label/photo." />
+          <label className="mt-3 block text-sm font-semibold">Priority <input type="number" min="0" step="1" value={revisionPriority} onChange={(event) => setRevisionPriority(Math.max(0, Number(event.target.value) || 0))} className="ml-2 w-20 rounded border px-2 py-1" /></label><p className="mt-1 text-xs text-[#667085]">0 = immediate / highest priority; newer priority-0 requests run first.</p>
+          <div className="mt-3"><Button variant="outline" onClick={requestRevision}>Send to Drafts &amp; request AI correction</Button></div>
+        </div>
+      </details>
+
+      <div className="listing-editor-main-grid grid gap-5 xl:grid-cols-[minmax(0,1.25fr)_minmax(340px,0.75fr)]">
         <div className="space-y-5">
           <SectionPanel title="Core Listing" description="This record can be created manually or populated by imports and AI.">
             <div className="grid gap-4 md:grid-cols-2">
@@ -623,12 +680,12 @@ export default function ListingWorkspacePage() {
                 />
               </div>
               <div className="space-y-2">
-                <label className="text-sm font-medium text-[#101828]">Category ID</label>
-                <Input value={form.category_id} onChange={(event) => setForm((current) => ({ ...current, category_id: event.target.value }))} placeholder="Collectibles > Cameras" />
+                <label className="text-sm font-medium text-[#101828]">Marketplace category ID</label>
+                <Input value={form.category_id} onChange={(event) => setForm((current) => ({ ...current, category_id: event.target.value }))} placeholder="30090" />
               </div>
               <div className="space-y-2">
-                <label className="text-sm font-medium text-[#101828]">Category suggestion</label>
-                <Input value={form.category_suggestion} onChange={(event) => setForm((current) => ({ ...current, category_suggestion: event.target.value }))} placeholder="Used by AI or imports" />
+                <label className="text-sm font-medium text-[#101828]">Category suggestion / path</label>
+                <Input value={form.category_suggestion} onChange={(event) => setForm((current) => ({ ...current, category_suggestion: event.target.value }))} placeholder="Toys & Games > Educational Toys" />
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium text-[#101828]">Condition</label>
@@ -940,6 +997,7 @@ export default function ListingWorkspacePage() {
               <div className="flex flex-wrap items-center gap-2">
                 <StatusPill status={listing?.status || "draft"} label={listing?.status || (isNew ? "new draft" : "draft")} />
                 <StatusPill status={workflow.review_before_publish ? "info" : "warning"} label={workflow.review_before_publish ? "Approval required" : "Direct publish allowed"} />
+                <StatusPill status={String(listing?.marketplace_data?.sync_state || "synced").includes("failed") ? "error" : String(listing?.marketplace_data?.sync_state || "synced").includes("queued") ? "warning" : "success"} label={{local_changes_not_published:"Local changes not published",update_queued:"Update queued",partially_synced:"Partially synced",update_failed:"Update failed",synced:"Synced"}[String(listing?.marketplace_data?.sync_state || "synced")] || String(listing?.marketplace_data?.sync_state || "synced")} />
               </div>
               <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-4 text-sm text-[#475467]">
                 Save here first, then let AI enrich the record, then approve for publish. The same page works for manual products, imported marketplace listings, and photo-ingested drafts.

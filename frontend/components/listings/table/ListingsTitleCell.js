@@ -67,7 +67,7 @@ export default function ListingsTitleCell({
         <Button variant="danger" size="sm" onClick={async (event) => { event.stopPropagation(); if (!confirmDeleteListings(1)) return; await deleteListing(listing.id); }}>
           Delete
         </Button>
-        {isAmazonVineSource(listing) && !isArchivedListing(listing) ? (
+        {!isArchivedListing(listing) ? (
           <Button variant="outline" size="sm" onClick={async (event) => { event.stopPropagation(); await archiveListing(listing.id); }}>
             Archive
           </Button>

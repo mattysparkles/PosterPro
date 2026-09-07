@@ -7,7 +7,7 @@ import StatusPill from "./StatusPill";
 import Button from "./ui/button";
 import PhotoEditorModal from "./PhotoEditorModal";
 import Input from "./ui/input";
-import { toPublicImageUrl } from "../lib/api";
+import { toPublicImageUrl, searchEbayCategories, browseEbayCategories } from "../lib/api";
 
 const PLATFORM_OPTIONS = [
   "ebay",
@@ -17,12 +17,50 @@ const PLATFORM_OPTIONS = [
   "mercari",
   "depop",
   "whatnot",
+  "vinted",
 ];
+
+const MARKETPLACE_THEMES = {
+  ebay: { page: "bg-[#f8fbff]", header: "bg-[#00509d]", headerSoft: "bg-[#eff6ff]", accent: "text-[#00509d]", pill: "bg-[#e8f1ff] text-[#004084]" },
+  facebook: { page: "bg-[#f7fbff]", header: "bg-[#1877f2]", headerSoft: "bg-[#eef4ff]", accent: "text-[#1877f2]", pill: "bg-[#edf4ff] text-[#1654b8]" },
+  mercari: { page: "bg-[#fff8f5]", header: "bg-[#ea4c89]", headerSoft: "bg-[#fff1f6]", accent: "text-[#c81e5a]", pill: "bg-[#fff1f6] text-[#c81e5a]" },
+  poshmark: { page: "bg-[#fff7fb]", header: "bg-[#7d3cff]", headerSoft: "bg-[#f6f0ff]", accent: "text-[#6b21a8]", pill: "bg-[#f6f0ff] text-[#6b21a8]" },
+  etsy: { page: "bg-[#fffaf4]", header: "bg-[#f1641e]", headerSoft: "bg-[#fff4eb]", accent: "text-[#b54708]", pill: "bg-[#fff4eb] text-[#b54708]" },
+  depop: { page: "bg-[#f8fafc]", header: "bg-[#111827]", headerSoft: "bg-[#f3f4f6]", accent: "text-[#111827]", pill: "bg-[#f3f4f6] text-[#111827]" },
+  whatnot: { page: "bg-[#f7fbf7]", header: "bg-[#16a34a]", headerSoft: "bg-[#effaf1]", accent: "text-[#15803d]", pill: "bg-[#effaf1] text-[#15803d]" },
+  vinted: { page: "bg-[#f9fafb]", header: "bg-[#0f172a]", headerSoft: "bg-[#f8fafc]", accent: "text-[#0f172a]", pill: "bg-[#f8fafc] text-[#0f172a]" },
+};
 
 function marketplacePreviewTitle(market) {
   if (market === "facebook") return "Facebook Marketplace";
   if (market === "ebay") return "eBay";
   return market;
+}
+
+function marketplaceTheme(market) {
+  return MARKETPLACE_THEMES[market] || MARKETPLACE_THEMES.ebay;
+}
+
+function isMarketplaceCategoryId(value) {
+  return /^\d+$/.test(String(value || "").trim());
+}
+
+function getCategoryPresentation(listing, previewEntry) {
+  const categorySuggestion = String(listing?.category_suggestion || previewEntry?.category_hint || listing?.detected_category_guess || "").trim();
+  const marketplaceCategoryId = isMarketplaceCategoryId(listing?.category_id) ? String(listing.category_id).trim() : "";
+  const legacyCategoryPath = !marketplaceCategoryId && String(listing?.category_id || "").trim() ? String(listing.category_id).trim() : "";
+  return {
+    categorySuggestion,
+    marketplaceCategoryId,
+    legacyCategoryPath,
+    displayCategory: categorySuggestion || legacyCategoryPath || "Category pending",
+  };
+}
+
+function formatShippingRule(price) {
+  const numeric = Number(price);
+  if (!Number.isFinite(numeric) || numeric <= 0) return "Shipping rule pending price";
+  return numeric < 10 ? "Buyer pays shipping under $10" : "Free shipping at $10+";
 }
 
 function deriveListingImages(listing) {
@@ -105,6 +143,7 @@ function provenanceLabel(source) {
 }
 
 function MarketplacePreviewFrame({ market, listing, previewEntry, previewImages, statusMap, crosspostPreviewLoading }) {
+  const theme = marketplaceTheme(market);
   const title = listing.title || "Draft title pending";
   const price = listing.suggested_price || listing.listing_price || previewEntry?.price || 0;
   const priceLabel = Number.isFinite(Number(price)) ? Number(price).toFixed(0) : String(price || "0");
@@ -113,33 +152,39 @@ function MarketplacePreviewFrame({ market, listing, previewEntry, previewImages,
   const notes = (previewEntry?.notes || []).slice(0, 4);
   const imageColumns = previewImages.slice(1, 5);
   const condition = listing.condition || previewEntry?.condition || "Condition pending";
-  const category = listing.category_suggestion || listing.category_id || previewEntry?.category_hint || "Category pending";
+  const categoryPresentation = getCategoryPresentation(listing, previewEntry);
   const shipping = previewEntry?.shipping_policy || previewEntry?.shipping || {};
+  const packageWeight = listing.shipping_profile?.package_weight || shipping?.package_weight || shipping?.weight || null;
+  const packageDimensions = listing.shipping_profile?.package_dimensions || shipping?.package_dimensions || null;
+  const dimensionText = packageDimensions && typeof packageDimensions === "object"
+    ? ["length", "width", "height"].map((key) => packageDimensions[key]).filter(Boolean).join(" × ")
+    : "";
+  const shippingRule = formatShippingRule(listing.suggested_price || listing.listing_price || previewEntry?.price);
 
   return (
     <div className="overflow-hidden rounded-[20px] border border-[#d0d5dd] bg-white shadow-[0_18px_50px_rgba(16,24,40,0.08)]">
-      <div className={`border-b px-4 py-3 ${market === "ebay" ? "bg-[#f5f9ff]" : "bg-[#f0f9ff]"}`}>
+      <div className={`border-b px-4 py-3 ${theme.headerSoft}`}>
         <div className="flex items-center gap-3">
-          <div className={`h-3 w-3 rounded-full ${market === "ebay" ? "bg-[#2563eb]" : "bg-[#1877f2]"}`} />
+          <div className={`h-3 w-3 rounded-full ${theme.header}`} />
           <div className="min-w-0">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[#667085]">{marketplaceName} preview</p>
+            <p className={`text-[11px] font-semibold uppercase tracking-[0.14em] ${theme.accent}`}>{marketplaceName} preview</p>
             <p className="truncate text-sm font-semibold text-[#101828]">{title}</p>
           </div>
-          <span className="ml-auto rounded-full border border-[#d0d5dd] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#475467]">
+          <span className={`ml-auto rounded-full border px-2.5 py-1 text-[11px] font-semibold ${theme.pill}`}>
             {crosspostPreviewLoading ? "Loading…" : statusMap[market] || "Draft"}
           </span>
         </div>
       </div>
 
-      <div className={`px-4 py-4 ${market === "ebay" ? "bg-[#f8fbff]" : "bg-[#f7fbff]"}`}>
+      <div className={`px-4 py-4 ${theme.page}`}>
         <div className="rounded-[16px] border border-[#d0d5dd] bg-white shadow-sm">
-          <div className={`flex items-center gap-2 border-b px-3 py-2 text-[11px] uppercase tracking-[0.14em] ${market === "ebay" ? "bg-[#f8fbff] text-[#2563eb]" : "bg-[#eef6ff] text-[#1877f2]"}`}>
-            <span className={`h-2.5 w-2.5 rounded-full ${market === "ebay" ? "bg-[#2563eb]" : "bg-[#1877f2]"}`} />
+          <div className={`flex items-center gap-2 border-b px-3 py-2 text-[11px] uppercase tracking-[0.14em] ${theme.headerSoft} ${theme.accent}`}>
+            <span className={`h-2.5 w-2.5 rounded-full ${theme.header}`} />
             {marketplaceName} listing page
           </div>
           <div className="grid gap-0 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]">
             <div className="border-b lg:border-b-0 lg:border-r">
-              <div className="bg-[#0b1f3a] px-4 py-3 text-white">
+              <div className={`${theme.header} px-4 py-3 text-white`}>
                 <div className="flex items-center justify-between gap-2">
                   <p className="text-sm font-semibold">{market === "ebay" ? "eBay" : "Marketplace"}</p>
                   <div className="rounded-full bg-white/10 px-2 py-1 text-[11px] font-medium">
@@ -183,9 +228,18 @@ function MarketplacePreviewFrame({ market, listing, previewEntry, previewImages,
                 <div className="mt-3 flex flex-wrap gap-2">
                   <span className="pp-chip">${priceLabel}</span>
                   <span className="pp-chip">{condition}</span>
-                  <span className="pp-chip">{category}</span>
+                  <span className="pp-chip">Category path {categoryPresentation.displayCategory}</span>
+                  {categoryPresentation.marketplaceCategoryId ? <span className="pp-chip">Marketplace category ID {categoryPresentation.marketplaceCategoryId}</span> : null}
+                  {packageWeight ? <span className="pp-chip">{packageWeight} lb</span> : null}
+                  {dimensionText ? <span className="pp-chip">{dimensionText} in</span> : null}
+                  <span className="pp-chip">{shippingRule}</span>
                   {listing.quantity ? <span className="pp-chip">Qty {listing.quantity}</span> : null}
                 </div>
+                {categoryPresentation.legacyCategoryPath ? (
+                  <div className="mt-3 rounded-[12px] border border-[#fecdca] bg-[#fff6ed] px-3 py-2 text-xs text-[#b54708]">
+                    Legacy category text is currently stored in the marketplace category ID field. Move that value into Suggested category path and keep the marketplace category ID numeric.
+                  </div>
+                ) : null}
               </div>
 
               <div className={`rounded-[16px] border px-4 py-3 ${market === "ebay" ? "border-[#dbeafe] bg-[#eff6ff]" : "border-[#dbeafe] bg-[#eff6ff]"}`}>
@@ -209,6 +263,14 @@ function MarketplacePreviewFrame({ market, listing, previewEntry, previewImages,
                       ? previewEntry?.delivery_method || "manual"
                       : shipping?.service || shipping?.domestic_service || "Standard shipping"}
                   </p>
+                  <p className="mt-2 text-xs font-medium text-[#667085]">{shippingRule}</p>
+                  {packageWeight || dimensionText ? (
+                    <p className="mt-2 text-xs text-[#667085]">
+                      {packageWeight ? `Weight ${packageWeight} lb` : ""}
+                      {packageWeight && dimensionText ? " · " : ""}
+                      {dimensionText ? `Size ${dimensionText} in` : ""}
+                    </p>
+                  ) : null}
                 </div>
               </div>
 
@@ -291,6 +353,10 @@ export default function ListingEditor({
   const [showExcludedComps, setShowExcludedComps] = useState(false);
   const [manualComp, setManualComp] = useState({ title: "", price: "", source_marketplace: "manual", condition: "" });
   const [newItemSpecific, setNewItemSpecific] = useState({ key: "", value: "" });
+  const [categoryQuery, setCategoryQuery] = useState("");
+  const [categoryResults, setCategoryResults] = useState([]);
+  const [browseNodes, setBrowseNodes] = useState([]);
+  const [browseTrail, setBrowseTrail] = useState([]);
   const router = useRouter();
   const requiresApproval = workflowPreferences?.review_before_publish ?? true;
   const intelligence = listingIntelligence?.intelligence || {};
@@ -309,6 +375,45 @@ export default function ListingEditor({
   const latestPublishAttempt = listing.latest_publish_attempt || null;
   const preflightMap = marketplacePreflights || {};
   const payloadPreviewMap = marketplacePayloadPreviews || {};
+  const categoryOptions = useMemo(() => {
+    const options = [];
+    const seen = new Set();
+    const push = (value, label) => {
+      const normalized = String(value || "").trim();
+      if (!normalized || seen.has(normalized)) return;
+      seen.add(normalized);
+      options.push({ value: normalized, label: label || normalized });
+    };
+    const categoryPresentation = getCategoryPresentation(listing, null);
+    push(categoryPresentation.categorySuggestion, `Suggested category path: ${categoryPresentation.categorySuggestion}`);
+    if (categoryPresentation.marketplaceCategoryId) {
+      push(categoryPresentation.marketplaceCategoryId, `Marketplace category ID: ${categoryPresentation.marketplaceCategoryId}`);
+    }
+    if (categoryPresentation.legacyCategoryPath) {
+      push(categoryPresentation.legacyCategoryPath, `Legacy category path: ${categoryPresentation.legacyCategoryPath}`);
+    }
+    push(intelligence.category_suggestion, `Intelligence: ${intelligence.category_suggestion}`);
+    push((listing.marketplace_data || {}).ebay_last_resolved_category?.category_id, `Resolved eBay ID: ${(listing.marketplace_data || {}).ebay_last_resolved_category?.category_id}`);
+    return options;
+  }, [intelligence.category_suggestion, listing.category_id, listing.category_suggestion, listing.marketplace_data]);
+  const runCategorySearch = async () => {
+    if (categoryQuery.trim().length < 2) return;
+    try { const result = await searchEbayCategories(categoryQuery.trim()); setCategoryResults(result.results || []); }
+    catch (error) { setCategoryResults([]); }
+  };
+  const openCategoryBrowser = async (parent = "", label = "All Categories") => {
+    try { const result = await browseEbayCategories(parent); setBrowseNodes(result.categories || []); setBrowseTrail(parent ? [...browseTrail, { id: parent, label }] : []); } catch (error) { /* editor keeps search usable when taxonomy is unavailable */ }
+  };
+  const conditionOptions = [
+    "New",
+    "Used",
+    "Open box",
+    "Refurbished",
+    "Pre-owned",
+    "For parts or not working",
+    "Parts only",
+    "Unknown",
+  ];
   const ebaySpecificsProvenance = useMemo(
     () => ({
       ...((latestPublishAttempt?.payload_snapshot && latestPublishAttempt.payload_snapshot.item_specifics_provenance) || {}),
@@ -385,7 +490,7 @@ export default function ListingEditor({
   const renderImageCard = (image, index, groupLabel) => (
     <div key={`${image.storage_path}-${index}-${groupLabel}`} className="rounded-[14px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
       <div className="overflow-hidden rounded-[12px] border border-[#e5e7eb] bg-white">
-        <img src={toPublicImageUrl(image.storage_path)} alt={`${listing.title || "Listing"} image ${index + 1}`} className="h-48 w-full object-cover" />
+        <img src={toPublicImageUrl(image.storage_path)} alt={`${listing.title || "Listing"} image ${index + 1}`} style={{ width: "100%", height: 112, maxHeight: 112, objectFit: "cover", display: "block" }} className="w-full object-cover" />
       </div>
       <div className="mt-3 flex flex-wrap gap-2">
         <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${sourceTone(image.source_platform)}`}>{image.source_platform || "upload"}</span>
@@ -587,6 +692,17 @@ export default function ListingEditor({
         Tighten the draft, set pricing, and publish when it is ready.
       </p>
 
+      <div className="mb-4 grid gap-4 rounded-[16px] border border-[#d9e2ef] bg-gradient-to-br from-[#f8fbff] to-white p-4 lg:grid-cols-[180px_1fr] lg:items-center">
+        <div className="h-36 overflow-hidden rounded-[12px] border border-[#dbe4f0] bg-[#eef3f8]">
+          {listingImages[0]?.storage_path ? <img src={toPublicImageUrl(listingImages[0].storage_path)} alt="Primary listing image" className="h-full w-full object-contain" /> : <div className="flex h-full items-center justify-center px-3 text-center text-xs font-semibold uppercase tracking-wide text-[#667085]">Add primary photo</div>}
+        </div>
+        <div className="min-w-0">
+          <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#667085]">Listing identity</p>
+          <h2 className="mt-1 truncate text-xl font-bold tracking-tight text-[#101828]">{listing.title || "Draft title pending"}</h2>
+          <div className="mt-3 grid gap-2 text-sm sm:grid-cols-3"><div><span className="pp-editor-field-label">Brand</span><p className="font-semibold">{listing.brand || "Pending"}</p></div><div><span className="pp-editor-field-label">Condition</span><p className="font-semibold">{listing.condition || "Pending"}</p></div><div><span className="pp-editor-field-label">Price</span><p className="font-semibold">{listing.suggested_price || listing.listing_price ? `$${Number(listing.suggested_price || listing.listing_price).toFixed(2)}` : "Pending"}</p></div></div>
+        </div>
+      </div>
+
       <div className="mb-4 grid gap-3 md:grid-cols-2">
         <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-4">
           <p className="text-sm font-semibold text-[#101828]">Review gate</p>
@@ -606,6 +722,14 @@ export default function ListingEditor({
           <p className="text-sm font-semibold text-[#101828]">Listing quality</p>
           <p className="mt-2 text-sm text-[#667085]">
             {qualitySummary.score != null ? `${qualitySummary.score}/100 · ${String(qualitySummary.status || 'needs_review').replaceAll('_', ' ')}` : 'Quality scoring pending'}
+          </p>
+        </div>
+        <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-4">
+          <p className="text-sm font-semibold text-[#101828]">Shipping rule</p>
+          <p className="mt-2 text-sm text-[#667085]">
+            {Number(listing.suggested_price || listing.listing_price || 0) > 0 && Number(listing.suggested_price || listing.listing_price || 0) < 10
+              ? 'Under $10: buyer pays shipping by default.'
+              : 'At $10 or above: free shipping is the default.'}
           </p>
         </div>
       </div>
@@ -778,8 +902,8 @@ export default function ListingEditor({
       <div className="mb-4 rounded-[14px] border border-[#e5e7eb] bg-white p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <p className="text-sm font-semibold text-[#101828]">Image review</p>
-            <p className="mt-1 text-sm text-[#667085]">Approve the actual item photos, keep source/reference images clearly labeled, and set the primary image before publish.</p>
+            <p className="pp-editor-section-title">Image review</p>
+            <p className="pp-editor-section-copy">Approve the actual item photos, keep source/reference images clearly labeled, and set the primary image before publish.</p>
           </div>
           <div className="flex flex-wrap gap-2">
             <span className="pp-chip">{listingImages.length} attached</span>
@@ -809,26 +933,26 @@ export default function ListingEditor({
         <div className="mt-4 space-y-4">
           <div>
             <p className="mb-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Actual item photos, approved</p>
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
               {approvedActualImages.map((image, index) => renderImageCard(image, index, "approved"))}
             </div>
           </div>
           <div>
             <p className="mb-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Actual item photos, pending review</p>
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
               {pendingActualImages.map((image, index) => renderImageCard(image, index, "pending"))}
             </div>
           </div>
           <div>
             <p className="mb-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Reference/source images</p>
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
               {referenceImages.map((image, index) => renderImageCard(image, index, "reference"))}
             </div>
           </div>
           {rejectedImages.length ? (
             <div>
               <p className="mb-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Rejected images</p>
-              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
                 {rejectedImages.map((image, index) => renderImageCard(image, index, "rejected"))}
               </div>
             </div>
@@ -851,10 +975,25 @@ export default function ListingEditor({
             <span className="pp-chip">{Math.round(Number(conditionData.condition_confidence || 0) * 100)}% confidence</span>
           </div>
           <div className="mt-4 grid gap-3 md:grid-cols-2">
-            <div>
-              <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Condition label</label>
-              <Input defaultValue={listing.condition || ""} placeholder="Needs review / Used / Open box" onBlur={(e) => onSave(listing.id, { condition: e.target.value })} />
-            </div>
+          <div>
+            <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Condition label</label>
+            <select
+              className="mt-1 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]"
+              value={listing.condition || ""}
+              onChange={(e) => onSave(listing.id, { condition: e.target.value })}
+            >
+              <option value="">Select condition</option>
+              {conditionOptions.map((option) => (
+                <option key={option} value={option}>{option}</option>
+              ))}
+            </select>
+            <Input
+              className="mt-3"
+              defaultValue={listing.condition || ""}
+              placeholder="Needs review / Used / Open box"
+              onBlur={(e) => onSave(listing.id, { condition: e.target.value })}
+            />
+          </div>
             <div>
               <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Condition bucket</label>
               <select className="pp-input mt-1 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]" value={conditionData.condition_bucket || "needs_review"} onChange={(e) => updateConditionField("condition_bucket", e.target.value)}>
@@ -1041,23 +1180,66 @@ export default function ListingEditor({
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <p className="text-sm font-semibold text-[#101828]">Category</p>
-            <p className="mt-1 text-sm text-[#667085]">Choose the clearest category suggestion and keep the marketplace category in sync.</p>
+            <p className="mt-1 text-sm text-[#667085]">Category suggestion/path is the human-readable review path. Marketplace category ID is the publish-time taxonomy value.</p>
           </div>
-          <span className="pp-chip">{listing.category_suggestion || listing.category_id || 'Category pending'}</span>
+          <span className="pp-chip">{getCategoryPresentation(listing, null).displayCategory}</span>
+        </div>
+        <div className="mt-3 rounded-[12px] border border-blue-100 bg-blue-50 p-3">
+          <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#175cd3]">Search or browse real eBay taxonomy</label>
+          <div className="mt-2 flex gap-2"><Input value={categoryQuery} onChange={(e)=>setCategoryQuery(e.target.value)} placeholder="electronic project kit" onKeyDown={(e)=>{if(e.key==='Enter'){e.preventDefault();runCategorySearch();}}}/><Button type="button" variant="outline" onClick={runCategorySearch}>Search</Button></div>
+          <Button type="button" className="mt-2" variant="outline" onClick={() => openCategoryBrowser()}>Browse categories</Button>
+          {categoryResults.length ? <div className="mt-2 space-y-2">{categoryResults.map((result)=><button type="button" key={result.category_id} onClick={()=>{onSave(listing.id,{category_id:result.category_id,category_suggestion:result.breadcrumb||result.category_name,category_provenance:'MANUAL_OPERATOR'});setCategoryResults([]);}} className="block w-full rounded-lg border bg-white p-2 text-left text-sm"><b>{result.category_name}</b><span className="block text-xs text-slate-500">{result.breadcrumb} · ID {result.category_id}</span></button>)}</div>:null}
+          {browseNodes.length ? <div className="mt-2 space-y-2"><div className="text-xs text-slate-500">{['All Categories', ...browseTrail.map((x) => x.label)].join(' > ')}</div>{browseNodes.map((node) => <div key={node.category_id} className="flex items-center justify-between rounded-lg border bg-white p-2 text-sm"><span>{node.category_name} <small className="text-slate-500">ID {node.category_id}</small></span>{node.has_children ? <Button type="button" size="sm" variant="outline" onClick={() => openCategoryBrowser(node.category_id, node.category_name)}>Open</Button> : <Button type="button" size="sm" onClick={() => { onSave(listing.id, { category_id: node.category_id, category_suggestion: node.category_name, category_provenance: 'MANUAL_OPERATOR' }); setBrowseNodes([]); }}>Select</Button>}</div>)}</div> : null}
         </div>
         <div className="mt-4 grid gap-3 md:grid-cols-2">
-          <Input
-            id="listing-category-field"
-            defaultValue={listing.category_id || ""}
-            placeholder="Marketplace category ID"
-            onBlur={(e) => onSave(listing.id, { category_id: e.target.value })}
-          />
-          <Input
-            defaultValue={listing.category_suggestion || ""}
-            placeholder="Category suggestion / hint"
-            onBlur={(e) => onSave(listing.id, { category_suggestion: e.target.value })}
-          />
+          <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+            <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Suggested category path</label>
+            {categoryOptions.length ? (
+              <select
+                id="listing-category-suggestion-field"
+                className="mt-1 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]"
+                value={getCategoryPresentation(listing, null).categorySuggestion || getCategoryPresentation(listing, null).legacyCategoryPath || ""}
+                onChange={(e) => onSave(listing.id, { category_suggestion: e.target.value })}
+                title="Pick the closest reviewed category suggestion."
+              >
+                <option value="">Select a category suggestion</option>
+                {categoryOptions.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            ) : null}
+            <Input
+              className="mt-3"
+              defaultValue={getCategoryPresentation(listing, null).categorySuggestion || getCategoryPresentation(listing, null).legacyCategoryPath || ""}
+              placeholder="Toys & Games > Educational Toys"
+              onBlur={(e) => onSave(listing.id, { category_suggestion: e.target.value })}
+              title="Human-readable category suggestion used during review."
+            />
+          </div>
+          <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+            <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Marketplace category ID</label>
+            <select
+              id="listing-category-field"
+              className="mt-1 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]"
+              value={getCategoryPresentation(listing, null).marketplaceCategoryId}
+              onChange={(e) => onSave(listing.id, { category_id: e.target.value })}
+              title="Marketplace-specific category ID used for publishing."
+            >
+              <option value="">Select marketplace category ID</option>
+              {categoryOptions.filter((option) => /^\d+$/.test(option.value)).map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+            {!getCategoryPresentation(listing, null).marketplaceCategoryId && getCategoryPresentation(listing, null).legacyCategoryPath ? (
+              <p className="mt-2 text-xs text-[#b54708]">Current value looks like a category path, not a numeric marketplace category ID.</p>
+            ) : (
+              <p className="mt-2 text-xs text-[#667085]">Leave blank until the marketplace taxonomy ID is known.</p>
+            )}
+          </div>
         </div>
+        <p className="mt-3 text-xs text-[#667085]">
+          If the review path looks better than the current marketplace category ID, keep the suggestion field updated and resolve the numeric category ID separately before publish.
+        </p>
       </div>
 
       <div className="mt-4 rounded-[14px] border border-[#e5e7eb] bg-white p-4">
@@ -1308,7 +1490,7 @@ export default function ListingEditor({
               <p className="text-xs text-[#667085]">These are styled like the live marketplace pages so you can review before approval/publish.</p>
             </div>
             <div className="flex flex-wrap gap-2">
-              {PLATFORM_OPTIONS.filter((market) => market === 'ebay' || market === 'facebook').map((market) => {
+              {PLATFORM_OPTIONS.map((market) => {
                 const selected = activePreviewMarket === market;
                 const mode = previewMap[market]?.execution_mode || null;
                 return (
@@ -1337,16 +1519,45 @@ export default function ListingEditor({
               statusMap={statusMap}
               crosspostPreviewLoading={crosspostPreviewLoading}
             />
-            <MarketplacePreviewFrame
-              market="facebook"
-              listing={listing}
-              previewEntry={previewMap.facebook || activePreviewEntry}
-              previewImages={previewImages}
-              statusMap={statusMap}
-              crosspostPreviewLoading={crosspostPreviewLoading}
-            />
-          </div>
+          <MarketplacePreviewFrame
+            market="facebook"
+            listing={listing}
+            previewEntry={previewMap.facebook || activePreviewEntry}
+            previewImages={previewImages}
+            statusMap={statusMap}
+            crosspostPreviewLoading={crosspostPreviewLoading}
+          />
         </div>
+        <div className="mt-4 grid gap-4 xl:grid-cols-3">
+          {['etsy', 'mercari', 'poshmark', 'depop', 'whatnot', 'vinted']
+            .filter((market) => previewMap[market] || selectedPlatforms.includes(market))
+            .slice(0, 3)
+            .map((market) => (
+              <div key={`extra-preview-${market}`} className="overflow-hidden rounded-[16px] border border-[#e5e7eb] bg-white shadow-sm">
+                <div className={`px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.14em] ${market === 'mercari' ? 'bg-[#f0f9ff] text-[#2563eb]' : market === 'etsy' ? 'bg-[#fff7ed] text-[#b54708]' : 'bg-[#f9fafb] text-[#667085]'}`}>
+                  {marketplacePreviewTitle(market)} mock preview
+                </div>
+                <div className="grid grid-cols-[88px_minmax(0,1fr)] gap-3 p-3">
+                  <div className="overflow-hidden rounded-[12px] border border-[#e5e7eb] bg-[#f9fafb]">
+                    {previewImages.length ? (
+                      <img src={toPublicImageUrl(previewImages[0])} alt={`${market} preview`} className="h-24 w-full object-cover" />
+                    ) : (
+                      <div className="flex h-24 items-center justify-center text-xs text-[#667085]">No photo</div>
+                    )}
+                  </div>
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-[#101828]">{title}</p>
+                    <p className="mt-1 text-sm font-semibold text-[#2563eb]">${priceLabel}</p>
+                    <p className="mt-1 text-xs text-[#667085]">{category}</p>
+                    <p className="mt-2 line-clamp-3 text-xs leading-5 text-[#475467]">
+                      {previewMap[market]?.description || listing.description || 'Marketplace-specific preview will appear here when data is available.'}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            ))}
+        </div>
+      </div>
       ) : null}
 
       <div className="mt-4 flex flex-wrap gap-2">

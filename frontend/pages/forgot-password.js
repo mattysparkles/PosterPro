@@ -20,6 +20,7 @@ export default function ForgotPasswordPage() {
     >
       <form
         className="pp-auth-form"
+        method="post"
         onSubmit={async (event) => {
           event.preventDefault();
           setSubmitting(true);
@@ -44,7 +45,7 @@ export default function ForgotPasswordPage() {
       >
         <div className="pp-field">
           <label htmlFor="forgot-email">Email</label>
-          <Input id="forgot-email" name="email" type="email" required placeholder="you@example.com" />
+          <Input id="forgot-email" name="email" type="email" autoComplete="email" required placeholder="you@example.com" />
         </div>
 
         {error ? <p className="text-sm font-medium text-rose-600">{error}</p> : null}

@@ -17,12 +17,14 @@ from pathlib import Path
 from shutil import which
 from typing import Any
 from urllib.parse import urlparse
+from uuid import uuid4
 
 import cv2
+import httpx
 import numpy as np
 import qrcode
-from PIL import Image, ImageEnhance, ImageOps
-from sqlalchemy import func, or_, select
+from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -30,6 +32,7 @@ from app.models.enums import ListingStatus
 from app.models.models import (
     CanonicalItem,
     CanonicalItemFact,
+    AutomatedOfferLog,
     IntakeNotification,
     IntakePhoto,
     IntakePhotoBatch,
@@ -40,16 +43,27 @@ from app.models.models import (
     IntakeSourceState,
     IntakeSlate,
     IntakeSlateRecoveryCandidate,
+    EbayOfferHistory,
     Listing,
+    ListingABTestVariant,
+    ListingPrediction,
     MarketplaceListing,
+    MarketplaceCrosspostJob,
+    MarketplaceImportJob,
+    MediaRecoveryItemGroup,
+    Sale,
     SlateObservation,
     User,
 )
 from app.services.ebay import EbayService
+from app.services.automation_bridge import AutomationBridgeError, submit_bridge_job
 from app.services.google_photos import GooglePhotosService
+from app.services.google_photos_oauth import get_google_photos_oauth_state, upload_photo_to_album, GooglePhotosOAuthError
 from app.services.listing_ai import ListingAIService
-from app.services.listing_review import derive_condition_data, derive_shipping_profile, normalize_listing_images, summarize_listing_readiness
+from app.services.listing_review import derive_condition_data, derive_shipping_profile, normalize_listing_images, shipping_policy_for_user, summarize_listing_readiness
+from app.services.media_lifecycle import purge_listing_media
 from app.services.listing_workspace import normalize_marketplace_data
+from app.services.photo_enrichment import PhotoEnrichmentService
 from app.services.pricing_intelligence_service import PricingIntelligenceService
 from app.services.storage import LocalStorage
 
@@ -63,12 +77,14 @@ DEFAULT_INTAKE_SETTINGS = {
     "provider": "google_photos",
     "enabled": False,
     "album_url": "",
+    "google_album_id": "",
     "folder_id": "",
     "poll_interval_seconds": 300,
     "default_item_prefix": "SP",
     "default_box_prefix": "BX",
     "default_location": "",
     "default_session_naming_pattern": "{date}-{location}",
+    "default_label_copies": 2,
     "auto_increment_item_id": True,
     "auto_increment_box_id": True,
     "keep_same_box_mode": False,
@@ -76,7 +92,9 @@ DEFAULT_INTAKE_SETTINGS = {
     "internal_box_photos_default": True,
     "auto_draft_listing": True,
     "auto_draft_when_provisional": True,
+    "drafting_paused": False,
     "draft_min_public_photos": 1,
+    "max_new_items_per_run": None,
     "quiet_period_seconds": 300,
     "integrity_scan_interval_seconds": 86400,
     "require_manual_review_before_publish": True,
@@ -88,11 +106,11 @@ DEFAULT_INTAKE_SETTINGS = {
     "marketplace_defaults": {"targets": ["ebay", "facebook"]},
 }
 
-SLATE_DETECTION_VERSION = 2
+SLATE_DETECTION_VERSION = 3
 SLATE_RECOVERY_PIPELINE_VERSION = "deterministic_slate_recovery_v1"
 SLATE_RECOVERY_PIPELINE_VERSION_V2 = "deterministic_slate_recovery_v2"
-STRICT_ITEM_ID_RE = re.compile(r"^SP-\d{8}-\d{4}$")
-ITEM_ID_TEXT_RE = re.compile(r"SP\s*[-\u2010-\u2015\u2212]\s*[0-9OIL|S]{8}\s*[-\u2010-\u2015\u2212]\s*[0-9OIL|S]{4}", re.IGNORECASE)
+STRICT_ITEM_ID_RE = re.compile(r"^SP-(?:\d{8}|\d{4})-\d{4}$")
+ITEM_ID_TEXT_RE = re.compile(r"SP\s*[-\u2010-\u2015\u2212]\s*[0-9OIL|S]{4,8}\s*[-\u2010-\u2015\u2212]\s*[0-9OIL|S]{4}", re.IGNORECASE)
 ITEM_ID_LIKE_TEXT_RE = re.compile(r"SP\s*[-\u2010-\u2015\u2212]\s*[^\s-]{8}\s*[-\u2010-\u2015\u2212]\s*[^\s-]{4}", re.IGNORECASE)
 TAIL_BOUNDARY_TOKENS = (
     "tail slate",
@@ -117,6 +135,7 @@ class IntakeSlateService:
         self.google_photos = GooglePhotosService()
         self.storage = LocalStorage()
         self.ai = ListingAIService()
+        self.photo_enrichment = PhotoEnrichmentService()
         self.ebay = EbayService()
         self.pricing = PricingIntelligenceService()
 
@@ -126,11 +145,32 @@ class IntakeSlateService:
         return {
             **DEFAULT_INTAKE_SETTINGS,
             **stored,
+            "google_photos": get_google_photos_oauth_state(user) if user else {
+                "connected": False,
+                "connection_state": "not_connected",
+                "account_email": None,
+                "account_subject": None,
+                "account_name": None,
+                "has_refresh_token": False,
+                "token_expires_at": None,
+                "last_connected_at": None,
+                "last_error": None,
+                "scopes": [],
+                "redirect_uri": None,
+            },
             "marketplace_defaults": {
                 **DEFAULT_INTAKE_SETTINGS["marketplace_defaults"],
                 **(stored.get("marketplace_defaults") if isinstance(stored.get("marketplace_defaults"), dict) else {}),
             },
         }
+
+    @staticmethod
+    def _drafting_enabled(settings_payload: dict[str, Any] | None) -> bool:
+        payload = settings_payload if isinstance(settings_payload, dict) else {}
+        return bool(payload.get("auto_draft_listing", True)) and not bool(payload.get("drafting_paused", False))
+
+    def drafting_paused_for_user(self, user: User | None) -> bool:
+        return not self._drafting_enabled(self.settings_for_user(user))
 
     def save_settings(self, *, db: Session, user: User, payload: dict[str, Any]) -> dict[str, Any]:
         merged = {
@@ -148,6 +188,83 @@ class IntakeSlateService:
         db.commit()
         db.refresh(user)
         return self.settings_for_user(user)
+
+    @staticmethod
+    def _session_intake_metadata(session: IntakeSession | None) -> dict[str, Any]:
+        metadata = session.metadata_json if session and isinstance(session.metadata_json, dict) else {}
+        intake = metadata.get("intake") if isinstance(metadata.get("intake"), dict) else {}
+        return intake
+
+    @staticmethod
+    def _coerce_int(value: Any) -> int | None:
+        try:
+            parsed = int(str(value).strip())
+            return parsed if parsed > 0 else None
+        except Exception:
+            return None
+
+    def _initial_display_number(self, db: Session, *, user_id: int, field: str) -> int:
+        column = IntakeSlate.item_id if field == "item" else IntakeSlate.box_id
+        values = db.execute(
+            select(column).where(IntakeSlate.user_id == user_id)
+        ).scalars().all()
+        numbers: list[int] = []
+        for value in values:
+            if not value:
+                continue
+            parsed = self._coerce_int(str(value).rsplit("-", 1)[-1])
+            if parsed is not None:
+                numbers.append(parsed)
+        return (max(numbers) if numbers else 0) + 1
+
+    def _build_slate_metadata(
+        self,
+        db: Session,
+        *,
+        user: User,
+        session: IntakeSession,
+        slate: IntakeSlate | None,
+        payload: dict[str, Any],
+        qr_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        session_intake = self._session_intake_metadata(session)
+        next_item_number = self._coerce_int(session_intake.get("next_item_display_number"))
+        next_box_number = self._coerce_int(session_intake.get("next_box_display_number"))
+        if next_item_number is None:
+            next_item_number = self._initial_display_number(db, user_id=user.id, field="item")
+        if next_box_number is None:
+            next_box_number = self._initial_display_number(db, user_id=user.id, field="box")
+        label_copies = self._coerce_int(payload.get("label_copies")) or self._coerce_int(session_intake.get("label_default_copies")) or int(self.settings_for_user(user).get("default_label_copies") or 2)
+        return {
+            "canonical_item_uuid": str(session_intake.get("canonical_item_uuid") or uuid4()),
+            "display_item_number": next_item_number,
+            "display_box_number": next_box_number,
+            "current_location": qr_payload.get("location") or session.default_location or "",
+            "label_default_copies": label_copies,
+            "label_status": "pending",
+            "label_print_status": "pending",
+            "google_photos": {
+                "status": "not_connected",
+                "album_url": str(self.settings_for_user(user).get("album_url") or "").strip() or None,
+                "album_id": self._album_identifier(self.settings_for_user(user).get("album_url")),
+                "last_error": None,
+                "last_upload_status": None,
+                "last_upload_error": None,
+            },
+            "voice": {},
+            "print_history": [],
+            "created_via": "slate_page",
+        }
+
+    @staticmethod
+    def _merge_nested_metadata(metadata: dict[str, Any] | None, updates: dict[str, Any]) -> dict[str, Any]:
+        next_metadata = dict(metadata or {})
+        for key, value in updates.items():
+            if isinstance(value, dict) and isinstance(next_metadata.get(key), dict):
+                next_metadata[key] = {**next_metadata[key], **value}
+            else:
+                next_metadata[key] = value
+        return next_metadata
 
     def list_sessions(self, db: Session, *, user_id: int) -> list[IntakeSession]:
         return db.execute(select(IntakeSession).where(IntakeSession.user_id == user_id).order_by(IntakeSession.updated_at.desc())).scalars().all()
@@ -188,24 +305,51 @@ class IntakeSlateService:
 
     def create_slate(self, db: Session, *, user: User, payload: dict[str, Any]) -> tuple[IntakeSlate, dict[str, Any], str]:
         session = self.get_or_create_session(db, user=user, payload=payload)
+        session = db.execute(
+            select(IntakeSession).where(IntakeSession.id == session.id).with_for_update()
+        ).scalar_one()
         settings_payload = self.settings_for_user(user)
-        item_id = str(payload.get("item_id") or "").strip() or self.next_item_id(db, user_id=user.id, prefix=str(payload.get("item_prefix") or session.item_prefix or settings_payload.get("default_item_prefix") or "SP"))
-        box_id = self._resolve_box_id(
-            db,
-            user_id=user.id,
-            requested=str(payload.get("box_id") or "").strip(),
-            prefix=str(payload.get("box_prefix") or session.box_prefix or settings_payload.get("default_box_prefix") or "BX"),
-            same_box=bool(payload.get("same_box")),
-            increment_box=bool(payload.get("increment_box")),
-        )
+        current_location = str(payload.get("location") or session.default_location or self._session_intake_metadata(session).get("current_location") or settings_payload.get("default_location") or "").strip()
+        if current_location:
+            session.default_location = current_location
+        session_intake = self._session_intake_metadata(session)
+        display_item_number = self._coerce_int(session_intake.get("next_item_display_number")) or self._initial_display_number(db, user_id=user.id, field="item")
+        display_box_number = self._coerce_int(session_intake.get("next_box_display_number")) or self._initial_display_number(db, user_id=user.id, field="box")
+        canonical_item_uuid = str(session_intake.get("canonical_item_uuid") or uuid4())
         created_at = datetime.now(UTC).astimezone().isoformat()
+        item_prefix = str(payload.get("item_prefix") or session.item_prefix or settings_payload.get("default_item_prefix") or "SP")
+        box_prefix = str(payload.get("box_prefix") or session.box_prefix or settings_payload.get("default_box_prefix") or "BX")
+        requested_box = str(payload.get("box_id") or "").strip()
+        if requested_box:
+            box_id = requested_box
+        elif bool(payload.get("same_box")) and str(session_intake.get("last_slate_box_id") or "").strip():
+            box_id = str(session_intake.get("last_slate_box_id")).strip()
+        else:
+            box_id = f"{self._slug_token(box_prefix).upper() or 'BX'}-{display_box_number:04d}"
+        item_id = str(payload.get("item_id") or "").strip() or self._build_fallback_item_id(
+            prefix=item_prefix,
+            sequence=display_item_number,
+        )
+        voice_transcript = str(payload.get("voice_transcript") or "").strip()
+        voice_notes = str(payload.get("voice_notes") or "").strip()
+        voice_intelligence = payload.get("voice_intelligence") if isinstance(payload.get("voice_intelligence"), dict) else {}
+        voice_audio_asset = self._save_data_url_asset(
+            data_url=payload.get("voice_audio_data_url"),
+            prefix=f"intake-voice/{user.id}",
+            suggested_basename=f"{item_id}-voice-note",
+        )
+        label_copies = self._coerce_int(payload.get("label_copies")) or self._coerce_int(session_intake.get("label_default_copies")) or int(settings_payload.get("default_label_copies") or 2)
+        quantity = str(payload.get("quantity") or "").strip()
         qr_payload = {
             "type": SLATE_TYPE,
             "version": SLATE_VERSION,
+            "canonical_item_uuid": canonical_item_uuid,
+            "display_item_number": display_item_number,
+            "display_box_number": display_box_number,
             "session_id": session.session_id,
             "item_id": item_id,
             "box_id": box_id,
-            "location": str(payload.get("location") or session.default_location or settings_payload.get("default_location") or "").strip(),
+            "location": current_location,
             "title": str(payload.get("title") or "").strip(),
             "brand": str(payload.get("brand") or "").strip(),
             "model": str(payload.get("model") or "").strip(),
@@ -216,10 +360,33 @@ class IntakeSlateService:
             "length": str(payload.get("length") or "").strip(),
             "width": str(payload.get("width") or "").strip(),
             "height": str(payload.get("height") or "").strip(),
+            "quantity": quantity,
             "packed": bool(payload.get("mark_packed") or payload.get("packed")),
             "boundary_position": self._normalize_boundary_position(payload),
             "created_at": created_at,
+            "label_copies": label_copies,
         }
+        slate_metadata = self._build_slate_metadata(db, user=user, session=session, slate=None, payload={**payload, "label_copies": label_copies}, qr_payload=qr_payload)
+        slate_metadata = self._merge_nested_metadata(
+            slate_metadata,
+            {
+                "state": {
+                    "group_state": "HEAD_SEEN",
+                    "draft_state": "CAPTURE_ONLY",
+                    "reconciliation_state": "none",
+                    "state_updated_at": created_at,
+                    "group_revision": 1,
+                    "evidence_revision": 1,
+                },
+                "voice": {
+                    "transcript": voice_transcript or None,
+                    "notes": voice_notes or None,
+                    "intelligence": voice_intelligence or None,
+                    "saved_at": created_at,
+                    "audio": voice_audio_asset or None,
+                },
+            },
+        )
         existing = db.execute(select(IntakeSlate).where(IntakeSlate.item_id == item_id)).scalar_one_or_none()
         if existing and existing.user_id != user.id:
             raise ValueError("Item ID already exists for another user.")
@@ -244,6 +411,7 @@ class IntakeSlateService:
                 packed=bool(qr_payload["packed"]),
                 internal_notes=str(payload.get("internal_notes") or "").strip() or None,
                 qr_payload_json=qr_payload,
+                metadata_json=slate_metadata,
                 status="draft",
             )
             db.add(slate)
@@ -268,10 +436,29 @@ class IntakeSlateService:
             existing.packed = bool(qr_payload["packed"])
             existing.internal_notes = str(payload.get("internal_notes") or existing.internal_notes or "").strip() or None
             existing.qr_payload_json = qr_payload
+            existing.metadata_json = self._merge_nested_metadata(existing.metadata_json if isinstance(existing.metadata_json, dict) else {}, slate_metadata)
             slate = existing
             db.add(existing)
+        session.metadata_json = self._merge_nested_metadata(
+            session.metadata_json if isinstance(session.metadata_json, dict) else {},
+            {
+                "intake": {
+                    "canonical_item_uuid": canonical_item_uuid,
+                    "current_location": current_location or session.default_location or "",
+                    "next_item_display_number": display_item_number + 1,
+                    "next_box_display_number": display_box_number + 1,
+                    "label_default_copies": label_copies,
+                    "last_slate_item_id": item_id,
+                    "last_slate_box_id": box_id,
+                    "last_slate_at": created_at,
+                    "last_group_state": "HEAD_SEEN",
+                }
+            },
+        )
+        db.add(session)
         db.commit()
         db.refresh(slate)
+        db.refresh(session)
         self._record_slate_observation(
             db,
             user_id=user.id,
@@ -284,6 +471,491 @@ class IntakeSlateService:
         db.commit()
         qr_data_url = self.build_qr_data_url(qr_payload)
         return slate, qr_payload, qr_data_url
+
+    def render_slate_preview_asset(
+        self,
+        payload: dict[str, Any],
+        *,
+        item_id: str,
+        session_id: str | None = None,
+    ) -> dict[str, str]:
+        """Render a backend-generated slate preview image for review or upload workflows."""
+        preview = self._render_slate_preview_image(payload)
+        session_token = self._slug_token(session_id or str(payload.get("session_id") or "")) or "session"
+        item_token = self._slug_token(item_id) or "item"
+        destination_dir = Path(settings.storage_root) / "intake-slates" / session_token
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        destination = destination_dir / f"{item_token}-posterpro-head-slate.png"
+        preview.save(destination, format="PNG")
+        output = io.BytesIO()
+        preview.save(output, format="PNG")
+        return {
+            "storage_path": self._to_public_media_path(str(destination)),
+            "local_path": str(destination),
+            "data_url": f"data:image/png;base64,{base64.b64encode(output.getvalue()).decode('ascii')}",
+        }
+
+    def render_label_preview_asset(
+        self,
+        payload: dict[str, Any],
+        *,
+        item_id: str,
+        session_id: str | None = None,
+    ) -> dict[str, str]:
+        preview = self._render_label_preview_image(payload)
+        session_token = self._slug_token(session_id or str(payload.get("session_id") or "")) or "session"
+        item_token = self._slug_token(item_id) or "item"
+        destination_dir = Path(settings.storage_root) / "intake-labels" / session_token
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        destination = destination_dir / f"{item_token}-posterpro-label.png"
+        preview.save(destination, format="PNG")
+        output = io.BytesIO()
+        preview.save(output, format="PNG")
+        return {
+            "storage_path": self._to_public_media_path(str(destination)),
+            "local_path": str(destination),
+            "data_url": f"data:image/png;base64,{base64.b64encode(output.getvalue()).decode('ascii')}",
+        }
+
+    def _render_label_preview_image(self, payload: dict[str, Any]) -> Image.Image:
+        width = 696
+        height = 384
+        canvas = Image.new("RGB", (width, height), "white")
+        draw = ImageDraw.Draw(canvas)
+
+        def load_font(size: int, bold: bool = False) -> ImageFont.ImageFont:
+            candidates = (
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+            )
+            for candidate in candidates:
+                try:
+                    return ImageFont.truetype(candidate, size=size)
+                except Exception:
+                    continue
+            return ImageFont.load_default()
+
+        title_font = load_font(34, bold=True)
+        body_font = load_font(20)
+        mono_font = load_font(24, bold=True)
+        small_font = load_font(16)
+        qr = qrcode.QRCode(border=2, box_size=6)
+        qr.add_data(json.dumps(payload, separators=(",", ":"), sort_keys=True))
+        qr.make(fit=True)
+        qr_image = qr.make_image(fill_color="black", back_color="white").convert("RGB").resize((180, 180))
+
+        item_label = str(payload.get("display_item_number") or payload.get("item_id") or "—").strip()
+        box_label = str(payload.get("display_box_number") or payload.get("box_id") or "—").strip()
+        location = str(payload.get("location") or "—").strip()
+        title = str(payload.get("title") or "").strip() or "PENDING IDENTIFICATION"
+        quantity = str(payload.get("quantity") or payload.get("qty") or 1).strip()
+        copies = str(payload.get("label_copies") or 2).strip()
+        slate_type = "HEAD SLATE" if str(payload.get("boundary_position") or "start").lower() != "tail" else "TAIL SLATE"
+
+        draw.rounded_rectangle((16, 16, width - 16, height - 16), radius=20, outline="black", width=3)
+        draw.text((32, 28), "POSTERPRO", fill="black", font=small_font)
+        draw.text((32, 56), slate_type, fill="black", font=title_font)
+        draw.text((32, 112), title[:48], fill="black", font=body_font)
+        draw.text((32, 150), f"ITEM {item_label}", fill="black", font=mono_font)
+        draw.text((32, 188), f"BOX {box_label}", fill="black", font=mono_font)
+        draw.text((32, 230), f"LOCATION {location[:36]}", fill="black", font=body_font)
+        draw.text((32, 262), f"QTY {quantity}   COPIES {copies}", fill="black", font=body_font)
+        draw.text((32, 296), f"SESSION {str(payload.get('session_id') or '—')[:28]}", fill="black", font=small_font)
+        canvas.paste(qr_image, (width - 214, 86))
+        draw.text((width - 214, 278), "Scan for item record", fill="black", font=small_font)
+        return canvas
+
+    def build_voice_intelligence(
+        self,
+        *,
+        db: Any | None = None,
+        user: User,
+        slate: IntakeSlate | None,
+        transcript: str,
+        notes: str | None = None,
+        current_form: dict[str, Any] | None = None,
+        current_session: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        form = current_form if isinstance(current_form, dict) else {}
+        session = current_session if isinstance(current_session, dict) else {}
+        transcript_text = str(transcript or "").strip()
+        transcript_lower = transcript_text.lower()
+        quantity_hint = None
+        for pattern in (
+            r"\b(?:quantity|qty|have|got|there are|i have)\s+(\d+)\b",
+            r"\b(one|two|three|four|five|six|seven|eight|nine|ten)\b",
+        ):
+            match = re.search(pattern, transcript_lower)
+            if not match:
+                continue
+            value = match.group(1)
+            if value.isdigit():
+                quantity_hint = int(value)
+            else:
+                quantity_hint = {
+                    "one": 1,
+                    "two": 2,
+                    "three": 3,
+                    "four": 4,
+                    "five": 5,
+                    "six": 6,
+                    "seven": 7,
+                    "eight": 8,
+                    "nine": 9,
+                    "ten": 10,
+                }.get(value)
+            if quantity_hint:
+                break
+        condition_hint = None
+        for phrase, normalized in (
+            ("new open box", "New - Open Box"),
+            ("new in box", "New"),
+            ("brand new", "New"),
+            ("used", "Used"),
+        ):
+            if phrase in transcript_lower:
+                condition_hint = normalized
+                break
+        marketplace_targets = []
+        for marketplace in ("ebay", "facebook", "mercari", "poshmark", "vinted"):
+            if marketplace in transcript_lower:
+                marketplace_targets.append(marketplace)
+        if not marketplace_targets:
+            marketplace_targets = list(self.settings_for_user(user).get("marketplace_defaults", {}).get("targets") or ["ebay", "facebook"])
+        source_metadata = {
+            "session": session,
+            "slate": {
+                "item_id": slate.item_id if slate else None,
+                "box_id": slate.box_id if slate else None,
+                "location": slate.location if slate else None,
+                "title": slate.title if slate else None,
+            } if slate else {},
+            "voice": {"transcript": transcript_text, "notes": notes},
+        }
+        image_signals = {
+            "title_hint": transcript_text or str(form.get("title") or "").strip(),
+            "source_type": "intake_voice",
+            "image_count": 0,
+            "existing_specifics": {
+                "Brand": str(form.get("brand") or "").strip(),
+                "Model": str(form.get("model") or "").strip(),
+                "Type": str(form.get("title") or "").strip(),
+                "UPC": str(form.get("upc") or "").strip(),
+            },
+            "existing_condition": str(form.get("condition") or condition_hint or "").strip(),
+            "quantity": quantity_hint,
+            "custom_labels": [slate.item_id if slate else None, slate.box_id if slate else None],
+            "source_metadata": source_metadata,
+            "voice_transcript": transcript_text,
+            "voice_notes": notes,
+            "photo_keywords": [word for word in self._slug_token(transcript_text).split("-") if word],
+            "marketplace_targets": marketplace_targets,
+        }
+        generated = self.ai.generate(image_signals, db=db, user_id=user.id, listing_id=slate.listing_id if slate else None)
+        generated["voice_transcript"] = transcript_text
+        generated["voice_notes"] = notes
+        generated["confidence"] = generated.get("confidence") or 0.5
+        generated["marketplace_targets"] = marketplace_targets
+        return generated
+
+    def transcribe_voice_audio(
+        self,
+        *,
+        voice_audio_data_url: str,
+        fallback_transcript: str | None = None,
+    ) -> dict[str, Any]:
+        fallback = str(fallback_transcript or "").strip()
+        audio_bytes, mime_type = self._parse_data_url(voice_audio_data_url)
+        if not audio_bytes:
+            return {
+                "transcript": fallback,
+                "used_fallback": bool(fallback),
+                "audio_present": False,
+                "transcription_source": "fallback" if fallback else "missing_audio",
+            }
+        if not settings.openai_api_key:
+            return {
+                "transcript": fallback,
+                "used_fallback": bool(fallback),
+                "audio_present": True,
+                "transcription_source": "fallback" if fallback else "missing_openai_api_key",
+                "error": "OPENAI_API_KEY is not configured",
+            }
+        extension = {
+            "audio/webm": ".webm",
+            "audio/mp4": ".m4a",
+            "audio/mpeg": ".mp3",
+            "audio/wav": ".wav",
+            "audio/x-wav": ".wav",
+            "audio/ogg": ".ogg",
+        }.get(mime_type or "", ".webm")
+        from tempfile import NamedTemporaryFile
+
+        with NamedTemporaryFile(suffix=extension, delete=True) as temp_audio:
+            temp_audio.write(audio_bytes)
+            temp_audio.flush()
+            transcription = self._transcribe_audio_file(Path(temp_audio.name))
+        transcript = str((transcription or {}).get("text") or "").strip() or fallback
+        return {
+            "transcript": transcript,
+            "used_fallback": transcript == fallback and bool(fallback),
+            "audio_present": True,
+            "transcription_source": "openai" if transcript and transcript != fallback else ("fallback" if fallback else "openai"),
+            "model_used": (transcription or {}).get("model"),
+            "language": (transcription or {}).get("language"),
+        }
+
+    def _transcribe_audio_file(self, audio_path: Path) -> dict[str, Any]:
+        if not settings.openai_api_key:
+            raise RuntimeError("OPENAI_API_KEY is not configured")
+        headers = {"Authorization": f"Bearer {settings.openai_api_key}"}
+        data = {"model": "whisper-1"}
+        with audio_path.open("rb") as handle:
+            files = {"file": (audio_path.name, handle, "application/octet-stream")}
+            with httpx.Client(timeout=60) as client:
+                response = client.post("https://api.openai.com/v1/audio/transcriptions", headers=headers, data=data, files=files)
+                response.raise_for_status()
+                payload = response.json()
+                return payload if isinstance(payload, dict) else {"text": str(response.text or "").strip()}
+
+    @staticmethod
+    def _parse_data_url(data_url: str | None) -> tuple[bytes | None, str | None]:
+        raw = str(data_url or "").strip()
+        if not raw.startswith("data:"):
+            return None, None
+        header, _, payload = raw.partition(",")
+        if not payload:
+            return None, None
+        mime = header[5:].split(";", 1)[0] or "application/octet-stream"
+        try:
+            return base64.b64decode(payload), mime
+        except Exception:
+            return None, None
+
+    def _save_data_url_asset(self, *, data_url: str | None, prefix: str, suggested_basename: str) -> dict[str, str] | None:
+        data, mime = self._parse_data_url(data_url)
+        if not data:
+            return None
+        extension = {
+            "image/png": ".png",
+            "image/jpeg": ".jpg",
+            "image/jpg": ".jpg",
+            "image/webp": ".webp",
+            "audio/webm": ".webm",
+            "audio/mp4": ".m4a",
+            "audio/mpeg": ".mp3",
+            "audio/wav": ".wav",
+            "audio/x-wav": ".wav",
+            "audio/ogg": ".ogg",
+        }.get(mime or "", ".bin")
+        path = self.storage.save_bytes(data, extension=extension, prefix=prefix)
+        return {
+            "path": path,
+            "public_path": self._to_public_media_path(path),
+            "mime_type": mime or None,
+            "filename": f"{self._slug_token(suggested_basename, max_length=120) or 'asset'}{extension}",
+        }
+
+    def queue_rendered_slate_upload(
+        self,
+        db: Session,
+        *,
+        user: User,
+        slate: IntakeSlate,
+        qr_payload: dict[str, Any],
+        rendered_asset: dict[str, str],
+        suppress_notifications: bool = False,
+    ) -> dict[str, Any]:
+        settings_payload = self.settings_for_user(user)
+        target_album_url = str(settings_payload.get("album_url") or settings_payload.get("folder_id") or "").strip()
+        asset_payload = {
+            "storage_path": rendered_asset.get("storage_path"),
+            "local_path": rendered_asset.get("local_path"),
+            "data_url": rendered_asset.get("data_url"),
+        }
+        if not target_album_url:
+            result = {
+                "status": "BRIDGE_UPLOAD_SKIPPED",
+                "reason": "No intake Google Photos album or Drive link is configured.",
+                "job_type": "google_photos_upload",
+                "execution_mode": "browser_assist",
+                "target_album_url": None,
+                "rendered_asset": asset_payload,
+            }
+            if not suppress_notifications:
+                db.add(
+                    IntakeNotification(
+                        user_id=user.id,
+                        notification_type="intake_slate_bridge_upload_skipped",
+                        title="Rendered slate upload skipped",
+                        message="No intake Google Photos album or Drive link is configured, so the rendered slate was not queued for upload.",
+                        href="/intake/slate",
+                        metadata_json={"item_id": slate.item_id, "session_id": slate.session_id, "target_album_url": None},
+                    )
+                )
+                db.commit()
+            return result
+
+        # Use the real Google Photos API first. The automation bridge does not
+        # implement a google_photos_upload job (it only handles marketplace
+        # import/crosspost jobs), so routing a Slate there can never upload it.
+        # Shared photos.app.goo.gl links contain a browser token, not the
+        # durable REST album ID. Let the API create/return an app-owned album
+        # and persist that ID after the first successful upload.
+        album_id = str(settings_payload.get("google_album_id") or "").strip() or (None if "photos.app.goo.gl" in target_album_url else self._album_identifier(target_album_url))
+        local_path = rendered_asset.get("local_path") or rendered_asset.get("storage_path")
+        try:
+            if not local_path:
+                raise GooglePhotosOAuthError("Rendered Slate asset is unavailable")
+            asset_path = Path(str(local_path))
+            if not asset_path.is_file():
+                raise GooglePhotosOAuthError("Rendered Slate asset is not available on the server")
+            upload = upload_photo_to_album(
+                user=user,
+                db=db,
+                album_id=album_id,
+                image_bytes=asset_path.read_bytes(),
+                filename=rendered_asset.get("filename") or f"posterpro-slate-{slate.item_id}.png",
+                description=f"PosterPro HEAD Slate {slate.item_id} / Box {slate.box_id}",
+                album_title="PosterPro",
+            )
+            # Keep the durable API album identity alongside the operator's
+            # share URL so retries never create another album.
+            settings_json = dict(getattr(user, "settings_json", None) or {})
+            intake_settings = dict(settings_json.get(INTAKE_SETTINGS_KEY) or {})
+            intake_settings["google_album_id"] = upload.get("album_id")
+            if upload.get("album_product_url"):
+                intake_settings["google_album_url"] = upload.get("album_product_url")
+            settings_json[INTAKE_SETTINGS_KEY] = intake_settings
+            user.settings_json = settings_json
+            db.add(user)
+            db.commit()
+            result = {
+                "status": "UPLOADED",
+                "job_type": "google_photos_upload",
+                "execution_mode": "google_photos_api",
+                "target_album_url": target_album_url,
+                "album_id": upload.get("album_id"),
+                "google_album_url": upload.get("album_product_url"),
+                "google_media_id": upload.get("media_id"),
+                "google_media_item": upload.get("media_item"),
+                "rendered_asset": asset_payload,
+            }
+            if not suppress_notifications:
+                db.add(IntakeNotification(user_id=user.id, notification_type="intake_slate_google_upload_succeeded", title="Slate uploaded to Google Photos", message=f"{slate.item_id} was uploaded to the PosterPro Google Photos album.", href="/intake/slate", metadata_json={"item_id": slate.item_id, "google_media_id": upload.get("media_id"), "album_id": upload.get("album_id")}))
+                db.commit()
+            return result
+        except (GooglePhotosOAuthError, OSError) as exc:
+            # Keep the server-rendered Slate and return a truthful failure. A
+            # retry endpoint can re-run the same transaction without making a
+            # second intake item or consuming another sequence number.
+            direct_error = str(exc)
+            if "401" in direct_error:
+                direct_error = f"{direct_error} Reconnect Google Photos to refresh the account authorization."
+
+        # Do not submit an unsupported bridge job and report it as queued. The
+        # generated image remains saved locally and can be retried explicitly.
+        result = {
+            "status": "UPLOAD_FAILED",
+            "job_type": "google_photos_upload",
+            "execution_mode": "google_photos_api",
+            "target_album_url": target_album_url,
+            "album_id": album_id,
+            "rendered_asset": asset_payload,
+            "error": direct_error,
+        }
+        if not suppress_notifications:
+            db.add(IntakeNotification(user_id=user.id, notification_type="intake_slate_google_upload_failed", title="Slate Google Photos upload failed", message=direct_error, href="/intake/slate", metadata_json={"item_id": slate.item_id, "album_id": album_id, "error": direct_error}))
+            db.commit()
+        return result
+
+        try:
+            bridge_result = submit_bridge_job(
+                job_type="google_photos_upload",
+                execution_mode="browser_assist",
+                payload={
+                    "source_marketplace": "google_photos",
+                    "operation": "upload_rendered_slate",
+                    "target_album_url": target_album_url,
+                    "session_id": slate.session_id,
+                    "item_id": slate.item_id,
+                    "box_id": slate.box_id,
+                    "location": slate.location,
+                    "qr_payload": qr_payload,
+                    "rendered_asset": asset_payload,
+                    "asset_kind": "posterpro_head_slate",
+                    "upload_label": f"{slate.item_id} PosterPro Slate",
+                },
+            )
+        except AutomationBridgeError as exc:
+            result = {
+                "status": "BRIDGE_UPLOAD_FAILED",
+                "job_type": "google_photos_upload",
+                "execution_mode": "browser_assist",
+                "target_album_url": upload.get("album_product_url") or target_album_url,
+                "rendered_asset": asset_payload,
+                "error": str(exc),
+            }
+            if not suppress_notifications:
+                db.add(
+                    IntakeNotification(
+                        user_id=user.id,
+                        notification_type="intake_slate_bridge_upload_failed",
+                        title="Rendered slate upload failed",
+                        message=str(exc),
+                        href="/intake/slate",
+                        metadata_json={"item_id": slate.item_id, "session_id": slate.session_id, "target_album_url": target_album_url, "error": str(exc)},
+                    )
+                )
+                db.commit()
+            return result
+        result = {
+            "status": str(bridge_result.get("status") or "").strip() or "BRIDGE_UPLOAD_QUEUED",
+            "job_type": "google_photos_upload",
+            "execution_mode": "browser_assist",
+            "target_album_url": target_album_url,
+            "rendered_asset": asset_payload,
+            "bridge_submission": bridge_result,
+            "direct_upload_error": direct_error,
+        }
+        if not suppress_notifications:
+            db.add(
+                IntakeNotification(
+                    user_id=user.id,
+                    notification_type="intake_slate_bridge_upload_queued",
+                    title="Rendered slate queued for Google Photos upload",
+                    message=f"{slate.item_id} was queued for bridge-assisted upload to the intake Google Photos album.",
+                    href="/intake/slate",
+                    metadata_json={"item_id": slate.item_id, "session_id": slate.session_id, "target_album_url": target_album_url, "bridge_status": result["status"]},
+                )
+            )
+            db.commit()
+        return result
+
+    def retry_rendered_slate_upload(
+        self,
+        db: Session,
+        *,
+        user: User,
+        slate_id: int,
+    ) -> dict[str, Any]:
+        slate = db.get(IntakeSlate, int(slate_id))
+        if slate is None or slate.user_id != user.id:
+            raise ValueError("Slate not found.")
+        if not isinstance(slate.qr_payload_json, dict) or not slate.qr_payload_json:
+            raise ValueError("Slate does not have a stored QR payload to render.")
+        rendered_asset = self.render_slate_preview_asset(
+            slate.qr_payload_json,
+            item_id=slate.item_id,
+            session_id=slate.session_id,
+        )
+        return self.queue_rendered_slate_upload(
+            db,
+            user=user,
+            slate=slate,
+            qr_payload=slate.qr_payload_json,
+            rendered_asset=rendered_asset,
+        )
 
     def next_item_id(self, db: Session, *, user_id: int, prefix: str = "SP") -> str:
         today = datetime.now(UTC).astimezone().strftime("%Y%m%d")
@@ -444,7 +1116,11 @@ class IntakeSlateService:
             logger.info("intake_image_downloaded", extra={"user_id": user.id, "source_photo_id": source_photo_id, "local_path": local_path})
             content_hash = self._hash_file(local_path)
             detection = self.classify_photo_for_intake(local_path)
-            qr_payload = self.decode_slate_payload_isolated(local_path) if detection.get("is_qr_candidate") else None
+            qr_payload = detection.get("detected_slate_payload") or (
+                self.decode_slate_payload_isolated(local_path)
+                if (detection.get("is_qr_candidate") or detection.get("is_probable_slate"))
+                else None
+            )
             metadata = {
                 "album_url": source_url,
                 "source_url": entry.get("url"),
@@ -554,6 +1230,7 @@ class IntakeSlateService:
             worker_id="backend-intake-monitor",
             limit=max(1, len(jobs)),
         )
+        stabilization = self.refresh_drafts_until_stable(db, user=user, max_passes=2)
         assigned = sum(int((job.get("result") or {}).get("assigned_photos") or 0) for job in processed)
         drafted = sum(int((job.get("result") or {}).get("drafts_created") or 0) for job in processed)
         source_state = db.get(IntakeSourceState, source_state.id) or source_state
@@ -592,6 +1269,7 @@ class IntakeSlateService:
                     "drafts_created": drafted,
                     "reconciliation_jobs": len(jobs),
                     "reconciliation_processed": len(processed),
+                    "draft_stabilization": stabilization,
                     "failed_downloads": failed_downloads,
                     "remaining_unseen_estimate": max((enumeration.provider_item_count or len(entries)) - len(discovered_by_source_id), 0),
                     "download_errors": download_errors[:20],
@@ -627,6 +1305,7 @@ class IntakeSlateService:
             "drafts_created": drafted,
             "reconciliation_jobs": len(jobs),
             "reconciliation_processed": len(processed),
+            "draft_stabilization": stabilization,
             "failed_downloads": failed_downloads,
             "download_errors": download_errors,
             "enumeration_complete": enumeration.enumeration_complete,
@@ -1247,10 +1926,11 @@ class IntakeSlateService:
             batch.internal_photo_count = len([photo for photo in batch_photos if photo.is_internal_only or photo.is_slate])
             batch.first_photo_id = batch_photos[0].id if batch_photos else None
             batch.last_photo_id = batch_photos[-1].id if batch_photos else None
-            batch.metadata_json = {
-                **(batch.metadata_json or {}),
-                "stream_closed": batch.item_id in closed_item_ids,
-            }
+            batch.metadata_json = self._batch_state_snapshot(
+                batch,
+                batch_photos,
+                stream_closed=batch.item_id in closed_item_ids,
+            )
             batch.status = self._batch_status(batch, batch_photos)
             db.add(batch)
         db.commit()
@@ -1345,6 +2025,20 @@ class IntakeSlateService:
         )
         if target_is_late:
             item = self._canonical_item_for(db, user_id=user_id, item_id=target.item_id)
+            target_batch = db.get(IntakePhotoBatch, target.batch_id) if target and target.batch_id else None
+            if target_batch is not None:
+                target_photos = sorted(
+                    db.execute(select(IntakePhoto).where(IntakePhoto.batch_id == target_batch.id)).scalars().all(),
+                    key=self._timeline_sort_key,
+                )
+                target_batch.metadata_json = self._batch_state_snapshot(
+                    target_batch,
+                    target_photos,
+                    stream_closed=self._batch_is_closed(target_batch),
+                    draft_state="RECONCILING",
+                    reconciliation_required=True,
+                )
+                db.add(target_batch)
             self._create_intake_notification(
                 db,
                 user_id=user_id,
@@ -1368,7 +2062,11 @@ class IntakeSlateService:
         review draft without overwriting an operator's title, description, or
         locked facts. A deliberate regeneration remains an operator action.
         """
-        created = self.create_drafts_for_ready_batches(db, user_id=user_id)
+        created = self.create_drafts_for_ready_batches(
+            db,
+            user_id=user_id,
+            max_new_items_per_run=self._parse_optional_int(self.settings_for_user(db.get(User, user_id)).get("max_new_items_per_run")),
+        )
         refreshed = 0
         for item_id in {str(value).strip() for value in item_ids if str(value).strip()}:
             batch = db.execute(
@@ -1401,6 +2099,14 @@ class IntakeSlateService:
                     photos=public_photos,
                 )
                 continue
+            batch.metadata_json = self._batch_state_snapshot(
+                batch,
+                photos,
+                stream_closed=self._batch_is_closed(batch),
+                draft_state="RECONCILING",
+                reconciliation_required=True,
+            )
+            db.add(batch)
             public_urls, listing_images = self._materialize_listing_images(
                 item_id=item_id,
                 title=listing.title or (slate.title if slate else item_id),
@@ -1425,6 +2131,14 @@ class IntakeSlateService:
                 message=f"{item_id} received newly reconciled product photos. Listing text was preserved for review.",
                 href=f"/listings/{listing.id}",
             )
+            batch.metadata_json = self._batch_state_snapshot(
+                batch,
+                photos,
+                stream_closed=self._batch_is_closed(batch),
+                draft_state="DRAFT_CREATED",
+                reconciliation_required=False,
+            )
+            db.add(batch)
             refreshed += 1
         db.commit()
         return created + refreshed
@@ -1444,6 +2158,99 @@ class IntakeSlateService:
             select(MarketplaceListing.status).where(MarketplaceListing.listing_id == listing.id)
         ).scalars().all()
         return any(self._enum_value(status) in {"PENDING", "PUBLISHED", "UPDATED", "SOLD", "CLOSED"} for status in marketplace_statuses)
+
+    def _is_clearly_bad_google_photos_listing(self, db: Session, listing: Listing) -> bool:
+        source_type = str(listing.source_type or "").strip().lower()
+        if source_type not in {"google_photos_album", "media_inventory_recovery"}:
+            return False
+        if self._listing_is_externally_active(db, listing):
+            return False
+        title = str(listing.title or "").strip().lower()
+        description = str(listing.description or "").strip().lower()
+        category = str(listing.category_suggestion or "").strip().lower()
+        text = " ".join(part for part in (title, description, category) if part).strip()
+        if not text:
+            return True
+        generic_markers = (
+            "google photos intake draft",
+            "generated from monitored google photos album intake",
+            "recovered from preserved inventory photos",
+            "recovered photographed inventory item",
+            "item needs operator review",
+            "posterpro slate",
+            "general resale > identity review required",
+            "collectibles > cameras",
+        )
+        if any(marker in text for marker in generic_markers):
+            return True
+        if len(listing.image_urls or []) <= 1 and "review the attached photos" in text and not title:
+            return True
+        return False
+
+    def _delete_listing_graph(self, db: Session, *, listing: Listing) -> dict[str, Any]:
+        media_cleanup = purge_listing_media(db, listing)
+        db.execute(update(MediaRecoveryItemGroup).where(MediaRecoveryItemGroup.draft_listing_id == listing.id).values(draft_listing_id=None))
+        db.execute(update(IntakePhotoBatch).where(IntakePhotoBatch.draft_listing_id == listing.id).values(draft_listing_id=None))
+        db.execute(delete(MarketplaceListing).where(MarketplaceListing.listing_id == listing.id))
+        db.execute(delete(MarketplaceCrosspostJob).where(MarketplaceCrosspostJob.listing_id == listing.id))
+        db.execute(delete(ListingPrediction).where(ListingPrediction.listing_id == listing.id))
+        db.execute(delete(ListingABTestVariant).where(ListingABTestVariant.listing_id == listing.id))
+        db.execute(update(Sale).where(Sale.listing_id == listing.id).values(listing_id=None))
+        db.execute(update(EbayOfferHistory).where(EbayOfferHistory.listing_id == listing.id).values(listing_id=None))
+        db.execute(update(AutomatedOfferLog).where(AutomatedOfferLog.listing_id == listing.id).values(listing_id=None))
+        db.execute(update(MarketplaceImportJob).where(MarketplaceImportJob.created_listing_id == listing.id).values(created_listing_id=None))
+        db.delete(listing)
+        return media_cleanup
+
+    def purge_and_regenerate_bad_google_photos_drafts(
+        self,
+        db: Session,
+        *,
+        user: User | None = None,
+        rebuild_user: User | None = None,
+    ) -> dict[str, Any]:
+        query = select(Listing).where(
+            Listing.source_type.in_(("google_photos_album", "media_inventory_recovery")),
+        )
+        if user is not None and not getattr(user, "is_admin", False):
+            query = query.where(Listing.user_id == user.id)
+        listings = db.execute(query).scalars().all()
+        candidates = [listing for listing in listings if self._is_clearly_bad_google_photos_listing(db, listing)]
+        preserved = [listing for listing in listings if listing not in candidates]
+        purged_details: list[dict[str, Any]] = []
+        for listing in candidates:
+            media_cleanup = self._delete_listing_graph(db, listing=listing)
+            purged_details.append({"listing_id": listing.id, "media_cleanup": media_cleanup})
+            db.commit()
+        rebuild_owner = rebuild_user or user
+        rebuilt = self.monitor_google_album(db, user=rebuild_owner) if purged_details and rebuild_owner else {"scanned": 0, "imported": 0, "drafts_created": 0, "duplicates": 0}
+        return {
+            "scanned_google_photos_listings": len(listings),
+            "purged_count": len(purged_details),
+            "purged_listing_ids": [row["listing_id"] for row in purged_details],
+            "preserved_count": len(preserved),
+            "rebuild_result": rebuilt,
+        }
+
+    def _listing_refresh_signature(self, listing: Listing) -> str:
+        payload = {
+            "title": listing.title,
+            "description": listing.description,
+            "category_suggestion": listing.category_suggestion,
+            "item_specifics": listing.item_specifics,
+            "image_urls": list(listing.image_urls or []),
+            "listing_images": listing.listing_images or [],
+            "condition": listing.condition,
+            "shipping_profile": listing.shipping_profile,
+            "suggested_price": listing.suggested_price,
+            "listing_price": listing.listing_price,
+            "buy_it_now_price": listing.buy_it_now_price,
+            "custom_labels": list(listing.custom_labels or []),
+            "storage_unit_name": listing.storage_unit_name,
+            "raw_photo_path": listing.raw_photo_path,
+            "source_type": listing.source_type,
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
     def _record_external_listing_reconciliation_review(
         self,
@@ -1745,12 +2552,16 @@ class IntakeSlateService:
             "drafts_created": drafted,
         }
 
-    def create_drafts_for_ready_batches(self, db: Session, *, user_id: int) -> int:
+    def create_drafts_for_ready_batches(self, db: Session, *, user_id: int, max_new_items_per_run: int | None = None) -> int:
         user = db.get(User, user_id)
         intake_settings = self.settings_for_user(user)
+        if not self._drafting_enabled(intake_settings):
+            return 0
         batches = db.execute(select(IntakePhotoBatch).where(IntakePhotoBatch.user_id == user_id).order_by(IntakePhotoBatch.updated_at.asc())).scalars().all()
         created = 0
         for batch in batches:
+            if max_new_items_per_run is not None and created >= max(0, int(max_new_items_per_run)):
+                break
             if batch.draft_listing_id:
                 continue
             slate = db.execute(select(IntakeSlate).where(IntakeSlate.user_id == user_id, IntakeSlate.item_id == batch.item_id)).scalar_one_or_none()
@@ -1760,8 +2571,23 @@ class IntakeSlateService:
             public_photos = [photo for photo in photos if photo.is_public_listing_candidate and not photo.is_slate]
             if not self._batch_is_draftable(batch=batch, photos=public_photos, intake_settings=intake_settings):
                 continue
+            batch.metadata_json = self._batch_state_snapshot(
+                batch,
+                photos,
+                stream_closed=self._batch_is_closed(batch),
+                draft_state="DRAFTING",
+            )
+            db.add(batch)
+            db.flush()
             listing = self._create_or_update_listing_from_batch(db, slate=slate, batch=batch, photos=public_photos)
             if listing:
+                batch.metadata_json = self._batch_state_snapshot(
+                    batch,
+                    photos,
+                    stream_closed=self._batch_is_closed(batch),
+                    draft_state="DRAFT_CREATED",
+                )
+                db.add(batch)
                 created += 1
         db.commit()
         return created
@@ -1880,7 +2706,7 @@ class IntakeSlateService:
         db.refresh(photo)
         self.rebuild_batches_for_user(db, user_id=user_id)
         user = db.get(User, user_id)
-        if user and self.settings_for_user(user).get("auto_draft_listing", True):
+        if user and self._drafting_enabled(self.settings_for_user(user)):
             self.create_drafts_for_ready_batches(db, user_id=user_id)
         photo = db.get(IntakePhoto, photo_id) or photo
         return photo
@@ -1993,6 +2819,115 @@ class IntakeSlateService:
         image.save(output, format="PNG")
         return f"data:image/png;base64,{base64.b64encode(output.getvalue()).decode('ascii')}"
 
+    def _render_slate_preview_image(self, payload: dict[str, Any]) -> Image.Image:
+        slate_type = "TAIL SLATE" if str(payload.get("boundary_position") or "start").lower() == "tail" else "HEAD SLATE"
+        head_mode = slate_type == "HEAD SLATE"
+        background = (239, 255, 220) if head_mode else (255, 232, 245)
+        accent = (0, 202, 170) if head_mode else (242, 84, 165)
+        accent2 = (67, 212, 255) if head_mode else (255, 154, 38)
+        canvas = Image.new("RGB", (1600, 1000), background)
+        draw = ImageDraw.Draw(canvas)
+        qr = qrcode.QRCode(border=2, box_size=8)
+        qr.add_data(json.dumps(payload, separators=(",", ":"), sort_keys=True))
+        qr.make(fit=True)
+        qr_image = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+        resampling = getattr(Image, "Resampling", Image)
+        qr_image = qr_image.resize((420, 420), resampling.LANCZOS)
+
+        def load_font(size: int, bold: bool = False) -> ImageFont.ImageFont:
+            candidates = (
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+            )
+            for candidate in candidates:
+                try:
+                    return ImageFont.truetype(candidate, size=size)
+                except Exception:
+                    continue
+            return ImageFont.load_default()
+
+        # Keep both brand and boundary labels inside their colored header
+        # blocks at the actual 1600px render size (no clipped final letters).
+        title_font = load_font(38, bold=True)
+        field_font = load_font(28)
+        small_font = load_font(20)
+        big_font = load_font(74, bold=True)
+
+        def text_value(key: str) -> str:
+            return str(payload.get(key) or "—").strip() or "—"
+
+        def draw_field(x: int, y: int, label: str, value: str, width: int = 700) -> int:
+            draw.text((x, y), f"{label}:", fill="black", font=field_font)
+            text_y = y + 34
+            lines = []
+            current = ""
+            for token in value.split():
+                trial = f"{current} {token}".strip()
+                if draw.textbbox((0, 0), trial, font=field_font)[2] - draw.textbbox((0, 0), trial, font=field_font)[0] <= width:
+                    current = trial
+                else:
+                    if current:
+                        lines.append(current)
+                    current = token
+            if current:
+                lines.append(current)
+            if not lines:
+                lines = ["—"]
+            for line in lines:
+                draw.text((x + 4, text_y), line, fill="black", font=field_font)
+                text_y += 34
+            return text_y + 8
+
+        draw.rounded_rectangle((38, 38, 1562, 962), radius=28, outline=accent, width=8)
+        draw.rounded_rectangle((56, 56, 1544, 944), radius=22, outline=accent2, width=4)
+        draw.rectangle((56, 56, 360, 126), fill=accent)
+        draw.rectangle((1160, 56, 1544, 126), fill=accent2)
+        draw.text((82, 70), "POSTERPRO", fill="white", font=title_font)
+        draw.text((1180, 70), slate_type, fill="white", font=title_font)
+        draw.text((88, 150), text_value("session_id"), fill="black", font=big_font)
+        display_item = text_value("display_item_number")
+        display_box = text_value("display_box_number")
+        draw.text((88, 240), f"Item: {display_item}   Box: {display_box}", fill="black", font=field_font)
+        draw.text((88, 272), f"Canonical: {text_value('item_id')} / {text_value('box_id')}", fill="black", font=small_font)
+        draw.text((88, 316), f"Location: {text_value('location')}", fill="black", font=field_font)
+        draw.text((88, 360), f"Condition: {text_value('condition')}", fill="black", font=field_font)
+        draw.text((88, 404), f"Boundary: {text_value('boundary_position').upper()}", fill="black", font=field_font)
+        draw.text((88, 448), f"Date: {text_value('created_at')}", fill="black", font=field_font)
+
+        y = 520
+        for label in ("title", "brand", "model", "notes", "flaws", "weight", "length", "width", "height"):
+            value = text_value(label)
+            if label == "title":
+                display = "Title"
+            elif label == "brand":
+                display = "Brand"
+            elif label == "model":
+                display = "Model"
+            elif label == "notes":
+                display = "Notes"
+            elif label == "flaws":
+                display = "Flaws"
+            elif label == "weight":
+                display = "Weight"
+            elif label == "length":
+                display = "Length"
+            elif label == "width":
+                display = "Width"
+            else:
+                display = "Height"
+            y = draw_field(88, y, display, value, width=760)
+            if y > 820:
+                break
+
+        qr_x = 1110
+        qr_y = 132
+        draw.rectangle((qr_x - 18, qr_y - 18, qr_x + 438, qr_y + 438), outline="black", width=3)
+        canvas.paste(qr_image, (qr_x, qr_y))
+        draw.text((1040, 586), "Use this image as the photographed boundary marker.", fill="black", font=small_font)
+        draw.text((1040, 620), "Keep the QR and header visible for best intake recognition.", fill="black", font=small_font)
+        draw.text((88, 884), "Bright color blocks + large QR help the grouping engine and humans spot the slate instantly.", fill="black", font=small_font)
+        return canvas
+
     def decode_slate_payload(self, image_path: str) -> dict[str, Any] | None:
         image = self._load_image_for_cv(str(image_path))
         if image is None:
@@ -2038,6 +2973,9 @@ class IntakeSlateService:
         return payload if isinstance(payload, dict) and payload else None
 
     def regenerate_drafts_for_closed_batches(self, db: Session, *, user_id: int) -> int:
+        user = db.get(User, user_id)
+        if not self._drafting_enabled(self.settings_for_user(user)):
+            return 0
         batches = db.execute(
             select(IntakePhotoBatch)
             .where(IntakePhotoBatch.user_id == user_id)
@@ -2086,9 +3024,27 @@ class IntakeSlateService:
                 photos=photos,
             )
             return listing
-        title_hint = (slate.title if slate and slate.title else "").strip() or f"{(slate.brand or '').strip()} {(slate.model or '').strip()}".strip() or batch.item_id
+        try:
+            group_evidence = self.photo_enrichment.enrich_group([photo.local_path for photo in photos])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("intake_group_enrichment_failed", extra={"batch_id": batch.id, "item_id": batch.item_id, "error": str(exc)})
+            group_evidence = {}
+        group_synthesis = group_evidence.get("group_synthesis") if isinstance(group_evidence, dict) else {}
+        evidence_identity = group_synthesis.get("identity") if isinstance(group_synthesis, dict) else {}
+        title_hint = (
+            (slate.title if slate and slate.title else "").strip()
+            or str((evidence_identity or {}).get("title") or "").strip()
+            or f"{(slate.brand or '').strip()} {(slate.model or '').strip()}".strip()
+            or batch.item_id
+        )
         public_urls, listing_images = self._materialize_listing_images(item_id=batch.item_id, title=title_hint, photos=photos)
         photo_signals = self._extract_photo_signals(photos)
+        photo_signals["group_synthesis"] = group_synthesis if isinstance(group_synthesis, dict) else {}
+        photo_signals["photo_evidence"] = group_evidence.get("photo_evidence") or []
+        if isinstance(group_synthesis, dict):
+            supporting = group_synthesis.get("supporting_media_ids") or {}
+            if isinstance(supporting, dict):
+                photo_signals["supporting_media_ids"] = supporting
         if listing is None:
             listing = Listing(user_id=batch.user_id, status=ListingStatus.draft)
         image_count = len(public_urls)
@@ -2108,6 +3064,8 @@ class IntakeSlateService:
                 "detected_identifiers": photo_signals.get("detected_identifiers") or [],
                 "barcode_candidates": photo_signals.get("barcode_candidates") or [],
                 "photo_keywords": photo_signals.get("photo_keywords") or [],
+                "group_synthesis": group_synthesis if isinstance(group_synthesis, dict) else {},
+                "quality_gate": (group_synthesis or {}).get("quality_gate") if isinstance(group_synthesis, dict) else None,
             }
         )
         price_data = self.ebay.enrich_price(generated.get("title") or title_hint, None)
@@ -2153,6 +3111,8 @@ class IntakeSlateService:
                 "draft_quality": generated.get("draft_quality"),
                 "generation_source": generated.get("generation_source"),
                 "model_used": generated.get("model_used"),
+                "group_synthesis": group_synthesis if isinstance(group_synthesis, dict) else {},
+                "photo_evidence": photo_signals.get("photo_evidence") or [],
                 "detected_identifiers": photo_signals.get("detected_identifiers") or [],
                 "barcode_candidates": photo_signals.get("barcode_candidates") or [],
                 "photo_keywords": photo_signals.get("photo_keywords") or [],
@@ -2181,6 +3141,7 @@ class IntakeSlateService:
                     "height": slate.height if slate and slate.height else ((listing.shipping_profile or {}).get("package_dimensions") or {}).get("height"),
                 },
             },
+            policy=shipping_policy_for_user(user),
         )
         listing.quantity = max(1, int(listing.quantity or 1))
         listing.platform_quantities = listing.platform_quantities or {"inventory": listing.quantity}
@@ -2219,6 +3180,13 @@ class IntakeSlateService:
         listing.status = ListingStatus.draft
         db.add(listing)
         batch.draft_listing_id = listing.id
+        batch.metadata_json = self._batch_state_snapshot(
+            batch,
+            photos,
+            stream_closed=self._batch_is_closed(batch),
+            draft_state="DRAFT_CREATED",
+            reconciliation_required=bool((batch.metadata_json or {}).get("reconciliation_required")),
+        )
         if slate:
             slate.listing_id = listing.id
             slate.status = "draft_created"
@@ -2269,10 +3237,21 @@ class IntakeSlateService:
             stale_found += 1
             # Only prune ungrouped non-slate photos automatically. Anything already grouped,
             # manually assigned, or acting as a slate boundary stays preserved for review.
-            if photo.batch_id or photo.is_slate or photo.item_id or photo.is_internal_only:
+            has_provider_reference = bool(
+                db.execute(
+                    select(IntakeProviderMedia.id).where(
+                        IntakeProviderMedia.user_id == user.id,
+                        IntakeProviderMedia.intake_photo_id == photo.id,
+                    )
+                ).first()
+            )
+            if photo.batch_id or photo.is_slate or photo.item_id or photo.is_internal_only or has_provider_reference:
                 metadata = dict(photo.metadata_json or {})
                 metadata["album_truth_missing"] = True
                 metadata["album_truth_checked_at"] = datetime.now(UTC).isoformat()
+                metadata["album_truth_action"] = "preserved_for_review"
+                if has_provider_reference:
+                    metadata["album_truth_preserved_reason"] = "provider_media_reference"
                 photo.metadata_json = metadata
                 db.add(photo)
                 preserved += 1
@@ -2280,6 +3259,7 @@ class IntakeSlateService:
             metadata = dict(photo.metadata_json or {})
             metadata["album_truth_missing"] = True
             metadata["album_truth_checked_at"] = datetime.now(UTC).isoformat()
+            metadata["album_truth_action"] = "removed"
             photo.metadata_json = metadata
             try:
                 resolved = Path(photo.local_path)
@@ -2357,13 +3337,15 @@ class IntakeSlateService:
     def _materialize_listing_images(self, *, item_id: str, title: str, photos: list[IntakePhoto]) -> tuple[list[str], list[dict[str, Any]]]:
         public_urls: list[str] = []
         listing_images: list[dict[str, Any]] = []
-        seo_title = self._slug_token(title) or "item"
+        seo_title = self._slug_token(title, max_length=120) or "item"
         destination_dir = Path(settings.storage_root) / "intake-items" / item_id
         destination_dir.mkdir(parents=True, exist_ok=True)
+        total = len(photos)
         for index, photo in enumerate(photos, start=1):
             source = Path(photo.local_path)
             extension = source.suffix.lower() or ".jpg"
-            filename = f"{item_id}_{seo_title}_{index:02d}{extension}"
+            purpose = self._listing_photo_purpose(photo=photo, index=index, total=total)
+            filename = f"{self._slug_token(f'{seo_title} {purpose} {item_id}', max_length=140) or 'item'}-{index:02d}{extension}"
             target = destination_dir / filename
             if not target.exists() and source.exists():
                 self._prepare_listing_image(source=source, target=target)
@@ -2394,6 +3376,85 @@ class IntakeSlateService:
             )
         return public_urls, listing_images
 
+    def refresh_drafts_until_stable(self, db: Session, *, user: User, max_passes: int = 2) -> dict[str, Any]:
+        """Continue batch regrouping and draft refreshes for a bounded number of passes."""
+        totals = {
+            "passes": 0,
+            "recovered_slates": 0,
+            "rebuilt_groups": 0,
+            "refreshed_drafts": 0,
+            "created_drafts": 0,
+            "regenerated_drafts": 0,
+        }
+        if not self._drafting_enabled(self.settings_for_user(user)):
+            return totals
+        limit = max(1, min(int(max_passes or 1), 3))
+        max_new_items_per_run = self._parse_optional_int(self.settings_for_user(user).get("max_new_items_per_run"))
+        for _ in range(limit):
+            pass_totals = {
+                "recovered_slates": self.recover_existing_slates(db, user=user, limit=75),
+                "rebuilt_groups": 0,
+                "refreshed_drafts": 0,
+                "created_drafts": 0,
+                "regenerated_drafts": 0,
+            }
+            grouping_result = self.rebuild_batches_for_user(db, user_id=user.id)
+            pass_totals["rebuilt_groups"] = int(grouping_result.get("assigned_photos") or 0)
+            pass_totals["refreshed_drafts"] = self.refresh_existing_draft_listings_for_user(db, user_id=user.id)
+            pass_totals["created_drafts"] = self.create_drafts_for_ready_batches(db, user_id=user.id, max_new_items_per_run=max_new_items_per_run)
+            pass_totals["regenerated_drafts"] = self.regenerate_drafts_for_closed_batches(db, user_id=user.id)
+            totals["passes"] += 1
+            for key in ("recovered_slates", "rebuilt_groups", "refreshed_drafts", "created_drafts", "regenerated_drafts"):
+                totals[key] += int(pass_totals[key] or 0)
+            if not any(pass_totals.values()):
+                break
+        return totals
+
+    def refresh_existing_draft_listings_for_user(self, db: Session, *, user_id: int) -> int:
+        """Refresh existing drafts using the full current batch photo set."""
+        user = db.get(User, user_id)
+        if not self._drafting_enabled(self.settings_for_user(user)):
+            return 0
+        batches = db.execute(
+            select(IntakePhotoBatch)
+            .where(
+                IntakePhotoBatch.user_id == user_id,
+                IntakePhotoBatch.draft_listing_id.is_not(None),
+            )
+            .order_by(IntakePhotoBatch.updated_at.asc(), IntakePhotoBatch.id.asc())
+        ).scalars().all()
+        refreshed = 0
+        for batch in batches:
+            slate = db.execute(
+                select(IntakeSlate).where(
+                    IntakeSlate.user_id == user_id,
+                    IntakeSlate.item_id == batch.item_id,
+                )
+            ).scalar_one_or_none()
+            photos = sorted(db.execute(select(IntakePhoto).where(IntakePhoto.batch_id == batch.id)).scalars().all(), key=self._timeline_sort_key)
+            public_photos = [photo for photo in photos if photo.is_public_listing_candidate and not photo.is_slate]
+            if not public_photos:
+                continue
+            listing = db.get(Listing, batch.draft_listing_id)
+            if listing is None or self._listing_is_externally_active(db, listing):
+                continue
+            before_signature = self._listing_refresh_signature(listing)
+            refreshed_listing = self._create_or_update_listing_from_batch(
+                db,
+                slate=slate,
+                batch=batch,
+                photos=public_photos,
+                force_regenerate=True,
+            )
+            if refreshed_listing is None:
+                continue
+            after_signature = self._listing_refresh_signature(refreshed_listing)
+            if before_signature != after_signature:
+                refreshed += 1
+        if refreshed:
+            db.commit()
+        return refreshed
+
     def recover_existing_slates(self, db: Session, *, user: User, limit: int | None = None) -> int:
         query = select(IntakePhoto).where(
             IntakePhoto.user_id == user.id,
@@ -2411,7 +3472,16 @@ class IntakeSlateService:
         recovered = 0
         touched = 0
         for photo in pending:
-            payload = self.decode_slate_payload_isolated(photo.local_path) if self.classify_photo_for_intake(photo.local_path).get("is_probable_slate") else None
+            payload = self.decode_slate_payload_isolated(photo.local_path) or self.decode_slate_payload(photo.local_path)
+            if payload is None and not self.classify_photo_for_intake(photo.local_path).get("is_probable_slate"):
+                metadata = dict(photo.metadata_json or {})
+                metadata["slate_detection_version"] = SLATE_DETECTION_VERSION
+                metadata["slate_detection_checked_at"] = datetime.now(UTC).isoformat()
+                metadata["slate_detection_result"] = "no_match"
+                photo.metadata_json = metadata
+                db.add(photo)
+                touched += 1
+                continue
             metadata = dict(photo.metadata_json or {})
             metadata["slate_detection_version"] = SLATE_DETECTION_VERSION
             metadata["slate_detection_checked_at"] = datetime.now(UTC).isoformat()
@@ -3035,7 +4105,6 @@ class IntakeSlateService:
                 height=str(qr_payload.get("height") or "").strip() or None,
                 packed=bool(qr_payload.get("packed")),
                 qr_payload_json=qr_payload,
-                slate_image_id=photo.id,
                 status="captured",
             )
             db.add(slate)
@@ -3057,9 +4126,9 @@ class IntakeSlateService:
             slate.height = str(qr_payload.get("height") or "").strip() or slate.height
             slate.packed = bool(qr_payload.get("packed"))
             slate.qr_payload_json = qr_payload
-            slate.slate_image_id = photo.id
             slate.status = "captured"
             db.add(slate)
+        self._set_best_slate_image(db, slate=slate, photo=photo, qr_payload=qr_payload)
         photo.item_id = slate.item_id
         photo.is_slate = True
         photo.is_public_listing_candidate = False
@@ -3077,6 +4146,53 @@ class IntakeSlateService:
             operator_confirmed=False,
         )
         return slate
+
+    def _set_best_slate_image(self, db: Session, *, slate: IntakeSlate, photo: IntakePhoto, qr_payload: dict[str, Any] | None = None) -> None:
+        """Keep the best-quality capture as the primary slate image."""
+        existing_photo = db.get(IntakePhoto, slate.slate_image_id) if slate.slate_image_id else None
+        new_score = self._slate_photo_quality_score(photo, qr_payload=qr_payload)
+        current_score = self._slate_photo_quality_score(
+            existing_photo,
+            qr_payload=slate.qr_payload_json if isinstance(slate.qr_payload_json, dict) else None,
+        )
+        if existing_photo is None or new_score >= current_score:
+            if existing_photo is not None and existing_photo.id != photo.id:
+                existing_metadata = dict(existing_photo.metadata_json or {})
+                existing_metadata["duplicate_slate_of_photo_id"] = photo.id
+                existing_metadata["duplicate_slate_item_id"] = slate.item_id
+                existing_metadata["duplicate_slate_replaced_by_photo_id"] = photo.id
+                existing_metadata["duplicate_slate_quality_score"] = round(current_score, 3)
+                existing_photo.metadata_json = existing_metadata
+                db.add(existing_photo)
+            slate.slate_image_id = photo.id
+            db.add(slate)
+            return
+        duplicate_metadata = dict(photo.metadata_json or {})
+        duplicate_metadata["duplicate_slate_of_photo_id"] = existing_photo.id
+        duplicate_metadata["duplicate_slate_item_id"] = slate.item_id
+        duplicate_metadata["duplicate_slate_kept_photo_id"] = existing_photo.id
+        duplicate_metadata["duplicate_slate_quality_score"] = round(new_score, 3)
+        photo.metadata_json = duplicate_metadata
+        db.add(photo)
+
+    def _slate_photo_quality_score(self, photo: IntakePhoto | None, *, qr_payload: dict[str, Any] | None = None) -> float:
+        if photo is None:
+            return -1.0
+        metadata = photo.metadata_json if isinstance(photo.metadata_json, dict) else {}
+        detection = metadata.get("slate_detection") if isinstance(metadata.get("slate_detection"), dict) else {}
+        score = self._focus_score(photo.local_path) / 100.0
+        if photo.is_slate:
+            score += 5.0
+        if qr_payload or metadata.get("qr_payload"):
+            score += 3.0
+        if self._stored_ocr_text(metadata):
+            score += 2.0
+        if str(metadata.get("slate_detection_result") or "").strip() == "matched":
+            score += 2.0
+        elif str(metadata.get("slate_detection_result") or "").strip() == "probable_slate_candidate":
+            score += 1.0
+        score += min(2.0, float(detection.get("layout_score") or 0.0) * 2.0)
+        return score
 
     def _prepare_listing_image(self, *, source: Path, target: Path) -> None:
         if not source.exists():
@@ -3327,10 +4443,11 @@ class IntakeSlateService:
         return values
 
     def _decode_slate_payload_from_text(self, image: np.ndarray) -> dict[str, Any] | None:
-        for text in self._ocr_text_variants(image):
-            payload = self._coerce_slate_text(text)
-            if payload:
-                return payload
+        for source in [image, *self._screen_and_qr_crops(image), *self._rectified_screen_crops(image), *self._qr_anchor_crops(image)]:
+            for text in self._ocr_text_variants(source):
+                payload = self._coerce_slate_text(text)
+                if payload:
+                    return payload
         return None
 
     def _qr_variants(self, image: np.ndarray) -> list[np.ndarray]:
@@ -3367,6 +4484,15 @@ class IntakeSlateService:
             pass
 
         for crop in self._screen_and_qr_crops(image):
+            add(crop)
+            try:
+                crop_gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                add(cv2.resize(crop_gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC))
+                add(cv2.threshold(crop_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1])
+                add(cv2.adaptiveThreshold(crop_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 9))
+            except Exception:
+                continue
+        for crop in self._qr_anchor_crops(image):
             add(crop)
             try:
                 crop_gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
@@ -3449,20 +4575,58 @@ class IntakeSlateService:
             return {
                 "is_qr_candidate": False,
                 "is_probable_slate": False,
+                "has_slate_text": False,
+                "detected_slate_payload": None,
                 "layout_score": 0.0,
                 "reason": ["unreadable_image"],
             }
         qr_candidate = self._detect_qr_presence(image)
         layout = self._score_slate_layout(image)
-        probable = qr_candidate or layout["layout_score"] >= 0.72
+        detected_payload = self._decode_slate_payload_from_text(image)
+        ocr_texts = self._ocr_text_variants(image)
+        if not ocr_texts:
+            ocr_texts = []
+        for source in self._screen_and_qr_crops(image):
+            if len(ocr_texts) >= 12:
+                break
+            for text in self._ocr_text_variants(source):
+                if text not in ocr_texts:
+                    ocr_texts.append(text)
+                    if len(ocr_texts) >= 12:
+                        break
+        for source in self._rectified_screen_crops(image):
+            if len(ocr_texts) >= 18:
+                break
+            for text in self._ocr_text_variants(source):
+                if text not in ocr_texts:
+                    ocr_texts.append(text)
+                    if len(ocr_texts) >= 18:
+                        break
+        marker_count = self._count_slate_markers(ocr_texts)
+        has_slate_text = bool(detected_payload) or marker_count >= 2
+        probable = bool(detected_payload) or (
+            marker_count >= 2 and layout["layout_score"] >= 0.52
+        ) or (
+            marker_count >= 3 and layout["layout_score"] >= 0.42
+        ) or (
+            layout["layout_score"] >= 0.9 and marker_count >= 1
+        )
         return {
             "is_qr_candidate": qr_candidate,
             "is_probable_slate": probable,
+            "has_slate_text": has_slate_text,
+            "detected_slate_payload": detected_payload,
+            "ocr_marker_count": marker_count,
             "layout_score": layout["layout_score"],
             "bright_ratio": layout["bright_ratio"],
             "dark_ratio": layout["dark_ratio"],
             "square_contours": layout["square_contours"],
-            "reason": [*layout["reason"], "qr_present" if qr_candidate else "qr_absent"],
+            "reason": [
+                *layout["reason"],
+                "qr_present" if qr_candidate else "qr_absent",
+                f"ocr_markers={marker_count}",
+                "posterpro_slate_text" if has_slate_text else "no_slate_text",
+            ],
         }
 
     def _looks_like_slate_candidate(self, image: np.ndarray) -> bool:
@@ -3471,15 +4635,51 @@ class IntakeSlateService:
     def classify_photo_for_intake_from_image(self, image: np.ndarray) -> dict[str, Any]:
         layout = self._score_slate_layout(image)
         qr_candidate = self._detect_qr_presence(image)
-        probable = qr_candidate or layout["layout_score"] >= 0.72
+        detected_payload = self._decode_slate_payload_from_text(image)
+        ocr_texts = self._ocr_text_variants(image)
+        if not ocr_texts:
+            ocr_texts = []
+        for source in self._screen_and_qr_crops(image):
+            if len(ocr_texts) >= 12:
+                break
+            for text in self._ocr_text_variants(source):
+                if text not in ocr_texts:
+                    ocr_texts.append(text)
+                    if len(ocr_texts) >= 12:
+                        break
+        for source in self._rectified_screen_crops(image):
+            if len(ocr_texts) >= 18:
+                break
+            for text in self._ocr_text_variants(source):
+                if text not in ocr_texts:
+                    ocr_texts.append(text)
+                    if len(ocr_texts) >= 18:
+                        break
+        marker_count = self._count_slate_markers(ocr_texts)
+        has_slate_text = bool(detected_payload) or marker_count >= 2
+        probable = bool(detected_payload) or (
+            marker_count >= 2 and layout["layout_score"] >= 0.52
+        ) or (
+            marker_count >= 3 and layout["layout_score"] >= 0.42
+        ) or (
+            layout["layout_score"] >= 0.9 and marker_count >= 1
+        )
         return {
             "is_qr_candidate": qr_candidate,
             "is_probable_slate": probable,
+            "has_slate_text": has_slate_text,
+            "detected_slate_payload": detected_payload,
+            "ocr_marker_count": marker_count,
             "layout_score": layout["layout_score"],
             "bright_ratio": layout["bright_ratio"],
             "dark_ratio": layout["dark_ratio"],
             "square_contours": layout["square_contours"],
-            "reason": [*layout["reason"], "qr_present" if qr_candidate else "qr_absent"],
+            "reason": [
+                *layout["reason"],
+                "qr_present" if qr_candidate else "qr_absent",
+                f"ocr_markers={marker_count}",
+                "posterpro_slate_text" if has_slate_text else "no_slate_text",
+            ],
         }
 
     def _detect_qr_presence(self, image: np.ndarray) -> bool:
@@ -3547,18 +4747,117 @@ class IntakeSlateService:
             return []
 
         texts: list[str] = []
-        for variant in self._text_variants(image):
+        for source in [image, *self._screen_and_qr_crops(image), *self._rectified_screen_crops(image)]:
+            for variant in self._text_variants(source):
+                try:
+                    text = pytesseract.image_to_string(
+                        variant,
+                        config="--oem 3 --psm 6",
+                    )
+                except Exception:
+                    continue
+                cleaned = str(text or "").strip()
+                if cleaned and cleaned not in texts:
+                    texts.append(cleaned)
+        return texts
+
+    def _rectified_screen_crops(self, image: np.ndarray) -> list[np.ndarray]:
+        crops: list[np.ndarray] = []
+        try:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        except Exception:
+            return crops
+        bright_mask = cv2.threshold(gray, 170, 255, cv2.THRESH_BINARY)[1]
+        contours, _ = cv2.findContours(bright_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        try:
+            edges = cv2.Canny(gray, 60, 170)
+            kernel = np.ones((5, 5), np.uint8)
+            edges = cv2.dilate(edges, kernel, iterations=2)
+            edge_contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        except Exception:
+            edge_contours = []
+        image_area = float(max(gray.shape[0] * gray.shape[1], 1))
+        candidates: list[tuple[float, np.ndarray]] = []
+        for contour in [*contours, *edge_contours]:
+            area = float(cv2.contourArea(contour))
+            if area < image_area * 0.08:
+                continue
+            rect = cv2.minAreaRect(contour)
+            box = cv2.boxPoints(rect)
+            box = np.array(box, dtype="float32")
+            w = max(int(rect[1][0]), int(rect[1][1]))
+            h = min(int(rect[1][0]), int(rect[1][1]))
+            if min(w, h) <= 0:
+                continue
+            ratio = w / max(h, 1)
+            if 0.55 <= ratio <= 2.8:
+                candidates.append((area, box))
+        for _, box in sorted(candidates, key=lambda item: item[0], reverse=True)[:4]:
+            ordered = self._order_points(box)
+            warped = self._warp_quad(image, ordered)
+            if warped is not None and warped.size:
+                crops.append(warped)
+        return crops
+
+    def _qr_anchor_crops(self, image: np.ndarray) -> list[np.ndarray]:
+        crops: list[np.ndarray] = []
+        detector = cv2.QRCodeDetector()
+        for variant in self._qr_variants(image):
             try:
-                text = pytesseract.image_to_string(
-                    variant,
-                    config="--oem 3 --psm 6",
-                )
+                ok, points = detector.detect(variant)
             except Exception:
                 continue
-            cleaned = str(text or "").strip()
-            if cleaned and cleaned not in texts:
-                texts.append(cleaned)
-        return texts
+            if not ok or points is None:
+                continue
+            try:
+                pts = np.array(points, dtype="float32").reshape(-1, 2)
+                x, y, w, h = cv2.boundingRect(pts.astype("int32"))
+            except Exception:
+                continue
+            if w <= 0 or h <= 0:
+                continue
+            pad_x = max(int(w * 2.4), 120)
+            pad_y = max(int(h * 2.4), 120)
+            left = max(0, x - pad_x)
+            top = max(0, y - pad_y)
+            right = min(variant.shape[1], x + w + pad_x)
+            bottom = min(variant.shape[0], y + h + pad_y)
+            crop = variant[top:bottom, left:right]
+            if crop.size:
+                crops.append(crop)
+        return crops
+
+    @staticmethod
+    def _order_points(points: np.ndarray) -> np.ndarray:
+        rect = np.zeros((4, 2), dtype="float32")
+        s = points.sum(axis=1)
+        rect[0] = points[np.argmin(s)]
+        rect[2] = points[np.argmax(s)]
+        diff = np.diff(points, axis=1)
+        rect[1] = points[np.argmin(diff)]
+        rect[3] = points[np.argmax(diff)]
+        return rect
+
+    @staticmethod
+    def _warp_quad(image: np.ndarray, points: np.ndarray) -> np.ndarray | None:
+        try:
+            (tl, tr, br, bl) = points
+            width_a = np.linalg.norm(br - bl)
+            width_b = np.linalg.norm(tr - tl)
+            height_a = np.linalg.norm(tr - br)
+            height_b = np.linalg.norm(tl - bl)
+            max_width = max(int(width_a), int(width_b))
+            max_height = max(int(height_a), int(height_b))
+            if max_width <= 0 or max_height <= 0:
+                return None
+            dst = np.array(
+                [[0, 0], [max_width - 1, 0], [max_width - 1, max_height - 1], [0, max_height - 1]],
+                dtype="float32",
+            )
+            matrix = cv2.getPerspectiveTransform(points, dst)
+            return cv2.warpPerspective(image, matrix, (max_width, max_height))
+        except Exception:
+            return None
 
     def _text_variants(self, image: np.ndarray) -> list[np.ndarray]:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -3566,7 +4865,41 @@ class IntakeSlateService:
         threshold = cv2.threshold(enlarged, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
         adaptive = cv2.adaptiveThreshold(enlarged, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 9)
         blur = cv2.GaussianBlur(enlarged, (3, 3), 0)
-        return [gray, enlarged, threshold, adaptive, blur]
+        sharpen = cv2.filter2D(enlarged, -1, np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32))
+        return [gray, enlarged, threshold, adaptive, blur, sharpen]
+
+    @staticmethod
+    def _count_slate_markers(texts: list[str]) -> int:
+        markers = {
+            "POSTERPRO SLATE",
+            "SESSION:",
+            "SESSION ID:",
+            "ITEM ID:",
+            "ITEM:",
+            "BOX:",
+            "BOX ID:",
+            "LOC:",
+            "LOCATION:",
+            "TITLE:",
+            "BRAND:",
+            "MODEL:",
+            "CONDITION:",
+            "NOTES:",
+            "WEIGHT:",
+            "LENGTH:",
+            "WIDTH:",
+            "HEIGHT:",
+            "PACKED:",
+        }
+        hits = 0
+        seen: set[str] = set()
+        for text in texts:
+            upper = str(text or "").upper()
+            for marker in markers:
+                if marker in upper and marker not in seen:
+                    seen.add(marker)
+                    hits += 1
+        return hits
 
     def _coerce_slate_text(self, value: str | None) -> dict[str, Any] | None:
         text = str(value or "").strip()
@@ -3579,23 +4912,29 @@ class IntakeSlateService:
 
         field_map = {
             "SESSION": self._extract_text_field(normalized, "SESSION"),
-            "ITEM": self._extract_text_field(normalized, "ITEM"),
-            "BOX": self._extract_text_field(normalized, "BOX"),
-            "LOC": self._extract_text_field(normalized, "LOC"),
-            "LOCATION": self._extract_text_field(normalized, "LOCATION"),
+            "ITEM": self._extract_item_id_from_text(normalized) or self._extract_text_field(normalized, "ITEM"),
             "TITLE": self._extract_text_field(normalized, "TITLE"),
             "BRAND": self._extract_text_field(normalized, "BRAND"),
             "MODEL": self._extract_text_field(normalized, "MODEL"),
             "CONDITION": self._extract_text_field(normalized, "CONDITION"),
+            "NOTES": self._extract_text_field(normalized, "NOTES"),
+            "WEIGHT": self._extract_text_field(normalized, "WEIGHT"),
+            "LENGTH": self._extract_text_field(normalized, "LENGTH"),
+            "WIDTH": self._extract_text_field(normalized, "WIDTH"),
+            "HEIGHT": self._extract_text_field(normalized, "HEIGHT"),
+            "PACKED": self._extract_text_field(normalized, "PACKED"),
             "DATE": self._extract_text_field(normalized, "DATE"),
         }
+        box_id, location_value = self._extract_box_location_fields(normalized)
         item_id = field_map["ITEM"]
         session_id = field_map["SESSION"]
         created_at = self._coerce_text_created_at(field_map["DATE"])
-        if not item_id or not session_id or not created_at:
+        if not item_id or not session_id:
             return None
+        if not created_at:
+            created_at = datetime.now(UTC).isoformat()
 
-        location = field_map["LOC"] or field_map["LOCATION"] or ""
+        location = location_value
         title = field_map["TITLE"] or ""
         raw_boundary = "tail" if any(token in upper for token in TAIL_BOUNDARY_TOKENS) else "start"
         return {
@@ -3603,34 +4942,93 @@ class IntakeSlateService:
             "version": SLATE_VERSION,
             "session_id": session_id,
             "item_id": item_id,
-            "box_id": field_map["BOX"] or "",
+            "box_id": box_id,
             "location": location,
             "title": title,
             "brand": field_map["BRAND"] or "",
             "model": field_map["MODEL"] or "",
             "condition": field_map["CONDITION"] or "",
-            "notes": "",
+            "notes": field_map["NOTES"] or "",
             "flaws": "",
-            "weight": "",
-            "length": "",
-            "width": "",
-            "height": "",
-            "packed": False,
+            "weight": field_map["WEIGHT"] or "",
+            "length": field_map["LENGTH"] or "",
+            "width": field_map["WIDTH"] or "",
+            "height": field_map["HEIGHT"] or "",
+            "packed": str(field_map["PACKED"] or "").strip().lower() in {"1", "true", "yes", "y", "packed"},
             "boundary_position": raw_boundary,
             "created_at": created_at,
         }
 
     @staticmethod
-    def _extract_text_field(text: str, label: str) -> str:
-        import re
+    def _extract_item_id_from_text(text: str) -> str:
+        for line in re.split(r"[\r\n]+", str(text or "")):
+            candidate = line.strip()
+            if not candidate:
+                continue
+            normalized = re.sub(r"\s*[-\u2010-\u2015\u2212]\s*", "-", candidate).upper()
+            if STRICT_ITEM_ID_RE.fullmatch(normalized):
+                return normalized
+            normalized = normalized.replace(" ", "")
+            if STRICT_ITEM_ID_RE.fullmatch(normalized):
+                return normalized
+            repaired = re.sub(r"[^A-Z0-9-]", "", normalized)
+            if STRICT_ITEM_ID_RE.fullmatch(repaired):
+                return repaired
+        return ""
 
-        pattern = re.compile(rf"{label}\s*[:\-]\s*(.+)", re.IGNORECASE)
-        match = pattern.search(text)
-        if not match:
-            return ""
-        value = str(match.group(1) or "").strip()
-        value = value.splitlines()[0].strip()
-        return value
+    @staticmethod
+    def _extract_box_location_fields(text: str) -> tuple[str, str]:
+        patterns = (
+            re.compile(
+                r"BOX\s*[:\-]\s*(?P<box>.+?)\s+(?:LOC|LOCATION)\s*[:\-]\s*(?P<location>.+?)(?:\s{2,}|$)",
+                re.IGNORECASE | re.DOTALL,
+            ),
+            re.compile(
+                r"BOX ID\s*[:\-]\s*(?P<box>.+?)\s+(?:LOC|LOCATION)\s*[:\-]\s*(?P<location>.+?)(?:\s{2,}|$)",
+                re.IGNORECASE | re.DOTALL,
+            ),
+        )
+        for pattern in patterns:
+            match = pattern.search(text)
+            if match:
+                box = str(match.group("box") or "").strip()
+                location = str(match.group("location") or "").strip()
+                return box.splitlines()[0].strip(), location.splitlines()[0].strip()
+        box = IntakeSlateService._extract_text_field(text, "BOX")
+        location = IntakeSlateService._extract_text_field(text, "LOC") or IntakeSlateService._extract_text_field(text, "LOCATION")
+        if box and location and location in box:
+            box = box.split(location, 1)[0].strip()
+        return box, location
+
+    @staticmethod
+    def _extract_text_field(text: str, label: str) -> str:
+        aliases = {
+            "SESSION": ("SESSION", "SESSION ID"),
+            "ITEM": ("ITEM", "ITEM ID"),
+            "BOX": ("BOX", "BOX ID"),
+            "LOC": ("LOC", "LOCATION"),
+            "LOCATION": ("LOCATION", "LOC"),
+            "TITLE": ("TITLE", "TITLE / ITEM NAME", "ITEM NAME"),
+            "BRAND": ("BRAND",),
+            "MODEL": ("MODEL",),
+            "CONDITION": ("CONDITION",),
+            "NOTES": ("NOTES",),
+            "WEIGHT": ("WEIGHT",),
+            "LENGTH": ("LENGTH",),
+            "WIDTH": ("WIDTH",),
+            "HEIGHT": ("HEIGHT",),
+            "PACKED": ("PACKED",),
+            "DATE": ("DATE",),
+        }.get(label.upper(), (label,))
+        for alias in aliases:
+            pattern = re.compile(rf"(?:^|\n)\s*{re.escape(alias)}\s*[:\-]\s*(.+)", re.IGNORECASE)
+            match = pattern.search(text)
+            if not match:
+                continue
+            value = str(match.group(1) or "").strip()
+            value = value.splitlines()[0].strip()
+            return value
+        return ""
 
     @staticmethod
     def _coerce_text_created_at(value: str | None) -> str | None:
@@ -3690,6 +5088,53 @@ class IntakeSlateService:
 
     def _batch_is_closed(self, batch: IntakePhotoBatch) -> bool:
         return bool(isinstance(batch.metadata_json, dict) and batch.metadata_json.get("stream_closed"))
+
+    def _batch_state_snapshot(
+        self,
+        batch: IntakePhotoBatch,
+        batch_photos: list[IntakePhoto],
+        *,
+        stream_closed: bool | None = None,
+        draft_state: str | None = None,
+        group_state: str | None = None,
+        reconciliation_required: bool | None = None,
+    ) -> dict[str, Any]:
+        metadata = dict(batch.metadata_json or {})
+        now = datetime.now(UTC).isoformat()
+        photo_ids = [int(photo.id) for photo in batch_photos if photo.id is not None]
+        public_photo_ids = [int(photo.id) for photo in batch_photos if photo.id is not None and photo.is_public_listing_candidate and not photo.is_slate]
+        previous_photo_ids = [int(value) for value in (metadata.get("observed_photo_ids") or []) if str(value).strip().isdigit()]
+        if photo_ids != previous_photo_ids:
+            metadata["group_revision"] = int(metadata.get("group_revision") or 0) + 1
+            metadata["evidence_revision"] = int(metadata.get("evidence_revision") or 0) + 1
+            metadata["last_evidence_change_at"] = now
+        metadata["observed_photo_ids"] = photo_ids
+        metadata["public_photo_ids"] = public_photo_ids
+        metadata["stream_closed"] = bool(stream_closed if stream_closed is not None else metadata.get("stream_closed"))
+        metadata["reconciliation_required"] = bool(reconciliation_required if reconciliation_required is not None else metadata.get("reconciliation_required"))
+        if group_state:
+            metadata["group_state"] = group_state
+        elif batch.draft_listing_id:
+            metadata["group_state"] = "FINALIZED"
+        elif not batch_photos:
+            metadata["group_state"] = "HEAD_SEEN" if batch.slate_id else "COLLECTING_PHOTOS"
+        elif metadata["stream_closed"]:
+            metadata["group_state"] = "SETTLING" if metadata["reconciliation_required"] else "GROUP_CLOSED"
+        elif public_photo_ids:
+            metadata["group_state"] = "GROUP_PROVISIONAL"
+        else:
+            metadata["group_state"] = "COLLECTING_PHOTOS"
+        if draft_state:
+            metadata["draft_state"] = draft_state
+        elif batch.draft_listing_id:
+            metadata["draft_state"] = "DRAFT_CREATED"
+        elif metadata["stream_closed"] and public_photo_ids:
+            metadata["draft_state"] = "DRAFT_QUEUED"
+        else:
+            metadata["draft_state"] = "CAPTURE_ONLY"
+        metadata["state_updated_at"] = now
+        metadata["settling"] = metadata["group_state"] in {"SETTLING", "RECONCILING"}
+        return metadata
 
     def _batch_warnings(self, *, slate: IntakeSlate | None, batch: IntakePhotoBatch, listing: Listing | None, photos: list[IntakePhoto]) -> list[str]:
         warnings: list[str] = []
@@ -3804,6 +5249,31 @@ class IntakeSlateService:
                 values.append(value)
         return values
 
+    @staticmethod
+    def _listing_photo_purpose(*, photo: IntakePhoto, index: int, total: int) -> str:
+        name_bits = " ".join(
+            part
+            for part in [
+                str(photo.original_filename or ""),
+                str(photo.source_photo_id or ""),
+                str(photo.image_type or ""),
+            ]
+            if part
+        ).lower()
+        if any(token in name_bits for token in ("label", "barcode", "qr", "upc", "ean", "gtin", "isbn", "mpn", "model")):
+            return "label-detail-view"
+        if any(token in name_bits for token in ("packaging", "box", "carton", "package")):
+            return "packaging-view"
+        if any(token in name_bits for token in ("damage", "flaw", "scratch", "wear")):
+            return "condition-detail-view"
+        if index == 1:
+            return "front-view"
+        if index == 2:
+            return "alternate-view"
+        if index == total:
+            return "detail-view"
+        return "product-view"
+
     def _to_public_media_path(self, path: str) -> str:
         storage_root = Path(settings.storage_root).resolve()
         resolved = Path(path).resolve()
@@ -3871,11 +5341,21 @@ class IntakeSlateService:
         value = str(metadata.get("manual_item_id") or "").strip()
         return value or None
 
-    def _slug_token(self, value: str | None) -> str:
+    def _slug_token(self, value: str | None, *, max_length: int = 80) -> str:
         raw = "".join(char.lower() if char.isalnum() else "-" for char in str(value or ""))
         while "--" in raw:
             raw = raw.replace("--", "-")
-        return raw.strip("-")[:80]
+        return raw.strip("-")[:max_length]
+
+    @staticmethod
+    def _parse_optional_int(value: Any) -> int | None:
+        if value is None:
+            return None
+        try:
+            parsed = int(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
 
     def _album_identifier(self, url: str | None) -> str | None:
         parsed = urlparse(str(url or "").strip())

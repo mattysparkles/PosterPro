@@ -4,6 +4,7 @@ import { Toaster as HotToaster } from 'react-hot-toast';
 import { Toaster } from 'sonner';
 
 import AuthGate from '../components/auth/AuthGate';
+import ErrorBoundary from '../components/ErrorBoundary';
 import { AdminThemeProvider } from '../contexts/AdminThemeContext';
 import { AuthProvider } from '../contexts/AuthContext';
 import '../styles/globals.css';
@@ -13,36 +14,34 @@ export default function App({ Component, pageProps }) {
 
   useEffect(() => {
     if (typeof window === 'undefined' || !('serviceWorker' in navigator)) return;
-    // The intake offline helper used to be registered for the entire origin.
-    // Its cache-first static-asset strategy could therefore keep an old
-    // Listings/navigation bundle alive after deployment.  Keep the helper
-    // strictly opt-in for Intake and remove the legacy global registration
-    // everywhere else.
-    if (router.pathname.startsWith('/intake')) {
-      navigator.serviceWorker.register('/intake-offline-sw.js').catch(() => undefined);
-      return;
-    }
+    // Do not keep an origin-wide or route-wide service worker active while the
+    // shell is being actively iterated. Stale caches can preserve old bundles
+    // and surface client-side exceptions even after a successful deploy.
     navigator.serviceWorker.getRegistrations()
       .then((registrations) => Promise.all(
         registrations
-          .filter((registration) => registration.active?.scriptURL?.endsWith('/intake-offline-sw.js'))
           .map((registration) => registration.unregister()),
       ))
       .catch(() => undefined);
+    if (window.caches?.keys) {
+      window.caches.keys().then((keys) => Promise.all(keys.map((key) => window.caches.delete(key)))).catch(() => undefined);
+    }
   }, [router.pathname]);
 
   return (
     <AuthProvider>
       <AdminThemeProvider>
-        {Component.requireAuth ? (
-          <AuthGate>
+        <ErrorBoundary>
+          {Component.requireAuth ? (
+            <AuthGate>
+              <Component {...pageProps} />
+            </AuthGate>
+          ) : (
             <Component {...pageProps} />
-          </AuthGate>
-        ) : (
-          <Component {...pageProps} />
-        )}
-        <Toaster richColors position="top-right" />
-        <HotToaster position="bottom-right" />
+          )}
+          <Toaster richColors position="top-right" />
+          <HotToaster position="bottom-right" />
+        </ErrorBoundary>
       </AdminThemeProvider>
     </AuthProvider>
   );

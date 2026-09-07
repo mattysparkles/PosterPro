@@ -96,9 +96,10 @@ def sales_dashboard(
         }
         for row in db.execute(platform_stmt).all()
     }
+    pending_shipments = sum(1 for sale in sales if str(sale.status or '').upper() in {'SYNCED','DETECTED'} and sale.listing_id)
     return {
         "user_id": scoped_user_id,
-        "summary": {"total_sales": len(sales), "units": units, "gross": gross_sales, "total_profit": total_profit, "by_platform": by_platform},
+        "summary": {"total_sales": len(sales), "units": units, "gross": gross_sales, "total_profit": total_profit, "pending_shipments": pending_shipments, "by_platform": by_platform},
         "sales": [
             {
                 "id": sale.id,

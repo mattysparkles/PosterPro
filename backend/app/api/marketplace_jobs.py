@@ -3,7 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from sqlalchemy import func
+from pydantic import BaseModel, Field
+from sqlalchemy import func, case
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -25,10 +26,11 @@ from app.api.schemas import (
 )
 from app.core.auth import ensure_user_owns_resource, get_current_user
 from app.core.database import get_db
-from app.models.enums import MarketplaceListingStatus, MarketplaceName
-from app.models.models import Listing, MarketplaceCrosspostJob, MarketplaceImportJob, MarketplaceListing, User
+from app.models.enums import EbayPublishStatus, ListingStatus, MarketplaceListingStatus, MarketplaceName
+from app.models.models import IntakeNotification, IntakePhotoBatch, IntakeProviderMedia, Listing, ListingCorrectionJob, MarketplaceCrosspostJob, MarketplaceImportJob, MarketplaceListing, User
 from app.services.marketplace_execution import resolve_execution_mode
 from app.services.marketplace_field_mapper import build_marketplace_payload
+from app.services.customer_description import customer_description_is_safe
 from app.services.automation_bridge import (
     bridge_browser_submit_policy,
     connect_bridge_account,
@@ -49,6 +51,29 @@ from app.workers.celery_app import celery_app
 
 router = APIRouter()
 
+@router.get("/correction-jobs")
+def list_correction_jobs(limit: int = Query(100, ge=1, le=500), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    rows = db.execute(select(ListingCorrectionJob).where(ListingCorrectionJob.user_id == current_user.id).order_by(ListingCorrectionJob.priority.asc(), case((ListingCorrectionJob.priority == 0, ListingCorrectionJob.created_at), else_=None).desc(), case((ListingCorrectionJob.priority != 0, ListingCorrectionJob.created_at), else_=None).asc())).scalars().all()
+    return [{"id": r.id, "listing_id": r.listing_id, "priority": r.priority, "fields": r.fields or [], "operator_note": r.operator_note, "status": r.status, "attempt_count": r.attempt_count, "before": r.before_snapshot, "after": r.after_snapshot, "material_delta": r.material_delta, "result": r.result, "failure_reason": r.failure_reason, "requested_by": r.requested_by, "created_at": r.created_at.isoformat() if r.created_at else None} for r in rows[:limit]]
+
+@router.patch("/correction-jobs/{job_id}/priority")
+def reprioritize_correction_job(job_id: int, payload: dict, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    job = db.get(ListingCorrectionJob, job_id)
+    if not job or job.user_id != current_user.id: raise HTTPException(status_code=404, detail="Correction job not found")
+    if job.status != "queued": raise HTTPException(status_code=409, detail="Only queued corrections can be reprioritized")
+    old = job.priority; job.priority = max(0, int(payload.get("priority", old))); meta = dict(job.result or {}); meta.setdefault("priority_history", []).append({"old": old, "new": job.priority, "changed_by": current_user.id, "changed_at": datetime.utcnow().isoformat()}); job.result = meta; db.commit()
+    return {"id": job.id, "priority": job.priority}
+
+
+def _enqueue_priority(task, job_id: int, priority: int | None = None):
+    """Celery uses larger broker priority values first; PosterPro uses 0 as highest."""
+    normalized = max(0, min(10, int(priority if priority is not None else 1)))
+    return task.apply_async(args=[job_id], priority=max(0, 10 - normalized))
+
+class BulkRequeueRequest(BaseModel):
+    statuses: list[str] = Field(default_factory=lambda: ["failed"], max_length=4)
+    job_types: list[str] = Field(default_factory=lambda: ["crosspost", "import"], max_length=2)
+
 
 def _build_job_status_summary(rows: list[tuple[str | None, int]]) -> dict:
     summary = {
@@ -65,6 +90,103 @@ def _build_job_status_summary(rows: list[tuple[str | None, int]]) -> dict:
         if normalized in summary:
             summary[normalized] += int(count or 0)
     return summary
+
+
+@router.post("/marketplace-jobs/bulk-requeue")
+def bulk_requeue_marketplace_jobs(
+    payload: BulkRequeueRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    statuses = {str(item).strip().lower() for item in payload.statuses if str(item).strip()}
+    allowed = {"failed", "queued", "completed", "canceled"}
+    if not statuses or not statuses.issubset(allowed):
+        raise HTTPException(status_code=400, detail="Unsupported job status for bulk requeue")
+    queued = []
+    if "crosspost" in payload.job_types:
+        rows = db.execute(select(MarketplaceCrosspostJob).where(MarketplaceCrosspostJob.user_id == current_user.id, MarketplaceCrosspostJob.status.in_(statuses))).scalars().all()
+        for job in rows:
+            job.status = "queued"; job.last_error = None; job.result_summary = None
+            task = _enqueue_priority(process_marketplace_crosspost_job_task, job.id, job.priority); job.task_id = task.id; db.add(job); queued.append({"type":"crosspost","id":job.id,"task_id":task.id})
+    if "import" in payload.job_types:
+        rows = db.execute(select(MarketplaceImportJob).where(MarketplaceImportJob.user_id == current_user.id, MarketplaceImportJob.status.in_(statuses))).scalars().all()
+        for job in rows:
+            job.status = "queued"; job.last_error = None
+            task = _enqueue_priority(process_marketplace_import_job_task, job.id, job.priority); job.task_id = task.id; db.add(job); queued.append({"type":"import","id":job.id,"task_id":task.id})
+    db.commit()
+    return {"queued": queued, "count": len(queued)}
+
+
+def _build_system_status_summary(db: Session, *, user_id: int, import_summary: dict, crosspost_summary: dict) -> dict:
+    # Aggregate in PostgreSQL instead of materializing the entire catalog on
+    # every 10-second Jobs Console refresh (which caused request timeouts).
+    catalog_total = int(db.execute(select(func.count(Listing.id)).where(Listing.user_id == user_id)).scalar_one())
+    catalog_sold = int(db.execute(select(func.count(Listing.id)).where(Listing.user_id == user_id, (Listing.sold_at.is_not(None) | (Listing.quantity <= 0)))).scalar_one())
+    # `custom_labels` is legacy JSON (and is not portable to one SQL JSON
+    # predicate across the supported PostgreSQL/SQLite test environments).
+    # Fetch only that narrow column rather than full Listing objects.
+    archived_labels = db.execute(
+        select(Listing.custom_labels).where(Listing.user_id == user_id, Listing.custom_labels.is_not(None))
+    ).scalars()
+    catalog_archived = sum(1 for labels in archived_labels if isinstance(labels, list) and any(str(label).lower().startswith("archived") for label in labels))
+    catalog_drafts = int(db.execute(select(func.count(Listing.id)).where(Listing.user_id == user_id, Listing.status.in_([ListingStatus.draft, ListingStatus.FAILED]))).scalar_one())
+    catalog_review = int(db.execute(select(func.count(Listing.id)).where(Listing.user_id == user_id, (Listing.needs_review.is_(True) | Listing.restricted_review_required.is_(True)), Listing.sold_at.is_(None))).scalar_one())
+    catalog_ready = int(db.execute(select(func.count(Listing.id)).where(Listing.user_id == user_id, Listing.status == ListingStatus.ready, Listing.sold_at.is_(None))).scalar_one())
+    catalog_published = int(db.execute(select(func.count(Listing.id)).where(Listing.user_id == user_id, (Listing.ebay_publish_status == EbayPublishStatus.POSTED) | Listing.ebay_listing_id.is_not(None), Listing.sold_at.is_(None))).scalar_one())
+
+    intake_batches_rows = db.execute(
+        select(IntakePhotoBatch.status, func.count(IntakePhotoBatch.id))
+        .where(IntakePhotoBatch.user_id == user_id)
+        .group_by(IntakePhotoBatch.status)
+    ).all()
+    intake_batches = {str(status or "").lower(): int(count or 0) for status, count in intake_batches_rows}
+    intake_photos_rows = db.execute(
+        select(IntakeProviderMedia.processing_status, func.count(IntakeProviderMedia.id))
+        .where(IntakeProviderMedia.user_id == user_id)
+        .group_by(IntakeProviderMedia.processing_status)
+    ).all()
+    intake_photos = {str(status or "").lower(): int(count or 0) for status, count in intake_photos_rows}
+    unread_notifications = int(
+        db.execute(
+            select(func.count(IntakeNotification.id)).where(IntakeNotification.user_id == user_id, IntakeNotification.read_at.is_(None))
+        ).scalar_one()
+    )
+    queued_jobs = int(import_summary.get("queued", 0)) + int(crosspost_summary.get("queued", 0))
+    running_jobs = int(import_summary.get("running", 0)) + int(crosspost_summary.get("running", 0))
+    failed_jobs = int(import_summary.get("failed", 0)) + int(crosspost_summary.get("failed", 0))
+    visible_total = max(catalog_total - catalog_sold - catalog_archived, 0)
+    active_batches = sum(int(intake_batches.get(status, 0)) for status in ("collecting", "ready_for_draft", "drafted"))
+    processing_photos = sum(int(intake_photos.get(status, 0)) for status in ("discovered", "changed", "retry", "processing"))
+    message = "No active work detected."
+    if running_jobs or processing_photos:
+        message = "Intake or marketplace work is currently in progress."
+    elif queued_jobs:
+        message = "Jobs are queued and waiting for workers."
+    elif catalog_review:
+        message = "Review-ready drafts are waiting for operator approval."
+    elif catalog_drafts:
+        message = "Drafts are still being refined automatically."
+    return {
+        "catalog_total": catalog_total,
+        "catalog_visible": visible_total,
+        "catalog_drafts": catalog_drafts,
+        "catalog_review": catalog_review,
+        "catalog_ready": catalog_ready,
+        "catalog_published": catalog_published,
+        "catalog_sold": catalog_sold,
+        "catalog_archived": catalog_archived,
+        "intake_batches_active": active_batches,
+        "intake_batches_ready": int(intake_batches.get("ready_for_draft", 0)),
+        "intake_batches_drafted": int(intake_batches.get("drafted", 0)),
+        "intake_photos_processing": processing_photos,
+        "intake_photos_processed": int(intake_photos.get("processed", 0)),
+        "intake_photos_retry": int(intake_photos.get("retry", 0)),
+        "queued_jobs": queued_jobs,
+        "running_jobs": running_jobs,
+        "failed_jobs": failed_jobs,
+        "unread_notifications": unread_notifications,
+        "status_message": message,
+    }
 
 
 def _crosspost_operator_note(*, failed_target_count: int, review_required_count: int, submitted_count: int) -> str | None:
@@ -168,7 +290,7 @@ def _build_crosspost_target_outcomes(job: MarketplaceCrosspostJob) -> list[dict]
     return pending_outcomes
 
 
-def _serialize_crosspost_job(job: MarketplaceCrosspostJob, *, compact: bool = False) -> dict:
+def _serialize_crosspost_job(job: MarketplaceCrosspostJob, *, compact: bool = False, operator_email: str | None = None) -> dict:
     status_value = str(job.status or "").lower()
     can_cancel = status_value in {"queued", "running"}
     can_retry = status_value in {"completed", "failed", "canceled"}
@@ -215,6 +337,7 @@ def _serialize_crosspost_job(job: MarketplaceCrosspostJob, *, compact: bool = Fa
     return {
         "id": job.id,
         "user_id": job.user_id,
+        "operator_email": operator_email,
         "listing_id": job.listing_id,
         "source_marketplace": job.source_marketplace,
         "target_marketplaces": job.target_marketplaces,
@@ -237,10 +360,14 @@ def _serialize_crosspost_job(job: MarketplaceCrosspostJob, *, compact: bool = Fa
         "ui_secondary_actions": ui_secondary_actions,
         "created_at": job.created_at,
         "updated_at": job.updated_at,
+        "priority": int(job.priority or 1),
+        "attempt_count": int(job.attempt_count or 0),
+        "next_attempt_at": job.next_attempt_at,
+        "requested_by": job.requested_by,
     }
 
 
-def _serialize_import_job(job: MarketplaceImportJob, *, db: Session, compact: bool = False) -> dict:
+def _serialize_import_job(job: MarketplaceImportJob, *, db: Session, compact: bool = False, operator_email: str | None = None) -> dict:
     status_value = str(job.status or "").lower()
     is_stale = _import_job_is_stale(job)
     can_cancel = status_value in {"queued", "running"} and not is_stale
@@ -333,6 +460,7 @@ def _serialize_import_job(job: MarketplaceImportJob, *, db: Session, compact: bo
     return {
         "id": job.id,
         "user_id": job.user_id,
+        "operator_email": operator_email,
         "source_marketplace": job.source_marketplace,
         "source_listing_reference": job.source_listing_reference,
         "import_mode": job.import_mode,
@@ -354,6 +482,10 @@ def _serialize_import_job(job: MarketplaceImportJob, *, db: Session, compact: bo
         "ui_secondary_actions": ui_secondary_actions,
         "created_at": job.created_at,
         "updated_at": job.updated_at,
+        "priority": int(job.priority or 1),
+        "attempt_count": int(job.attempt_count or 0),
+        "next_attempt_at": job.next_attempt_at,
+        "requested_by": job.requested_by,
     }
 
 
@@ -429,6 +561,8 @@ def queue_crosspost_job(
     targets = [name for name in requested if name in MarketplaceName._value2member_map_]
     if not targets:
         raise HTTPException(status_code=400, detail="No supported target marketplaces were requested")
+    if not customer_description_is_safe(listing.description):
+        raise HTTPException(status_code=422, detail="Customer description contains internal review or marketplace guidance; revise before publishing")
 
     execution_plan = {
         "targets": [
@@ -444,6 +578,8 @@ def queue_crosspost_job(
         requested_mode=payload.requested_mode,
         status="queued",
         execution_plan=execution_plan,
+        priority=0,
+        requested_by=current_user.id,
     )
     db.add(job)
     db.flush()
@@ -471,12 +607,12 @@ def queue_crosspost_job(
                 )
             )
 
-    task = process_marketplace_crosspost_job_task.delay(job.id)
+    task = _enqueue_priority(process_marketplace_crosspost_job_task, job.id, job.priority)
     job.task_id = task.id
     db.add(job)
     db.commit()
     db.refresh(job)
-    return _serialize_crosspost_job(job)
+    return _serialize_crosspost_job(job, operator_email=current_user.email)
 
 
 @router.get("/listings/{listing_id}/crosspost-jobs", response_model=list[CrosspostJobResponse])
@@ -494,7 +630,7 @@ def list_crosspost_jobs(
         .where(MarketplaceCrosspostJob.listing_id == listing_id)
         .order_by(MarketplaceCrosspostJob.created_at.desc())
     ).scalars().all()
-    return [_serialize_crosspost_job(job) for job in jobs]
+    return [_serialize_crosspost_job(job, operator_email=current_user.email) for job in jobs]
 
 
 @router.post("/imports/marketplaces/jobs", response_model=MarketplaceImportJobResponse)
@@ -511,15 +647,17 @@ def create_marketplace_import_job(
         import_mode=payload.import_mode,
         status="queued",
         payload=payload.payload,
+        priority=0,
+        requested_by=current_user.id,
     )
     db.add(job)
     db.flush()
-    task = process_marketplace_import_job_task.delay(job.id)
+    task = _enqueue_priority(process_marketplace_import_job_task, job.id, job.priority)
     job.task_id = task.id
     db.add(job)
     db.commit()
     db.refresh(job)
-    return _serialize_import_job(job, db=db)
+    return _serialize_import_job(job, db=db, operator_email=current_user.email)
 
 
 @router.post("/imports/marketplaces/bulk", include_in_schema=False)
@@ -562,12 +700,15 @@ def list_marketplace_import_jobs(
         .where(MarketplaceImportJob.user_id == current_user.id)
         .order_by(MarketplaceImportJob.created_at.desc())
     ).scalars().all()
-    return [_serialize_import_job(job, db=db) for job in jobs]
+    return [_serialize_import_job(job, db=db, operator_email=current_user.email) for job in jobs]
 
 
 @router.get("/marketplace-jobs/overview", response_model=MarketplaceJobsOverviewResponse)
 def get_marketplace_jobs_overview(
-    limit: int | None = Query(default=None, ge=1, le=250),
+    # Keep the console responsive even when historical job volume is large.
+    # The console is an operational view; detail routes remain available for
+    # drilling into a specific job.
+    limit: int = Query(default=100, ge=1, le=250),
     compact: bool = Query(default=False),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -588,6 +729,7 @@ def get_marketplace_jobs_overview(
 
     import_jobs = db.execute(import_query).scalars().all()
     crosspost_jobs = db.execute(crosspost_query).scalars().all()
+    correction_jobs = db.execute(select(ListingCorrectionJob).where(ListingCorrectionJob.user_id == current_user.id).order_by(ListingCorrectionJob.priority.asc(), case((ListingCorrectionJob.priority == 0, ListingCorrectionJob.created_at), else_=None).desc(), case((ListingCorrectionJob.priority != 0, ListingCorrectionJob.created_at), else_=None).asc()).limit(limit)).scalars().all()
 
     import_summary_rows = db.execute(
         select(MarketplaceImportJob.status, func.count(MarketplaceImportJob.id))
@@ -599,12 +741,16 @@ def get_marketplace_jobs_overview(
         .where(MarketplaceCrosspostJob.user_id == current_user.id)
         .group_by(MarketplaceCrosspostJob.status)
     ).all()
+    import_summary = _build_job_status_summary(import_summary_rows)
+    crosspost_summary = _build_job_status_summary(crosspost_summary_rows)
 
     return {
-        "import_jobs": [_serialize_import_job(job, db=db, compact=compact) for job in import_jobs],
-        "crosspost_jobs": [_serialize_crosspost_job(job, compact=compact) for job in crosspost_jobs],
-        "import_summary": _build_job_status_summary(import_summary_rows),
-        "crosspost_summary": _build_job_status_summary(crosspost_summary_rows),
+        "import_jobs": [_serialize_import_job(job, db=db, compact=compact, operator_email=current_user.email) for job in import_jobs],
+        "crosspost_jobs": [_serialize_crosspost_job(job, compact=compact, operator_email=current_user.email) for job in crosspost_jobs],
+        "correction_jobs": [{"id": j.id, "listing_id": j.listing_id, "priority": j.priority, "fields": j.fields or [], "operator_note": j.operator_note, "status": j.status, "attempt_count": j.attempt_count, "result": j.result, "material_delta": j.material_delta, "failure_reason": j.failure_reason, "created_at": j.created_at.isoformat() if j.created_at else None} for j in correction_jobs],
+        "import_summary": import_summary,
+        "crosspost_summary": crosspost_summary,
+        "system_status": _build_system_status_summary(db, user_id=current_user.id, import_summary=import_summary, crosspost_summary=crosspost_summary),
     }
 
 
@@ -621,12 +767,12 @@ def retry_crosspost_job(
     job.status = "queued"
     job.last_error = None
     job.result_summary = None
-    task = process_marketplace_crosspost_job_task.delay(job.id)
+    task = _enqueue_priority(process_marketplace_crosspost_job_task, job.id, job.priority)
     job.task_id = task.id
     db.add(job)
     db.commit()
     db.refresh(job)
-    return _serialize_crosspost_job(job)
+    return _serialize_crosspost_job(job, operator_email=current_user.email)
 
 
 @router.get("/marketplace-crosspost-jobs/{job_id}", response_model=CrosspostJobResponse)
@@ -689,12 +835,12 @@ def retry_import_job(
         else None
     )
     job.created_listing_id = None
-    task = process_marketplace_import_job_task.delay(job.id)
+    task = _enqueue_priority(process_marketplace_import_job_task, job.id, job.priority)
     job.task_id = task.id
     db.add(job)
     db.commit()
     db.refresh(job)
-    return _serialize_import_job(job, db=db)
+    return _serialize_import_job(job, db=db, operator_email=current_user.email)
 
 
 @router.get("/marketplace-import-jobs/{job_id}", response_model=MarketplaceImportJobResponse)
@@ -707,7 +853,7 @@ def get_import_job(
     if not job:
         raise HTTPException(status_code=404, detail="Import job not found")
     ensure_user_owns_resource(current_user, job.user_id)
-    return _serialize_import_job(job, db=db)
+    return _serialize_import_job(job, db=db, operator_email=current_user.email)
 
 
 @router.post("/marketplace-import-jobs/{job_id}/cancel", response_model=MarketplaceImportJobResponse)

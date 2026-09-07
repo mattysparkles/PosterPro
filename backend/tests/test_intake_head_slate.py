@@ -6,7 +6,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
-from PIL import Image, ImageFilter
+import pytest
+from PIL import Image, ImageDraw, ImageFilter
 
 from app.models.enums import ListingStatus
 from app.models.models import (
@@ -24,6 +25,7 @@ from app.models.models import (
     SlateObservation,
     User,
 )
+from app.core.config import settings
 from app.services.alert_service import AlertService
 from app.services.google_photos import GooglePhotoEnumeration, GooglePhotosService
 from app.services.intake_slate import IntakeSlateService
@@ -33,6 +35,22 @@ def _make_image_file(name: str, color: str = 'white') -> str:
     handle = tempfile.NamedTemporaryFile(prefix=name, suffix='.jpg', delete=False)
     handle.close()
     Image.new('RGB', (40, 40), color=color).save(handle.name, format='JPEG')
+    return handle.name
+
+
+def _make_detail_image(name: str, *, blur: float = 0.0) -> str:
+    handle = tempfile.NamedTemporaryFile(prefix=name, suffix='.png', delete=False)
+    handle.close()
+    image = Image.new('RGB', (720, 480), 'white')
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((30, 30, 690, 450), outline='black', width=8)
+    draw.rectangle((48, 48, 240, 192), outline='black', width=4)
+    draw.line((48, 240, 660, 240), fill='black', width=6)
+    draw.line((48, 300, 660, 300), fill='black', width=4)
+    draw.line((48, 360, 660, 360), fill='black', width=4)
+    if blur:
+        image = image.filter(ImageFilter.GaussianBlur(radius=blur))
+    image.save(handle.name, format='PNG')
     return handle.name
 
 
@@ -110,6 +128,164 @@ def test_head_slate_qr_payload_round_trip_from_photographed_style_image(db_sessi
     assert decoded['item_id'] == slate.item_id
     assert decoded['session_id'] == '2026-07-05-STORAGE-B'
 
+
+def test_classify_photo_for_intake_uses_posterpro_slate_text_without_qr(monkeypatch):
+    service = IntakeSlateService()
+    image_path = _make_detail_image('ocr-slate')
+    detected_payload = {
+        'type': 'posterpro_head_slate',
+        'version': 1,
+        'session_id': 'OCR-SESSION',
+        'item_id': 'SP-20260708-1234',
+        'box_id': 'BX-0009',
+        'location': 'A-03',
+        'title': 'OCR slate item',
+        'brand': '',
+        'model': '',
+        'condition': '',
+        'notes': '',
+        'flaws': '',
+        'weight': '',
+        'length': '',
+        'width': '',
+        'height': '',
+        'packed': False,
+        'boundary_position': 'start',
+        'created_at': '2026-07-08T10:00:00+00:00',
+    }
+    monkeypatch.setattr(service, '_detect_qr_presence', lambda _image: False)
+    monkeypatch.setattr(
+        service,
+        '_score_slate_layout',
+        lambda _image: {'layout_score': 0.81, 'bright_ratio': 0.62, 'dark_ratio': 0.11, 'square_contours': 1, 'reason': ['mock-layout']},
+    )
+    monkeypatch.setattr(service, '_decode_slate_payload_from_text', lambda _image: detected_payload)
+
+    result = service.classify_photo_for_intake(image_path)
+
+    assert result['has_slate_text'] is True
+    assert result['is_probable_slate'] is True
+    assert result['detected_slate_payload']['item_id'] == 'SP-20260708-1234'
+
+
+def test_classify_photo_for_intake_does_not_promote_layout_only_product_photo(monkeypatch):
+    service = IntakeSlateService()
+    image_path = _make_detail_image('layout-only-product')
+    monkeypatch.setattr(service, '_detect_qr_presence', lambda _image: False)
+    monkeypatch.setattr(
+        service,
+        '_score_slate_layout',
+        lambda _image: {'layout_score': 0.94, 'bright_ratio': 0.66, 'dark_ratio': 0.08, 'square_contours': 2, 'reason': ['mock-layout']},
+    )
+    monkeypatch.setattr(service, '_decode_slate_payload_from_text', lambda _image: None)
+    monkeypatch.setattr(service, '_ocr_text_variants', lambda _image: [])
+
+    result = service.classify_photo_for_intake(image_path)
+
+    assert result['has_slate_text'] is False
+    assert result['is_probable_slate'] is False
+    assert result['detected_slate_payload'] is None
+
+
+def test_voice_transcription_uses_backend_audio_helper(db_session, monkeypatch):
+    _create_user(db_session, email='voice-transcribe@example.com')
+    service = IntakeSlateService()
+
+    monkeypatch.setattr(settings, 'openai_api_key_plain', 'test-key')
+    monkeypatch.setattr(service, '_transcribe_audio_file', lambda _audio_path: {'text': 'Whirlpool refrigerator control board', 'model': 'whisper-1', 'language': 'en'})
+
+    result = service.transcribe_voice_audio(
+        voice_audio_data_url='data:audio/webm;base64,QUJDRA==',
+        fallback_transcript='fallback text',
+    )
+
+    assert result['transcript'] == 'Whirlpool refrigerator control board'
+    assert result['audio_present'] is True
+    assert result['transcription_source'] == 'openai'
+
+
+def test_build_voice_intelligence_returns_structured_listing_json(db_session, monkeypatch):
+    user = _create_user(db_session, email='voice-intelligence@example.com')
+    service = IntakeSlateService()
+
+    monkeypatch.setattr(service.ai, 'generate', lambda signals: {
+        'title': 'Whirlpool Refrigerator Control Board',
+        'description': 'Structured AI description.',
+        'category_suggestion': 'Appliances > Parts & Accessories',
+        'condition': 'New - Open Box',
+        'item_specifics': {'Brand': 'Whirlpool', 'Model': 'W11478526'},
+        'tags': ['whirlpool', 'control board'],
+        'missing_information': ['Verify exact part number from photos.'],
+        'photo_notes': ['Package label visible.'],
+        'research_queries': ['Whirlpool W11478526'],
+        'estimated_value': 74.5,
+        'draft_quality': 'strong',
+        'marketplace_targets': ['ebay', 'facebook', 'mercari'],
+        'marketplace_drafts': {
+            'ebay': {'title': 'Whirlpool Refrigerator Control Board'},
+            'mercari': {'description': 'Mercari copy'},
+        },
+        'structured_listing_json': {
+            'schema_version': 'posterpro_listing_intelligence_v1',
+            'identity': {'product_name': 'Whirlpool Refrigerator Control Board', 'brand': 'Whirlpool', 'model': 'W11478526', 'confidence': 0.94},
+            'inventory': {'quantity_on_hand': 2, 'pack_size': 1, 'units_per_sale': 1, 'listing_quantity': 2, 'bundle_strategy': 'individual'},
+            'condition': {'canonical_condition': 'New - Open Box', 'condition_notes': 'Open box', 'defects': [], 'included_items': ['Board'], 'missing_items': []},
+            'research': {'photo_research_required': True, 'identifiers_to_verify': ['W11478526'], 'research_instructions': ['Verify part number'], 'pricing_instructions': ['Research sold comps']},
+            'canonical_listing': {'human_readable_name': 'Whirlpool Refrigerator Control Board', 'master_title': 'Whirlpool Refrigerator Control Board', 'master_description': 'Structured AI description.', 'keywords': ['whirlpool'], 'features': ['OEM replacement'], 'specifications': {'Brand': 'Whirlpool'}, 'category_candidates': ['Appliances > Parts & Accessories']},
+            'pricing': {'strategy': 'compare_sold_comps', 'price_hint': 74.5, 'minimum_price': 49.99, 'comparison_instruction': 'Research sold comps'},
+            'marketplace_targets': ['ebay', 'facebook', 'mercari'],
+            'marketplace_drafts': {'ebay': {'title': 'Whirlpool Refrigerator Control Board'}},
+            'evidence': {'facts_from_user': ['two of them'], 'facts_inferred': ['control board'], 'facts_needing_verification': ['Exact part number'], 'contradictions': []},
+            'quality': {'overall_confidence': 0.94, 'ready_for_photo_enrichment': True, 'ready_for_draft': True, 'blocking_questions': []},
+        },
+        'ai_metadata': {'model': 'gpt-4o-mini', 'generation_source': 'openai', 'schema_version': 'posterpro_listing_intelligence_v1', 'request_id': 'req-voice-1', 'request_timestamp': '2026-09-02T12:00:00+00:00', 'latency_ms': 33, 'validation_status': 'validated', 'validation_errors': [], 'response_provider': 'openai'},
+        'intelligence_state': {'voice_recorded': True, 'transcript_sent': True, 'enrichment_sent': True, 'structured_json_received': True, 'fields_populated': True},
+    })
+
+    result = service.build_voice_intelligence(
+        user=user,
+        slate=None,
+        transcript='Whirlpool refrigerator control board, two, sell individually.',
+        notes='Research sold comps.',
+        current_form={'title': '', 'brand': '', 'model': '', 'condition': ''},
+        current_session={'default_location': 'Storage Test'},
+    )
+
+    assert result['structured_listing_json']['identity']['product_name'] == 'Whirlpool Refrigerator Control Board'
+    assert result['marketplace_drafts']['mercari']['description'] == 'Mercari copy'
+    assert result['ai_metadata']['request_id'] == 'req-voice-1'
+    assert result['intelligence_state']['fields_populated'] is True
+
+
+def test_head_slate_advances_item_and_box_sequences_and_persists_location(db_session):
+    user = _create_user(db_session, email='sequence-check@example.com')
+    service = IntakeSlateService()
+
+    first, _, _ = service.create_slate(
+        db_session,
+        user=user,
+        payload={'session_id': 'SEQUENCE', 'location': 'Storage Test', 'title': 'First item'},
+    )
+    second, _, _ = service.create_slate(
+        db_session,
+        user=user,
+        payload={'session_id': 'SEQUENCE', 'location': 'Storage Test', 'title': 'Second item'},
+    )
+    third, _, _ = service.create_slate(
+        db_session,
+        user=user,
+        payload={'session_id': 'SEQUENCE', 'location': 'Kevin Garage', 'title': 'Third item'},
+    )
+
+    assert first.metadata_json['display_item_number'] == 1
+    assert first.metadata_json['display_box_number'] == 1
+    assert second.metadata_json['display_item_number'] == 2
+    assert second.metadata_json['display_box_number'] == 2
+    assert third.metadata_json['display_item_number'] == 3
+    assert third.metadata_json['display_box_number'] == 3
+    assert first.location == 'Storage Test'
+    assert second.location == 'Storage Test'
+    assert third.location == 'Kevin Garage'
 
 
 def test_rebuild_batches_groups_everything_after_a_slate_until_the_next_slate(db_session):
@@ -278,6 +454,250 @@ def test_recover_existing_slates_promotes_previously_unassigned_qr_photo(db_sess
     assert photo.item_id == slate.item_id
     assert slate.slate_image_id == photo.id
 
+
+def test_duplicate_slate_retake_keeps_better_image_and_marks_worse_capture(db_session):
+    user = _create_user(db_session, email='duplicate-slate-best@example.com')
+    service = IntakeSlateService()
+    slate, qr_payload, qr_data_url = service.create_slate(
+        db_session,
+        user=user,
+        payload={'session_id': 'BEST', 'title': 'Best slate item'},
+    )
+    sharp_path = _make_detail_image('posterpro-slate-sharp')
+    blurred_path = _make_image_file('posterpro-slate-blurred', 'white')
+    sharp = IntakePhoto(
+        user_id=user.id,
+        source_provider='google_photos',
+        source_photo_id='sharp-slate',
+        local_path=sharp_path,
+        metadata_json={'qr_payload': qr_payload, 'slate_detection': {'layout_score': 0.91}},
+        is_slate=True,
+        is_internal_only=True,
+        is_public_listing_candidate=False,
+    )
+    blurry = IntakePhoto(
+        user_id=user.id,
+        source_provider='google_photos',
+        source_photo_id='blurry-slate',
+        local_path=blurred_path,
+        metadata_json={'qr_payload': qr_payload, 'slate_detection': {'layout_score': 0.91}},
+        is_slate=True,
+        is_internal_only=True,
+        is_public_listing_candidate=False,
+    )
+    db_session.add_all([sharp, blurry])
+    db_session.commit()
+
+    service._upsert_slate_from_qr(db_session, user=user, qr_payload=qr_payload, photo=sharp)
+    service._upsert_slate_from_qr(db_session, user=user, qr_payload=qr_payload, photo=blurry)
+    db_session.commit()
+    db_session.refresh(slate)
+    db_session.refresh(sharp)
+    db_session.refresh(blurry)
+
+    assert slate.slate_image_id == sharp.id
+    assert blurry.metadata_json['duplicate_slate_of_photo_id'] == sharp.id
+    assert blurry.metadata_json['duplicate_slate_kept_photo_id'] == sharp.id
+
+
+def test_duplicate_slate_retake_replaces_worse_primary_with_better_later_capture(db_session):
+    user = _create_user(db_session, email='duplicate-slate-replace@example.com')
+    service = IntakeSlateService()
+    slate, qr_payload, qr_data_url = service.create_slate(
+        db_session,
+        user=user,
+        payload={'session_id': 'REPLACE', 'title': 'Replaceable slate item'},
+    )
+    sharp_path = _make_detail_image('posterpro-slate-sharp')
+    blurred_path = _make_image_file('posterpro-slate-blurred', 'white')
+    blurry = IntakePhoto(
+        user_id=user.id,
+        source_provider='google_photos',
+        source_photo_id='blurry-slate-first',
+        local_path=blurred_path,
+        metadata_json={'qr_payload': qr_payload, 'slate_detection': {'layout_score': 0.91}},
+        is_slate=True,
+        is_internal_only=True,
+        is_public_listing_candidate=False,
+    )
+    sharp = IntakePhoto(
+        user_id=user.id,
+        source_provider='google_photos',
+        source_photo_id='sharp-slate-later',
+        local_path=sharp_path,
+        metadata_json={'qr_payload': qr_payload, 'slate_detection': {'layout_score': 0.91}},
+        is_slate=True,
+        is_internal_only=True,
+        is_public_listing_candidate=False,
+    )
+    db_session.add_all([blurry, sharp])
+    db_session.commit()
+
+    service._upsert_slate_from_qr(db_session, user=user, qr_payload=qr_payload, photo=blurry)
+    service._upsert_slate_from_qr(db_session, user=user, qr_payload=qr_payload, photo=sharp)
+    db_session.commit()
+    db_session.refresh(slate)
+
+    assert slate.slate_image_id == sharp.id
+
+
+def test_render_slate_preview_asset_writes_backend_png(db_session):
+    user = _create_user(db_session, email='rendered-slate@example.com')
+    service = IntakeSlateService()
+    slate, qr_payload, _ = service.create_slate(
+        db_session,
+        user=user,
+        payload={'session_id': 'RENDER', 'title': 'Rendered slate item', 'location': 'A-04'},
+    )
+
+    asset = service.render_slate_preview_asset(qr_payload, item_id=slate.item_id, session_id=slate.session_id)
+    rendered_path = Path(asset['local_path'])
+
+    assert rendered_path.exists()
+    with Image.open(rendered_path) as image:
+        assert image.size == (1600, 1000)
+    assert asset['storage_path'].endswith('.png')
+    assert asset['data_url'].startswith('data:image/png;base64,')
+
+
+def test_retry_rendered_slate_upload_requeues_existing_slate(db_session, monkeypatch):
+    user = _create_user(db_session, email='retry-rendered-slate@example.com')
+    user.settings_json = {
+        'intake_settings': {
+            'album_url': 'https://photos.app.goo.gl/test-upload-album',
+            'default_item_prefix': 'SP',
+            'default_box_prefix': 'BX',
+            'default_location': 'A-04',
+        }
+    }
+    db_session.add(user)
+    db_session.commit()
+
+    service = IntakeSlateService()
+    bridge_calls = {}
+
+    def _fake_submit_bridge_job(*, job_type, execution_mode, payload):
+        bridge_calls['job_type'] = job_type
+        bridge_calls['execution_mode'] = execution_mode
+        bridge_calls['payload'] = payload
+        return {'status': 'SUBMITTED_TO_BRIDGE', 'bridge_response': {'job_id': 'bridge-upload-1'}}
+
+    monkeypatch.setattr('app.services.intake_slate.submit_bridge_job', _fake_submit_bridge_job)
+
+    slate, _, _ = service.create_slate(
+        db_session,
+        user=user,
+        payload={'session_id': 'RETRY', 'title': 'Retry slate item', 'location': 'A-04'},
+    )
+
+    upload = service.retry_rendered_slate_upload(db_session, user=user, slate_id=slate.id)
+
+    assert upload['status'] == 'SUBMITTED_TO_BRIDGE'
+    assert upload['job_type'] == 'google_photos_upload'
+    assert bridge_calls['payload']['item_id'] == slate.item_id
+    assert bridge_calls['payload']['rendered_asset']['storage_path'].endswith('.png')
+    assert bridge_calls['payload']['rendered_asset']['data_url'].startswith('data:image/png;base64,')
+    assert bridge_calls['payload']['operation'] == 'upload_rendered_slate'
+
+
+def test_create_slate_queues_rendered_asset_to_bridge_for_google_photos_upload(db_session, monkeypatch):
+    user = _create_user(db_session, email='bridge-upload@example.com')
+    user.settings_json = {
+        'intake_settings': {
+            'album_url': 'https://photos.app.goo.gl/test-upload-album',
+            'default_item_prefix': 'SP',
+            'default_box_prefix': 'BX',
+            'default_location': 'A-04',
+            'marketplace_defaults': {'targets': ['ebay']},
+        }
+    }
+    db_session.add(user)
+    db_session.commit()
+
+    service = IntakeSlateService()
+    bridge_calls = {}
+
+    def _fake_submit_bridge_job(*, job_type, execution_mode, payload):
+        bridge_calls['job_type'] = job_type
+        bridge_calls['execution_mode'] = execution_mode
+        bridge_calls['payload'] = payload
+        return {'status': 'SUBMITTED_TO_BRIDGE', 'bridge_response': {'job_id': 'bridge-upload-1'}}
+
+    monkeypatch.setattr('app.services.intake_slate.submit_bridge_job', _fake_submit_bridge_job)
+
+    slate, qr_payload, _ = service.create_slate(
+        db_session,
+        user=user,
+        payload={'session_id': 'UPLOAD', 'title': 'Upload slate item', 'location': 'A-04'},
+    )
+    rendered_asset = service.render_slate_preview_asset(qr_payload, item_id=slate.item_id, session_id=slate.session_id)
+    upload = service.queue_rendered_slate_upload(
+        db_session,
+        user=user,
+        slate=slate,
+        qr_payload=qr_payload,
+        rendered_asset=rendered_asset,
+    )
+
+    notification = db_session.query(IntakeNotification).filter(IntakeNotification.user_id == user.id, IntakeNotification.notification_type == 'intake_slate_bridge_upload_queued').one()
+
+    assert upload['status'] == 'SUBMITTED_TO_BRIDGE'
+    assert upload['job_type'] == 'google_photos_upload'
+    assert upload['target_album_url'] == 'https://photos.app.goo.gl/test-upload-album'
+    assert bridge_calls['job_type'] == 'google_photos_upload'
+    assert bridge_calls['execution_mode'] == 'browser_assist'
+    assert bridge_calls['payload']['operation'] == 'upload_rendered_slate'
+    assert bridge_calls['payload']['rendered_asset']['storage_path'] == rendered_asset['storage_path']
+    assert bridge_calls['payload']['rendered_asset']['data_url'].startswith('data:image/png;base64,')
+    assert bridge_calls['payload']['upload_label'] == f'{slate.item_id} PosterPro Slate'
+    assert notification.metadata_json['item_id'] == slate.item_id
+    assert notification.metadata_json['target_album_url'] == 'https://photos.app.goo.gl/test-upload-album'
+
+
+
+@pytest.mark.anyio
+async def test_retry_rendered_slate_upload_route_requeues_existing_slate(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Owner", "email": "owner-retry@example.com", "password": "supersecret123"},
+    )
+    assert register.status_code == 201
+
+    settings_resp = await async_client.put(
+        "/intake/settings",
+        json={
+            "enabled": True,
+            "album_url": "https://photos.app.goo.gl/test-upload-album",
+            "default_item_prefix": "SP",
+            "default_box_prefix": "BX",
+            "default_location": "A-04",
+        },
+    )
+    assert settings_resp.status_code == 200
+
+    service_calls = {}
+
+    def _fake_submit_bridge_job(*, job_type, execution_mode, payload):
+        service_calls['job_type'] = job_type
+        service_calls['execution_mode'] = execution_mode
+        service_calls['payload'] = payload
+        return {'status': 'SUBMITTED_TO_BRIDGE', 'bridge_response': {'job_id': 'bridge-upload-2'}}
+
+    monkeypatch.setattr('app.services.intake_slate.submit_bridge_job', _fake_submit_bridge_job)
+
+    created = await async_client.post(
+        "/intake/slates",
+        json={"session_id": "RETRY-ROUTE", "title": "Route retry slate", "location": "A-04"},
+    )
+    assert created.status_code == 200
+    slate_id = created.json()["slate"]["id"]
+
+    retry = await async_client.post(f"/intake/slates/{slate_id}/bridge-upload")
+    assert retry.status_code == 200
+    payload = retry.json()
+    assert payload["bridge_upload"]["status"] == "SUBMITTED_TO_BRIDGE"
+    assert payload["bridge_upload"]["job_type"] == "google_photos_upload"
+    assert service_calls["payload"]["item_id"] == payload["slate"]["item_id"]
 
 
 def test_create_draft_from_batch_uses_item_id_as_inventory_and_excludes_slate_images(db_session, monkeypatch):
@@ -532,6 +952,65 @@ def test_coerce_slate_text_builds_payload_without_qr():
     assert payload['title'] == 'Laptop charger'
 
 
+def test_coerce_slate_text_accepts_missing_date_when_item_and_session_are_present():
+    service = IntakeSlateService()
+
+    payload = service._coerce_slate_text(
+        '\n'.join(
+            [
+                'POSTERPRO HEAD SLATE',
+                'SESSION: 2026-07-08-INTAKE',
+                'ITEM: SP-20260708-0007',
+                'BOX: BX-0007',
+                'LOC: A-01',
+                'TITLE: Laptop charger',
+            ]
+        )
+    )
+
+    assert payload is not None
+    assert payload['type'] == 'posterpro_head_slate'
+    assert payload['session_id'] == '2026-07-08-INTAKE'
+    assert payload['item_id'] == 'SP-20260708-0007'
+    assert payload['box_id'] == 'BX-0007'
+    assert payload['location'] == 'A-01'
+    assert payload['title'] == 'Laptop charger'
+    assert payload['created_at']
+
+
+def test_coerce_slate_text_handles_desktop_app_slates_with_standalone_item_and_combined_box_location():
+    service = IntakeSlateService()
+
+    payload = service._coerce_slate_text(
+        '\n'.join(
+            [
+                'POSTERPRO SLATE',
+                'SESSION: 2026-07-08-STORAGE-A',
+                'SP-0626-0001',
+                'BOX: BX-001     LOC: SHELF-9',
+                'TITLE / ITEM NAME: Portable Fan',
+                'CONDITION: New',
+                'NOTES: Rendered from desktop app',
+                'WEIGHT: 3.5 lb',
+                'DIMENSIONS: 10 x 8 x 6',
+                'PACKED: YES',
+            ]
+        )
+    )
+
+    assert payload is not None
+    assert payload['type'] == 'posterpro_head_slate'
+    assert payload['session_id'] == '2026-07-08-STORAGE-A'
+    assert payload['item_id'] == 'SP-0626-0001'
+    assert payload['box_id'] == 'BX-001'
+    assert payload['location'] == 'SHELF-9'
+    assert payload['title'] == 'Portable Fan'
+    assert payload['condition'] == 'New'
+    assert payload['notes'] == 'Rendered from desktop app'
+    assert payload['weight'] == '3.5 lb'
+    assert payload['packed'] is True
+
+
 
 def test_export_csv_includes_intake_identifiers(db_session, monkeypatch):
     user = _create_user(db_session, email='export@example.com')
@@ -723,6 +1202,98 @@ def test_monitor_uses_drive_link_fallback_when_album_url_missing(db_session, mon
     assert saved_settings['folder_id'] == 'https://drive.google.com/drive/folders/drive-link-example'
 
 
+def test_refresh_drafts_until_stable_runs_bounded_convergence_loop(db_session, monkeypatch):
+    user = _create_user(db_session, email='stabilize-loop@example.com')
+    service = IntakeSlateService()
+
+    recover = [1, 0]
+    rebuild = [{'assigned_photos': 2}, {'assigned_photos': 0}]
+    refresh = [1, 0]
+    created = [1, 0]
+    regenerated = [0, 0]
+
+    monkeypatch.setattr(service, 'recover_existing_slates', lambda *_args, **_kwargs: recover.pop(0))
+    monkeypatch.setattr(service, 'rebuild_batches_for_user', lambda *_args, **_kwargs: rebuild.pop(0))
+    monkeypatch.setattr(service, 'refresh_existing_draft_listings_for_user', lambda *_args, **_kwargs: refresh.pop(0))
+    monkeypatch.setattr(service, 'create_drafts_for_ready_batches', lambda *_args, **_kwargs: created.pop(0))
+    monkeypatch.setattr(service, 'regenerate_drafts_for_closed_batches', lambda *_args, **_kwargs: regenerated.pop(0))
+
+    result = service.refresh_drafts_until_stable(db_session, user=user, max_passes=3)
+
+    assert result['passes'] == 2
+    assert result['recovered_slates'] == 1
+    assert result['rebuilt_groups'] == 2
+    assert result['refreshed_drafts'] == 1
+    assert result['created_drafts'] == 1
+    assert result['regenerated_drafts'] == 0
+
+
+def test_materialize_listing_images_uses_long_tail_seo_filenames(db_session):
+    service = IntakeSlateService()
+    user = _create_user(db_session, email='seo-filenames@example.com')
+    item_id = 'SP-20260708-0001'
+    photo_one = IntakePhoto(
+        user_id=user.id,
+        source_provider='google_photos',
+        source_photo_id='photo-front',
+        local_path=_make_image_file('photo-front', 'white'),
+        original_filename='IMG_1234.JPG',
+        metadata_json={},
+        is_public_listing_candidate=True,
+    )
+    photo_two = IntakePhoto(
+        user_id=user.id,
+        source_provider='google_photos',
+        source_photo_id='photo-label',
+        local_path=_make_image_file('photo-label', 'white'),
+        original_filename='barcode-label.png',
+        metadata_json={},
+        is_public_listing_candidate=True,
+    )
+    db_session.add_all([photo_one, photo_two])
+    db_session.commit()
+
+    _public_urls, listing_images = service._materialize_listing_images(
+        item_id=item_id,
+        title='Keurig K-Compact Single Serve Coffee Maker Black',
+        photos=[photo_one, photo_two],
+    )
+
+    first_filename = listing_images[0]['metadata']['seo_filename']
+    second_filename = listing_images[1]['metadata']['seo_filename']
+
+    assert first_filename.startswith('keurig-k-compact-single-serve-coffee-maker-black-front-view-sp-20260708-0001-01')
+    assert second_filename.startswith('keurig-k-compact-single-serve-coffee-maker-black-label-detail-view-sp-20260708-0001-02')
+    assert first_filename.endswith('.jpg')
+    assert second_filename.endswith('.jpg')
+
+
+def test_monitor_google_album_includes_draft_stabilization_result(db_session, monkeypatch):
+    user = _create_user(db_session, email='monitor-stabilization@example.com')
+    service = IntakeSlateService()
+    service.save_settings(
+        db=db_session,
+        user=user,
+        payload={
+            'enabled': True,
+            'album_url': 'https://photos.app.goo.gl/monitor-stabilization',
+            'auto_draft_listing': False,
+        },
+    )
+    monkeypatch.setattr(service.google_photos, 'enumerate_photo_entries', lambda _url, **_kwargs: GooglePhotoEnumeration([], enumeration_complete=True))
+    monkeypatch.setattr(service, '_claim_source_poll_lease', lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(service, '_heartbeat_source_poll_lease', lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(service, '_release_source_poll_lease', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service, 'recover_existing_slates', lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(service, 'process_reconciliation_jobs', lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(service, 'refresh_drafts_until_stable', lambda *_args, **_kwargs: {'passes': 1, 'created_drafts': 0})
+
+    result = service.monitor_google_album(db_session, user=user)
+
+    assert result['draft_stabilization']['passes'] == 1
+    assert result['draft_stabilization']['created_drafts'] == 0
+
+
 def _monitor_listing_ai(monkeypatch, service):
     monkeypatch.setattr(service.ai, 'generate', lambda signals: {
         'title': signals.get('title_hint') or 'Intake item',
@@ -904,6 +1475,50 @@ def test_integrity_scan_persists_source_state_and_audit_event(db_session, monkey
     assert len(events) == 1
 
 
+def test_sync_google_album_truth_preserves_photos_with_provider_media_references(db_session, monkeypatch):
+    user = _create_user(db_session, email='truth-sync@example.com')
+    service = IntakeSlateService()
+    album_url = 'https://photos.app.goo.gl/truth-sync'
+    service.save_settings(db=db_session, user=user, payload={'enabled': True, 'album_url': album_url})
+    album_key = service._album_identifier(album_url)
+    photo = IntakePhoto(
+        user_id=user.id,
+        source_provider='google_photos',
+        source_photo_id='missing-from-album',
+        source_album_id=album_key,
+        local_path=_make_image_file('truth-sync-photo'),
+        metadata_json={},
+        is_slate=False,
+        is_public_listing_candidate=True,
+    )
+    db_session.add(photo)
+    db_session.flush()
+    source_state = service._source_state_for(db_session, user_id=user.id, provider='google_photos', source_key=album_key)
+    db_session.add(
+        IntakeProviderMedia(
+            user_id=user.id,
+            source_state_id=source_state.id,
+            provider='google_photos',
+            source_key=album_key,
+            provider_media_id='missing-from-album',
+            provider_url='https://photos.app.goo.gl/truth-sync/missing-from-album',
+            metadata_fingerprint='truth-sync-fingerprint',
+            intake_photo_id=photo.id,
+        )
+    )
+    db_session.commit()
+
+    monkeypatch.setattr(service.google_photos, 'extract_photo_entries', lambda _url: [])
+
+    result = service.sync_google_album_truth(db_session, user=user)
+    db_session.refresh(photo)
+
+    assert result['preserved'] == 1
+    assert result['removed'] == 0
+    assert photo.metadata_json['album_truth_action'] == 'preserved_for_review'
+    assert photo.metadata_json['album_truth_preserved_reason'] == 'provider_media_reference'
+
+
 def test_discovery_persists_entire_enumeration_before_chunked_processing(db_session, monkeypatch):
     """A chunk size bounds work, never visibility of an enumerated album."""
     user = _create_user(db_session, email='discovery-chunks@example.com')
@@ -944,6 +1559,62 @@ def test_discovery_persists_entire_enumeration_before_chunked_processing(db_sess
     assert db_session.query(IntakeProviderMedia).filter_by(user_id=user.id, processing_status='processed').count() == 125
     state = db_session.query(IntakeSourceState).filter_by(user_id=user.id).one()
     assert state.source_caught_up is True
+
+
+def test_create_drafts_for_ready_batches_respects_max_new_items_per_run(db_session):
+    user = _create_user(db_session, email='draft-cap@example.com')
+    service = IntakeSlateService()
+    service.save_settings(
+        db=db_session,
+        user=user,
+        payload={
+            'enabled': True,
+            'album_url': 'https://photos.app.goo.gl/draft-cap',
+            'auto_draft_listing': True,
+            'auto_draft_when_provisional': True,
+            'quiet_period_seconds': 0,
+            'max_new_items_per_run': 25,
+        },
+    )
+    start = datetime.now(UTC) - timedelta(hours=1)
+    for index in range(30):
+        slate, qr_payload, _ = service.create_slate(
+            db_session,
+            user=user,
+            payload={'session_id': f'CAP-{index:02d}', 'title': f'Item {index:02d}'},
+        )
+        slate_photo = IntakePhoto(
+            user_id=user.id,
+            source_provider='google_photos',
+            source_photo_id=f'cap-slate-{index:02d}',
+            local_path=_make_image_file(f'cap-slate-{index:02d}'),
+            captured_at=start + timedelta(minutes=index * 2),
+            imported_at=start + timedelta(minutes=index * 2),
+            metadata_json={'qr_payload': qr_payload},
+            is_slate=True,
+            is_internal_only=True,
+            is_public_listing_candidate=False,
+        )
+        product = IntakePhoto(
+            user_id=user.id,
+            source_provider='google_photos',
+            source_photo_id=f'cap-product-{index:02d}',
+            local_path=_make_image_file(f'cap-product-{index:02d}', 'orange'),
+            captured_at=start + timedelta(minutes=index * 2 + 1),
+            imported_at=start + timedelta(minutes=index * 2 + 1),
+            metadata_json={},
+            is_slate=False,
+            is_public_listing_candidate=True,
+        )
+        db_session.add_all([slate_photo, product])
+        db_session.commit()
+        service.rebuild_batches_for_user(db_session, user_id=user.id)
+
+    created = service.create_drafts_for_ready_batches(db_session, user_id=user.id, max_new_items_per_run=25)
+
+    assert created == 25
+    assert db_session.query(Listing).filter(Listing.user_id == user.id).count() == 25
+    assert db_session.query(IntakePhotoBatch).filter(IntakePhotoBatch.user_id == user.id, IntakePhotoBatch.draft_listing_id.isnot(None)).count() == 25
 
 
 def test_source_poll_lease_recovers_after_expiration(db_session):
@@ -1014,3 +1685,69 @@ def test_external_listing_reconciliation_preserves_snapshot_and_creates_review(d
     assert listing.image_urls == ['/old.jpg']
     assert event.details_json['before']['image_urls'] == ['/old.jpg']
     assert event.details_json['proposed']['requires_explicit_marketplace_update'] is True
+
+
+def test_purge_and_regenerate_bad_google_photos_drafts_preserves_recovery_vine_and_published_rows(db_session, monkeypatch):
+    user = _create_user(db_session, email='google-photos-rebuild@example.com')
+    service = IntakeSlateService()
+    bad_listing = Listing(
+        user_id=user.id,
+        source_type='google_photos_album',
+        status=ListingStatus.draft,
+        title='Google Photos intake draft',
+        description='Generated from monitored Google Photos album intake.',
+        image_urls=['/media/google-photos/bad.jpg'],
+        listing_images=[{'storage_path': '/media/google-photos/bad.jpg', 'source_platform': 'google_photos'}],
+        category_suggestion='General resale > Identity review required',
+    )
+    good_google_listing = Listing(
+        user_id=user.id,
+        source_type='google_photos_album',
+        status=ListingStatus.posted,
+        ebay_listing_id='12345',
+        title='Keurig K-Compact Single Serve Coffee Maker Black',
+        description='A real product listing description.',
+        image_urls=['/media/google-photos/good.jpg'],
+        listing_images=[{'storage_path': '/media/google-photos/good.jpg', 'source_platform': 'google_photos'}],
+        category_suggestion='Home & Garden > Kitchen, Dining & Bar > Coffee, Tea & Espresso Makers',
+    )
+    recovery_listing = Listing(
+        user_id=user.id,
+        source_type='media_inventory_recovery',
+        status=ListingStatus.draft,
+        title='Keurig K-Compact Single Serve Coffee Maker Black',
+        description='Keep me',
+    )
+    vine_listing = Listing(
+        user_id=user.id,
+        source_type='amazon_vine',
+        status=ListingStatus.draft,
+        title='Vine item',
+        description='Keep me too',
+    )
+    db_session.add_all([bad_listing, good_google_listing, recovery_listing, vine_listing])
+    db_session.commit()
+
+    monitor_calls = {}
+    monkeypatch.setattr(
+        service,
+        'monitor_google_album',
+        lambda db, user: monitor_calls.setdefault('called', True) or {
+            'scanned': 1,
+            'imported': 0,
+            'drafts_created': 0,
+            'duplicates': 0,
+        },
+    )
+
+    result = service.purge_and_regenerate_bad_google_photos_drafts(db_session, user=user)
+    db_session.expire_all()
+
+    assert result['purged_count'] == 1
+    assert result['purged_listing_ids'] == [bad_listing.id]
+    assert result['preserved_count'] == 2
+    assert monitor_calls.get('called') is True
+    assert db_session.get(Listing, bad_listing.id) is None
+    assert db_session.get(Listing, good_google_listing.id) is not None
+    assert db_session.get(Listing, recovery_listing.id) is not None
+    assert db_session.get(Listing, vine_listing.id) is not None

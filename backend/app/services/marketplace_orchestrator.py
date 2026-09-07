@@ -266,7 +266,10 @@ def enqueue_crosspost_job(
                 )
             )
 
-    task = process_marketplace_crosspost_job_task.delay(job.id)
+    # Broker priority is inverted: PosterPro priority 0 is highest.
+    task = process_marketplace_crosspost_job_task.apply_async(
+        args=[job.id], priority=max(0, 10 - max(0, min(10, int(getattr(job, "priority", 1) or 1))))
+    )
     job.task_id = task.id
     db.add(job)
     db.commit()

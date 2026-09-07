@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.api.schemas import BulkJobResponse, InventoryBulkEditRequest, InventoryBulkRequest, ListingResponse
+from app.api.schemas import BulkJobResponse, InventoryBulkEditRequest, InventoryBulkRequest, ListingResponse, RecoveryCopyRepairRequest
 from app.core.auth import ensure_user_owns_resource, get_current_user
 from app.core.database import get_db
 from app.models.models import BulkJob, Listing, User
@@ -79,6 +79,40 @@ def bulk_inventory(
         db,
         user_id=current_user.id,
         action=payload.action,
+        listing_ids=listing_ids,
+        payload=payload.payload or {},
+        filters=payload.filters.model_dump() if payload.filters else {},
+    )
+    return BulkJobResponse(
+        job_id=job.id,
+        action=job.action,
+        status=job.status,
+        total_items=job.total_items,
+        processed_items=job.processed_items,
+        error_count=job.error_count,
+        errors=job.errors or [],
+    )
+
+
+@router.post("/recovery-copy-repair", response_model=BulkJobResponse)
+def repair_recovery_copy(
+    payload: RecoveryCopyRepairRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    stmt = select(Listing.id).where(Listing.source_type == "media_inventory_recovery")
+    if not getattr(current_user, "is_admin", False):
+        stmt = stmt.where(Listing.user_id == current_user.id)
+    if payload.listing_ids:
+        stmt = stmt.where(Listing.id.in_(payload.listing_ids))
+    elif payload.filters and payload.filters.search:
+        term = f"%{payload.filters.search.strip()}%"
+        stmt = stmt.where(Listing.title.ilike(term))
+    listing_ids = [int(row[0]) for row in db.execute(stmt).all()]
+    job = service.queue_bulk_job(
+        db,
+        user_id=current_user.id,
+        action="repair_recovery_copy",
         listing_ids=listing_ids,
         payload=payload.payload or {},
         filters=payload.filters.model_dump() if payload.filters else {},

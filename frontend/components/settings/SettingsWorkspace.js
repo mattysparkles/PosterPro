@@ -3,7 +3,7 @@ import { cn } from '../../lib/utils';
 export function SettingsWorkspaceHero({ eyebrow, title, description, actions, stats = [] }) {
   return (
     <section className="rounded-[28px] border border-[var(--pp-border)] bg-[linear-gradient(135deg,#fffdf7_0%,#f7faff_48%,#ffffff_100%)] p-6 shadow-[0_20px_50px_rgba(16,24,40,0.08)]">
-      <div className="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
+      <div className="flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between">
         <div className="max-w-3xl">
           {eyebrow ? <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--pp-muted)]">{eyebrow}</p> : null}
           {title ? <h2 className="mt-2 font-[var(--pp-heading-font)] text-[2rem] font-semibold tracking-[-0.04em] text-[var(--pp-text)]">{title}</h2> : null}
@@ -27,7 +27,7 @@ export function SettingsWorkspaceHero({ eyebrow, title, description, actions, st
 }
 
 export function SettingsWorkspaceGrid({ children, className }) {
-  return <div className={cn('grid gap-6 xl:grid-cols-[minmax(0,1.25fr)_360px]', className)}>{children}</div>;
+  return <div className={cn('grid gap-6 sm:grid-cols-[minmax(0,1.25fr)_360px]', className)}>{children}</div>;
 }
 
 export function SettingsWorkspaceMain({ children, className }) {
@@ -35,7 +35,7 @@ export function SettingsWorkspaceMain({ children, className }) {
 }
 
 export function SettingsWorkspaceAside({ children, className }) {
-  return <aside className={cn('space-y-6 xl:sticky xl:top-[96px] xl:self-start', className)}>{children}</aside>;
+  return <aside className={cn('space-y-6 sm:sticky sm:top-[96px] sm:self-start', className)}>{children}</aside>;
 }
 
 export function SettingsWorkspaceRailCard({ title, description, children, tone = 'default', className }) {

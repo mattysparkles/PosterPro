@@ -1,0 +1,136 @@
+:root {
+  color-scheme: light;
+}
+
+body {
+  margin: 0;
+  width: 360px;
+  background: #f6f8fc;
+  color: #101828;
+  font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+}
+
+.hero,
+.card {
+  border: 1px solid #d0d7e2;
+  border-radius: 14px;
+  background: #ffffff;
+  padding: 14px;
+  box-shadow: 0 1px 3px rgba(16, 24, 40, 0.06);
+}
+
+.eyebrow {
+  margin: 0 0 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #667085;
+}
+
+h1 {
+  margin: 0;
+  font-size: 19px;
+}
+
+.lede {
+  margin: 6px 0 0;
+  color: #475467;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #344054;
+}
+
+label + label {
+  margin-top: 10px;
+}
+
+input,
+select {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 6px;
+  border: 1px solid #d0d5dd;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+  background: #fff;
+  color: #101828;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+button {
+  border: none;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.primary {
+  background: #2563eb;
+  color: white;
+}
+
+.secondary {
+  background: #e5edff;
+  color: #1d4ed8;
+}
+
+.tertiary {
+  width: 100%;
+  margin-top: 8px;
+  background: #f2f4f7;
+  color: #344054;
+}
+
+.row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+
+.row strong {
+  color: #344054;
+}
+
+.row span {
+  color: #475467;
+  text-align: right;
+  word-break: break-word;
+}
+
+.status {
+  margin: 0;
+  min-height: 88px;
+  border-radius: 10px;
+  background: #0f172a;
+  color: #dbeafe;
+  padding: 12px;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

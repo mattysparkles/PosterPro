@@ -14,6 +14,7 @@ from sqlalchemy import select
 from app.core.database import SessionLocal
 from app.models.models import Listing, MediaRecoveryItemGroup, MediaRecoveryMedia, MediaRecoveryPhotoEvidence, MediaRecoveryRun
 from app.services.marketplace_preflight import MarketplacePreflightService
+from app.services.listing_provenance import is_human_owned_field, mark_field_provenance
 from app.services.photo_enrichment import FULL_GROUP_EVIDENCE_PIPELINE_VERSION, PHOTO_EVIDENCE_PIPELINE_VERSION, PhotoEnrichmentService, quality_gate
 
 
@@ -22,8 +23,7 @@ def _safe(value):
 
 
 def _locked(listing: Listing, field: str) -> bool:
-    recovery = ((listing.source_metadata or {}).get("recovery") or {})
-    return field in set(recovery.get("operator_locked_fields") or [])
+    return is_human_owned_field(listing.source_metadata if isinstance(listing.source_metadata, dict) else {}, field)
 
 
 def select_validation_groups(db, run_id: int, limit: int = 20) -> list[MediaRecoveryItemGroup]:
@@ -98,21 +98,31 @@ def _payload_from_row(row: MediaRecoveryPhotoEvidence, media: MediaRecoveryMedia
 def _apply_coherent_synthesis(db, listing: Listing, group: MediaRecoveryItemGroup, synthesis: dict) -> bool:
     before = {field: getattr(listing, field) for field in ("title", "description", "category_suggestion", "item_specifics", "condition", "estimated_value", "listing_price")}
     identity = synthesis.get("identity") or {}
+    source = dict(listing.source_metadata or {})
     if not _locked(listing, "title") and identity.get("title"):
         listing.title = str(identity["title"])[:255]
+        source = mark_field_provenance(source, field="title", provenance="full_group_evidence_v2")
     if not _locked(listing, "category_suggestion") and synthesis.get("category"):
         listing.category_suggestion = str(synthesis["category"])[:255]
+        source = mark_field_provenance(source, field="category_suggestion", provenance="full_group_evidence_v2")
     if not _locked(listing, "item_specifics"):
         specifics = synthesis.get("item_specifics") if isinstance(synthesis.get("item_specifics"), dict) else {}
         listing.item_specifics = {**(listing.item_specifics or {}), **specifics}
+        source = mark_field_provenance(source, field="item_specifics", provenance="full_group_evidence_v2")
     if not _locked(listing, "condition") and synthesis.get("condition"):
         listing.condition = str(synthesis["condition"])[:64]
+        source = mark_field_provenance(source, field="condition", provenance="full_group_evidence_v2")
     if not _locked(listing, "description"):
         listing.description = (listing.description or "") + "\n\nFull-group evidence: " + str(synthesis.get("reason_selected") or "")
-    source = dict(listing.source_metadata or {}); recovery = dict(source.get("recovery") or {})
+        source = mark_field_provenance(source, field="description", provenance="full_group_evidence_v2")
+    recovery = dict(source.get("recovery") or {})
     recovery[FULL_GROUP_EVIDENCE_PIPELINE_VERSION] = synthesis
     recovery["quality_gate"] = synthesis.get("quality_gate")
     recovery["identity_status"] = "coherent_all_photo_evidence_v3"
+    recovery["field_provenance"] = {
+        **(recovery.get("field_provenance") or {}),
+        **{field: "full_group_evidence_v2" for field in ("title", "category_suggestion", "item_specifics", "condition", "description") if not _locked(listing, field)},
+    }
     recovery["before_after_diff_v3"] = {key: {"before": before[key], "after": getattr(listing, key)} for key in before if before[key] != getattr(listing, key)}
     source["recovery"] = recovery; listing.source_metadata = source
     return bool(recovery["before_after_diff_v3"])

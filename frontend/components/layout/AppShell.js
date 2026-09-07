@@ -1,11 +1,13 @@
 /* eslint-disable @next/next/no-html-link-for-pages */
 import Link from 'next/link';
 import { useRouter } from 'next/router';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   BarChart3,
   Bot,
   Briefcase,
+  Bell,
+  ChevronDown,
   FolderInput,
   LayoutDashboard,
   ListChecks,
@@ -21,9 +23,14 @@ import {
   Store,
   User,
   Wrench,
+  Puzzle,
+  QrCode,
+  Film,
 } from 'lucide-react';
+import toast from 'react-hot-toast';
 
 import { useAuth } from '../../contexts/AuthContext';
+import { fetchProcessNotifications, markAllProcessNotificationsRead, markProcessNotificationRead } from '../../lib/api';
 import Button from '../ui/button';
 import Drawer from '../ui/drawer';
 import Input from '../ui/input';
@@ -37,6 +44,8 @@ function buildNavGroups(user) {
       items: [
         { href: '/app', label: 'Dashboard', icon: LayoutDashboard },
         { href: '/intake', label: 'Intake', icon: FolderInput },
+        { href: '/intake/slate', label: 'Slate', icon: QrCode },
+        { href: '/intake/timeline', label: 'Photo Timeline', icon: Film },
         { href: '/listings', label: 'Listings', icon: ListChecks },
         { href: '/inventory', label: 'Inventory', icon: Package },
       ],
@@ -46,21 +55,32 @@ function buildNavGroups(user) {
       description: 'Publishing, offers, and sales.',
       items: [
         { href: '/publishing', label: 'Publishing', icon: Rocket },
+        { href: '/posterpro/storefront', label: 'Storefront', icon: Store },
         { href: '/sales', label: 'Sales', icon: ShoppingCart },
         { href: '/offers', label: 'Offers', icon: Store },
       ],
     },
-      {
-        label: 'System',
-        description: 'Settings, jobs, and reporting.',
-        items: [
-          { href: '/analytics', label: 'Analytics', icon: BarChart3 },
+    {
+      label: 'System',
+      description: 'Settings, jobs, and reporting.',
+      items: [
+        { href: '/analytics', label: 'Analytics', icon: BarChart3 },
+        { href: '/bridge-desktop', label: 'Marketplace Extension', icon: Puzzle },
+        { href: '/settings?tab=marketplaces', label: 'Marketplaces', icon: ShoppingCart },
         { href: '/settings/ebay', label: 'Marketplace setup', icon: Wrench },
-          { href: '/settings', label: 'Settings', icon: Settings2 },
-          { href: '/jobs', label: 'Jobs', icon: Briefcase },
-          ...(user?.can_access_vine_import ? [{ href: '/imports/vine', label: 'Vine Import', icon: ShieldCheck }] : []),
-        ],
+        { href: '/settings', label: 'Settings', icon: Settings2 },
+        { href: '/jobs', label: 'Jobs', icon: Briefcase },
+        { href: '/notices', label: 'Notices', icon: Bell },
+        ...(user?.can_access_vine_import ? [{ href: '/imports/vine', label: 'Vine Import', icon: ShieldCheck }] : []),
+      ],
       },
+    {
+      label: 'Account',
+      description: 'Profile and communication preferences.',
+      items: [
+        { href: '/settings?tab=profile', label: 'My account', icon: User },
+      ],
+    },
   ];
 }
 
@@ -77,9 +97,14 @@ function findActiveNavItem(navGroups, isSelected) {
 
 function NavGroup({ title, description, items, isSelected, onNavigate, collapsed = false }) {
   return (
-    <section className="pp-sidebar-panel p-3.5">
-      {!collapsed ? <p className="pp-sidebar-label px-2">{title}</p> : null}
-      {!collapsed && description ? <p className="px-2 pt-1 text-xs leading-5 text-[var(--pp-shell-soft-copy)]">{description}</p> : null}
+    <details className="group pp-sidebar-panel p-3.5" open={!collapsed}>
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded-[16px] px-2 py-1.5 outline-none">
+        <div className="min-w-0">
+          {!collapsed ? <p className="pp-sidebar-label">{title}</p> : null}
+          {!collapsed && description ? <p className="pt-1 text-xs leading-5 text-[var(--pp-shell-soft-copy)]">{description}</p> : null}
+        </div>
+        <ChevronDown size={16} className="shrink-0 text-[var(--pp-shell-soft-copy)] transition-transform duration-200 group-open:rotate-180" />
+      </summary>
       <div className="mt-3 space-y-2">
         {items.map((item) => {
           const Icon = item.icon;
@@ -106,14 +131,13 @@ function NavGroup({ title, description, items, isSelected, onNavigate, collapsed
               {!collapsed ? (
                 <span className="min-w-0">
                   <span className="block text-sm font-semibold leading-5">{item.label}</span>
-                  <span className="mt-0.5 block text-xs leading-5 text-[var(--pp-shell-soft-copy)]">{title}</span>
                 </span>
               ) : null}
             </Link>
           );
         })}
       </div>
-    </section>
+    </details>
   );
 }
 
@@ -132,6 +156,11 @@ export default function AppShell({
   const [searchValue, setSearchValue] = useState('');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [processNotifications, setProcessNotifications] = useState([]);
+  const [notificationUnreadCount, setNotificationUnreadCount] = useState(0);
+  const notificationsSeenRef = useRef(new Set());
+  const notificationsInitializedRef = useRef(false);
   const navGroups = buildNavGroups(user);
   const activePath = active || router.pathname;
   const activeHref = router.asPath || activePath;
@@ -148,8 +177,6 @@ export default function AppShell({
     );
   };
   const activeNav = findActiveNavItem(navGroups, isSelected);
-  const currentGroup = activeNav?.group || navGroups[0] || null;
-  const currentGroupItems = (Array.isArray(currentGroup?.items) ? currentGroup.items : []).filter(Boolean);
   const subnavSections = Array.isArray(subnav?.sections)
     ? subnav.sections
         .filter((section) => section && Array.isArray(section.items))
@@ -161,6 +188,8 @@ export default function AppShell({
 
   const contentWidthClass =
     contentWidth === 'narrow' ? 'max-w-[940px]' : contentWidth === 'wide' ? 'max-w-[1320px]' : 'max-w-[1180px]';
+  const sidebarWidthClass = sidebarCollapsed ? 'sm:w-[104px]' : 'sm:w-[340px]';
+  const contentPaddingClass = sidebarCollapsed ? 'sm:pl-[104px]' : 'sm:pl-[340px]';
 
   useEffect(() => {
     try {
@@ -184,10 +213,98 @@ export default function AppShell({
     });
   };
 
+  const handleMenuClick = () => {
+    // Desktop uses the persistent left rail; smaller screens use the drawer.
+    if (typeof window !== 'undefined' && window.matchMedia('(min-width: 640px)').matches) {
+      toggleSidebar();
+    } else {
+      setMobileMenuOpen(true);
+    }
+  };
+
   const submitSearch = (event) => {
     event.preventDefault();
     const value = searchValue.trim();
     router.push(value ? `/listings?q=${encodeURIComponent(value)}` : '/listings');
+  };
+
+  const loadProcessNotifications = useCallback(async () => {
+    if (!user?.id) return;
+    try {
+      const payload = await fetchProcessNotifications({ limit: 8, unreadOnly: false });
+      const rows = Array.isArray(payload?.notifications) ? payload.notifications : [];
+      const unreadCount = Number(payload?.unread_count || rows.filter((row) => !row.read_at).length || 0);
+      setProcessNotifications(rows);
+      setNotificationUnreadCount(unreadCount);
+
+      const nextIds = new Set(rows.map((row) => row.id));
+      if (!notificationsInitializedRef.current) {
+        notificationsSeenRef.current = nextIds;
+        notificationsInitializedRef.current = true;
+        return;
+      }
+
+      const newRows = rows.filter((row) => !notificationsSeenRef.current.has(row.id));
+      const shouldSuppressToast = (row) => {
+        const normalize = (value) => String(value || '').toLowerCase().replaceAll('_', ' ').replaceAll('-', ' ');
+        const type = normalize(row?.notification_type);
+        const title = normalize(row?.title);
+        const message = normalize(row?.message);
+        const combined = `${title} ${message}`;
+        return (
+          type.includes('blocked') ||
+          type.includes('generic_or_caption_identity') ||
+          type.includes('needs_image_identification') ||
+          type.includes('insufficient_identity_evidence') ||
+          type.includes('caption_identity') ||
+          combined.includes('needs attention') ||
+          combined.includes('generic or caption identity') ||
+          combined.includes('needs image identification') ||
+          combined.includes('insufficient identity evidence')
+        );
+      };
+      newRows.reverse().forEach((row) => {
+        if (shouldSuppressToast(row)) return;
+        const status = String(row?.metadata_json?.status || row?.metadata_json?.stage || '').toLowerCase();
+        const isError = ['failed', 'error', 'blocked'].some((token) => status.includes(token)) || /failed|error|blocked/i.test(`${row.title || ''} ${row.message || ''}`);
+        const message = row.message || row.title || 'Process update';
+        if (isError) {
+          toast.error(message);
+        } else if (status.includes('complete') || status.includes('completed') || status.includes('success')) {
+          toast.success(message);
+        } else {
+          toast(message);
+        }
+      });
+      notificationsSeenRef.current = nextIds;
+    } catch {
+      return;
+    }
+  }, [user?.id]);
+
+  useEffect(() => {
+    loadProcessNotifications();
+    const interval = window.setInterval(loadProcessNotifications, 15000);
+    return () => window.clearInterval(interval);
+  }, [loadProcessNotifications]);
+
+  const handleMarkNotificationRead = async (notificationId) => {
+    try {
+      await markProcessNotificationRead(notificationId);
+      await loadProcessNotifications();
+    } catch (error) {
+      toast.error(error.message || 'Could not mark notification read.');
+    }
+  };
+
+  const handleMarkAllNotificationsRead = async () => {
+    try {
+      await markAllProcessNotificationsRead();
+      await loadProcessNotifications();
+      toast.success('Process notifications cleared.');
+    } catch (error) {
+      toast.error(error.message || 'Could not clear notifications.');
+    }
   };
 
   const renderNav = (onNavigate) => (
@@ -292,22 +409,33 @@ export default function AppShell({
 
   return (
     <div className="posterpro-app-shell min-h-screen bg-[var(--pp-bg)] text-[var(--pp-text)]">
-      <div className={`grid min-h-screen ${sidebarCollapsed ? 'md:grid-cols-[104px_minmax(0,1fr)]' : 'md:grid-cols-[340px_minmax(0,1fr)]'}`}>
-        <aside className="pp-shell-sidebar-surface hidden md:block">
-          <div className="sticky top-0 h-screen overflow-y-auto px-4 py-5">{renderNav()}</div>
-        </aside>
+      <aside className={`pp-shell-sidebar-rail pp-shell-sidebar-surface ${sidebarWidthClass}`}>
+        <div className="h-full overflow-y-auto px-4 py-5">{renderNav()}</div>
+      </aside>
 
+      <div className={`min-h-screen min-w-0 ${contentPaddingClass}`}>
         <div className="pp-shell-content-wrap min-w-0">
           <header className="pp-shell-header-surface sticky top-0 z-30 backdrop-blur-xl">
             <div className="mx-auto flex w-full max-w-[1520px] items-center gap-3 px-4 py-3 md:px-6">
-              <Button variant="secondary" size="sm" className="gap-2 px-3 shadow-none" onClick={() => setMobileMenuOpen(true)} aria-label="Open navigation menu" title="Open navigation menu">
+              <Button variant="secondary" size="sm" className="inline-flex gap-2 px-3 shadow-none" onClick={handleMenuClick} aria-label="Open navigation menu" title="Open navigation menu">
                 <Menu size={18} />
                 Menu
               </Button>
               <Button
                 variant="secondary"
                 size="sm"
-                className="hidden gap-2 px-3 shadow-none xl:inline-flex"
+                className="fixed left-4 top-4 z-[120] gap-2 px-3 shadow-none sm:hidden"
+                onClick={() => setMobileMenuOpen(true)}
+                aria-label="Open navigation menu"
+                title="Open navigation menu"
+              >
+                <Menu size={18} />
+                Menu
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                className="hidden gap-2 px-3 shadow-none sm:inline-flex"
                 onClick={toggleSidebar}
                 aria-label={sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'}
                 title={sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'}
@@ -331,7 +459,7 @@ export default function AppShell({
                 </p>
               </div>
 
-              <form onSubmit={submitSearch} className="relative hidden xl:block">
+              <form onSubmit={submitSearch} className="relative hidden lg:block">
                 <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--pp-shell-soft-copy)]" size={16} />
                 <Input
                   aria-label="Global search"
@@ -350,6 +478,73 @@ export default function AppShell({
                 Settings
               </Button>
 
+              <div className="relative">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="inline-flex gap-2"
+                  onClick={() => setNotificationsOpen((current) => !current)}
+                  aria-label="Open process notifications"
+                >
+                  <Bell size={15} />
+                  {notificationUnreadCount ? <span className="inline-flex min-w-5 items-center justify-center rounded-full bg-[#b42318] px-1.5 py-0.5 text-[11px] font-semibold text-white">{notificationUnreadCount}</span> : null}
+                </Button>
+                {notificationsOpen ? (
+                  <div className="fixed right-3 top-[72px] z-50 mt-2 w-[min(360px,calc(100vw-24px))] max-h-[min(70vh,560px)] overflow-y-auto rounded-[18px] border border-[var(--pp-border)] bg-white p-3 shadow-[0_16px_40px_rgba(16,24,40,0.18)] sm:right-6">
+                    <div className="flex items-center justify-between gap-3 border-b border-[var(--pp-border)] pb-2">
+                      <div>
+                        <p className="text-sm font-semibold text-[var(--pp-text)]">Process notifications</p>
+                        <p className="text-xs text-[var(--pp-muted)]">Uploads, jobs, and workflow actions</p>
+                      </div>
+                      <div className="flex items-center gap-1"><Button size="sm" variant="ghost" onClick={handleMarkAllNotificationsRead} disabled={!notificationUnreadCount}>Mark all read</Button><Button size="sm" variant="ghost" href="/notices" onClick={() => setNotificationsOpen(false)}>View all</Button></div>
+                    </div>
+                    <div className="max-h-[420px] overflow-y-auto py-2">
+                      {processNotifications.length ? (
+                        processNotifications.map((notification) => (
+                          <button
+                            key={notification.id}
+                            type="button"
+                            className={`block w-full rounded-[14px] border px-3 py-3 text-left transition hover:bg-[#f9fafb] ${
+                              notification.read_at ? 'border-transparent' : 'border-[#bfd4ef] bg-[#f8fbff]'
+                            }`}
+                            onClick={async () => {
+                              if (notification.href) {
+                                await handleMarkNotificationRead(notification.id);
+                                router.push(notification.href);
+                              } else {
+                                await handleMarkNotificationRead(notification.id);
+                              }
+                              setNotificationsOpen(false);
+                            }}
+                          >
+                            <div className="flex items-start gap-2">
+                              <span className="mt-0.5">
+                                {String(notification.notification_type || '').includes('failed') || /failed|error|blocked/i.test(`${notification.title || ''} ${notification.message || ''}`) ? (
+                                  <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#fee4e2] text-[#b42318]">!</span>
+                                ) : (
+                                  <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#ecfdf3] text-[#027a48]">✓</span>
+                                )}
+                              </span>
+                              <div className="min-w-0 flex-1">
+                                <p className="truncate text-sm font-semibold text-[var(--pp-text)]">{notification.title || 'Process update'}</p>
+                                <p className="mt-1 text-xs leading-5 text-[var(--pp-muted)]">{notification.message || 'Workflow update'}</p>
+                                <p className="mt-1 text-[11px] text-[var(--pp-shell-soft-copy)]">
+                                  {notification.created_at ? new Date(notification.created_at).toLocaleString() : 'Just now'}
+                                </p>
+                              </div>
+                            </div>
+                          </button>
+                        ))
+                      ) : (
+                        <div className="rounded-[14px] border border-dashed border-[var(--pp-border)] px-3 py-6 text-center text-sm text-[var(--pp-muted)]">
+                          No recent process notifications.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+
               <button
                 type="button"
                 onClick={onToggleAutonomous}
@@ -364,25 +559,6 @@ export default function AppShell({
 
           <main className="mx-auto w-full max-w-[1520px] px-4 py-4 pb-20 md:px-6">
             <div className="space-y-4">
-              <nav aria-label={`${currentGroup?.label || 'Workspace'} shortcuts`} className="pp-shell-lane-strip flex items-center gap-2 overflow-x-auto px-1 py-1">
-                <span className="hidden shrink-0 text-xs font-semibold uppercase tracking-[0.12em] text-[var(--pp-muted)] lg:inline">
-                  {currentGroup?.label || 'Workspace'}
-                </span>
-                {currentGroupItems.map((item) => {
-                  const Icon = item.icon || Settings2;
-                  const selected = isSelected(item.href);
-                  return (
-                    <Link
-                      key={item.href}
-                      href={item.href}
-                      className={`pp-shell-lane-link shrink-0 ${selected ? 'is-active' : ''}`}
-                    >
-                      <span className="pp-shell-lane-icon"><Icon size={15} /></span>
-                      <span className="text-sm font-semibold">{item.label}</span>
-                    </Link>
-                  );
-                })}
-              </nav>
               {sectionBadge}
               <div className={`mx-auto w-full ${contentWidthClass} min-w-0 space-y-4 ${contentClassName}`}>{children}</div>
             </div>
@@ -390,7 +566,7 @@ export default function AppShell({
         </div>
       </div>
 
-      <Drawer open={mobileMenuOpen} onClose={() => setMobileMenuOpen(false)} title="Main menu" description="All core areas, marketplace setup, and settings are available here." widthClassName="max-w-[440px]">
+      <Drawer open={mobileMenuOpen} onClose={() => setMobileMenuOpen(false)} side="left" title="Main menu" description="All core areas, marketplace setup, and settings are available here." widthClassName="max-w-[440px]">
         <div className="space-y-4">{renderNav(() => setMobileMenuOpen(false))}</div>
       </Drawer>
     </div>

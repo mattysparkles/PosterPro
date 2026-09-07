@@ -173,10 +173,26 @@ export async function fetchListings(options = {}) {
   if (options.page) params.set('page', String(options.page));
   if (options.pageSize) params.set('page_size', String(options.pageSize));
   if (options.sourceType && options.sourceType !== 'all') params.set('source_type', options.sourceType);
+  if (options.marketplace && options.marketplace !== 'all') params.set('marketplace', options.marketplace);
+  if (options.readiness && options.readiness !== 'all') params.set('readiness', options.readiness);
   if (options.queue && options.queue !== 'all') params.set('queue', options.queue);
   if (options.search) params.set('search', options.search);
+  if (options.sortBy) params.set('sort_by', options.sortBy);
+  if (options.sortDir) params.set('sort_dir', options.sortDir);
+  if (options.summaryOnly) params.set('summary_only', 'true');
   const suffix = params.toString() ? `?${params.toString()}` : '';
   return jsonFetch(`${API_BASE}/listings${suffix}`, { timeoutMs: 60000 });
+}
+
+export async function fetchPublicStorefrontListings(options = {}) {
+  const params = new URLSearchParams();
+  if (options.page) params.set('page', String(options.page));
+  if (options.pageSize) params.set('page_size', String(options.pageSize));
+  if (options.search) params.set('search', options.search);
+  if (options.sortBy) params.set('sort_by', options.sortBy);
+  if (options.sortDir) params.set('sort_dir', options.sortDir);
+  const suffix = params.toString() ? `?${params.toString()}` : '';
+  return jsonFetch(`${API_BASE}/public/storefront/listings${suffix}`, { timeoutMs: 30000 });
 }
 
 export async function fetchIntakeSettings() {
@@ -188,6 +204,13 @@ export async function updateIntakeSettings(body) {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+  });
+}
+
+export async function setIntakeDraftingPaused(settings, paused) {
+  return updateIntakeSettings({
+    ...(settings || {}),
+    drafting_paused: Boolean(paused),
   });
 }
 
@@ -209,6 +232,61 @@ export async function createIntakeSlate(body) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+export async function analyzeVoiceIntake(body) {
+  return jsonFetch(`${API_BASE}/intake/voice/analyze`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function transcribeVoiceIntake(body) {
+  return jsonFetch(`${API_BASE}/intake/voice/transcribe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function retryIntakeSlateBridgeUpload(slateId) {
+  return jsonFetch(`${API_BASE}/intake/slates/${slateId}/bridge-upload`, {
+    method: "POST",
+  });
+}
+
+export async function printIntakeLabel(slateId) {
+  return jsonFetch(`${API_BASE}/intake/slates/${slateId}/label/print`, {
+    method: "POST",
+  });
+}
+
+export async function markIntakeLabelWrittenOnBox(slateId) {
+  return jsonFetch(`${API_BASE}/intake/slates/${slateId}/label/write-on-box`, {
+    method: "POST",
+  });
+}
+
+export async function fetchGooglePhotosStatus() {
+  return jsonFetch(`${API_BASE}/intake/google-photos/status`);
+}
+
+export async function fetchGooglePhotosAuthUrl() {
+  return jsonFetch(`${API_BASE}/intake/google-photos/auth/url`);
+}
+
+export function getGooglePhotosConnectUrl() {
+  return `${API_BASE}/intake/google-photos/connect`;
+}
+
+export async function startGooglePhotosOAuth() {
+  const payload = await fetchGooglePhotosAuthUrl();
+  const authUrl = String(payload?.auth_url || '').trim();
+  if (!authUrl) {
+    throw new Error('Google Photos OAuth URL was not returned by the server.');
+  }
+  return payload;
 }
 
 export async function updateIntakeSlate(slateId, body) {
@@ -251,6 +329,10 @@ export async function runIntakeIntegrityScan() {
 
 export async function fetchIntakeTimeline() {
   return jsonFetch(`${API_BASE}/intake/timeline`);
+}
+
+export async function createRetroactiveSlate(body) {
+  return jsonFetch(`${API_BASE}/intake/slates/retroactive`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 }
 
 export async function assignIntakeUnassignedPhotos(body) {
@@ -312,10 +394,53 @@ export async function backfillVineListingImages(options = {}) {
   if (options.forceRefresh != null) url.searchParams.set("force_refresh", String(Boolean(options.forceRefresh)));
   if (options.strictMatch != null) url.searchParams.set("strict_match", String(Boolean(options.strictMatch)));
   if (options.onlyMissingImages != null) url.searchParams.set("only_missing_images", String(Boolean(options.onlyMissingImages)));
+  if (options.sinceOrderDate) url.searchParams.set("since_order_date", String(options.sinceOrderDate));
+  if (Number.isFinite(Number(options.limit))) url.searchParams.set("limit", String(Number(options.limit)));
+  if (Array.isArray(options.listingIds) && options.listingIds.length) {
+    options.listingIds.forEach((listingId) => {
+      if (Number.isFinite(Number(listingId))) {
+        url.searchParams.append("listing_ids", String(Number(listingId)));
+      }
+    });
+  }
+  return jsonFetch(url.toString().replace(window.location.origin, ""), {
+    method: "POST",
+  });
+}
+
+export async function refreshVineListingMetadata(options = {}) {
+  const url = new URL(`${API_BASE}/listings/vine/refresh-metadata`, window.location.origin);
+  if (options.includeArchived != null) url.searchParams.set("include_archived", String(Boolean(options.includeArchived)));
+  if (options.sinceOrderDate) url.searchParams.set("since_order_date", String(options.sinceOrderDate));
   if (Number.isFinite(Number(options.limit))) url.searchParams.set("limit", String(Number(options.limit)));
   return jsonFetch(url.toString().replace(window.location.origin, ""), {
     method: "POST",
   });
+}
+
+export async function repairAllVineListingImages(options = {}) {
+  const url = new URL(`${API_BASE}/listings/vine/repair-all-images`, window.location.origin);
+  if (options.includeArchived != null) url.searchParams.set("include_archived", String(Boolean(options.includeArchived)));
+  if (options.forceRefresh != null) url.searchParams.set("force_refresh", String(Boolean(options.forceRefresh)));
+  if (options.useBridgeSession != null) url.searchParams.set("use_bridge_session", String(Boolean(options.useBridgeSession)));
+  if (options.onlyMissingImages != null) url.searchParams.set("only_missing_images", String(Boolean(options.onlyMissingImages)));
+  if (Number.isFinite(Number(options.limit))) url.searchParams.set("limit", String(Number(options.limit)));
+  if (Number.isFinite(Number(options.chunkSize))) url.searchParams.set("chunk_size", String(Number(options.chunkSize)));
+  return jsonFetch(url.toString().replace(window.location.origin, ""), {
+    method: "POST",
+  });
+}
+
+export async function fetchListingPage(params = {}) {
+  const url = new URL(`${API_BASE}/listings`);
+  if (params.page) url.searchParams.set("page", String(params.page));
+  if (params.pageSize) url.searchParams.set("page_size", String(params.pageSize));
+  if (params.sourceType && params.sourceType !== "all") url.searchParams.set("source_type", params.sourceType);
+  if (params.queue && params.queue !== "all") url.searchParams.set("queue", params.queue);
+  if (params.search) url.searchParams.set("search", params.search);
+  if (params.sortBy) url.searchParams.set("sort_by", params.sortBy);
+  if (params.sortDir) url.searchParams.set("sort_dir", params.sortDir);
+  return jsonFetch(url.toString());
 }
 
 export async function fetchListing(id) {
@@ -350,6 +475,17 @@ export async function fetchCrosspostJobs(id) {
   return jsonFetch(`${API_BASE}/listings/${id}/crosspost-jobs`);
 }
 
+export async function searchEbayCategories(query) {
+  return jsonFetch(`${API_BASE}/ebay/taxonomy/suggestions?q=${encodeURIComponent(query)}`);
+}
+export async function browseEbayCategories(parentCategoryId = "") {
+  const query = parentCategoryId ? `?parent_category_id=${encodeURIComponent(parentCategoryId)}` : "";
+  return jsonFetch(`${API_BASE}/ebay/taxonomy/browse${query}`);
+}
+export async function classifyTimelineAssets(photoIds, classification) { return jsonFetch(`${API_BASE}/intake/timeline/classify`, { method: 'POST', body: JSON.stringify({ photo_ids: photoIds, classification }) }); }
+export async function resetTimelineClassifications(options = {}) { return jsonFetch(`${API_BASE}/intake/timeline/reset-classifications`, { method: 'POST', body: JSON.stringify(options) }); }
+export async function reprioritizeCorrectionJob(jobId, priority) { return jsonFetch(`${API_BASE}/marketplace-jobs/correction-jobs/${jobId}/priority`, { method: 'PATCH', body: JSON.stringify({ priority }) }); }
+
 export async function createMarketplaceImportJob(body) {
   return jsonFetch(`${API_BASE}/imports/marketplaces/jobs`, {
     method: "POST",
@@ -382,6 +518,51 @@ export async function fetchMarketplaceJobsOverview(options = {}) {
     url.searchParams.set("compact", String(Boolean(options.compact)));
   }
   return jsonFetch(url.toString().replace(window.location.origin, ""));
+}
+
+export async function fetchProcessingHealth() {
+  return jsonFetch(`${API_BASE}/processing/health`);
+}
+
+export async function fetchProcessingBlockers(reason, limit = 100) {
+  const params = new URLSearchParams({ reason: String(reason || ""), limit: String(limit) });
+  return jsonFetch(`${API_BASE}/processing/blockers?${params.toString()}`);
+}
+
+export async function fetchProcessNotifications(options = {}) {
+  const url = new URL(`${API_BASE}/notifications`, window.location.origin);
+  url.searchParams.set("limit", String(Number.isFinite(Number(options.limit)) ? Number(options.limit) : 20));
+  url.searchParams.set("unread_only", options.unreadOnly ? "1" : "0");
+  url.searchParams.set("offset", String(Number.isFinite(Number(options.offset)) ? Number(options.offset) : 0));
+  return jsonFetch(url.toString().replace(window.location.origin, ""));
+}
+
+export async function markProcessNotificationRead(notificationId) {
+  return jsonFetch(`${API_BASE}/notifications/${notificationId}/read`, {
+    method: "POST",
+  });
+}
+
+export async function markAllProcessNotificationsRead() {
+  return jsonFetch(`${API_BASE}/notifications/read-all`, {
+    method: "POST",
+  });
+}
+
+export async function bulkProcessNotifications(notificationIds, action, options = {}) {
+  return jsonFetch(`${API_BASE}/notifications/bulk`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ notification_ids: notificationIds, action, select_all: Boolean(options.selectAll) }),
+  });
+}
+
+export async function bulkRequeueMarketplaceJobs({ statuses = ["failed"], jobTypes = ["crosspost", "import"] } = {}) {
+  return jsonFetch(`${API_BASE}/marketplace-jobs/bulk-requeue`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ statuses, job_types: jobTypes }),
+  });
 }
 
 export async function fetchCrosspostJob(jobId) {
@@ -504,6 +685,15 @@ export async function updateListing(id, body) {
   });
 }
 
+export async function savePublishListingChanges(id, body) {
+  return jsonFetch(`${API_BASE}/listings/${id}/save-publish-changes`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    timeoutMs: 30000,
+  });
+}
+
 export async function uploadListingPhotos(listingId, { files = [], role, note, source = "actual_upload", operatorState = "suggested" } = {}) {
   const form = new FormData();
   (files || []).forEach((file) => form.append("photos", file));
@@ -601,11 +791,11 @@ export async function generateListing(id) {
   });
 }
 
-export async function requestListingRevision(id, fields = [], note = "") {
+export async function requestListingRevision(id, fields = [], note = "", priority = 0) {
   return jsonFetch(`${API_BASE}/listings/${id}/request-revision`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ fields, note }),
+    body: JSON.stringify({ fields, note, priority }),
   });
 }
 
@@ -887,11 +1077,12 @@ export async function toggleAutonomousMode(enabled) {
   });
 }
 
-export async function runDashboardOperatorCommand(body = {}) {
+export async function runDashboardOperatorCommand(body = {}, { timeoutMs = 180000 } = {}) {
   return jsonFetch(`${API_BASE}/dashboard/operator-command`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    timeoutMs,
   });
 }
 
@@ -992,6 +1183,7 @@ export async function uploadVineReport(file) {
   return jsonFetch(`${API_BASE}/imports/vine/upload`, {
     method: "POST",
     body: form,
+    timeoutMs: 300000,
   });
 }
 
@@ -1021,9 +1213,17 @@ export async function repairVineImages(batchId, itemIds) {
   });
 }
 
+export async function refreshVineDraftMetadata(batchId) {
+  return jsonFetch(`${API_BASE}/imports/vine/batches/${batchId}/refresh-drafts`, {
+    method: "POST",
+    timeoutMs: 0,
+  });
+}
+
 export async function createVineInventory(batchId, itemIds, includeLocked = true, includeCancelled = false) {
   return jsonFetch(`${API_BASE}/imports/vine/batches/${batchId}/create-inventory`, {
     method: "POST",
+    timeoutMs: 0,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ item_ids: itemIds, include_locked: includeLocked, include_cancelled: includeCancelled }),
   });

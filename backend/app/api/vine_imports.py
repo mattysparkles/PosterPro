@@ -15,7 +15,9 @@ from app.api.schemas import (
 from app.core.auth import ensure_user_owns_resource, ensure_vine_access, get_current_user
 from app.core.database import get_db
 from app.models.models import VineImportBatch, VineImportItem, User
+from app.services.process_notifications import create_process_notification
 from app.services.vine_import_service import VineImportService
+from app.workers.tasks import repair_recent_vine_images_task
 
 router = APIRouter(prefix="/imports/vine", tags=["vine-imports"])
 service = VineImportService()
@@ -32,6 +34,16 @@ async def upload_vine_report(
     payload = await file.read()
     user_id = getattr(current_user, "id", None)
     try:
+        create_process_notification(
+            db,
+            user_id=user_id,
+            notification_type="vine_import",
+            title="Vine upload received",
+            message=f"Parsing {file.filename or 'Vine report'} and preparing draft build.",
+            href="/imports/vine",
+            metadata_json={"stage": "upload_received", "filename": file.filename or "vine-report"},
+        )
+        db.commit()
         batch = service.create_batch_from_upload(
             db,
             current_user=current_user,
@@ -46,14 +58,53 @@ async def upload_vine_report(
         logger.exception("Vine report upload parse failed", extra={"upload_filename": file.filename, "user_id": user_id})
         raise HTTPException(status_code=400, detail=f"Vine report upload failed: {exc}") from exc
     try:
+        create_process_notification(
+            db,
+            user_id=current_user.id,
+            notification_type="vine_import",
+            title="Vine draft build started",
+            message=f"Batch #{batch.id} is being converted into listings.",
+            href="/imports/vine?batch=" + str(batch.id),
+            metadata_json={"stage": "draft_build_started", "batch_id": batch.id},
+        )
+        db.commit()
         service.auto_build_batch_drafts(
             db,
             batch=batch,
             item_ids=None,
             new_only=True,
-            include_cancelled=False,
+            include_cancelled=True,
         )
+        try:
+            repair_recent_vine_images_task.delay(current_user.id)
+        except Exception as task_exc:  # noqa: BLE001
+            logger.warning(
+                "Vine image retry queue unavailable; continuing without background enqueue",
+                extra={"batch_id": batch.id, "user_id": user_id, "error": str(task_exc)},
+            )
+            batch = db.get(VineImportBatch, batch.id)
+            if batch is not None:
+                current_stats = dict(batch.stats_json or {})
+                current_stats["recent_image_retry_enqueue_error"] = str(task_exc)
+                batch.stats_json = current_stats
+                db.add(batch)
+                db.commit()
         db.refresh(batch)
+        create_process_notification(
+            db,
+            user_id=current_user.id,
+            notification_type="vine_import",
+            title="Vine draft build complete",
+            message=f"Batch #{batch.id} finished with {batch.drafts_created_count or 0} draft(s).",
+            href="/imports/vine?batch=" + str(batch.id),
+            metadata_json={
+                "stage": "draft_build_completed",
+                "batch_id": batch.id,
+                "drafts_created_count": batch.drafts_created_count or 0,
+                "parsed_count": batch.parsed_count,
+            },
+        )
+        db.commit()
     except Exception as exc:
         db.rollback()
         logger.exception("Vine report auto-build failed", extra={"batch_id": batch.id, "user_id": user_id})
@@ -64,7 +115,16 @@ async def upload_vine_report(
             batch.stats_json = current_stats
             db.add(batch)
             db.commit()
-            db.refresh(batch)
+        create_process_notification(
+            db,
+            user_id=user_id,
+            notification_type="vine_import",
+            title="Vine draft build failed",
+            message=str(exc),
+            href="/imports/vine?batch=" + str(batch.id),
+            metadata_json={"stage": "draft_build_failed", "batch_id": batch.id, "error": str(exc)},
+        )
+        db.commit()
     items = db.execute(select(VineImportItem).where(VineImportItem.batch_id == batch.id).order_by(VineImportItem.id.asc())).scalars().all()
     return VineImportBatchResponse.model_validate({**batch.__dict__, "items": items})
 
@@ -215,13 +275,31 @@ def auto_build_vine_drafts(
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
     ensure_user_owns_resource(current_user, batch.user_id)
-    return service.auto_build_batch_drafts(
+    result = service.auto_build_batch_drafts(
         db,
         batch=batch,
         item_ids=payload.item_ids,
         new_only=payload.new_only,
         include_cancelled=payload.include_cancelled,
     )
+    repair_recent_vine_images_task.delay(current_user.id)
+    return result
+
+
+@router.post("/batches/{batch_id}/refresh-drafts")
+def refresh_vine_draft_metadata(
+    batch_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ensure_vine_access(current_user)
+    batch = db.get(VineImportBatch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    ensure_user_owns_resource(current_user, batch.user_id)
+    result = service.refresh_batch_drafts_from_stored_amazon_facts(db, batch=batch)
+    repair_recent_vine_images_task.delay(current_user.id)
+    return result
 
 
 @router.patch("/items/{item_id}", response_model=VineImportItemResponse)

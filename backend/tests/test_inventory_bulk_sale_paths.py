@@ -118,3 +118,64 @@ def test_storage_unit_processing_sets_inventory_and_sale_detection_metadata(monk
     assert listing.marketplace_data["ingestion_source"] == "autonomous_storage_batch"
     assert listing.last_refreshed is not None
     db.close()
+
+
+def test_bulk_repair_recovery_copy_rewrites_generic_copy_and_keeps_recovery_listing():
+    db = SessionLocal()
+    user = User(email=f"recovery-copy-{uuid4()}@example.com")
+    db.add(user)
+    db.flush()
+    listing = Listing(
+        user_id=user.id,
+        status=ListingStatus.draft,
+        title="Keurig K-Compact Single Serve Coffee Maker Black",
+        description="Recovered from preserved inventory photos. Review the attached photos before publishing.",
+        source_type="media_inventory_recovery",
+        category_suggestion="General resale > Identity review required",
+        item_specifics={
+            "Brand": "Keurig",
+            "Model": "K-Compact",
+            "Type": "Single Serve Coffee Maker",
+            "Compatible Capsule/Pad System": "K-Cup",
+        },
+        tags=["keurig", "coffee maker"],
+        condition_data={"item_condition_notes": "Light wear", "included_accessories": "Coffee maker only"},
+        shipping_profile={"package_weight": "9 lb (estimated)", "package_dimensions": {"length": 16, "width": 14, "height": 12}},
+        listing_price=39.99,
+        suggested_price=39.99,
+        buy_it_now_price=39.99,
+    )
+    db.add(listing)
+    db.flush()
+    job = BulkJob(
+        id=f"job-{uuid4()}",
+        user_id=user.id,
+        action="repair_recovery_copy",
+        status="queued",
+        total_items=1,
+        processed_items=0,
+        errors=[],
+        error_count=0,
+        payload={},
+        filters={},
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(listing)
+    db.refresh(job)
+
+    result = tasks.bulk_process_inventory_chunk(
+        job_id=job.id,
+        action="repair_recovery_copy",
+        payload={},
+        listing_ids=[listing.id],
+        batch_index=0,
+    )
+    assert result["processed"] == 1
+
+    db.refresh(listing)
+    assert "Recovered from preserved inventory photos" not in listing.description
+    assert "presented as a product listing" in listing.description
+    assert listing.category_suggestion != "General resale > Identity review required"
+    assert listing.source_metadata["recovery"]["copy_repair"]["description_rewritten"] is True
+    db.close()

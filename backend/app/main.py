@@ -1,6 +1,9 @@
 import asyncio
 import contextlib
 import logging
+import subprocess
+from datetime import datetime, UTC
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -21,6 +24,9 @@ from app.api.inventory import router as inventory_router
 from app.api.intelligence import router as intelligence_router
 from app.api.intake import router as intake_router
 from app.api.media import router as media_router
+from app.api.browser_extension import router as browser_extension_router
+from app.api.processing import router as processing_router
+from app.api.notifications import router as notifications_router
 from app.api.marketplaces import router as marketplaces_router
 from app.api.marketplace_jobs import router as marketplace_jobs_router
 from app.api.routes import router
@@ -32,6 +38,7 @@ from app.core.database import Base, SessionLocal, engine
 from app.models.models import User
 from app.services.automation_bridge import AutomationBridgeError, get_bridge_connect_session
 from app.services.bridge_desktop import BridgeDesktopTokenError, bridge_desktop_target, parse_bridge_desktop_token
+from app.services.intake_slate import IntakeSlateService
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +167,8 @@ def _repair_unsafe_vine_images_on_startup() -> dict[str, object]:
     environment = str(settings.environment or "").strip().lower()
     if environment not in {"production", "staging"}:
         return {"ran": False, "reason": "environment_not_production"}
+    if not settings.startup_vine_image_repair_enabled:
+        return {"ran": False, "reason": "startup_vine_image_repair_disabled"}
     if not settings.amazon_vine_import_enabled:
         return {"ran": False, "reason": "vine_import_disabled"}
     if settings.autonomous_dry_run:
@@ -212,16 +221,187 @@ def _repair_unsafe_vine_images_on_startup() -> dict[str, object]:
         "unsafe_listing_count": sum(len(listing_ids) for listing_ids in repair_map.values()),
     }
 
+
+def _run_live_intake_probe() -> None:
+    started_at = datetime.now(UTC).isoformat()
+    probe_state: dict[str, object] = {
+        "status": "running",
+        "started_at": started_at,
+        "probe_type": "synthetic_openai_and_google_intake",
+    }
+    app.state.live_intake_probe = probe_state
+    db = SessionLocal()
+    try:
+        from uuid import uuid4
+
+        from app.models.models import IntakeSlate, User
+        from app.services.google_photos_oauth import get_google_photos_oauth_state
+
+        service = IntakeSlateService()
+        users = db.execute(select(User).order_by(User.id.asc())).scalars().all()
+        user = None
+        for candidate in users:
+            settings_payload = service.settings_for_user(candidate)
+            if str(settings_payload.get("album_url") or settings_payload.get("folder_id") or "").strip():
+                user = candidate
+                break
+        if user is None and users:
+            user = users[0]
+        if user is None:
+            probe_state.update({"status": "blocked", "reason": "no_users"})
+            return
+
+        google_refresh_probe = {"attempted": False}
+        try:
+            from app.services.google_photos_oauth import refresh_google_photos_access_token
+            oauth_raw = (getattr(user, "settings_json", None) or {}).get("google_photos_oauth") or {}
+            if oauth_raw.get("refresh_token_enc"):
+                google_refresh_probe["attempted"] = True
+                refresh_google_photos_access_token(user, db)
+                google_refresh_probe["result"] = "refreshed"
+        except Exception as exc:
+            google_refresh_probe["error"] = str(exc)[:240]
+        try:
+            from app.services.google_photos_oauth import _access_token_for_user, fetch_userinfo
+            import asyncio
+            token = _access_token_for_user(user, db)
+            asyncio.run(fetch_userinfo(token))
+            google_refresh_probe["userinfo"] = "valid"
+        except Exception as exc:
+            google_refresh_probe["userinfo_error"] = str(exc)[:240]
+
+        transcript = (
+            "This is a Ryobi battery adapter. I have three of them. They are new open box. "
+            "Sell them individually. I do not know the exact model, so identify that from the photos. "
+            "Research recent sold comps. I want eBay, Facebook and Mercari."
+        )
+        voice_result = service.build_voice_intelligence(
+            user=user,
+            slate=None,
+            transcript=transcript,
+            notes="Synthetic production probe",
+            current_form={"title": "", "brand": "", "model": "", "condition": ""},
+            current_session={"default_location": "Probe Location"},
+            db=db,
+        )
+        item_id = f"PROBE-{uuid4().hex[:8].upper()}"
+        slate = IntakeSlate(
+            user_id=user.id,
+            session_id=f"probe-{uuid4().hex[:8]}",
+            item_id=item_id,
+            box_id="PROBE-BOX-1",
+            location="Probe Location",
+            title=str(voice_result.get("title") or "Ryobi battery adapter"),
+            brand=str((voice_result.get("item_specifics") or {}).get("Brand") or ""),
+            model=str((voice_result.get("item_specifics") or {}).get("Model") or ""),
+            condition=str(voice_result.get("condition") or "New open box"),
+            status="draft",
+        )
+        qr_payload = {
+            "type": "HEAD SLATE",
+            "version": 1,
+            "canonical_item_uuid": str(uuid4()),
+            "display_item_number": 999001,
+            "display_box_number": 999501,
+            "session_id": slate.session_id,
+            "item_id": slate.item_id,
+            "box_id": slate.box_id,
+            "location": slate.location,
+            "title": slate.title,
+            "brand": slate.brand,
+            "model": slate.model,
+            "condition": slate.condition,
+            "notes": "Synthetic production probe",
+            "flaws": "",
+            "weight": "",
+            "length": "",
+            "width": "",
+            "height": "",
+            "quantity": "3",
+            "packed": False,
+            "boundary_position": "start",
+            "created_at": datetime.now(UTC).astimezone().isoformat(),
+            "label_copies": 2,
+        }
+        rendered_slate = service.render_slate_preview_asset(qr_payload, item_id=slate.item_id, session_id=slate.session_id)
+        rendered_label = service.render_label_preview_asset(qr_payload, item_id=slate.item_id, session_id=slate.session_id)
+        bridge_upload = service.queue_rendered_slate_upload(
+            db,
+            user=user,
+            slate=slate,
+            qr_payload=qr_payload,
+            rendered_asset=rendered_slate,
+            suppress_notifications=True,
+        )
+        probe_state.update(
+            {
+                "status": "completed",
+                "completed_at": datetime.now(UTC).isoformat(),
+                "user_id": user.id,
+                "openai": {
+                    "generation_source": voice_result.get("generation_source"),
+                    "model": voice_result.get("model_used"),
+                    "schema_version": voice_result.get("schema_version"),
+                    "request_id": (voice_result.get("ai_metadata") or {}).get("request_id"),
+                    "request_timestamp": (voice_result.get("ai_metadata") or {}).get("request_timestamp"),
+                    "latency_ms": (voice_result.get("ai_metadata") or {}).get("latency_ms"),
+                    "validation_status": (voice_result.get("ai_metadata") or {}).get("validation_status"),
+                    "validation_errors": (voice_result.get("ai_metadata") or {}).get("validation_errors"),
+                    "structured_json_valid": bool(voice_result.get("structured_listing_json")),
+                    "structured_listing_json": voice_result.get("structured_listing_json"),
+                    "marketplace_targets": voice_result.get("marketplace_targets"),
+                    "title": voice_result.get("title"),
+                    "condition": voice_result.get("condition"),
+                },
+                "google": {
+                    "refresh_probe": google_refresh_probe,
+                    "oauth": get_google_photos_oauth_state(user),
+                    "album_url": bridge_upload.get("target_album_url"),
+                    "status": bridge_upload.get("status"),
+                    "job_type": bridge_upload.get("job_type"),
+                    "execution_mode": bridge_upload.get("execution_mode"),
+                    "bridge_submission": bridge_upload.get("bridge_submission"),
+                    "bridge_status": bridge_upload.get("status"),
+                    "error": bridge_upload.get("error"),
+                    "google_media_id": bridge_upload.get("google_media_id"),
+                    "album_id": bridge_upload.get("album_id"),
+                    "upload_method": bridge_upload.get("execution_mode"),
+                    "rendered_slate_url": rendered_slate.get("storage_path"),
+                    "rendered_label_url": rendered_label.get("storage_path"),
+                },
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Live intake probe failed")
+        probe_state.update({"status": "failed", "completed_at": datetime.now(UTC).isoformat(), "error": str(exc)})
+    finally:
+        db.close()
+        app.state.live_intake_probe = probe_state
+
 app = FastAPI(title="PosterPro API")
+
+@app.get("/deployment")
+def deployment_identity():
+    """Non-secret build identity used to verify the public deployment path."""
+    repo = Path(__file__).resolve().parents[2]
+    try:
+        commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True, timeout=2).strip()
+    except Exception:
+        commit = "unknown"
+    return {"backend_build_id": commit, "source_repo": str(repo), "build_timestamp": datetime.now(UTC).isoformat()}
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins(),
+    allow_origin_regex=r"chrome-extension://.*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 app.include_router(auth_router)
 app.include_router(ebay_router)
+app.include_router(browser_extension_router)
+app.include_router(processing_router)
+app.include_router(notifications_router)
 app.include_router(marketplaces_router)
 app.include_router(marketplace_jobs_router)
 app.include_router(intelligence_router)
@@ -243,6 +423,9 @@ def startup() -> None:
         app.state.database_ready = True
         app.state.database_error = None
         app.state.bootstrap_summary = {**bootstrap_summary, "vine_image_repair": vine_repair_summary}
+        app.state.live_intake_probe = {"status": "pending", "probe_type": "synthetic_openai_and_google_intake"}
+        if settings.environment.lower() in {"production", "staging"}:
+            threading.Thread(target=_run_live_intake_probe, daemon=True).start()
     except SQLAlchemyError as exc:
         logger.exception("PosterPro database bootstrap failed")
         app.state.database_ready = False
@@ -324,7 +507,10 @@ async def _intake_monitor_loop() -> None:
 
 @app.on_event("startup")
 async def startup_intake_monitor() -> None:
-    app.state.intake_monitor_task = asyncio.create_task(_intake_monitor_loop())
+    if settings.intake_monitor_enabled:
+        app.state.intake_monitor_task = asyncio.create_task(_intake_monitor_loop())
+    else:
+        app.state.intake_monitor_task = None
 
 
 @app.on_event("shutdown")
@@ -347,6 +533,7 @@ def health():
         "startup_schema_compat_enabled": bool(bootstrap_summary.get("startup_schema_compat_enabled", settings.startup_schema_compat_enabled)),
         "legacy_schema_columns_applied": bootstrap_summary.get("legacy_schema_columns_applied", []),
         "vine_image_repair": bootstrap_summary.get("vine_image_repair", {}),
+        "live_intake_probe": getattr(app.state, "live_intake_probe", None),
     }
     if database_ready:
         return payload

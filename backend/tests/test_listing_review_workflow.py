@@ -47,6 +47,18 @@ def test_listing_review_metadata_persists_on_listing_model(db_session):
     assert listing.shipping_profile["manual_measurement_needed"] is True
 
 
+def test_missing_shipping_data_gets_draft_estimate():
+    shipping = derive_shipping_profile(
+        listing={"title": "Ryobi Battery Adapter", "description": "New open box"},
+        existing={},
+    )
+    assert shipping["package_weight"] == 1.0
+    assert shipping["package_dimensions"] == {"length": 10, "width": 8, "height": 4}
+    assert shipping["estimated"] is True
+    assert "package_weight" in shipping["estimated_fields"]
+    assert shipping["provenance"]["package_dimensions"] == "title_category_estimate"
+
+
 def test_imported_reference_images_are_labeled_and_failed_imports_are_preserved(db_session, monkeypatch):
     user = User(email="import-images@example.com")
     db_session.add(user)
@@ -169,7 +181,7 @@ def test_manual_override_behavior_survives_serialization(db_session):
     assert payload["readiness_summary"]["ready_for_publish"] is True
 
 
-def test_sync_listing_review_state_keeps_vine_source_images_as_reference(db_session):
+def test_sync_listing_review_state_promotes_vine_source_images_for_review(db_session):
     user = User(email="vine-reference@example.com")
     db_session.add(user)
     db_session.flush()
@@ -185,5 +197,5 @@ def test_sync_listing_review_state_keeps_vine_source_images_as_reference(db_sess
 
     sync_listing_review_state(listing=listing)
 
-    assert listing.listing_images[0]["is_reference"] is True
-    assert listing.listing_images[0]["operator_state"] == "suggested"
+    assert listing.listing_images[0]["is_reference"] is False
+    assert listing.listing_images[0]["operator_state"] == "approved"

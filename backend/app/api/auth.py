@@ -43,6 +43,7 @@ from app.models.enums import MarketplaceName
 from app.models.models import MarketplaceAccount, User
 from app.services.email_service import EmailDeliveryError, send_password_reset_email, smtp_configured
 from app.services.ebay_service import summarize_ebay_account_health
+from app.services.google_photos_oauth import get_google_photos_oauth_state, google_photos_oauth_ready
 from app.services.site_content_service import (
     build_public_page_urls,
     import_theme_pack,
@@ -61,6 +62,8 @@ _STRING_SETTING_FIELDS = {
     "ebay_client_id": "EBAY_CLIENT_ID",
     "ebay_runame": "EBAY_RUNAME",
     "ebay_redirect_uri": "EBAY_REDIRECT_URI",
+    "google_photos_client_id": "GOOGLE_PHOTOS_CLIENT_ID",
+    "google_photos_redirect_uri": "GOOGLE_PHOTOS_REDIRECT_URI",
     "storage_root": "STORAGE_ROOT",
     "environment": "ENVIRONMENT",
     "amazon_marketplace_region": "AMAZON_MARKETPLACE_REGION",
@@ -94,6 +97,7 @@ _SECRET_SETTING_FIELDS = {
     "photoroom_api_key": "PHOTOROOM_API_KEY_ENC",
     "automation_bridge_api_key": "AUTOMATION_BRIDGE_API_KEY_ENC",
     "ebay_client_secret": "EBAY_CLIENT_SECRET_ENC",
+    "google_photos_client_secret": "GOOGLE_PHOTOS_CLIENT_SECRET_ENC",
     "amazon_paapi_access_key": "AMAZON_PAAPI_ACCESS_KEY_ENC",
     "amazon_paapi_secret_key": "AMAZON_PAAPI_SECRET_KEY_ENC",
     "amazon_paapi_partner_tag": "AMAZON_PAAPI_PARTNER_TAG_ENC",
@@ -104,6 +108,7 @@ _SECRET_PLAIN_ENV_FIELDS = {
     "photoroom_api_key": "PHOTOROOM_API_KEY",
     "automation_bridge_api_key": "AUTOMATION_BRIDGE_API_KEY",
     "ebay_client_secret": "EBAY_CLIENT_SECRET",
+    "google_photos_client_secret": "GOOGLE_PHOTOS_CLIENT_SECRET",
     "smtp_password": "SMTP_PASSWORD",
 }
 
@@ -113,6 +118,9 @@ _DEFAULT_WORKFLOW_PREFERENCES = {
     "bulk_approval_enabled": True,
     "listing_preview_mode": "marketplace",
     "default_preview_marketplace": "ebay",
+    "shipping_price_threshold": 10.0,
+    "shipping_under_threshold_mode": "buyer_pays_shipping",
+    "shipping_at_or_above_threshold_mode": "free_shipping",
 }
 _DEFAULT_VINE_PREFERENCES = {
     "enforce_six_month_lock": True,
@@ -191,6 +199,9 @@ def _workflow_preferences(user: User | None) -> dict:
         "bulk_approval_enabled": bool(stored.get("bulk_approval_enabled", _DEFAULT_WORKFLOW_PREFERENCES["bulk_approval_enabled"])),
         "listing_preview_mode": str(stored.get("listing_preview_mode") or _DEFAULT_WORKFLOW_PREFERENCES["listing_preview_mode"]),
         "default_preview_marketplace": str(stored.get("default_preview_marketplace") or _DEFAULT_WORKFLOW_PREFERENCES["default_preview_marketplace"]),
+        "shipping_price_threshold": float(stored.get("shipping_price_threshold", _DEFAULT_WORKFLOW_PREFERENCES["shipping_price_threshold"])),
+        "shipping_under_threshold_mode": str(stored.get("shipping_under_threshold_mode") or _DEFAULT_WORKFLOW_PREFERENCES["shipping_under_threshold_mode"]),
+        "shipping_at_or_above_threshold_mode": str(stored.get("shipping_at_or_above_threshold_mode") or _DEFAULT_WORKFLOW_PREFERENCES["shipping_at_or_above_threshold_mode"]),
     }
 
 
@@ -290,6 +301,7 @@ def _persist_sold_sync_preferences(user: User, updates: dict) -> None:
 
 
 def _serialize_user(user: User) -> dict:
+    settings_json = user.settings_json if isinstance(user.settings_json, dict) else {}
     return {
         "id": user.id,
         "email": user.email,
@@ -303,6 +315,7 @@ def _serialize_user(user: User) -> dict:
         "vine_enforce_six_month_lock": bool(_vine_preferences(user).get("enforce_six_month_lock", True)),
         "sold_sync_preferences": _sold_sync_preferences(user),
         "ebay_marketplace_policy_settings": _ebay_marketplace_policy_settings(user),
+        "profile_preferences": settings_json.get("profile_preferences") if isinstance(settings_json.get("profile_preferences"), dict) else {},
     }
 
 
@@ -338,6 +351,7 @@ def _build_settings_panel_response(current_user: User, *, ebay_account: Marketpl
     page_urls = build_public_page_urls(runtime_settings.app_base_url)
     runame = runtime_settings.ebay_runame or runtime_settings.ebay_redirect_uri or ""
     ebay_health = summarize_ebay_account_health(ebay_account)
+    google_health = get_google_photos_oauth_state(current_user)
     bridge_submit_policy = bridge_browser_submit_policy()
     return {
         "profile": {
@@ -348,6 +362,7 @@ def _build_settings_panel_response(current_user: User, *, ebay_account: Marketpl
             "view_as_regular": is_viewing_as_regular(current_user),
             "role": get_user_role(current_user),
             "can_access_vine_import": settings.amazon_vine_import_enabled and user_has_vine_access(current_user),
+            "profile_preferences": (current_user.settings_json or {}).get("profile_preferences", {}) if isinstance(current_user.settings_json, dict) else {},
         },
         "workflow": _workflow_preferences(current_user),
         "sold_sync_preferences": _sold_sync_preferences(current_user),
@@ -377,9 +392,19 @@ def _build_settings_panel_response(current_user: User, *, ebay_account: Marketpl
             "auth_declined_url": page_urls["auth_declined_url"],
             "policy_settings": _ebay_marketplace_policy_settings(current_user),
         },
+        "google_photos": {
+            "client_id_configured": bool(runtime_settings.google_photos_client_id),
+            "client_secret_configured": bool(runtime_settings.google_photos_client_secret),
+            "redirect_uri": runtime_settings.google_photos_redirect_uri or "",
+            "oauth_ready": google_photos_oauth_ready(),
+            **google_health,
+        },
         "api_keys": {
             "openai_configured": bool(runtime_settings.openai_api_key),
             "photoroom_configured": bool(runtime_settings.photoroom_api_key),
+            "google_photos_client_id_configured": bool(runtime_settings.google_photos_client_id),
+            "google_photos_client_secret_configured": bool(runtime_settings.google_photos_client_secret),
+            "google_photos_oauth_configured": google_photos_oauth_ready(),
         },
         "automation": {
             "autonomous_mode": runtime_settings.autonomous_mode,
@@ -404,6 +429,7 @@ def _build_settings_panel_response(current_user: User, *, ebay_account: Marketpl
             "database_url_configured": bool(runtime_settings.database_url),
             "redis_url_configured": bool(runtime_settings.redis_url),
             "session_secret_configured": bool(runtime_settings.session_secret),
+            "google_photos_oauth_configured": google_photos_oauth_ready(),
             "can_manage": is_effective_admin(current_user),
         },
         "email": {
@@ -475,6 +501,19 @@ def update_me(
     if payload.full_name is not None:
         cleaned = payload.full_name.strip()
         current_user.full_name = cleaned or None
+    profile_updates = {}
+    for field in ("avatar_url", "phone_number"):
+        value = getattr(payload, field, None)
+        if value is not None:
+            profile_updates[field] = str(value).strip() or None
+    for field in ("marketing_email_consent", "marketing_sms_consent"):
+        value = getattr(payload, field, None)
+        if value is not None:
+            profile_updates[field] = bool(value)
+    if profile_updates:
+        settings_json = current_user.settings_json if isinstance(current_user.settings_json, dict) else {}
+        profile = settings_json.get("profile_preferences") if isinstance(settings_json.get("profile_preferences"), dict) else {}
+        profile.update(profile_updates); settings_json["profile_preferences"] = profile; current_user.settings_json = settings_json
     workflow_updates = {}
     if payload.review_before_publish is not None:
         workflow_updates["review_before_publish"] = payload.review_before_publish
@@ -486,6 +525,12 @@ def update_me(
         workflow_updates["listing_preview_mode"] = payload.listing_preview_mode.strip() or _DEFAULT_WORKFLOW_PREFERENCES["listing_preview_mode"]
     if payload.default_preview_marketplace is not None:
         workflow_updates["default_preview_marketplace"] = payload.default_preview_marketplace.strip().lower() or _DEFAULT_WORKFLOW_PREFERENCES["default_preview_marketplace"]
+    if payload.shipping_price_threshold is not None:
+        workflow_updates["shipping_price_threshold"] = max(0.0, float(payload.shipping_price_threshold))
+    if payload.shipping_under_threshold_mode is not None:
+        workflow_updates["shipping_under_threshold_mode"] = payload.shipping_under_threshold_mode.strip().lower() or _DEFAULT_WORKFLOW_PREFERENCES["shipping_under_threshold_mode"]
+    if payload.shipping_at_or_above_threshold_mode is not None:
+        workflow_updates["shipping_at_or_above_threshold_mode"] = payload.shipping_at_or_above_threshold_mode.strip().lower() or _DEFAULT_WORKFLOW_PREFERENCES["shipping_at_or_above_threshold_mode"]
     if workflow_updates:
         _persist_workflow_preferences(current_user, workflow_updates)
     if payload.vine_enforce_six_month_lock is not None:

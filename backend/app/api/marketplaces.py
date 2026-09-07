@@ -47,6 +47,7 @@ from app.core.config import reload_settings, settings
 from app.core.database import get_db
 from app.models.enums import MarketplaceName
 from app.models.models import Listing, ListingTemplate, MarketplaceAccount, User
+from app.services.google_photos_oauth import google_photos_oauth_ready
 from app.connectors.registry import MARKETPLACE_REGISTRY
 from app.services.marketplace_setup import (
     MANUAL_MARKETPLACES,
@@ -63,6 +64,7 @@ from app.services.marketplace_orchestrator import (
     trigger_sync_sold,
 )
 from app.services.marketplace_preflight import MarketplacePreflightService
+from app.services.process_notifications import create_process_notification
 from app.services.ebay_service import (
     EbayIntegrationError,
     get_or_refresh_account,
@@ -352,6 +354,34 @@ def bulk_marketplace_preflight(
         only_ready_candidates=payload.only_ready_candidates,
         only_blocked_candidates=payload.only_blocked_candidates,
     )
+    blocked_items = [item for item in (report.get("items") or []) if isinstance(item, dict) and item.get("blocked_marketplaces")]
+    if blocked_items:
+        # Summarize the exact blockers and fix hints in a process notification so the operator can act on them later.
+        lines: list[str] = []
+        for item in blocked_items[:5]:
+            marketplaces = ", ".join(str(value) for value in (item.get("blocked_marketplaces") or []) if str(value).strip())
+            market_data = item.get("marketplaces") if isinstance(item.get("marketplaces"), dict) else {}
+            first_market = next(iter(market_data.values()), {})
+            blockers = [blocker for blocker in (first_market.get("blockers") or []) if isinstance(blocker, dict)]
+            fix_hint = next((str(blocker.get("fix_hint") or blocker.get("message") or "").strip() for blocker in blockers if str(blocker.get("fix_hint") or blocker.get("message") or "").strip()), None)
+            lines.append(
+                f"Listing #{item.get('listing_id')}: {marketplaces or 'marketplace'} — {fix_hint or item.get('top_blocker_message') or 'preflight blocked'}"
+            )
+        create_process_notification(
+            db,
+            user_id=current_user.id,
+            notification_type="marketplace_preflight_blocked",
+            title=f"{int(report.get('summary', {}).get('blocked_listings', 0) or 0)} listing(s) blocked by marketplace preflight",
+            message="\n".join(lines),
+            href="/listings?tab=review",
+            metadata_json={
+                "markets": payload.marketplaces,
+                "listing_ids": payload.listing_ids,
+                "blocked_listings": int(report.get("summary", {}).get("blocked_listings", 0) or 0),
+                "blocker_codes": report.get("summary", {}).get("blocker_codes") or {},
+                "warning_codes": report.get("summary", {}).get("warning_codes") or {},
+            },
+        )
     return report
 
 
@@ -997,6 +1027,7 @@ def get_account_setup_summary(
             openai_configured=bool(runtime_settings.openai_api_key),
             photoroom_configured=bool(runtime_settings.photoroom_api_key),
             ebay_oauth_configured=server_has_ebay,
+            google_photos_oauth_configured=google_photos_oauth_ready(),
             storage_root_configured=bool(runtime_settings.storage_root),
             session_secret_configured=bool(runtime_settings.session_secret),
             amazon_vine_import_enabled=runtime_settings.amazon_vine_import_enabled,

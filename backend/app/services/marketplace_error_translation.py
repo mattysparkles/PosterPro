@@ -74,6 +74,18 @@ def translate_marketplace_error(marketplace: str, error: Any) -> dict[str, Any]:
                 "operator_action": "fix_category",
                 "raw_error": raw_error,
             }
+        if _matches(message, "smoke and carbon monoxide detectors", "smoke detector", "smokedetectors", "policy reference", "25019"):
+            return {
+                "code": "EBAY_PRODUCT_SAFETY_RESTRICTED",
+                "marketplace_code": "product_safety",
+                "field": "title",
+                "user_message": "eBay restricted this smoke/CO detector under its product-safety policy.",
+                "fix_hint": "Only approved brands and safe models are allowed; route this item to another marketplace or verify its eBay eligibility. This is non-retryable until the product/policy issue changes.",
+                "severity": "blocker",
+                "retryable": False,
+                "operator_action": "manual_review",
+                "raw_error": raw_error,
+            }
         if _matches(message, "leaf category"):
             return {
                 "code": "EBAY_CATEGORY_NOT_LEAF",
@@ -168,6 +180,18 @@ def translate_marketplace_error(marketplace: str, error: Any) -> dict[str, Any]:
                 "severity": "blocker",
                 "retryable": False,
                 "operator_action": "fix_policies",
+                "raw_error": raw_error,
+            }
+        if _matches(message, "invalid item condition information", "condition id is invalid", "condition information"):
+            return {
+                "code": "EBAY_CONDITION_INCOMPATIBLE_WITH_CATEGORY",
+                "marketplace_code": "condition",
+                "field": "condition",
+                "user_message": "eBay rejected the selected condition for the current category.",
+                "fix_hint": "Review the item condition bucket or choose a category that accepts the selected condition, then retry.",
+                "severity": "blocker",
+                "retryable": False,
+                "operator_action": "fix_condition",
                 "raw_error": raw_error,
             }
         if _matches(message, "merchant location"):

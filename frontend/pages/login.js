@@ -9,15 +9,15 @@ import { useAuth } from '../contexts/AuthContext';
 
 export default function LoginPage() {
   const router = useRouter();
-  const { user, login } = useAuth();
+  const { user, loading, login } = useAuth();
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    if (user) {
+    if (!loading && user) {
       router.replace(typeof router.query.next === 'string' ? router.query.next : '/app');
     }
-  }, [router, user]);
+  }, [loading, router, user]);
 
   return (
     <AuthPage
@@ -26,6 +26,7 @@ export default function LoginPage() {
     >
       <form
         className="pp-auth-form"
+        method="post"
         onSubmit={async (event) => {
           event.preventDefault();
           setSubmitting(true);
@@ -46,12 +47,12 @@ export default function LoginPage() {
       >
         <div className="pp-field">
           <label htmlFor="login-email">Email</label>
-          <Input id="login-email" name="email" type="email" required placeholder="you@example.com" />
+          <Input id="login-email" name="email" type="email" autoComplete="username" required placeholder="you@example.com" />
         </div>
 
         <div className="pp-field">
           <label htmlFor="login-password">Password</label>
-          <Input id="login-password" name="password" type="password" required placeholder="Enter your password" />
+          <Input id="login-password" name="password" type="password" autoComplete="current-password" required placeholder="Enter your password" />
         </div>
 
         {error ? <p className="text-sm font-medium text-rose-600">{error}</p> : null}

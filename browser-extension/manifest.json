@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "PosterPro Marketplace Assistant",
+  "version": "0.1.0",
+  "description": "Capture and hand off marketplace browser sessions to PosterPro for assisted publishing.",
+  "action": {
+    "default_title": "PosterPro Marketplace Assistant",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "options_page": "options.html",
+  "permissions": [
+    "activeTab",
+    "clipboardWrite",
+    "cookies",
+    "scripting",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://posterpro.sparkleserver.site/*",
+    "http://127.0.0.1:3030/*",
+    "http://127.0.0.1:8030/*",
+    "https://www.facebook.com/*",
+    "https://www.mercari.com/*",
+    "https://poshmark.com/*",
+    "https://www.etsy.com/*",
+    "https://www.depop.com/*",
+    "https://www.whatnot.com/*",
+    "https://seller.whatnot.com/*",
+    "https://www.vinted.com/*"
+  ]
+}

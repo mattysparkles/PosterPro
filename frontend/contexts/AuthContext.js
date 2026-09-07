@@ -103,19 +103,29 @@ export function AuthProvider({ children }) {
       login: async (payload) => {
         refreshRequestIdRef.current += 1;
         const session = await loginUser(payload);
+        cacheRecentLoginUser(session.user);
+        const verifiedUser = await refreshUser();
+        if (!verifiedUser) {
+          throw new Error('Signed in, but PosterPro could not verify the browser session. Please retry.');
+        }
         setBootError(null);
         setLoading(false);
-        setUser(session.user);
-        cacheRecentLoginUser(session.user);
+        setUser(verifiedUser);
+        cacheRecentLoginUser(verifiedUser);
         return session;
       },
       register: async (payload) => {
         refreshRequestIdRef.current += 1;
         const session = await registerUser(payload);
+        cacheRecentLoginUser(session.user);
+        const verifiedUser = await refreshUser();
+        if (!verifiedUser) {
+          throw new Error('Account was created, but PosterPro could not verify the browser session. Please retry.');
+        }
         setBootError(null);
         setLoading(false);
-        setUser(session.user);
-        cacheRecentLoginUser(session.user);
+        setUser(verifiedUser);
+        cacheRecentLoginUser(verifiedUser);
         return session;
       },
       logout: async () => {
@@ -128,10 +138,15 @@ export function AuthProvider({ children }) {
       resetPassword: async (payload) => {
         refreshRequestIdRef.current += 1;
         const session = await resetPassword(payload);
+        cacheRecentLoginUser(session.user);
+        const verifiedUser = await refreshUser();
+        if (!verifiedUser) {
+          throw new Error('Password was reset, but PosterPro could not verify the browser session. Please retry.');
+        }
         setBootError(null);
         setLoading(false);
-        setUser(session.user);
-        cacheRecentLoginUser(session.user);
+        setUser(verifiedUser);
+        cacheRecentLoginUser(verifiedUser);
         return session;
       },
       setViewAsRegular: async (enabled) => {

@@ -26,6 +26,7 @@ export default function ResetPasswordPage() {
     >
       <form
         className="pp-auth-form"
+        method="post"
         onSubmit={async (event) => {
           event.preventDefault();
           setSubmitting(true);
@@ -55,6 +56,7 @@ export default function ResetPasswordPage() {
           <Input
             id="reset-token"
             name="token"
+            autoComplete="one-time-code"
             required
             value={token || tokenFromQuery}
             onChange={(event) => setToken(event.target.value)}
@@ -64,7 +66,7 @@ export default function ResetPasswordPage() {
 
         <div className="pp-field">
           <label htmlFor="reset-password">New password</label>
-          <Input id="reset-password" name="password" type="password" required minLength={8} placeholder="Create a new password" />
+          <Input id="reset-password" name="password" type="password" autoComplete="new-password" required minLength={8} placeholder="Create a new password" />
         </div>
 
         <div className="pp-field">

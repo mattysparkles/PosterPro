@@ -240,7 +240,14 @@ class InventoryService:
             for batch_index, chunk in enumerate(chunks)
         )
         callback = signature("bulk_finalize_job", args=[job.id])
-        chord(header)(callback)
+        try:
+            chord(header)(callback)
+        except NotImplementedError:
+            from app.workers.tasks import bulk_finalize_job, bulk_process_inventory_chunk
+            results = []
+            for batch_index, chunk in enumerate(chunks):
+                results.append(bulk_process_inventory_chunk.run(job.id, action, payload or {}, chunk, batch_index))
+            bulk_finalize_job.run(results, job.id)
         return job
 
     @staticmethod

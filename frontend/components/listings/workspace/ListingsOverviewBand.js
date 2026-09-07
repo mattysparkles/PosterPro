@@ -1,9 +1,9 @@
 function SummaryTile({ label, value, note, accentClassName = 'from-[#eff4ff] to-white' }) {
   return (
-    <div className={`rounded-[18px] border border-white/70 bg-gradient-to-br ${accentClassName} p-4 shadow-[0_10px_24px_rgba(15,23,42,0.06)]`}>
+    <div className={`rounded-[16px] border border-white/70 bg-gradient-to-br ${accentClassName} p-3.5 shadow-[0_10px_24px_rgba(15,23,42,0.06)]`}>
       <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[#667085]">{label}</p>
-      <p className="mt-2 font-[var(--pp-heading-font)] text-2xl font-semibold tracking-[-0.04em] text-[#101828]">{value}</p>
-      <p className="mt-2 text-sm text-[#475467]">{note}</p>
+      <p className="mt-1.5 font-[var(--pp-heading-font)] text-[1.5rem] font-semibold tracking-[-0.04em] text-[#101828]">{value}</p>
+      <p className="mt-1.5 text-sm text-[#475467]">{note}</p>
     </div>
   );
 }
@@ -21,15 +21,15 @@ export default function ListingsOverviewBand({
 }) {
   return (
     <div className="space-y-5">
-      <div className="grid gap-5 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.95fr)]">
-        <div className="rounded-[22px] border border-white/70 bg-[linear-gradient(135deg,#fff7ed_0%,#ffffff_42%,#eef4ff_100%)] p-5 shadow-[0_18px_40px_rgba(15,23,42,0.08)]">
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]">
+        <div className="rounded-[20px] border border-white/70 bg-[linear-gradient(135deg,#fff7ed_0%,#ffffff_42%,#eef4ff_100%)] p-4 shadow-[0_18px_40px_rgba(15,23,42,0.08)]">
           <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#b54708]">Listings workspace</p>
-          <div className="mt-3 flex flex-wrap items-end justify-between gap-4">
+          <div className="mt-3 flex flex-wrap items-end justify-between gap-3">
             <div>
-              <h2 className="font-[var(--pp-heading-font)] text-3xl font-semibold tracking-[-0.05em] text-[#101828]">
+              <h2 className="font-[var(--pp-heading-font)] text-[2rem] font-semibold tracking-[-0.05em] text-[#101828]">
                 {activeTabLabel}
               </h2>
-              <p className="mt-2 max-w-[54ch] text-sm leading-6 text-[#475467]">
+              <p className="mt-1.5 max-w-[52ch] text-sm leading-6 text-[#475467]">
                 Keep the results surface primary. Use the lower workspace modules only when you need repair, launch QA, or queue diagnostics.
               </p>
             </div>
@@ -45,10 +45,10 @@ export default function ListingsOverviewBand({
               </span>
             </div>
           </div>
-          <div className="mt-5">{tabs}</div>
+          <div className="mt-4">{tabs}</div>
         </div>
 
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-2">
+        <div className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-2">
           <SummaryTile
             label="Review queue"
             value={listingMetrics.reviewCount}

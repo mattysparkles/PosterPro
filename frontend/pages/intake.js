@@ -15,6 +15,7 @@ import {
   fetchIntakeSessions,
   fetchIntakeSettings,
   runIntakeMonitor,
+  setIntakeDraftingPaused,
 } from '../lib/api';
 
 function formatWhen(value) {
@@ -84,6 +85,20 @@ export default function IntakeDashboardPage() {
     }
   };
 
+  const toggleDraftingPause = async (paused) => {
+    if (!settings) return;
+    setSyncing(true);
+    try {
+      const payload = await setIntakeDraftingPaused(settings, paused);
+      setSettings(payload || null);
+      toast.success(paused ? 'Drafting paused.' : 'Drafting resumed.');
+    } catch (error) {
+      toast.error(error.message || 'Failed to update drafting state.');
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   const latestBatches = (queue.batches || []).slice(0, 6);
   const lastMonitorResult = settings?.last_monitor_result || null;
 
@@ -120,7 +135,12 @@ export default function IntakeDashboardPage() {
               <div className="rounded-[22px] border border-[var(--pp-border)] bg-[var(--pp-surface-muted)] p-4">
                 <div className="flex flex-wrap items-center gap-2">
                   <StatusPill status={settings?.enabled ? 'success' : 'warning'} label={settings?.enabled ? 'Watching enabled' : 'Watching disabled'} />
+                  <StatusPill status={settings?.drafting_paused ? 'warning' : 'success'} label={settings?.drafting_paused ? 'Drafting paused' : 'Drafting active'} />
                   <StatusPill status={settings?.auto_draft_listing ? 'success' : 'default'} label={settings?.auto_draft_listing ? 'Auto draft on' : 'Auto draft off'} />
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Button onClick={() => toggleDraftingPause(true)} variant="outline" size="sm" disabled={syncing || settings?.drafting_paused}>Pause drafting</Button>
+                  <Button onClick={() => toggleDraftingPause(false)} variant="secondary" size="sm" disabled={syncing || !settings?.drafting_paused}>Resume drafting</Button>
                 </div>
                 <dl className="mt-4 space-y-3 text-sm text-[var(--pp-muted)]">
                   <div>
@@ -206,7 +226,9 @@ export default function IntakeDashboardPage() {
               <p className="text-sm text-[var(--pp-muted)]">Loading intake queue…</p>
             ) : latestBatches.length ? (
               <div className="space-y-3">
-                {latestBatches.map((batch) => (
+                {latestBatches.map((batch) => {
+                  const renderedSlateUrl = batch?.slate?.metadata_json?.rendered_slate?.storage_path || batch?.slate?.metadata_json?.rendered_slate?.data_url || null;
+                  return (
                   <div key={batch.id} className="rounded-[20px] border border-[var(--pp-border)] bg-[var(--pp-surface-muted)] p-4">
                     <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                       <div>
@@ -221,6 +243,7 @@ export default function IntakeDashboardPage() {
                       <div className="flex flex-wrap gap-2">
                         <Button href="/intake/queue" variant="secondary" size="sm">Open queue</Button>
                         {batch.draft_listing_id ? <Button href={`/listings/${batch.draft_listing_id}?mode=preview`} variant="outline" size="sm">Preview draft</Button> : null}
+                        {renderedSlateUrl ? <Button href={renderedSlateUrl} variant="outline" size="sm" download>Download slate</Button> : null}
                       </div>
                     </div>
                     {batch.warnings?.length ? (
@@ -229,7 +252,8 @@ export default function IntakeDashboardPage() {
                       </ul>
                     ) : null}
                   </div>
-                ))}
+                  );
+                })}
               </div>
             ) : (
               <div className="rounded-[20px] border border-dashed border-[var(--pp-border)] bg-[var(--pp-surface-muted)] p-6 text-sm text-[var(--pp-muted)]">

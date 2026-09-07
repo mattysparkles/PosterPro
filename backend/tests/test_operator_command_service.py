@@ -6,7 +6,6 @@ from datetime import UTC, datetime, timedelta
 from app.models.enums import EbayPublishStatus, ListingStatus, MarketplaceListingStatus, MarketplaceName
 from app.models.models import Listing, MarketplaceListing, User
 from app.services.operator_command_service import (
-    LIVE_EBAY_REPRICE_CONFIRMATION_PHRASE,
     OperatorCommandService,
 )
 
@@ -68,6 +67,57 @@ def test_operator_command_preview_finds_old_live_ebay_listings(db_session):
     assert result["listings"][0]["new_price"] == 90.0
 
 
+def test_operator_command_preview_accepts_price_threshold_phrase(db_session):
+    user = User(email="operator-command-price-threshold@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    _seed_live_ebay_listing(db_session, user=user, title="High Price", price=120.0, posted_days_ago=1)
+    _seed_live_ebay_listing(db_session, user=user, title="Low Price", price=40.0, posted_days_ago=1)
+
+    result = asyncio.run(
+        OperatorCommandService().handle_prompt(
+            db_session,
+            user=user,
+            prompt="reduce all ebay items above $50.00 by 10%",
+            dry_run=True,
+            apply_live=False,
+        )
+    )
+
+    assert result["parsed"] is True
+    assert result["command_type"] == "ebay_reprice_by_listing_price"
+    assert result["summary"]["minimum_price"] == 50.0
+    assert result["summary"]["eligible_count"] == 1
+    assert result["listings"][0]["title"] == "High Price"
+    assert result["listings"][0]["new_price"] == 108.0
+
+
+def test_operator_command_preview_accepts_generic_price_reduction_phrase(db_session):
+    user = User(email="operator-command-generic@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    _seed_live_ebay_listing(db_session, user=user, title="Generic One", price=20.0, posted_days_ago=1)
+    _seed_live_ebay_listing(db_session, user=user, title="Generic Two", price=30.0, posted_days_ago=1)
+
+    result = asyncio.run(
+        OperatorCommandService().handle_prompt(
+            db_session,
+            user=user,
+            prompt="reduce all item prices by 10%",
+            dry_run=True,
+            apply_live=False,
+        )
+    )
+
+    assert result["parsed"] is True
+    assert result["command_type"] == "ebay_reprice_all"
+    assert result["summary"]["eligible_count"] == 2
+
+
 def test_operator_command_live_apply_requires_confirmation(db_session):
     user = User(email="operator-command-confirm@example.com", role="owner", is_admin=True)
     db_session.add(user)
@@ -83,13 +133,14 @@ def test_operator_command_live_apply_requires_confirmation(db_session):
             prompt="lower all item prices by 10 percent if they have been listed for more than 1 week on ebay",
             dry_run=False,
             apply_live=True,
+            confirm_live_apply=False,
             confirmation_phrase="wrong phrase",
         )
     )
 
     assert result["parsed"] is True
     assert result["summary"]["eligible_count"] == 1
-    assert LIVE_EBAY_REPRICE_CONFIRMATION_PHRASE in (result["message"] or "")
+    assert "requires confirmation" in (result["message"] or "")
 
 
 def test_operator_command_live_apply_updates_listing_prices(db_session, monkeypatch):
@@ -113,7 +164,7 @@ def test_operator_command_live_apply_updates_listing_prices(db_session, monkeypa
             prompt="lower all item prices by 10 percent if they have been listed for more than 1 week on ebay",
             dry_run=False,
             apply_live=True,
-            confirmation_phrase=LIVE_EBAY_REPRICE_CONFIRMATION_PHRASE,
+            confirm_live_apply=True,
         )
     )
 
@@ -122,3 +173,48 @@ def test_operator_command_live_apply_updates_listing_prices(db_session, monkeypa
     assert refreshed is not None
     assert refreshed.listing_price == 45.0
     assert refreshed.suggested_price == 45.0
+    applied_actions = (((refreshed.marketplace_data or {}).get("operator_bulk_actions") or {}).get("applied") or [])
+    assert any(str(action.get("signature") or "").startswith("ebay_reprice") for action in applied_actions)
+
+
+def test_operator_command_live_apply_is_idempotent_for_same_discount(db_session, monkeypatch):
+    user = User(email="operator-command-idempotent@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    listing = _seed_live_ebay_listing(db_session, user=user, title="Idempotent Update", price=100.0, posted_days_ago=9)
+
+    async def _fake_revise(listing_obj, db):  # noqa: ARG001
+        db.commit()
+        return {"status": "UPDATED", "listing_id": listing_obj.id}
+
+    monkeypatch.setattr("app.services.operator_command_service.revise_ebay_listing", _fake_revise)
+
+    first = asyncio.run(
+        OperatorCommandService().handle_prompt(
+            db_session,
+            user=user,
+            prompt="reduce all ebay items above $49 by 18%",
+            dry_run=False,
+            apply_live=True,
+            confirm_live_apply=True,
+        )
+    )
+    second = asyncio.run(
+        OperatorCommandService().handle_prompt(
+            db_session,
+            user=user,
+            prompt="reduce all ebay items above $49 by 18%",
+            dry_run=False,
+            apply_live=True,
+            confirm_live_apply=True,
+        )
+    )
+
+    refreshed = db_session.get(Listing, listing.id)
+    assert first["summary"]["updated_count"] == 1
+    assert second["summary"]["updated_count"] == 0
+    assert second["summary"]["already_applied_count"] == 1
+    assert refreshed is not None
+    assert refreshed.listing_price == 82.0

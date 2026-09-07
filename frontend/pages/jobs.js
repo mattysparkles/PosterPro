@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/router";
 import toast from "react-hot-toast";
 import { RefreshCcw } from "lucide-react";
@@ -25,15 +25,21 @@ import {
   cancelCrosspostJob,
   cancelMarketplaceImportJob,
   fetchMarketplaceJobsOverview,
+  fetchCrosspostJob,
+  fetchMarketplaceImportJob,
+  fetchProcessingHealth,
   retryCrosspostJob,
   retryMarketplaceImportJob,
+  bulkRequeueMarketplaceJobs,
   runAutomationBridgeSmokeTest,
   toggleAutonomousMode,
+  reprioritizeCorrectionJob,
 } from "../lib/api";
 
 const JOB_TABS = [
   { value: "crosspost", label: "Cross-post Jobs" },
   { value: "imports", label: "Import Jobs" },
+  { value: "corrections", label: "Correction Jobs" },
 ];
 
 function formatTime(value) {
@@ -62,6 +68,14 @@ function startCase(value) {
     .replace(/[_-]+/g, " ")
     .replace(/\b\w/g, (char) => char.toUpperCase())
     .trim();
+}
+
+function jobProgress(job) {
+  const total = Number(job?.target_marketplaces?.length || job?.review_items?.length || 0);
+  const done = Number(job?.submitted_count || 0) + Number(job?.failed_target_count || 0) + Number(job?.review_required_count || 0);
+  if (String(job?.status || '').toLowerCase() === 'completed') return 100;
+  if (!total) return ['running', 'queued'].includes(String(job?.status || '').toLowerCase()) ? 15 : 0;
+  return Math.min(100, Math.round((done / total) * 100));
 }
 
 function flattenArtifactEntries(value, prefix = "") {
@@ -171,7 +185,15 @@ export default function JobsPage() {
   const { autonomousConfig, reload: reloadDashboard } = useDashboardData(user?.id);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("crosspost");
-  const [jobsOverview, setJobsOverview] = useState({ import_jobs: [], crosspost_jobs: [] });
+  const [statusFilter, setStatusFilter] = useState("");
+  const [jobsOverview, setJobsOverview] = useState(() => {
+    if (typeof window === "undefined") return { import_jobs: [], crosspost_jobs: [] };
+    try {
+      return JSON.parse(window.sessionStorage.getItem("posterpro.jobs.overview") || "null") || { import_jobs: [], crosspost_jobs: [] };
+    } catch {
+      return { import_jobs: [], crosspost_jobs: [] };
+    }
+  });
   const [retrying, setRetrying] = useState({});
   const [canceling, setCanceling] = useState({});
   const [activeJob, setActiveJob] = useState(null);
@@ -179,24 +201,85 @@ export default function JobsPage() {
   const [bridgeSmoke, setBridgeSmoke] = useState(null);
   const [testingBridge, setTestingBridge] = useState(false);
   const [loadError, setLoadError] = useState("");
+  const [processingHealth, setProcessingHealth] = useState(null);
+  const [processingHealthError, setProcessingHealthError] = useState("");
+  const [activeBlocker, setActiveBlocker] = useState(null);
+  const [blockerLoading, setBlockerLoading] = useState(false);
+  const loadInFlight = useRef(false);
+  const defaultProcessingOrder = ["worker", "queued", "processing", "retrying", "attention", "review", "complete", "stalled", "queue_summary"];
+  const [processingOrder, setProcessingOrder] = useState(defaultProcessingOrder);
+  const [draggingMetric, setDraggingMetric] = useState(null);
+
+  useEffect(() => {
+    if (!user?.id) return;
+    try {
+      const saved = JSON.parse(window.localStorage.getItem(`posterpro.jobs.processing-order.${user.id}`) || "null");
+      if (Array.isArray(saved) && saved.length === defaultProcessingOrder.length && saved.every((key) => defaultProcessingOrder.includes(key))) setProcessingOrder(saved);
+    } catch { /* preference cache is optional */ }
+  }, [user?.id]);
+
+  const moveMetric = (from, to) => {
+    if (!from || !to || from === to) return;
+    setProcessingOrder((current) => {
+      const next = [...current];
+      const fromIndex = next.indexOf(from); const toIndex = next.indexOf(to);
+      if (fromIndex < 0 || toIndex < 0) return current;
+      next.splice(fromIndex, 1); next.splice(toIndex, 0, from);
+      try { if (user?.id) window.localStorage.setItem(`posterpro.jobs.processing-order.${user.id}`, JSON.stringify(next)); } catch { /* optional */ }
+      return next;
+    });
+  };
 
   const load = async () => {
+    if (loadInFlight.current) return;
+    loadInFlight.current = true;
     setLoading(true);
     setLoadError("");
+    setProcessingHealthError("");
     try {
-      const data = await fetchMarketplaceJobsOverview();
-      setJobsOverview(data || { import_jobs: [], crosspost_jobs: [] });
+      const [jobsData, healthData] = await Promise.allSettled([
+        fetchMarketplaceJobsOverview({ limit: 100, compact: true }),
+        fetchProcessingHealth(),
+      ]);
+      if (jobsData.status !== "fulfilled") {
+        throw jobsData.reason;
+      }
+      const nextOverview = jobsData.value || { import_jobs: [], crosspost_jobs: [] };
+      setJobsOverview(nextOverview);
+      try { window.sessionStorage.setItem("posterpro.jobs.overview", JSON.stringify(nextOverview)); } catch { /* cache is optional */ }
+      if (healthData.status === "fulfilled") {
+        setProcessingHealth(healthData.value || null);
+      } else {
+        setProcessingHealth(null);
+        setProcessingHealthError(healthData.reason?.message || "Failed to load processing health.");
+      }
     } catch (error) {
       setLoadError(error.message || "Failed to load jobs overview.");
       toast.error(error.message);
     } finally {
       setLoading(false);
+      loadInFlight.current = false;
     }
   };
 
   useEffect(() => {
     load();
   }, []);
+
+  useEffect(() => {
+    if (!activeJob?.job?.id) return undefined;
+    let cancelled = false;
+    const hydrate = async () => {
+      try {
+        const detail = activeJob.type === "crosspost" ? await fetchCrosspostJob(activeJob.job.id) : await fetchMarketplaceImportJob(activeJob.job.id);
+        if (!cancelled && detail) setActiveJob((current) => current && current.job.id === activeJob.job.id ? { ...current, job: detail } : current);
+      } catch (error) {
+        if (!cancelled) toast.error(`Unable to load job details: ${error.message}`);
+      }
+    };
+    hydrate();
+    return () => { cancelled = true; };
+  }, [activeJob?.job?.id, activeJob?.type]);
 
   useEffect(() => {
     if (!autoRefresh) return undefined;
@@ -212,8 +295,17 @@ export default function JobsPage() {
     }
   }, [router.isReady, router.query.tab]);
 
+  useEffect(() => {
+    setStatusFilter(typeof router.query.status === "string" ? router.query.status.toLowerCase() : "");
+  }, [router.query.status]);
+
   const importJobs = jobsOverview.import_jobs || [];
   const crosspostJobs = jobsOverview.crosspost_jobs || [];
+  const correctionJobs = jobsOverview.correction_jobs || [];
+  const visibleCrosspostJobs = statusFilter ? crosspostJobs.filter((job) => String(job.status || "").toLowerCase() === statusFilter) : crosspostJobs;
+  const visibleImportJobs = statusFilter ? importJobs.filter((job) => String(job.status || "").toLowerCase() === statusFilter) : importJobs;
+  const systemStatus = jobsOverview.system_status || {};
+  const metricValue = (value) => (loading && !jobsOverview.system_status ? "—" : (value ?? "—"));
 
   const summary = useMemo(() => {
     const queued = [...importJobs, ...crosspostJobs].filter((job) => ["queued", "running"].includes(String(job.status).toLowerCase())).length;
@@ -250,6 +342,12 @@ export default function JobsPage() {
 
   const openJobDetails = async (type, job) => {
     setActiveJob({ type, job });
+    try {
+      const detail = type === "crosspost" ? await fetchCrosspostJob(job.id) : await fetchMarketplaceImportJob(job.id);
+      setActiveJob({ type, job: detail });
+    } catch (error) {
+      toast.error(`Could not load job details: ${error.message}`);
+    }
     await updateRouteState({ tab: type === "import" ? "imports" : "crosspost", type, jobId: job.id });
   };
 
@@ -323,6 +421,16 @@ export default function JobsPage() {
     }
   };
 
+  const openBlocker = async (entry) => {
+    await router.push(`/jobs/blockers?reason=${encodeURIComponent(entry.reason)}`);
+  };
+
+  const bulkRequeue = async (statuses) => {
+    const label = statuses.join(" / ");
+    if (!window.confirm(`Requeue all ${label} marketplace jobs? This will create new worker attempts for each matching job.`)) return;
+    try { const result = await bulkRequeueMarketplaceJobs({ statuses }); await load(); toast.success(`${result?.count || 0} jobs requeued.`); } catch (error) { toast.error(error.message); }
+  };
+
   const crosspostColumns = [
     { key: "id", label: "Job", render: (row) => `#${row.id}` },
     { key: "listing_id", label: "Listing", render: (row) => <Link href={`/listings/${row.listing_id}`} className="font-medium text-[#2563eb]">#{row.listing_id}</Link> },
@@ -353,12 +461,14 @@ export default function JobsPage() {
       ),
     },
     { key: "mode", label: "Requested mode", render: (row) => row.requested_mode || "auto" },
+    { key: "priority", label: "Priority", render: (row) => <span title="Lower number runs first" className="font-semibold">P{row.priority ?? 1}</span> },
+    { key: "attempts", label: "Attempts", render: (row) => row.attempt_count ?? 0 },
     { key: "updated", label: "Updated", render: (row) => formatTime(row.updated_at || row.created_at) },
     {
       key: "actions",
       label: "Actions",
       render: (row) => (
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap gap-2" onClick={(event) => event.stopPropagation()}>
           {row.can_cancel ? (
             <Button variant="outline" size="sm" onClick={() => cancelCrosspost(row.id)} disabled={!!canceling[`crosspost-${row.id}`]}>
               {canceling[`crosspost-${row.id}`] ? "Canceling..." : "Cancel"}
@@ -369,7 +479,7 @@ export default function JobsPage() {
               {retrying[`crosspost-${row.id}`] ? "Retrying..." : "Retry"}
             </Button>
           ) : null}
-          <Button variant="outline" size="sm" onClick={() => void openJobDetails("crosspost", row)}>
+          <Button variant="outline" size="sm" data-testid={`crosspost-details-${row.id}`} onClick={(event) => { event.stopPropagation(); void openJobDetails("crosspost", row); }}>
             Details
           </Button>
         </div>
@@ -389,6 +499,8 @@ export default function JobsPage() {
       render: (row) => <p className="text-sm text-[#475467]">{row.operator_action || row.operator_note || "Open Details for the current import state."}</p>,
     },
     { key: "listing", label: "Created listing", render: (row) => row.created_listing_id ? <Link href={`/listings/${row.created_listing_id}`} className="font-medium text-[#2563eb]">#{row.created_listing_id}</Link> : "Pending" },
+    { key: "priority", label: "Priority", render: (row) => <span title="Lower number runs first" className="font-semibold">P{row.priority ?? 1}</span> },
+    { key: "attempts", label: "Attempts", render: (row) => row.attempt_count ?? 0 },
     { key: "updated", label: "Updated", render: (row) => formatTime(row.updated_at || row.created_at) },
     {
       key: "actions",
@@ -396,7 +508,7 @@ export default function JobsPage() {
       render: (row) => {
         const recoverAction = ["queued", "running"].includes(String(row.status).toLowerCase()) && row.is_stale;
         return (
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap gap-2" onClick={(event) => event.stopPropagation()}>
           {row.can_cancel ? (
             <Button variant="outline" size="sm" onClick={() => cancelImport(row.id)} disabled={!!canceling[`import-${row.id}`]}>
               {canceling[`import-${row.id}`] ? "Canceling..." : "Cancel"}
@@ -407,13 +519,46 @@ export default function JobsPage() {
               {retrying[`import-${row.id}`] ? (recoverAction ? "Recovering..." : "Retrying...") : (recoverAction ? "Recover" : "Retry")}
             </Button>
           ) : null}
-          <Button variant="outline" size="sm" onClick={() => void openJobDetails("import", row)}>
+          <Button variant="outline" size="sm" data-testid={`import-details-${row.id}`} onClick={(event) => { event.stopPropagation(); void openJobDetails("import", row); }}>
             Details
           </Button>
         </div>
       )},
     },
   ];
+
+  const metricCard = (key, node) => (
+    <div key={key} draggable role="group" aria-label={`Reorder ${key} metric`} onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; setDraggingMetric(key); }} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; }} onDrop={(event) => { event.preventDefault(); moveMetric(draggingMetric, key); setDraggingMetric(null); }} onDragEnd={() => setDraggingMetric(null)} className="min-w-0 cursor-grab active:cursor-grabbing">
+      {node}
+    </div>
+  );
+  const processingMetrics = {
+    worker: <MetricCard label="Worker health" value={loading && !processingHealth ? "—" : (processingHealth?.worker_health?.worker_count ?? "—")} detail={processingHealth?.worker_health?.worker_count ? "Celery worker ping responded." : "Awaiting worker health response."} onClick={() => router.push("/jobs?tab=crosspost")} />,
+    queued: <MetricCard label="Queued" value={loading && !processingHealth ? "—" : (processingHealth?.backlog?.queued ?? "—")} detail="Eligible backlog waiting to be resumed." onClick={() => router.push("/listings?queue=drafts")} />,
+    processing: <MetricCard label="Processing" value={loading && !processingHealth ? "—" : (processingHealth?.backlog?.processing ?? "—")} detail="Rows currently leased by a worker." onClick={() => router.push("/jobs?tab=imports")} />,
+    retrying: <MetricCard label="Retrying" value={loading && !processingHealth ? "—" : (processingHealth?.backlog?.retrying ?? "—")} detail="Temporary failures waiting for retry." onClick={() => router.push("/jobs?tab=crosspost")} />,
+    attention: <MetricCard label="Needs attention" value={loading && !processingHealth ? "—" : (processingHealth?.backlog?.needs_attention ?? "—")} detail="Rows blocked by explicit reasons." onClick={() => router.push("/listings?queue=needs_attention")} />,
+    review: <MetricCard label="Needs review" value={loading && !processingHealth ? "—" : (processingHealth?.backlog?.needs_review ?? "—")} detail="Review-ready rows waiting on operator approval." onClick={() => router.push("/listings?queue=review")} />,
+    complete: <MetricCard label="Processing complete" value={loading && !processingHealth ? "—" : (processingHealth?.backlog?.complete ?? "—")} detail="Processing finished; may still also require review." onClick={() => router.push("/listings?queue=review")} />,
+    stalled: <MetricCard label="Stalled" value={loading && !processingHealth ? "—" : (processingHealth?.stalled ? 1 : 0)} detail={processingHealth?.stalled ? "Processing appears stalled." : "Backlog is moving."} onClick={() => router.push("/jobs?tab=imports")} />,
+    queue_summary: (
+      <div
+        className="pp-card pp-metric-card min-h-[146px] cursor-pointer p-5 transition hover:-translate-y-0.5 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-[var(--pp-accent)]"
+        role="button"
+        tabIndex={0}
+        onClick={() => router.push("/jobs?tab=imports")}
+        onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); router.push("/jobs?tab=imports"); } }}
+      >
+        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[var(--pp-muted)]">Queue timing &amp; sources</p>
+        <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+          <div><p className="text-[11px] uppercase tracking-wide text-[var(--pp-muted)]">Oldest queued</p><p className="font-semibold text-[var(--pp-text)]">{loading && !processingHealth ? "—" : (processingHealth?.backlog?.oldest_queued || "—")}</p></div>
+          <div><p className="text-[11px] uppercase tracking-wide text-[var(--pp-muted)]">Last complete</p><p className="font-semibold text-[var(--pp-text)]">{loading && !processingHealth ? "—" : formatExactTime(processingHealth?.backlog?.last_success_at)}</p></div>
+          <div><p className="text-[11px] uppercase tracking-wide text-[var(--pp-muted)]">Amazon Vine</p><p className="font-semibold text-[var(--pp-text)]">{loading && !processingHealth ? "—" : `${processingHealth?.backlog?.source_breakdown?.amazon_vine ?? 0} rows`}</p></div>
+          <div><p className="text-[11px] uppercase tracking-wide text-[var(--pp-muted)]">Recovered</p><p className="font-semibold text-[var(--pp-text)]">{loading && !processingHealth ? "—" : `${processingHealth?.backlog?.source_breakdown?.media_inventory_recovery ?? 0} rows`}</p></div>
+        </div>
+      </div>
+    ),
+  };
 
   return (
     <AppShell
@@ -442,12 +587,64 @@ export default function JobsPage() {
         }
       />
 
-      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <MetricCard label="Cross-post jobs" value={crosspostJobs.length} detail="Queued and completed outbound marketplace orchestration." />
-        <MetricCard label="Import jobs" value={importJobs.length} detail="Normalized inbound marketplace imports and draft creation." />
-        <MetricCard label="Queued / running" value={summary.queued} detail="Jobs still moving through workers or awaiting execution." />
-        <MetricCard label="Failed" value={summary.failed} detail="Jobs that should be reviewed and potentially retried." />
+      <section className="pp-jobs-metric-grid">
+        <MetricCard onClick={() => router.push("/jobs?tab=crosspost")} label="Cross-post jobs" value={loading && !jobsOverview.crosspost_jobs?.length ? "—" : crosspostJobs.length} detail="Queued and completed outbound marketplace orchestration." />
+        <MetricCard onClick={() => router.push("/jobs?tab=imports")} label="Import jobs" value={loading && !jobsOverview.import_jobs?.length ? "—" : importJobs.length} detail="Normalized inbound marketplace imports and draft creation." />
+        <MetricCard onClick={() => router.push("/jobs?tab=crosspost")} label="Queued / running" value={loading && !jobsOverview.system_status ? "—" : summary.queued} detail="Jobs still moving through workers or awaiting execution." />
+        <MetricCard onClick={() => router.push("/jobs?tab=crosspost&status=failed")} label="Failed" value={loading && !jobsOverview.system_status ? "—" : summary.failed} detail="Jobs that should be reviewed and potentially retried." />
       </section>
+      <SectionPanel title="Live system status" description={systemStatus.status_message || "A consolidated snapshot of catalog, intake, and queue activity."}>
+        <div className="pp-jobs-metric-grid">
+          <MetricCard label="Visible catalog" value={metricValue(systemStatus.catalog_visible)} detail={`${metricValue(systemStatus.catalog_total)} total listings in the catalog.`} />
+          <MetricCard label="Draft backlog" value={metricValue(systemStatus.catalog_drafts)} detail="Listings still being refined automatically." />
+          <MetricCard label="Needs review" value={metricValue(systemStatus.catalog_review)} detail="Review-ready drafts awaiting approval." />
+          <MetricCard label="Published / sold" value={metricValue((systemStatus.catalog_published ?? 0) + (systemStatus.catalog_sold ?? 0))} detail="Listings already live or no longer available." />
+          <MetricCard label="Intake active" value={metricValue((systemStatus.intake_batches_active ?? 0) + (systemStatus.intake_photos_processing ?? 0))} detail="Batches and photos still moving through intake." />
+          <MetricCard label="Queued work" value={metricValue((systemStatus.queued_jobs ?? 0) + (systemStatus.running_jobs ?? 0))} detail="Worker tasks currently waiting or executing." />
+          <MetricCard label="Failed work" value={metricValue(systemStatus.failed_jobs)} detail="Jobs that need attention or retry." />
+          <MetricCard label="Unread notices" value={metricValue(systemStatus.unread_notifications)} detail="Process updates waiting for review." />
+        </div>
+      </SectionPanel>
+
+      <SectionPanel title="Processing health" description="Live backlog drain for Amazon Vine and recovered inventory. Processing state and review state are separate; complete can still also need review.">
+        {processingHealthError ? <p className="mb-3 text-sm text-[#b42318]">{processingHealthError}</p> : null}
+        <div className="pp-jobs-metric-grid">
+          {processingOrder.map((key) => metricCard(key, processingMetrics[key]))}
+        </div>
+        <div className="mt-4 rounded-[12px] border border-[#e5e7eb] bg-white p-4">
+          <p className="text-sm font-semibold text-[#101828]">Top blocker reasons</p>
+          <p className="mt-1 text-xs text-[#667085]">
+            These are the explicit reasons keeping rows out of automatic review. Items with warnings can still be reviewable; hard blockers remain here until the underlying evidence is repaired.
+          </p>
+          <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+            {(processingHealth?.backlog?.blocker_breakdown || []).slice(0, 6).map((entry) => (
+              <button type="button" key={entry.reason} onClick={() => openBlocker(entry)} className="rounded-[10px] border border-[#eaecf0] bg-[#f8fafc] p-3 text-left transition hover:border-[var(--pp-accent)] hover:shadow-sm">
+                <p className="text-sm font-medium text-[#101828]">{entry.reason}</p>
+                <p className="mt-1 text-xs text-[#667085]">{entry.count} listings · Click to inspect and repair</p>
+              </button>
+            ))}
+          </div>
+          {activeBlocker ? (
+            <div className="mt-4 rounded-[12px] border border-[var(--pp-accent)]/30 bg-white p-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div><p className="text-sm font-semibold text-[#101828]">{activeBlocker.reason}</p><p className="text-xs text-[#667085]">Affected listings and evidence</p></div>
+                <div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => router.push(`/listings?queue=needs_attention&blocker=${encodeURIComponent(activeBlocker.reason)}`)}>Open full queue</Button><Button size="sm" variant="outline" onClick={() => setActiveBlocker(null)}>Close</Button></div>
+              </div>
+              {blockerLoading ? <p className="mt-3 text-sm text-[#667085]">Loading affected listings…</p> : (
+                <div className="mt-3 space-y-2">
+                  {(activeBlocker.items || []).map((item) => (
+                    <div key={item.id} className="flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-[#eaecf0] p-3">
+                      <div className="min-w-0"><Link className="text-sm font-semibold text-[var(--pp-accent)] hover:underline" href={`/listings/${item.id}`}>{item.title || `Listing #${item.id}`}</Link><p className="mt-1 text-xs text-[#667085]">#{item.id} · {item.source_type || "unknown source"} · {item.stage || item.processing_state || "blocked"}</p><p className="mt-1 text-xs text-[#475467]">{item.next_action}</p></div>
+                      <div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => router.push(`/listings/${item.id}`)}>Fix manually</Button><Button size="sm" onClick={() => router.push(`/listings/${item.id}?mode=repair`)}>Open AI repair</Button></div>
+                    </div>
+                  ))}
+                  {!activeBlocker.items?.length && !blockerLoading ? <p className="text-sm text-[#667085]">No rows currently match this reason.</p> : null}
+                </div>
+              )}
+            </div>
+          ) : null}
+        </div>
+      </SectionPanel>
       <ActionBar
         left={<HealthIndicator healthy={!bridgeSmoke || bridgeSmoke.ok} label={bridgeSmoke?.ok ? "Bridge healthy" : bridgeSmoke ? "Bridge needs attention" : "Bridge not tested"} />}
         right={<span>{autoRefresh ? "Auto-refresh on" : "Auto-refresh off"}</span>}
@@ -485,6 +682,11 @@ export default function JobsPage() {
             <p className="text-sm font-semibold text-[#101828]">Live status</p>
             <p className="mt-1 text-sm text-[#667085]">Queued and running jobs will update automatically while auto-refresh stays enabled.</p>
           </div>
+          <div className="rounded-[12px] border border-[#e5e7eb] bg-white p-4">
+            <p className="text-sm font-semibold text-[#101828]">Bulk operations</p>
+            <p className="mt-1 text-xs text-[#667085]">Requeue actions require confirmation and create independent worker attempts.</p>
+            <div className="mt-3 flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => void bulkRequeue(["failed"])}>Requeue failed</Button><Button size="sm" variant="outline" onClick={() => void bulkRequeue(["queued"])}>Requeue queued</Button><Button size="sm" variant="outline" onClick={() => void bulkRequeue(["completed"])}>Re-run completed</Button></div>
+          </div>
         </div>
       </SectionPanel>
 
@@ -492,6 +694,7 @@ export default function JobsPage() {
         items={[
           { value: "crosspost", label: "Cross-post Jobs", count: crosspostJobs.length },
           { value: "imports", label: "Import Jobs", count: importJobs.length },
+          { value: "corrections", label: "Correction Jobs", count: correctionJobs.length },
         ]}
         value={activeTab}
         onChange={(value) => {
@@ -502,10 +705,12 @@ export default function JobsPage() {
       {loadError ? <ErrorState title="Jobs feed unavailable" description={loadError} action={<Button variant="outline" onClick={load}>Retry</Button>} /> : null}
       {loading ? <LoadingSkeleton lines={6} className="mb-4" /> : null}
 
-      {activeTab === "crosspost" ? (
+      {activeTab === "corrections" ? (
+        <SectionPanel title="Manual correction jobs" description="Prioritized operator correction work and material results."><div className="space-y-2">{correctionJobs.map((job) => <article key={job.id} className="rounded border p-3 text-sm"><div className="flex flex-wrap justify-between gap-2"><b>Correction #{job.id} · Listing #{job.listing_id}</b><StatusPill status={job.status} label={`${String(job.status || '').toUpperCase()} · P${job.priority}`} /></div><p className="mt-1 text-xs text-slate-600">Fields: {(job.fields || []).join(', ') || 'none'} · Attempts: {job.attempt_count || 0}</p>{job.status === 'queued' ? <label className="mt-1 block text-xs">Priority <input type="number" min="0" value={job.priority} onChange={async (e) => { try { await reprioritizeCorrectionJob(job.id, Number(e.target.value)); await load(); } catch (err) { toast.error(err.message); } }} className="ml-1 w-16 rounded border px-1" /></label> : null}{job.operator_note ? <p className="mt-1 text-xs">Instruction: {job.operator_note}</p> : null}{job.failure_reason ? <p className="mt-1 text-xs text-red-700">{job.failure_reason}</p> : null}<details className="mt-2 text-xs"><summary className="cursor-pointer font-semibold">Details</summary><pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap">{JSON.stringify({before:job.before,after:job.after,material_delta:job.material_delta,result:job.result},null,2)}</pre></details></article>)}{!correctionJobs.length ? <p className="text-sm text-slate-500">No correction jobs.</p> : null}</div></SectionPanel>
+      ) : activeTab === "crosspost" ? (
         <DataTable
           columns={crosspostColumns}
-          rows={crosspostJobs}
+          rows={visibleCrosspostJobs}
           rowKey={(row) => row.id}
           onRowClick={(row) => void openJobDetails("crosspost", row)}
           emptyState={<EmptyState title="No cross-post jobs yet" description="Queue a cross-post job from a listing workspace to start using the execution layer." className="border-0 p-0 py-6" />}
@@ -513,7 +718,7 @@ export default function JobsPage() {
       ) : (
         <DataTable
           columns={importColumns}
-          rows={importJobs}
+          rows={visibleImportJobs}
           rowKey={(row) => row.id}
           onRowClick={(row) => void openJobDetails("import", row)}
           emptyState={<EmptyState title="No import jobs yet" description="Create a marketplace import from /listings/new to normalize an external listing into a PosterPro draft." className="border-0 p-0 py-6" />}
@@ -569,7 +774,48 @@ export default function JobsPage() {
                 <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Updated</p>
                 <p className="mt-2 text-sm font-semibold text-[#101828]">{formatTime(activeJob.job.updated_at || activeJob.job.created_at)}</p>
               </div>
+              <div className="rounded-[12px] border border-[#e5e7eb] bg-white p-4">
+                <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Requested by</p>
+                <p className="mt-2 text-sm font-semibold text-[#101828]">{activeJob.job.operator_email || `User #${activeJob.job.user_id || "—"}`}</p>
+              </div>
             </div>
+
+            <div className="rounded-[12px] border border-[#e5e7eb] bg-white p-4">
+              <p className="text-sm font-semibold text-[#101828]">Audit timeline</p>
+              <div className="mt-3 space-y-2 border-l-2 border-[#d0d5dd] pl-4">
+                <div><p className="text-sm font-medium text-[#101828]">Job created / requested</p><p className="text-xs text-[#667085]">{formatExactTime(activeJob.job.created_at)} · {activeJob.job.operator_email || `User #${activeJob.job.user_id || "—"}`}</p></div>
+                <div><p className="text-sm font-medium text-[#101828]">Current worker status: {startCase(activeJob.job.status)}</p><p className="text-xs text-[#667085]">Last update {formatExactTime(activeJob.job.updated_at || activeJob.job.created_at)} · task {activeJob.job.task_id || "not recorded"}</p></div>
+                {activeJob.job.last_error ? <div><p className="text-sm font-medium text-[#b42318]">Failure / blocker</p><p className="text-xs text-[#912018]">{activeJob.job.last_error}</p></div> : null}
+                {activeJob.job.operator_note ? <div><p className="text-sm font-medium text-[#101828]">Operator/system result</p><p className="text-xs text-[#475467]">{activeJob.job.operator_note}</p></div> : null}
+              </div>
+            </div>
+
+            <div className="rounded-[12px] border border-[#e5e7eb] bg-white p-4">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-sm font-semibold text-[#101828]">Progress</p>
+                <p className="text-sm font-semibold text-[#475467]">{jobProgress(activeJob.job)}%</p>
+              </div>
+              <div className="mt-3 h-2 overflow-hidden rounded-full bg-[#eaecf0]">
+                <div className="h-full rounded-full bg-gradient-to-r from-[#173a63] to-[#c9a160] transition-all" style={{ width: `${jobProgress(activeJob.job)}%` }} />
+              </div>
+            </div>
+
+            {activeJob.type === "crosspost" && activeJob.job.listing_id ? (
+              <div className="rounded-[12px] border border-[#c7d7fe] bg-[#eff4ff] p-4">
+                <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Originating listing</p>
+                <Link href={`/listings/${activeJob.job.listing_id}`} className="mt-2 inline-flex font-semibold text-[#175cd3] hover:underline">
+                  Open listing #{activeJob.job.listing_id} →
+                </Link>
+              </div>
+            ) : null}
+            {activeJob.type === "import" && activeJob.job.created_listing_id ? (
+              <div className="rounded-[12px] border border-[#c7d7fe] bg-[#eff4ff] p-4">
+                <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Created listing</p>
+                <Link href={`/listings/${activeJob.job.created_listing_id}`} className="mt-2 inline-flex font-semibold text-[#175cd3] hover:underline">
+                  Open listing #{activeJob.job.created_listing_id} →
+                </Link>
+              </div>
+            ) : null}
 
             <div className="grid gap-3 md:grid-cols-3">
               <div className="rounded-[12px] border border-[#e5e7eb] bg-white p-4">

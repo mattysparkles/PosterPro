@@ -336,6 +336,43 @@ def test_build_ebay_publish_plan_uses_numeric_category_fallback_when_suggestion_
     assert plan["category"]["category_id"] == "171485"
 
 
+def test_apply_repair_actions_persists_resolved_category_id(db_session, monkeypatch):
+    user, listing = _seed_user_and_listing(db_session)
+    listing.category_id = None
+    listing.category_suggestion = "RYOBI ONE+ cordless blower"
+    db_session.add(listing)
+    db_session.commit()
+
+    async def fake_build_ebay_publish_plan(_listing, _db, allow_create_policies=False):
+        return {
+            "category": {
+                "category_id": "139968",
+                "category_name": "Leaf Blowers",
+                "source": "ebay_taxonomy",
+            }
+        }
+
+    def fake_preflight_listing(_db, _listing, marketplace):
+        return {
+            "status": "ready_with_warnings",
+            "blockers": [],
+            "warnings": [],
+            "category_summary": {"category_id": "139968", "category_name": "Leaf Blowers"},
+            "image_summary": {"actual_image_present": True},
+        }
+
+    monkeypatch.setattr("app.services.marketplace_preflight.build_ebay_publish_plan", fake_build_ebay_publish_plan)
+    service = MarketplacePreflightService()
+    monkeypatch.setattr(service, "preflight_listing", fake_preflight_listing)
+
+    result = service.apply_repair_actions(db_session, listing, apply_category_suggestion=True, validate_images=False)
+
+    db_session.refresh(listing)
+    assert listing.category_id == "139968"
+    assert (listing.marketplace_data or {}).get("ebay_last_resolved_category", {}).get("category_id") == "139968"
+    assert "category_id" in result["applied"]
+
+
 def test_cached_category_aspects_uses_latest_duplicate_cache_row(db_session, monkeypatch):
     user, _listing = _seed_user_and_listing(db_session)
     account = MarketplaceAccount(
@@ -529,12 +566,15 @@ def test_marketplace_error_translation_normalizes_common_failures():
     ebay_error = translate_marketplace_error("ebay", '{"message":"Invalid access token"}')
     facebook_error = translate_marketplace_error("facebook", "Browser not connected for assisted publish")
     ebay_shipping_error = translate_marketplace_error("ebay", "invalid shipping policy id")
+    ebay_detector_error = translate_marketplace_error("ebay", "For safety reasons, certain smoke and carbon monoxide detectors aren't allowed. policy reference PI_PRS_UKSmokedetectors")
     facebook_handoff_error = translate_marketplace_error("facebook", "final submit unsupported in this workspace")
 
     assert ebay_error["code"] == "EBAY_OAUTH_EXPIRED"
     assert ebay_error["retryable"] is False
     assert "Reconnect eBay" in ebay_error["fix_hint"]
     assert ebay_shipping_error["code"] == "EBAY_POLICY_MISSING"
+    assert ebay_detector_error["code"] == "EBAY_PRODUCT_SAFETY_RESTRICTED"
+    assert ebay_detector_error["retryable"] is False
     assert ebay_shipping_error["operator_action"] == "fix_policies"
     assert facebook_error["code"] == "FACEBOOK_BROWSER_UNAVAILABLE"
     assert facebook_error["retryable"] is True

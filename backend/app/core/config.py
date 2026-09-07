@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/1"
     storage_root: str = "./storage"
     startup_schema_compat_enabled: bool = True
+    startup_vine_image_repair_enabled: bool = False
     session_secret: str | None = None
     openai_api_key_plain: str | None = Field(default=None, validation_alias=AliasChoices("OPENAI_API_KEY"))
     openai_api_key_enc: str | None = Field(default=None, validation_alias=AliasChoices("OPENAI_API_KEY_ENC"))
@@ -31,6 +32,10 @@ class Settings(BaseSettings):
     ebay_client_secret_enc: str | None = Field(default=None, validation_alias=AliasChoices("EBAY_CLIENT_SECRET_ENC"))
     ebay_runame: str | None = None
     ebay_redirect_uri: str | None = None
+    google_photos_client_id: str | None = None
+    google_photos_client_secret_plain: str | None = Field(default=None, validation_alias=AliasChoices("GOOGLE_PHOTOS_CLIENT_SECRET"))
+    google_photos_client_secret_enc: str | None = Field(default=None, validation_alias=AliasChoices("GOOGLE_PHOTOS_CLIENT_SECRET_ENC"))
+    google_photos_redirect_uri: str | None = None
     photoroom_api_key_plain: str | None = Field(default=None, validation_alias=AliasChoices("PHOTOROOM_API_KEY"))
     photoroom_api_key_enc: str | None = Field(default=None, validation_alias=AliasChoices("PHOTOROOM_API_KEY_ENC"))
     photoroom_api_url: str = "https://sdk.photoroom.com/v1/segment"
@@ -51,7 +56,15 @@ class Settings(BaseSettings):
     sale_detection_dry_run: bool = True
     sale_detection_poll_minutes: int = 15
     sold_sync_enabled: bool = False
+    intake_monitor_enabled: bool = False
+    historical_backlog_auto_resume_enabled: bool = False
     max_concurrent_bulk_tasks: int = 50
+    ai_cost_mode: str = "COMPLIMENTARY_ONLY"
+    ai_mini_daily_entitlement: int = 2_500_000
+    ai_mini_daily_safe_ceiling: int = 2_350_000
+    ai_large_daily_entitlement: int = 250_000
+    ai_large_daily_safe_ceiling: int = 225_000
+    ai_provider_circuit_cooldown_seconds: int = 900
     bulk_chunk_size: int = 0
     amazon_vine_import_enabled: bool = False
     amazon_vine_import_premium_only: bool = False
@@ -81,6 +94,10 @@ class Settings(BaseSettings):
     @property
     def ebay_client_secret(self) -> str | None:
         return decrypt_secret_if_needed(self.ebay_client_secret_enc, secret_key=self.session_secret) or self.ebay_client_secret_plain
+
+    @property
+    def google_photos_client_secret(self) -> str | None:
+        return decrypt_secret_if_needed(self.google_photos_client_secret_enc, secret_key=self.session_secret) or self.google_photos_client_secret_plain
 
     @property
     def photoroom_api_key(self) -> str | None:

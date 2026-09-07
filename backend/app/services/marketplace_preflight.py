@@ -88,8 +88,10 @@ def _compact_preflight_issue(item: dict[str, Any]) -> dict[str, Any]:
 def _listing_pricing_summary(listing: Listing) -> dict[str, Any]:
     pricing = (listing.marketplace_data or {}).get("pricing_analysis") if isinstance(listing.marketplace_data, dict) else {}
     pricing = pricing if isinstance(pricing, dict) else {}
+    listing_price = getattr(listing, "listing_price", None)
+    suggested_price = getattr(listing, "suggested_price", None)
     return {
-        "current_price": pricing.get("current_price") or listing.listing_price or listing.suggested_price,
+        "current_price": pricing.get("current_price") or listing_price or suggested_price,
         "recommended_price": pricing.get("recommended_price"),
         "quick_sale_price": pricing.get("quick_sale_price"),
         "floor_price": pricing.get("floor_price"),
@@ -293,8 +295,8 @@ class MarketplacePreflightService:
             listing={
                 "category_id": listing.category_id,
                 "category_suggestion": listing.category_suggestion,
-                "listing_price": listing.listing_price,
-                "suggested_price": listing.suggested_price,
+                "listing_price": getattr(listing, "listing_price", None),
+                "suggested_price": getattr(listing, "suggested_price", None),
             },
         )
         quality = compute_listing_quality_summary(listing, pricing_analysis=pricing)
@@ -375,9 +377,11 @@ class MarketplacePreflightService:
             blockers.append(_issue("TITLE_MISSING", "Draft title is missing.", field="title", fix_hint="Enter a concise product title."))
         if not (listing.description or "").strip():
             blockers.append(_issue("DESCRIPTION_MISSING", "Draft description is missing.", field="description", fix_hint="Add the key item details, defects, and included accessories."))
-        if not (listing.listing_price or listing.suggested_price or pricing.get("current_price") or pricing.get("recommended_price")):
+        listing_price = getattr(listing, "listing_price", None)
+        suggested_price = getattr(listing, "suggested_price", None)
+        if not (listing_price or suggested_price or pricing.get("current_price") or pricing.get("recommended_price")):
             blockers.append(_issue("PRICE_MISSING", "Listing price is missing.", field="listing_price", fix_hint="Apply a pricing recommendation or enter a list price."))
-        if int(listing.quantity or 0) <= 0:
+        if int(getattr(listing, "quantity", 0) or 0) <= 0:
             blockers.append(_issue("QUANTITY_INVALID", "Quantity must be at least 1.", field="quantity", fix_hint="Set quantity to 1 for a single-item listing."))
         if not (listing.condition or (listing.condition_data or {}).get("condition_bucket")):
             blockers.append(_issue("CONDITION_MISSING", "Condition review is missing.", field="condition", fix_hint="Set the condition bucket and operator notes before publish."))
@@ -387,7 +391,13 @@ class MarketplacePreflightService:
             blockers.append(_issue("ACTUAL_PHOTOS_MISSING", "No approved actual item photos are attached.", field="listing_images", fix_hint="Approve or upload real item photos before publishing."))
         if readiness.get("manual_photo_needed"):
             blockers.append(_issue("REFERENCE_IMAGES_ONLY", "Only source/reference images are attached.", field="listing_images", fix_hint="Add or approve actual item photos before publishing.", severity="warning"))
-        if marketplace == MarketplaceName.ebay.value and readiness.get("shipping_checklist", {}).get("manual_measurement_needed", True):
+        shipping_check = readiness.get("shipping_checklist", {})
+        # Estimated weight/dimensions are valid draft data.  Only block eBay
+        # when the payload is actually missing a usable value; an operator can
+        # replace the estimate with measured packaging later.
+        if marketplace == MarketplaceName.ebay.value and (
+            not shipping_check.get("weight_present") or not shipping_check.get("package_dimensions_present")
+        ):
             blockers.append(_issue("EBAY_SHIPPING_NEEDS_MEASUREMENT", "Shipping measurements still need review.", field="shipping_profile", fix_hint="Measure the packaged item and save weight and dimensions."))
         return blockers
 
@@ -715,8 +725,8 @@ class MarketplacePreflightService:
                     listing={
                         "category_id": listing.category_id,
                         "category_suggestion": listing.category_suggestion,
-                        "listing_price": listing.listing_price,
-                        "suggested_price": listing.suggested_price,
+                        "listing_price": getattr(listing, "listing_price", None),
+                        "suggested_price": getattr(listing, "suggested_price", None),
                     },
                 )
                 if not readiness.get("blockers"):
@@ -778,8 +788,8 @@ class MarketplacePreflightService:
                     listing={
                         "category_id": listing.category_id,
                         "category_suggestion": listing.category_suggestion,
-                        "listing_price": listing.listing_price,
-                        "suggested_price": listing.suggested_price,
+                        "listing_price": getattr(listing, "listing_price", None),
+                        "suggested_price": getattr(listing, "suggested_price", None),
                     },
                 ),
             )
@@ -1025,7 +1035,13 @@ class MarketplacePreflightService:
                 continue
             preflight = self.preflight_listing(db, listing, market)
             cache_summary = self.cache_preflight_summary(db, listing, preflight)
-            price = float(listing.listing_price or listing.suggested_price or listing.buy_it_now_price or listing.estimated_value or 0)
+            price = float(
+                getattr(listing, "listing_price", None)
+                or getattr(listing, "suggested_price", None)
+                or getattr(listing, "buy_it_now_price", None)
+                or getattr(listing, "estimated_value", None)
+                or 0
+            )
             shipping = preflight.get("shipping_summary") or {}
             image_summary = preflight.get("image_summary") or {}
             quality = preflight.get("quality_summary") or {}
@@ -1236,7 +1252,13 @@ class MarketplacePreflightService:
             ebay_status = str(getattr(listing.ebay_publish_status, "value", listing.ebay_publish_status) or "").strip().lower()
             if listing_status in {"posted", "published"} or ebay_status == "posted" or listing.ebay_listing_id:
                 continue
-            price = float(listing.listing_price or listing.suggested_price or listing.buy_it_now_price or listing.estimated_value or 0)
+            price = float(
+                getattr(listing, "listing_price", None)
+                or getattr(listing, "suggested_price", None)
+                or getattr(listing, "buy_it_now_price", None)
+                or getattr(listing, "estimated_value", None)
+                or 0
+            )
             if price <= 0 or price > max_price:
                 continue
             preflight = self.preflight_listing(db, listing, market)
@@ -1373,6 +1395,28 @@ class MarketplacePreflightService:
                 changes["applied"].append("category_suggestion")
             else:
                 changes["skipped"].append("category_suggestion")
+            if not str(listing.category_id or "").strip():
+                try:
+                    plan = _run_async_sync(build_ebay_publish_plan(listing, db, allow_create_policies=False))
+                except Exception:  # noqa: BLE001
+                    plan = {}
+                category = plan.get("category") if isinstance(plan, dict) else {}
+                category_id = str((category or {}).get("category_id") or "").strip()
+                category_name = str((category or {}).get("category_name") or "").strip()
+                if category_id.isdigit():
+                    listing.category_id = category_id
+                    marketplace_data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}
+                    listing.marketplace_data = {
+                        **marketplace_data,
+                        "ebay_last_resolved_category": {
+                            "category_id": category_id,
+                            "category_name": category_name or category_id,
+                            "source": str((category or {}).get("source") or "ebay_taxonomy").strip() or "ebay_taxonomy",
+                        },
+                    }
+                    if category_name and not str(listing.category_suggestion or "").strip():
+                        listing.category_suggestion = category_name
+                    changes["applied"].append("category_id")
         if validate_images:
             normalized_images = _normalized_listing_images(listing)
             if normalized_images != (listing.listing_images or []):

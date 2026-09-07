@@ -12,12 +12,24 @@ class DummyListing:
         self.title = "Vintage Lamp"
         self.description = "Great condition"
         self.category_suggestion = "171485"
+        self.category_id = None
         self.suggested_price = 44.5
         self.ebay_publish_status = EbayPublishStatus.DRAFT
         self.marketplace_data = None
         self.item_specifics = {}
+        self.listing_images = []
+        self.image_urls = []
+        self.shipping_profile = {}
+        self.condition_data = {"condition_bucket": "open_box", "item_condition_notes": "Open box"}
+        self.source_metadata = {}
+        self.source_type = "media_inventory_recovery"
+        self.status = "draft"
+        self.needs_review = False
         self.ebay_listing_id = None
         self.publish_attempts = []
+
+    def __getattr__(self, name):
+        return None
 
 
 class DummyAccount:
@@ -58,6 +70,92 @@ def test_apply_ebay_plan_repairs_to_listing_persists_safe_category_and_specifics
     assert listing.item_specifics == {"Brand": "Acme", "Type": "Desk Lamp", "Features": ["Dimmable", "LED"]}
     assert listing.marketplace_data["ebay_last_resolved_category"]["category_id"] == "171485"
     assert listing.marketplace_data["ebay_item_specifics_provenance"]["Brand"] == "derived"
+
+
+def test_build_ebay_package_weight_and_size_parses_text_weight():
+    listing = DummyListing()
+    listing.shipping_profile = {
+        "package_weight": "9 lb (estimated)",
+        "package_dimensions": {"length": 16, "width": 14, "height": 12},
+    }
+
+    payload = ebay_service._build_ebay_package_weight_and_size(listing)
+
+    assert payload == {
+        "weight": {"value": 9.0, "unit": "POUND"},
+        "dimensions": {"length": 16, "width": 14, "height": 12, "unit": "INCH"},
+    }
+
+
+def test_publish_failure_repair_parses_shipping_weight_and_sets_retryable_state(monkeypatch):
+    listing = DummyListing()
+    listing.shipping_profile = {
+        "package_weight": "3 lb (estimated)",
+        "package_dimensions": {"length": 12, "width": 10, "height": 8},
+    }
+    db = DummyDB()
+
+    class FakePreflightService:
+        def apply_repair_actions(self, _db, _listing, *, apply_category_suggestion=False, validate_images=False):
+            return {"applied": ["category_suggestion"] if apply_category_suggestion else [], "skipped": []}
+
+        def preflight_listing(self, _db, _listing, _marketplace):
+            return {
+                "status": "ready",
+                "blockers": [],
+                "warnings": [],
+            }
+
+        def cache_preflight_summary(self, _db, _listing, _preflight):
+            return {"cached": True}
+
+    monkeypatch.setattr("app.services.marketplace_preflight.MarketplacePreflightService", FakePreflightService)
+
+    repair = ebay_service._apply_publish_failure_repair(
+        db,
+        listing,
+        translated_error={"code": "EBAY_SHIPPING_DATA_INVALID", "operator_action": "fix_shipping"},
+        raw_error="eBay rejected the shipping or package details.",
+    )
+
+    assert repair["applied_actions"][0] == "parsed_shipping_weight"
+    assert listing.shipping_profile["package_weight"] == 3.0
+    assert listing.status == "ready"
+    assert listing.needs_review is False
+    assert listing.marketplace_data["publish_failure_repair"]["preflight_after"]["status"] == "ready"
+
+
+def test_publish_failure_repair_sets_condition_override_for_condition_incompatibility(monkeypatch):
+    listing = DummyListing()
+    db = DummyDB()
+
+    class FakePreflightService:
+        def apply_repair_actions(self, _db, _listing, *, apply_category_suggestion=False, validate_images=False):
+            return {"applied": ["category_suggestion"] if apply_category_suggestion else [], "skipped": []}
+
+        def preflight_listing(self, _db, _listing, _marketplace):
+            return {
+                "status": "needs_review",
+                "blockers": ["CONDITION_MISSING"],
+                "warnings": [],
+            }
+
+        def cache_preflight_summary(self, _db, _listing, _preflight):
+            return {"cached": True}
+
+    monkeypatch.setattr("app.services.marketplace_preflight.MarketplacePreflightService", FakePreflightService)
+
+    repair = ebay_service._apply_publish_failure_repair(
+        db,
+        listing,
+        translated_error={"code": "EBAY_CONDITION_INCOMPATIBLE_WITH_CATEGORY", "operator_action": "fix_condition"},
+        raw_error="condition id is invalid for the selected primary category id",
+    )
+
+    assert "ebay_condition_override" in listing.condition_data
+    assert repair["applied_actions"]
+    assert listing.status == "draft"
+    assert listing.needs_review is True
 
 
 def test_create_offer_for_item_uses_policy_ids(monkeypatch):

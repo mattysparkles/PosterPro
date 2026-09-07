@@ -9,6 +9,7 @@ import httpx
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.services.ai_guard import allow as ai_allow, mark_completed as ai_mark_completed, open_circuit as ai_open_circuit, signature as ai_signature
 from app.models.models import Listing
 from app.prompts.templates import get_prompt_template
 
@@ -108,6 +109,10 @@ class PricingService:
             "category": listing.category_suggestion or listing.category_id,
             "estimated_value": listing.estimated_value,
         }
+        guard_key = ai_signature(purpose="pricing", payload={"listing_id": listing.id, "signals": signals, "model": self.model})
+        if not ai_allow(guard_key):
+            logger.info("Skipping duplicate or circuit-open pricing provider call", extra={"listing_id": listing.id})
+            return None
         payload = {
             "model": self.model,
             "response_format": {"type": "json_object"},
@@ -127,6 +132,8 @@ class PricingService:
             data = None
             for attempt in range(1, 4):
                 response = client.post("https://api.openai.com/v1/chat/completions", json=payload, headers=headers)
+                if response.status_code == 429:
+                    ai_open_circuit()
                 if response.status_code in (429, 500, 502, 503, 504) and attempt < 3:
                     logger.warning(
                         "Transient pricing LLM error",
@@ -145,6 +152,7 @@ class PricingService:
         content = data["choices"][0]["message"]["content"]
         try:
             parsed = json.loads(content)
+            ai_mark_completed(guard_key)
             return {
                 "start_price": float(parsed.get("start_price")),
                 "buy_it_now_price": float(parsed.get("buy_it_now_price")),

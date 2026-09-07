@@ -4,6 +4,7 @@ import enum
 class ListingStatus(str, enum.Enum):
     draft = "draft"
     ready = "ready"
+    archived = "archived"
     posted = "posted"
     rejected = "rejected"
     INGESTED = "INGESTED"

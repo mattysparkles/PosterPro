@@ -95,6 +95,7 @@ export default function SettingsPage() {
   const { loading: connectingEbay, error: ebayConnectError, connect: connectEbay } = useEbayAuth(user?.id, ebayAuthRedirectUri);
   const [salePlatforms, setSalePlatforms] = useState([]);
   const [profileName, setProfileName] = useState('');
+  const [profilePreferences, setProfilePreferences] = useState({ avatar_url: '', phone_number: '', marketing_email_consent: false, marketing_sms_consent: false });
   const [loading, setLoading] = useState(true);
   const [savingProfile, setSavingProfile] = useState(false);
   const [savingPassword, setSavingPassword] = useState(false);
@@ -126,6 +127,8 @@ export default function SettingsPage() {
   const [runningMarketplaceImport, setRunningMarketplaceImport] = useState(false);
   const [runningBulkMarketplaceImport, setRunningBulkMarketplaceImport] = useState(false);
   const [selectedMarketplace, setSelectedMarketplace] = useState('');
+  const [browserExtensionInstallOpen, setBrowserExtensionInstallOpen] = useState(false);
+  const [browserExtensionInstallMarketplace, setBrowserExtensionInstallMarketplace] = useState('mercari');
   const [marketplaceForm, setMarketplaceForm] = useState({
     display_name: '',
     account_handle: '',
@@ -190,13 +193,16 @@ export default function SettingsPage() {
   const [syncingEbayPolicies, setSyncingEbayPolicies] = useState(false);
   const [verifyingEbayLocation, setVerifyingEbayLocation] = useState(false);
   const [creatingEbayLocation, setCreatingEbayLocation] = useState(false);
-  const [apiKeyForm, setApiKeyForm] = useState({ openai_api_key: '', photoroom_api_key: '' });
+  const [apiKeyForm, setApiKeyForm] = useState({ openai_api_key: '', photoroom_api_key: '', google_photos_client_id: '', google_photos_client_secret: '', google_photos_redirect_uri: '' });
   const [workflowForm, setWorkflowForm] = useState({
     review_before_publish: true,
     auto_publish_after_approval: false,
     bulk_approval_enabled: true,
     listing_preview_mode: 'marketplace',
     default_preview_marketplace: 'ebay',
+    shipping_price_threshold: 10,
+    shipping_under_threshold_mode: 'buyer_pays_shipping',
+    shipping_at_or_above_threshold_mode: 'free_shipping',
   });
   const [automationForm, setAutomationForm] = useState({
     autonomous_dry_run: false,
@@ -312,69 +318,73 @@ export default function SettingsPage() {
       setBridgeAccounts(bridgeAccountData?.accounts || []);
       setEbayAccountReadiness(ebayReadiness);
       setEbayPolicyCatalog(ebayPolicies);
-      setProfileName(panels.profile.full_name || '');
+      setProfileName(panels?.profile?.full_name || '');
+      setProfilePreferences({ avatar_url: '', phone_number: '', marketing_email_consent: false, marketing_sms_consent: false, ...(panels?.profile?.profile_preferences || {}) });
       setEbayForm({
         ebay_client_id: '',
         ebay_client_secret: '',
-        ebay_redirect_uri: panels.ebay.runame || panels.ebay.redirect_uri || '',
+        ebay_redirect_uri: panels?.ebay?.runame || panels?.ebay?.redirect_uri || '',
       });
       setEbayPolicyForm({
-        fulfillment_policy_id: panels.ebay?.policy_settings?.fulfillment_policy_id || '',
-        fulfillment_policy_name: panels.ebay?.policy_settings?.fulfillment_policy_name || '',
-        payment_policy_id: panels.ebay?.policy_settings?.payment_policy_id || '',
-        payment_policy_name: panels.ebay?.policy_settings?.payment_policy_name || '',
-        return_policy_id: panels.ebay?.policy_settings?.return_policy_id || '',
-        return_policy_name: panels.ebay?.policy_settings?.return_policy_name || '',
-        merchant_location_key: panels.ebay?.policy_settings?.merchant_location_key || '',
-        merchant_location_location_name: panels.ebay?.policy_settings?.merchant_location_location_name || 'PosterPro Default Location',
-        merchant_location_postal_code: panels.ebay?.policy_settings?.merchant_location_postal_code || '95125',
-        merchant_location_country: panels.ebay?.policy_settings?.merchant_location_country || 'US',
-        merchant_location_city: panels.ebay?.policy_settings?.merchant_location_city || 'San Jose',
-        merchant_location_state_or_province: panels.ebay?.policy_settings?.merchant_location_state_or_province || 'CA',
-        merchant_location_phone: panels.ebay?.policy_settings?.merchant_location_phone || '',
-        shipping_service_code: panels.ebay?.policy_settings?.shipping_service_code || '',
-        handling_time_days: Number(panels.ebay?.policy_settings?.handling_time_days || 1),
-        local_pickup_allowed: !!panels.ebay?.policy_settings?.local_pickup_allowed,
-        calculated_shipping: !!panels.ebay?.policy_settings?.calculated_shipping,
-        package_weight_required: panels.ebay?.policy_settings?.package_weight_required ?? true,
-        package_dimensions_required: panels.ebay?.policy_settings?.package_dimensions_required ?? true,
+        fulfillment_policy_id: panels?.ebay?.policy_settings?.fulfillment_policy_id || '',
+        fulfillment_policy_name: panels?.ebay?.policy_settings?.fulfillment_policy_name || '',
+        payment_policy_id: panels?.ebay?.policy_settings?.payment_policy_id || '',
+        payment_policy_name: panels?.ebay?.policy_settings?.payment_policy_name || '',
+        return_policy_id: panels?.ebay?.policy_settings?.return_policy_id || '',
+        return_policy_name: panels?.ebay?.policy_settings?.return_policy_name || '',
+        merchant_location_key: panels?.ebay?.policy_settings?.merchant_location_key || '',
+        merchant_location_location_name: panels?.ebay?.policy_settings?.merchant_location_location_name || 'PosterPro Default Location',
+        merchant_location_postal_code: panels?.ebay?.policy_settings?.merchant_location_postal_code || '95125',
+        merchant_location_country: panels?.ebay?.policy_settings?.merchant_location_country || 'US',
+        merchant_location_city: panels?.ebay?.policy_settings?.merchant_location_city || 'San Jose',
+        merchant_location_state_or_province: panels?.ebay?.policy_settings?.merchant_location_state_or_province || 'CA',
+        merchant_location_phone: panels?.ebay?.policy_settings?.merchant_location_phone || '',
+        shipping_service_code: panels?.ebay?.policy_settings?.shipping_service_code || '',
+        handling_time_days: Number(panels?.ebay?.policy_settings?.handling_time_days || 1),
+        local_pickup_allowed: !!panels?.ebay?.policy_settings?.local_pickup_allowed,
+        calculated_shipping: !!panels?.ebay?.policy_settings?.calculated_shipping,
+        package_weight_required: panels?.ebay?.policy_settings?.package_weight_required ?? true,
+        package_dimensions_required: panels?.ebay?.policy_settings?.package_dimensions_required ?? true,
       });
       setHostedPagesForm({
-        brand_name: panels.hosted_pages?.brand_name || 'PosterPro',
-        active_theme_id: panels.hosted_pages?.active_theme_id || 'corporate-sky',
-        pages: panels.hosted_pages?.pages || {},
+        brand_name: panels?.hosted_pages?.brand_name || 'PosterPro',
+        active_theme_id: panels?.hosted_pages?.active_theme_id || 'corporate-sky',
+        pages: panels?.hosted_pages?.pages || {},
       });
       setApiKeyForm({
         openai_api_key: '',
         photoroom_api_key: '',
       });
       setWorkflowForm({
-        review_before_publish: panels.workflow?.review_before_publish ?? true,
-        auto_publish_after_approval: panels.workflow?.auto_publish_after_approval ?? false,
-        bulk_approval_enabled: panels.workflow?.bulk_approval_enabled ?? true,
-        listing_preview_mode: panels.workflow?.listing_preview_mode || 'marketplace',
-        default_preview_marketplace: panels.workflow?.default_preview_marketplace || 'ebay',
+        review_before_publish: panels?.workflow?.review_before_publish ?? true,
+        auto_publish_after_approval: panels?.workflow?.auto_publish_after_approval ?? false,
+        bulk_approval_enabled: panels?.workflow?.bulk_approval_enabled ?? true,
+        listing_preview_mode: panels?.workflow?.listing_preview_mode || 'marketplace',
+        default_preview_marketplace: panels?.workflow?.default_preview_marketplace || 'ebay',
+        shipping_price_threshold: Number(panels?.workflow?.shipping_price_threshold ?? 10),
+        shipping_under_threshold_mode: panels?.workflow?.shipping_under_threshold_mode || 'buyer_pays_shipping',
+        shipping_at_or_above_threshold_mode: panels?.workflow?.shipping_at_or_above_threshold_mode || 'free_shipping',
       });
       setAutomationForm({
-        autonomous_dry_run: !!panels.automation.autonomous_dry_run,
-        autonomous_crosspost_enabled: !!panels.automation.autonomous_crosspost_enabled,
-        automation_bridge_enabled: !!panels.automation.automation_bridge_enabled,
-        automation_bridge_url: panels.automation.automation_bridge_url || '',
-        automation_bridge_timeout_seconds: Number(panels.automation.automation_bridge_timeout_seconds || 30),
+        autonomous_dry_run: !!panels?.automation?.autonomous_dry_run,
+        autonomous_crosspost_enabled: !!panels?.automation?.autonomous_crosspost_enabled,
+        automation_bridge_enabled: !!panels?.automation?.automation_bridge_enabled,
+        automation_bridge_url: panels?.automation?.automation_bridge_url || '',
+        automation_bridge_timeout_seconds: Number(panels?.automation?.automation_bridge_timeout_seconds || 30),
         automation_bridge_api_key: '',
-        sale_detection_enabled: !!panels.automation.sale_detection_enabled,
-        sale_detection_dry_run: !!panels.automation.sale_detection_dry_run,
-        sale_detection_poll_minutes: Number(panels.automation.sale_detection_poll_minutes || 15),
+        sale_detection_enabled: !!panels?.automation?.sale_detection_enabled,
+        sale_detection_dry_run: !!panels?.automation?.sale_detection_dry_run,
+        sale_detection_poll_minutes: Number(panels?.automation?.sale_detection_poll_minutes || 15),
       });
       setSoldSyncForm({
-        sold_out_delist_everywhere: panels.sold_sync_preferences?.sold_out_delist_everywhere ?? true,
-        out_of_stock_delist_everywhere: panels.sold_sync_preferences?.out_of_stock_delist_everywhere ?? false,
-        remove_media_on_sold_out: panels.sold_sync_preferences?.remove_media_on_sold_out ?? false,
+        sold_out_delist_everywhere: panels?.sold_sync_preferences?.sold_out_delist_everywhere ?? true,
+        out_of_stock_delist_everywhere: panels?.sold_sync_preferences?.out_of_stock_delist_everywhere ?? false,
+        remove_media_on_sold_out: panels?.sold_sync_preferences?.remove_media_on_sold_out ?? false,
       });
       setServerForm({
-        app_base_url: panels.server.app_base_url || '',
-        environment: panels.server.environment || '',
-        storage_root: panels.server.storage_root || '',
+        app_base_url: panels?.server?.app_base_url || '',
+        environment: panels?.server?.environment || '',
+        storage_root: panels?.server?.storage_root || '',
       });
       setEmailForm({
         smtp_host: panels.email?.host || '',
@@ -884,6 +894,19 @@ export default function SettingsPage() {
     });
   };
 
+  const copyBrowserExtensionInstallText = async (text, label) => {
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        toast.success(`${label} copied to clipboard.`);
+        return;
+      }
+      throw new Error('Clipboard access is unavailable in this browser.');
+    } catch (error) {
+      toast.error(error.message || `Unable to copy ${label}.`);
+    }
+  };
+
   const syncEbayPolicyCatalog = async (createMissingDefaults = false) => {
     setSyncingEbayPolicies(true);
     try {
@@ -1177,6 +1200,7 @@ export default function SettingsPage() {
       }}
     >
       <PageHeader
+        compact
         eyebrow="Configuration"
         breadcrumbs={[{ label: 'System' }, { label: 'Settings', active: true }]}
         title="Settings"
@@ -1369,7 +1393,7 @@ export default function SettingsPage() {
                         event.preventDefault();
                         setSavingProfile(true);
                         try {
-                          await updateCurrentUser({ full_name: profileName });
+                          await updateCurrentUser({ full_name: profileName, ...profilePreferences });
                           await refreshUser();
                           await reload();
                           toast.success('Profile updated.');
@@ -1388,6 +1412,22 @@ export default function SettingsPage() {
                         <div className="space-y-2">
                           <label className="text-sm font-medium text-[#101828]">Email</label>
                           <Input value={settingsPanels?.profile?.email || user?.email || ''} disabled />
+                        </div>
+                        <div className="space-y-2">
+                          <label className="text-sm font-medium text-[#101828]">Avatar URL</label>
+                          <Input value={profilePreferences.avatar_url || ''} onChange={(event) => setProfilePreferences((current) => ({ ...current, avatar_url: event.target.value }))} placeholder="https://…" />
+                        </div>
+                        <div className="space-y-2">
+                          <label className="text-sm font-medium text-[#101828]">Phone number</label>
+                          <Input value={profilePreferences.phone_number || ''} onChange={(event) => setProfilePreferences((current) => ({ ...current, phone_number: event.target.value }))} placeholder="Optional" />
+                        </div>
+                      </div>
+                      <div className="rounded-xl border border-[#e5e7eb] bg-[#f8fafc] p-4">
+                        <p className="text-sm font-semibold text-[#101828]">Communication consent</p>
+                        <p className="mt-1 text-xs text-[#667085]">Opt-in controls for future operational or marketing messages. Both are off by default and can be changed at any time.</p>
+                        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                          <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={!!profilePreferences.marketing_email_consent} onChange={(event) => setProfilePreferences((current) => ({ ...current, marketing_email_consent: event.target.checked }))} /> Email messages</label>
+                          <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={!!profilePreferences.marketing_sms_consent} onChange={(event) => setProfilePreferences((current) => ({ ...current, marketing_sms_consent: event.target.checked }))} /> SMS messages</label>
                         </div>
                       </div>
                       <div className="flex flex-wrap items-center gap-3">
@@ -1556,6 +1596,7 @@ export default function SettingsPage() {
                   { label: 'Review gate', value: workflowForm.review_before_publish ? 'On' : 'Off', detail: 'Drafts stop for human review before any publish call.' },
                   { label: 'Bulk approvals', value: workflowForm.bulk_approval_enabled ? 'Enabled' : 'Disabled', detail: 'Approve many drafts after a queue spot-check.' },
                   { label: 'Preview mode', value: WORKFLOW_PREVIEW_OPTIONS.find((option) => option.value === workflowForm.listing_preview_mode)?.label || 'Marketplace preview', detail: 'How the review drawer opens by default.' },
+                  { label: 'Shipping rule', value: `${Number(workflowForm.shipping_price_threshold || 0).toFixed(0)} threshold`, detail: `${workflowForm.shipping_under_threshold_mode === 'buyer_pays_shipping' ? 'Buyer pays' : 'Free shipping'} below threshold · ${workflowForm.shipping_at_or_above_threshold_mode === 'buyer_pays_shipping' ? 'Buyer pays' : 'Free shipping'} at/above threshold` },
                 ]}
               />
 
@@ -1649,6 +1690,45 @@ export default function SettingsPage() {
                             <option value="etsy">Etsy</option>
                             <option value="depop">Depop</option>
                           </select>
+                        </div>
+                        <div className="rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-4">
+                          <p className="text-sm font-semibold text-[#101828]">Shipping default policy</p>
+                          <p className="mt-1 text-sm text-[#667085]">Adjust the threshold and the shipping mode below and above it.</p>
+                          <div className="mt-3 grid gap-3 md:grid-cols-3">
+                            <div>
+                              <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Threshold price</label>
+                              <input
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                value={workflowForm.shipping_price_threshold}
+                                onChange={(event) => setWorkflowForm((current) => ({ ...current, shipping_price_threshold: Number(event.target.value || 0) }))}
+                                className="mt-1 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828] outline-none focus:border-[#2563eb]"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Below threshold</label>
+                              <select
+                                value={workflowForm.shipping_under_threshold_mode}
+                                onChange={(event) => setWorkflowForm((current) => ({ ...current, shipping_under_threshold_mode: event.target.value }))}
+                                className="mt-1 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828] outline-none focus:border-[#2563eb]"
+                              >
+                                <option value="buyer_pays_shipping">Buyer pays shipping</option>
+                                <option value="free_shipping">Free shipping</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">At / above threshold</label>
+                              <select
+                                value={workflowForm.shipping_at_or_above_threshold_mode}
+                                onChange={(event) => setWorkflowForm((current) => ({ ...current, shipping_at_or_above_threshold_mode: event.target.value }))}
+                                className="mt-1 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828] outline-none focus:border-[#2563eb]"
+                              >
+                                <option value="buyer_pays_shipping">Buyer pays shipping</option>
+                                <option value="free_shipping">Free shipping</option>
+                              </select>
+                            </div>
+                          </div>
                         </div>
                       </div>
                       <div className="flex flex-wrap items-center gap-3">
@@ -2501,7 +2581,7 @@ export default function SettingsPage() {
                     <Input
                       value={amazonForm.amazon_paapi_access_key}
                       onChange={(event) => setAmazonForm((current) => ({ ...current, amazon_paapi_access_key: event.target.value }))}
-                      placeholder={settingsPanels?.amazon?.paapi_access_key_configured ? settingsPanels.amazon.paapi_access_key_masked : 'Access key'}
+                      placeholder={settingsPanels?.amazon?.paapi_access_key_configured ? settingsPanels?.amazon?.paapi_access_key_masked : 'Access key'}
                     />
                   </div>
                   <div className="space-y-2">
@@ -2517,7 +2597,7 @@ export default function SettingsPage() {
                     <Input
                       value={amazonForm.amazon_paapi_partner_tag}
                       onChange={(event) => setAmazonForm((current) => ({ ...current, amazon_paapi_partner_tag: event.target.value }))}
-                      placeholder={settingsPanels?.amazon?.paapi_partner_tag_configured ? settingsPanels.amazon.paapi_partner_tag_masked : 'partner-tag-20'}
+                      placeholder={settingsPanels?.amazon?.paapi_partner_tag_configured ? settingsPanels?.amazon?.paapi_partner_tag_masked : 'partner-tag-20'}
                     />
                   </div>
                 </div>
@@ -2536,10 +2616,49 @@ export default function SettingsPage() {
           {activeTab === 'marketplaces' ? (
             <SectionPanel title="Marketplaces" description="Set up each channel in one consistent flow: connect, verify, then enable.">
               <div className="space-y-4">
-                <div className="grid gap-4 md:grid-cols-3">
-                  <MetricCard label="Connected channels" value={(setupSummary?.marketplace_connections || []).filter((marketplace) => marketplace.connected).length} detail="Channels already ready for publishing or sync." />
-                  <MetricCard label="Import-ready channels" value={eligibleMarketplaceBulkImports.length} detail="Channels that can import or sync drafts now." />
-                  <MetricCard label="Assisted channels" value={(setupSummary?.marketplace_connections || []).filter((marketplace) => ['browser_assist', 'manual'].includes(marketplace.connection_mode)).length} detail="Channels that rely on browser-assist or manual setup." />
+                <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+                  <div className="rounded-[16px] border border-[#dbe7ff] bg-[linear-gradient(135deg,#f7faff_0%,#ffffff_52%,#eef4ff_100%)] p-5 shadow-[0_14px_32px_rgba(15,23,42,0.06)]">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#2563eb]">Marketplace connections</p>
+                    <h3 className="mt-2 text-2xl font-semibold tracking-[-0.04em] text-[#101828]">Install, connect, verify, then publish.</h3>
+                    <p className="mt-2 max-w-3xl text-sm leading-6 text-[#475467]">
+                      Keep the browser-assist setup visible right at the top so Mercari, Facebook, and other assisted channels do not get buried inside the channel cards.
+                    </p>
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        onClick={() => {
+                          setBrowserExtensionInstallMarketplace('mercari');
+                          setBrowserExtensionInstallOpen(true);
+                        }}
+                      >
+                        Install browser extension
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => {
+                          setSelectedMarketplace('facebook');
+                          window.location.assign('/bridge-desktop?marketplace=facebook');
+                        }}
+                      >
+                        Open bridge desktop
+                      </Button>
+                      <Button type="button" variant="outline" href="/settings?tab=marketplaces&marketplace=facebook">
+                        Open Facebook setup
+                      </Button>
+                    </div>
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      <StatusPill status={browserConnectInProgress ? 'warning' : 'info'} label={browserConnectInProgress ? 'Bridge connect active' : 'Bridge connect ready'} />
+                      <StatusPill status={(setupSummary?.marketplace_connections || []).some((marketplace) => marketplace.connected) ? 'success' : 'default'} label={`${(setupSummary?.marketplace_connections || []).filter((marketplace) => marketplace.connected).length} connected`} />
+                      <StatusPill status={eligibleMarketplaceBulkImports.length ? 'success' : 'default'} label={`${eligibleMarketplaceBulkImports.length} import-ready`} />
+                    </div>
+                  </div>
+
+                  <div className="grid gap-4 md:grid-cols-3 xl:grid-cols-1">
+                    <MetricCard label="Connected channels" value={(setupSummary?.marketplace_connections || []).filter((marketplace) => marketplace.connected).length} detail="Channels already ready for publishing or sync." />
+                    <MetricCard label="Import-ready channels" value={eligibleMarketplaceBulkImports.length} detail="Channels that can import or sync drafts now." />
+                    <MetricCard label="Assisted channels" value={(setupSummary?.marketplace_connections || []).filter((marketplace) => ['browser_assist', 'manual'].includes(marketplace.connection_mode)).length} detail="Channels that rely on browser-assist or manual setup." />
+                  </div>
                 </div>
 
                 <CollapsiblePanel
@@ -2603,6 +2722,30 @@ export default function SettingsPage() {
                     'Run one small import or cross-post test before scaling up.',
                   ]}
                 />
+                <div className="rounded-[14px] border border-[#dbe7ff] bg-[#f7faff] p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="max-w-3xl">
+                      <p className="text-sm font-semibold text-[#101828]">Browser extension install</p>
+                      <p className="mt-1 text-sm text-[#475467]">
+                        Install the PosterPro Marketplace Assistant first for browser-assist channels like Mercari and Facebook. After that, connect the browser session from the marketplace card.
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      onClick={() => {
+                        setBrowserExtensionInstallMarketplace('mercari');
+                        setBrowserExtensionInstallOpen(true);
+                      }}
+                    >
+                      Install browser extension
+                    </Button>
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <StatusPill status="info" label="Mercari install ready" />
+                    <StatusPill status="info" label="Facebook install ready" />
+                    <StatusPill status="info" label="Browser session handoff" />
+                  </div>
+                </div>
                 <GuideCard
                   title="Channel onboarding flow"
                   description="Every marketplace should follow the same sequence: confirm prerequisites, save details, verify readiness, then enable publish or sales sync."
@@ -2619,9 +2762,10 @@ export default function SettingsPage() {
                   id="marketplace-cards"
                   title="Marketplace setup cards"
                   description="Per-channel controls, support contract, and connection actions."
-                  defaultOpen
+                  defaultOpen={false}
                   badge={`${(setupSummary?.marketplace_connections || []).length} channels`}
                 >
+                <div className="grid gap-4 xl:grid-cols-2">
                 {[...(setupSummary?.marketplace_connections || [])]
                   .sort((a, b) => {
                     const aName = String(a.marketplace || '').toLowerCase();
@@ -2783,6 +2927,17 @@ export default function SettingsPage() {
                             </div>
                           ) : null}
                           <div className="mt-3 flex flex-wrap gap-2">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() => {
+                                setBrowserExtensionInstallMarketplace(marketplace.marketplace);
+                                setBrowserExtensionInstallOpen(true);
+                              }}
+                            >
+                              Install extension
+                            </Button>
                             <Button
                               size="sm"
                               type="button"
@@ -2962,6 +3117,7 @@ export default function SettingsPage() {
                     </div>
                   );
                 })}
+                </div>
                 </CollapsiblePanel>
               </div>
             </SectionPanel>
@@ -3435,11 +3591,14 @@ export default function SettingsPage() {
                   const payload = {};
                   if (apiKeyForm.openai_api_key.trim()) payload.openai_api_key = apiKeyForm.openai_api_key.trim();
                   if (apiKeyForm.photoroom_api_key.trim()) payload.photoroom_api_key = apiKeyForm.photoroom_api_key.trim();
+                  if (apiKeyForm.google_photos_client_id.trim()) payload.google_photos_client_id = apiKeyForm.google_photos_client_id.trim();
+                  if (apiKeyForm.google_photos_client_secret.trim()) payload.google_photos_client_secret = apiKeyForm.google_photos_client_secret.trim();
+                  if (apiKeyForm.google_photos_redirect_uri.trim()) payload.google_photos_redirect_uri = apiKeyForm.google_photos_redirect_uri.trim();
                   setSavingServer(true);
                   try {
                     await updateServerSettings(payload);
                     await reload();
-                    setApiKeyForm({ openai_api_key: '', photoroom_api_key: '' });
+                    setApiKeyForm({ openai_api_key: '', photoroom_api_key: '', google_photos_client_id: '', google_photos_client_secret: '', google_photos_redirect_uri: '' });
                     toast.success('API keys saved.');
                   } catch (error) {
                     toast.error(error.message);
@@ -3470,6 +3629,16 @@ export default function SettingsPage() {
                   <InstructionTable title="OpenAI credentials" rows={CREDENTIAL_INSTRUCTIONS.openai} />
                   <InstructionTable title="PhotoRoom credentials" rows={CREDENTIAL_INSTRUCTIONS.photoroom} />
                 </div>
+                <div className="grid gap-4 xl:grid-cols-3" id="google-photos-oauth">
+                  <InstructionTable
+                    title="Google Photos OAuth"
+                    rows={[
+                      { field: 'Client ID', where: 'Google Cloud Console -> OAuth client', how: 'Paste the web application client ID used for Google Photos OAuth.', purpose: 'Starts the Google consent flow.' },
+                      { field: 'Client secret', where: 'Google Cloud Console -> OAuth client', how: 'Paste the client secret for the same OAuth client; PosterPro encrypts it at rest.', purpose: 'Exchanges the auth code for tokens.' },
+                      { field: 'Redirect URI', where: 'Google Cloud Console -> OAuth client', how: 'Use the exact PosterPro callback URL that Google will redirect to after consent.', purpose: 'Receives the OAuth callback back in PosterPro.' },
+                    ]}
+                  />
+                </div>
                 <div className="space-y-2">
                   <label className="flex items-center gap-2 text-sm font-medium text-[#101828]">
                     OpenAI API key
@@ -3492,9 +3661,45 @@ export default function SettingsPage() {
                     placeholder={settingsPanels?.api_keys?.photoroom_configured ? 'Configured on server' : 'PhotoRoom key'}
                   />
                 </div>
+                <div className="grid gap-4 md:grid-cols-3">
+                  <div className="space-y-2">
+                    <label className="flex items-center gap-2 text-sm font-medium text-[#101828]">
+                      Google Photos Client ID
+                      <HelpTip label="Google Photos Client ID help">This is the OAuth client ID from Google Cloud for the web app.</HelpTip>
+                    </label>
+                    <Input
+                      value={apiKeyForm.google_photos_client_id}
+                      onChange={(event) => setApiKeyForm((current) => ({ ...current, google_photos_client_id: event.target.value }))}
+                      placeholder={settingsPanels?.api_keys?.google_photos_client_id_configured ? 'Configured on server' : 'Google OAuth client ID'}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="flex items-center gap-2 text-sm font-medium text-[#101828]">
+                      Google Photos Client Secret
+                      <HelpTip label="Google Photos Client Secret help">PosterPro encrypts this before saving it to the server settings file.</HelpTip>
+                    </label>
+                    <Input
+                      value={apiKeyForm.google_photos_client_secret}
+                      onChange={(event) => setApiKeyForm((current) => ({ ...current, google_photos_client_secret: event.target.value }))}
+                      placeholder={settingsPanels?.api_keys?.google_photos_client_secret_configured ? 'Configured on server' : 'Google OAuth client secret'}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="flex items-center gap-2 text-sm font-medium text-[#101828]">
+                      Google Photos Redirect URI
+                      <HelpTip label="Google Photos Redirect URI help">Use the exact callback URI you register in Google Cloud.</HelpTip>
+                    </label>
+                    <Input
+                      value={apiKeyForm.google_photos_redirect_uri}
+                      onChange={(event) => setApiKeyForm((current) => ({ ...current, google_photos_redirect_uri: event.target.value }))}
+                      placeholder={settingsPanels?.google_photos?.redirect_uri || 'https://posterpro.sparkleserver.site/api/intake/google-photos/callback'}
+                    />
+                  </div>
+                </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <StatusPill status={settingsPanels?.api_keys?.openai_configured ? 'success' : 'warning'} label={settingsPanels?.api_keys?.openai_configured ? 'OpenAI ready' : 'OpenAI missing'} />
                   <StatusPill status={settingsPanels?.api_keys?.photoroom_configured ? 'success' : 'warning'} label={settingsPanels?.api_keys?.photoroom_configured ? 'PhotoRoom ready' : 'PhotoRoom missing'} />
+                  <StatusPill status={settingsPanels?.api_keys?.google_photos_oauth_configured ? 'success' : 'warning'} label={settingsPanels?.api_keys?.google_photos_oauth_configured ? 'Google OAuth ready' : 'Google OAuth missing'} />
                   <StatusPill status={settingsPanels?.server?.session_secret_configured ? 'success' : 'warning'} label={settingsPanels?.server?.session_secret_configured ? 'Encryption key ready' : 'Set SESSION_SECRET'} />
                 </div>
                 <Button type="submit" disabled={savingServer || !canManageServer}>
@@ -3678,6 +3883,62 @@ export default function SettingsPage() {
             </SectionPanel>
           ) : null}
       </SettingsLayout>
+
+      <Drawer
+        open={browserExtensionInstallOpen}
+        onClose={() => setBrowserExtensionInstallOpen(false)}
+        title={`Install browser extension for ${MARKETPLACE_LABELS[browserExtensionInstallMarketplace] || browserExtensionInstallMarketplace}`}
+        description="Load the PosterPro Marketplace Assistant so the browser session can be captured and handed back into PosterPro."
+        widthClassName="xl:w-[560px]"
+      >
+        <div className="space-y-4">
+          <div className="rounded-[14px] border border-[#dbe7ff] bg-[#f7faff] p-4">
+            <p className="text-sm font-semibold text-[#101828]">Install steps</p>
+            <ol className="mt-3 space-y-2 text-sm text-[#475467]">
+              <li>1. Open Chrome on the machine where you will log into {MARKETPLACE_LABELS[browserExtensionInstallMarketplace] || browserExtensionInstallMarketplace}.</li>
+              <li>2. Download the ZIP below, extract it, open <span className="font-mono text-xs text-[#101828]">chrome://extensions</span>, enable Developer Mode, and choose Load unpacked.</li>
+              <li>3. Sign in to {MARKETPLACE_LABELS[browserExtensionInstallMarketplace] || browserExtensionInstallMarketplace} in that browser.</li>
+              <li>4. Return to PosterPro and click Connect now on the marketplace card.</li>
+              <li>5. Save the captured browser session so assisted posting can continue without another login.</li>
+            </ol>
+          </div>
+          <div className="rounded-[14px] border border-[#e5e7eb] bg-white p-4">
+            <p className="text-sm font-semibold text-[#101828]">Quick copy values</p>
+            <div className="mt-3 space-y-2">
+              <div className="rounded-[10px] border border-[#f2f4f7] bg-[#fcfcfd] p-3">
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">Extension path</p>
+                <p className="mt-1 break-all font-mono text-xs text-[#101828]">/opt/apps/posterpro/repo/browser-extension</p>
+              </div>
+              <div className="rounded-[10px] border border-[#f2f4f7] bg-[#fcfcfd] p-3">
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">PosterPro URL</p>
+                <p className="mt-1 break-all font-mono text-xs text-[#101828]">{settingsPanels?.server?.app_base_url || 'https://posterpro.sparkleserver.site'}</p>
+              </div>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <a className="inline-flex items-center rounded-[10px] bg-[#2563eb] px-3 py-2 text-sm font-semibold text-white hover:bg-[#1d4ed8]" href="/api/browser-extension/download" download>
+              Download latest extension ZIP
+            </a>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => copyBrowserExtensionInstallText('/opt/apps/posterpro/repo/browser-extension', 'Extension path')}
+            >
+              Copy extension path
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => copyBrowserExtensionInstallText(settingsPanels?.server?.app_base_url || 'https://posterpro.sparkleserver.site', 'PosterPro URL')}
+            >
+              Copy PosterPro URL
+            </Button>
+            <Button type="button" onClick={() => setBrowserExtensionInstallOpen(false)}>
+              Close
+            </Button>
+          </div>
+        </div>
+      </Drawer>
 
       <Drawer
         open={activeTab === 'marketplaces' && !!configuredMarketplace && configuredMarketplace.connection_mode === 'manual'}

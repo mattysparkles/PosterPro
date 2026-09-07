@@ -251,6 +251,32 @@ def _coerce_positive_int(value: Any) -> int | None:
     return numeric if numeric > 0 else None
 
 
+def _parse_ebay_weight_value(value: Any) -> float | None:
+    numeric = _coerce_positive_float(value)
+    if numeric is not None:
+        return numeric
+
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(lb|lbs|pound|pounds|oz|ounce|ounces|kg|kilogram|kilograms|g|gram|grams)\b", text)
+    if not match:
+        return None
+
+    amount = float(match.group(1))
+    unit = match.group(2)
+    if unit in {"lb", "lbs", "pound", "pounds"}:
+        return round(amount, 3)
+    if unit in {"oz", "ounce", "ounces"}:
+        return round(amount / 16.0, 3)
+    if unit in {"kg", "kilogram", "kilograms"}:
+        return round(amount * 2.20462, 3)
+    if unit in {"g", "gram", "grams"}:
+        return round(amount / 453.592, 3)
+    return None
+
+
 def _to_public_image_url(path: str) -> str:
     raw = str(path or "").strip()
     if not raw:
@@ -465,6 +491,126 @@ def _finish_publish_attempt(
     return attempt
 
 
+def _ebay_condition_override_candidates(listing: Listing) -> list[str]:
+    condition_data = listing.condition_data if isinstance(listing.condition_data, dict) else {}
+    bucket = str(condition_data.get("condition_bucket") or listing.condition or "").strip().lower()
+    source_type = str(listing.source_type or "").strip().lower()
+    if source_type == "amazon_vine" or bucket in {"new", "new_in_box", "brand_new"}:
+        return ["NEW"]
+    if bucket in {"open_box"}:
+        return ["USED_LIKE_NEW", "USED_VERY_GOOD", "USED_GOOD"]
+    if bucket in {"used_like_new"}:
+        return ["USED_LIKE_NEW", "USED_VERY_GOOD", "USED_GOOD"]
+    if bucket in {"used_very_good"}:
+        return ["USED_VERY_GOOD", "USED_GOOD"]
+    if bucket in {"used_good", "used"}:
+        return ["USED_GOOD", "USED_VERY_GOOD"]
+    if bucket in {"parts_only", "for_parts", "for_parts_or_not_working"}:
+        return ["FOR_PARTS_OR_NOT_WORKING"]
+    return ["USED_GOOD"]
+
+
+def _apply_publish_failure_repair(
+    db: Session,
+    listing: Listing,
+    *,
+    translated_error: dict[str, Any],
+    raw_error: str,
+) -> dict[str, Any]:
+    from app.services.marketplace_preflight import MarketplacePreflightService
+
+    applied_actions: list[str] = []
+    repair_notes: list[str] = []
+    code = str(translated_error.get("code") or "").strip()
+    operator_action = str(translated_error.get("operator_action") or "").strip()
+    preflight_service = MarketplacePreflightService()
+
+    if code in {"EBAY_SHIPPING_DATA_INVALID", "EBAY_WEIGHT_MISSING", "EBAY_SHIPPING_PACKAGE_INVALID"} or operator_action == "fix_shipping":
+        shipping = dict(listing.shipping_profile or {})
+        parsed_weight = _parse_ebay_weight_value(shipping.get("package_weight") or shipping.get("item_weight"))
+        if parsed_weight is not None:
+            shipping["package_weight"] = parsed_weight
+            shipping["manual_measurement_needed"] = False
+            shipping["estimated"] = True
+            source_confidence = shipping.get("source_confidence") if isinstance(shipping.get("source_confidence"), dict) else {}
+            shipping["source_confidence"] = {**source_confidence, "package_weight": "parsed_from_text"}
+            listing.shipping_profile = shipping
+            applied_actions.append("parsed_shipping_weight")
+        else:
+            repair_notes.append("shipping_weight_unparseable")
+
+    if code in {"EBAY_IMAGE_URL_INVALID", "EBAY_INVALID_IMAGE_URL"} or operator_action == "fix_photos":
+        repair_result = preflight_service.apply_repair_actions(db, listing, validate_images=True)
+        applied_actions.extend(repair_result.get("applied") or [])
+        repair_notes.extend(repair_result.get("skipped") or [])
+
+    if code in {
+        "EBAY_INVALID_CATEGORY",
+        "EBAY_CATEGORY_NOT_LEAF",
+        "EBAY_CATEGORY_MISSING",
+        "EBAY_ITEM_SPECIFIC_MISSING",
+        "EBAY_ASPECT_INVALID",
+        "EBAY_CONDITION_INCOMPATIBLE_WITH_CATEGORY",
+    } or operator_action in {"fix_category", "fix_aspects", "fix_condition"}:
+        repair_result = preflight_service.apply_repair_actions(db, listing, apply_category_suggestion=True, validate_images=False)
+        applied_actions.extend(repair_result.get("applied") or [])
+        repair_notes.extend(repair_result.get("skipped") or [])
+        if code == "EBAY_CONDITION_INCOMPATIBLE_WITH_CATEGORY":
+            candidates = _ebay_condition_override_candidates(listing)
+            condition_data = dict(listing.condition_data or {})
+            chosen = candidates[0] if candidates else None
+            if chosen and str(condition_data.get("ebay_condition_override") or "").strip().upper() != chosen:
+                condition_data["ebay_condition_override"] = chosen
+                condition_data["ebay_condition_override_candidates"] = candidates
+                condition_data["ebay_condition_override_reason"] = "publish_condition_repair"
+                listing.condition_data = condition_data
+                applied_actions.append("ebay_condition_override")
+
+    if applied_actions:
+        db.add(listing)
+        db.commit()
+        db.refresh(listing)
+
+    preflight_after = preflight_service.preflight_listing(db, listing, "ebay")
+    preflight_service.cache_preflight_summary(db, listing, preflight_after)
+
+    def _issue_code(issue: Any) -> str | None:
+        if isinstance(issue, dict):
+            code = issue.get("code")
+            return str(code).strip() if code is not None else None
+        text = str(issue or "").strip()
+        return text or None
+
+    preflight_state = {
+        "status": str(preflight_after.get("status") or "").strip().lower(),
+        "blockers": [code for code in (_issue_code(issue) for issue in (preflight_after.get("blockers") or [])) if code],
+        "warnings": [code for code in (_issue_code(issue) for issue in (preflight_after.get("warnings") or [])) if code],
+    }
+    marketplace_data = dict(listing.marketplace_data or {})
+    marketplace_data["publish_failure_repair"] = {
+        "marketplace": "ebay",
+        "translated_error": translated_error,
+        "raw_error": raw_error,
+        "applied_actions": applied_actions,
+        "notes": repair_notes,
+        "preflight_after": preflight_state,
+        "repaired_at": datetime.now(UTC).isoformat(),
+    }
+    listing.marketplace_data = marketplace_data
+
+    if preflight_state["status"] in {"ready", "ready_with_warnings", "published"}:
+        listing.status = ListingStatus.ready
+        listing.needs_review = False
+    elif applied_actions:
+        listing.status = ListingStatus.draft
+        listing.needs_review = True
+
+    db.add(listing)
+    db.commit()
+    db.refresh(listing)
+    return marketplace_data["publish_failure_repair"]
+
+
 def _is_invalid_access_token_error(error: Exception) -> bool:
     message = str(error).lower()
     return "invalid access token" in message or "(401)" in message
@@ -621,6 +767,28 @@ def _fallback_aspect_value(listing: Listing, aspect_name: str, title: str) -> st
 
 def _derive_item_type(title: str) -> str | None:
     lowered = title.lower()
+    # Broad, buyer-facing product families used by eBay taxonomy required
+    # aspects.  Vine rows often arrive with only an ASIN/title and a
+    # placeholder Type; derive a safe category-level value instead of
+    # blocking the entire publish attempt.
+    if "home safe" in lowered or "security safe" in lowered or "wall safe" in lowered or "safe box" in lowered:
+        return "Safe"
+    if "security camera" in lowered or "surveillance camera" in lowered or "indoor/outdoor camera" in lowered:
+        return "Security Camera"
+    if "animal tracker" in lowered or "pet tracker" in lowered or "gps tracker" in lowered:
+        return "GPS Tracker"
+    if "battery adapter" in lowered or "power adapter" in lowered:
+        return "Adapter"
+    if "smoke detector" in lowered or "smoke alarm" in lowered:
+        return "Smoke Detector"
+    if "bird house" in lowered or "birdhouse" in lowered:
+        return "Bird House"
+    if "grab bar" in lowered:
+        return "Grab Bar"
+    if "dog bed" in lowered or "pet bed" in lowered:
+        return "Pet Bed"
+    if "kvm switch" in lowered:
+        return "KVM Switch"
     if "makeup brush cleaner" in lowered or "brush cleaner" in lowered:
         return "Brush Cleaner Machine"
     if "meat chopper" in lowered or "masher" in lowered:
@@ -1047,6 +1215,51 @@ async def suggest_ebay_category(listing: Listing, account: MarketplaceAccount, m
         "categoryId": category_id,
         "categoryName": str(category.get("categoryName") or "").strip(),
     }
+
+async def search_ebay_categories(query: str, account: MarketplaceAccount, marketplace_id: str = "EBAY_US") -> list[dict[str, object]]:
+    """Return the actual eBay taxonomy suggestions for operator selection."""
+    client = EbayAPIClient(account.access_token)
+    tree = await client.request("GET", "/commerce/taxonomy/v1/get_default_category_tree_id", params={"marketplace_id": marketplace_id})
+    tree_id = tree.get("categoryTreeId")
+    if not tree_id:
+        raise EbayIntegrationError("Unable to resolve eBay category tree id")
+    response = await client.request("GET", f"/commerce/taxonomy/v1/category_tree/{tree_id}/get_category_suggestions", params={"q": query})
+    results = []
+    for row in response.get("categorySuggestions") or []:
+        category = row.get("category") or {}
+        cid = str(category.get("categoryId") or "").strip()
+        if cid:
+            verified = await verify_ebay_category(account, cid, str(tree_id), marketplace_id=marketplace_id)
+            results.append({"category_id": cid, "category_name": str(category.get("categoryName") or cid), "breadcrumb": str(category.get("categoryTreeNodeLevel") or category.get("categoryName") or ""), "leaf": verified.get("leaf"), "publishable": verified.get("publishable"), "leaf_verified": verified.get("verified"), "verification_source": verified.get("source"), "taxonomy_tree_id": str(tree_id)})
+    return results
+
+
+async def verify_ebay_category(account: MarketplaceAccount, category_id: str, tree_id: str, marketplace_id: str = "EBAY_US") -> dict[str, object]:
+    """Verify category node metadata instead of assuming suggestions are publishable leaves."""
+    try:
+        client = EbayAPIClient(account.access_token)
+        payload = await client.request("GET", f"/commerce/taxonomy/v1/category_tree/{tree_id}/get_category_subtree", params={"category_id": category_id})
+        node = payload.get("categorySubtreeNode") or payload.get("rootCategoryNode") or {}
+        children = node.get("childCategoryTreeNodes") or []
+        return {"verified": True, "leaf": not bool(children), "publishable": not bool(children), "source": "ebay_taxonomy_category_subtree"}
+    except Exception:
+        return {"verified": False, "leaf": None, "publishable": None, "source": "verification_failed"}
+
+async def browse_ebay_categories(account: MarketplaceAccount, parent_category_id: str | None = None, marketplace_id: str = "EBAY_US") -> dict[str, object]:
+    client = EbayAPIClient(account.access_token)
+    tree = await client.request("GET", "/commerce/taxonomy/v1/get_default_category_tree_id", params={"marketplace_id": marketplace_id})
+    tree_id = str(tree.get("categoryTreeId") or "")
+    if not tree_id: raise EbayIntegrationError("Unable to resolve eBay category tree id")
+    path = f"/commerce/taxonomy/v1/category_tree/{tree_id}" if not parent_category_id else f"/commerce/taxonomy/v1/category_tree/{tree_id}/get_category_subtree"
+    params = {} if not parent_category_id else {"category_id": parent_category_id}
+    payload = await client.request("GET", path, params=params)
+    node = payload.get("categorySubtreeNode") or payload.get("rootCategoryNode") or {}
+    children = []
+    for child in node.get("childCategoryTreeNodes") or []:
+        c = child.get("category") or child
+        cid = str(c.get("categoryId") or "").strip()
+        if cid: children.append({"category_id": cid, "category_name": c.get("categoryName") or cid, "has_children": bool(child.get("childCategoryTreeNodes")), "leaf": not bool(child.get("childCategoryTreeNodes")), "publishable": not bool(child.get("childCategoryTreeNodes")), "taxonomy_tree_id": tree_id})
+    return {"tree_id": tree_id, "parent_category_id": parent_category_id, "categories": children}
 
 
 async def build_ebay_item_specifics(
@@ -1785,14 +1998,23 @@ def _ebay_candidate_aspect_values(listing: Listing) -> dict[str, str]:
 
 def _ebay_condition_value(listing: Listing) -> str:
     condition_data = listing.condition_data if isinstance(listing.condition_data, dict) else {}
+    override = str(condition_data.get("ebay_condition_override") or "").strip().upper()
+    if override:
+        return override
     bucket = str(condition_data.get("condition_bucket") or listing.condition or "").strip().lower()
     if str(listing.source_type or "").strip().lower() == "amazon_vine":
         return "NEW"
     if bucket in {"new", "new_in_box", "brand_new"}:
         return "NEW"
+    if bucket in {"open_box"}:
+        return "USED_LIKE_NEW"
+    if bucket in {"used_like_new"}:
+        return "USED_LIKE_NEW"
+    if bucket in {"used_very_good"}:
+        return "USED_VERY_GOOD"
     if bucket in {"parts_only", "for_parts", "for_parts_or_not_working"}:
         return "FOR_PARTS_OR_NOT_WORKING"
-    if bucket in {"open_box", "open_box_or_used_unknown", "used", "used_good", "used_like_new", "used_very_good"}:
+    if bucket in {"open_box_or_used_unknown", "used", "used_good"}:
         return "USED_GOOD"
     return "USED_GOOD"
 
@@ -1858,7 +2080,7 @@ def _cap_ebay_item_specifics(
 
 def _build_ebay_package_weight_and_size(listing: Listing) -> dict[str, Any] | None:
     shipping = listing.shipping_profile if isinstance(listing.shipping_profile, dict) else {}
-    weight_value = _coerce_positive_float(shipping.get("package_weight") or shipping.get("item_weight"))
+    weight_value = _parse_ebay_weight_value(shipping.get("package_weight") or shipping.get("item_weight"))
     dimensions = shipping.get("package_dimensions") if isinstance(shipping.get("package_dimensions"), dict) else {}
     length = _coerce_positive_int(dimensions.get("length"))
     width = _coerce_positive_int(dimensions.get("width"))
@@ -1978,21 +2200,46 @@ def _map_ebay_item_specifics(
         if candidate:
             cleaned_candidate = _sanitize_ebay_specific_values(name, [candidate[:80]])
             if not cleaned_candidate or _is_placeholder_specific_value(name, cleaned_candidate):
-                if required_value:
-                    missing_required.append(name)
+                if required_value and normalized in {"mpn", "manufacturer part number"}:
+                    mapped[name] = ["Does Not Apply"]
+                    provenance[name] = "default"
+                    continue
+                # A placeholder Type should fall through to the title-based
+                # derivation below (e.g. "Security Camera", "Safe").
+                if normalized == "type":
+                    candidate = None
+                    cleaned_candidate = []
+                else:
+                    if required_value:
+                        missing_required.append(name)
+                    continue
+            if candidate is not None and cleaned_candidate:
+                mapped[name] = cleaned_candidate
+                provenance[name] = "derived"
                 continue
-            mapped[name] = cleaned_candidate
-            provenance[name] = "derived"
-            continue
         fallback = _fallback_aspect_value(listing, name, str(listing.title or ""))
+        if normalized == "type" and (not fallback or str(fallback).strip().lower() in {"does not apply", "n/a", "unknown", "not applicable"}):
+            fallback = _derive_item_type(str(listing.title or ""))
         if fallback:
             cleaned_fallback = _sanitize_ebay_specific_values(name, [_clip_specific_value(fallback)])
             if not cleaned_fallback or _is_placeholder_specific_value(name, cleaned_fallback):
+                if required_value and normalized in {"mpn", "manufacturer part number"}:
+                    mapped[name] = ["Does Not Apply"]
+                    provenance[name] = "default"
+                    continue
                 if required_value:
                     missing_required.append(name)
                 continue
             mapped[name] = cleaned_fallback
             provenance[name] = "approximate"
+            continue
+        # eBay explicitly permits "Does not apply" for MPN when a product has
+        # no manufacturer part number (common for Amazon Vine ASIN-only rows).
+        # Treat it as a valid required value only for MPN; other required
+        # aspects still need a meaningful product-specific value.
+        if required_value and normalized in {"mpn", "manufacturer part number"}:
+            mapped[name] = ["Does Not Apply"]
+            provenance[name] = "default"
             continue
         if required_value:
             missing_required.append(name)
@@ -2853,22 +3100,40 @@ async def publish_listing_to_ebay(listing: Listing, db: Session, *, relist: bool
     except Exception as exc:
         listing.ebay_publish_status = EbayPublishStatus.FAILED
         translated = translate_marketplace_error("ebay", exc)
+        repair_result = _apply_publish_failure_repair(
+            db,
+            listing,
+            translated_error=translated,
+            raw_error=str(exc),
+        )
         listing.marketplace_data = {
+            **(listing.marketplace_data or {}),
             "error": translated.get("user_message") or str(exc),
             "error_detail": translated,
             "raw_error": str(exc),
+            "publish_failure_repair": repair_result,
         }
         _sync_ebay_marketplace_listing(
             db,
             listing_id=listing.id,
             status=MarketplaceListingStatus.FAILED,
-            response={"error": translated.get("user_message") or str(exc), "error_detail": translated, "status": str(listing.ebay_publish_status)},
+            response={
+                "error": translated.get("user_message") or str(exc),
+                "error_detail": translated,
+                "publish_failure_repair": repair_result,
+                "status": str(listing.ebay_publish_status),
+            },
         )
         _finish_publish_attempt(
             db,
             attempt=attempt,
             status="failed",
-            response={"error": translated.get("user_message") or str(exc), "error_detail": translated, "status": str(listing.ebay_publish_status)},
+            response={
+                "error": translated.get("user_message") or str(exc),
+                "error_detail": translated,
+                "publish_failure_repair": repair_result,
+                "status": str(listing.ebay_publish_status),
+            },
             error=exc,
             retryable=bool(translated.get("retryable")),
         )

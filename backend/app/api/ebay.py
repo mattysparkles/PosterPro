@@ -24,9 +24,30 @@ from app.services.ebay_service import (
     revise_ebay_listing,
     sync_ebay_active_listings,
     sync_ebay_fulfillment_history,
+    suggest_ebay_category,
+    search_ebay_categories,
+    browse_ebay_categories,
 )
 from app.services.pricing_research_service import validate_marketplace_readiness
 router = APIRouter()
+
+@router.get("/ebay/taxonomy/suggestions")
+async def ebay_taxonomy_suggestions(q: str = Query(..., min_length=2), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    account = db.execute(select(MarketplaceAccount).where(MarketplaceAccount.user_id == current_user.id, MarketplaceAccount.marketplace == MarketplaceName.ebay)).scalar_one_or_none()
+    if not account:
+        raise HTTPException(status_code=409, detail="Connect eBay before searching taxonomy")
+    try:
+        results = await search_ebay_categories(q, account)
+    except EbayIntegrationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"results": results, "source": "ebay_taxonomy"}
+
+@router.get("/ebay/taxonomy/browse")
+async def ebay_taxonomy_browse(parent_category_id: str | None = Query(None), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    account = db.execute(select(MarketplaceAccount).where(MarketplaceAccount.user_id == current_user.id, MarketplaceAccount.marketplace == MarketplaceName.ebay)).scalar_one_or_none()
+    if not account: raise HTTPException(status_code=409, detail="Connect eBay before browsing taxonomy")
+    try: return await browse_ebay_categories(account, parent_category_id)
+    except EbayIntegrationError as exc: raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.get("/ebay/auth/url")

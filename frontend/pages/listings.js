@@ -47,6 +47,8 @@ import {
   fetchSettingsPanels,
   refreshPricingRecommendation,
   backfillVineListingImages,
+  repairAllVineListingImages,
+  refreshVineListingMetadata,
   deleteListing as deleteListingApi,
   deleteListingsBulk as deleteListingsBulkApi,
   generateListing,
@@ -76,14 +78,14 @@ import {
 
 const LISTING_TABS = [
   { value: 'all', label: 'All Listings' },
-  { value: 'vine', label: 'Amazon Vine' },
   { value: 'review', label: 'Needs Review' },
+  { value: 'attention', label: 'Needs Attention' },
   { value: 'drafts', label: 'Drafts' },
   { value: 'ready', label: 'Ready' },
   { value: 'published', label: 'Published' },
+  { value: 'archived', label: 'Archived' },
   { value: 'sold', label: 'Sold' },
   { value: 'failed', label: 'Failed' },
-  { value: 'archived', label: 'Archived' },
 ];
 
 const FILTER_OPTIONS = [
@@ -101,7 +103,9 @@ const FILTER_OPTIONS = [
 const SOURCE_OPTIONS = [
   { value: 'all', label: 'All sources' },
   { value: 'amazon_vine', label: 'Amazon Vine' },
-  { value: 'media_inventory_recovery', label: 'Recovered inventory' },
+  { value: 'media_inventory_recovery', label: 'Google Photos / Recovery' },
+  { value: 'ebay_history_reconciliation', label: 'eBay History Recovery' },
+  { value: 'manual', label: 'Manual' },
 ];
 
 const READINESS_FILTER_OPTIONS = [
@@ -142,11 +146,11 @@ const READINESS_FILTER_OPTIONS = [
 function isAmazonVineSource(listing) {
   const source = String(listing?.source_type || '').toLowerCase();
   const hint = String(listing?.source || listing?.ingest_source || listing?.marketplace_source || '').toLowerCase();
-  return source === 'amazon_vine' || hint.includes('vine');
+  return source.includes('vine') || hint.includes('vine');
 }
 
 function isArchivedListing(listing) {
-  return (listing.custom_labels || []).some((label) => ['archived_vine', 'archived_sold'].includes(label)) || listing.status === 'rejected';
+  return (listing.custom_labels || []).some((label) => ['archived_vine', 'archived_sold'].includes(label)) || listing.status === 'archived';
 }
 
 function isSoldListing(listing) {
@@ -182,35 +186,52 @@ function getListingThumbnail(listing) {
 function getListingBucket(listing) {
   if (isSoldListing(listing)) return 'sold';
   if (isArchivedListing(listing)) return 'archived';
-  if (listing.status === 'draft') return 'drafts';
+  if (['needs_attention', 'blocked'].includes(String(listing?.processing_state || '').toLowerCase())) return 'attention';
   if (listing.status === 'error' || listing.ebay_publish_status === 'FAILED') return 'failed';
+  if (listing.status === 'archived') return 'archived';
   if (listing.ebay_publish_status === 'POSTED' || listing.ebay_listing_id) return 'published';
   const isRecovery = listing?.source_type === 'media_inventory_recovery';
   const explicitlyApproved = Boolean(listing?.source_metadata?.operator_approved_at);
+  const reviewReady = isCompleteForOperatorReview(listing);
   if (isRecovery && !explicitlyApproved) return 'drafts';
-  if (listing.restricted_review_required || listing.needs_review) return isCompleteForOperatorReview(listing) ? 'review' : 'drafts';
-  if (listing.status === 'ready') return explicitlyApproved || !isRecovery ? 'ready' : 'drafts';
-  return 'review';
+  if (listing.restricted_review_required || listing.needs_review) return reviewReady ? 'review' : 'drafts';
+  if (listing.status === 'ready') return explicitlyApproved ? 'ready' : 'drafts';
+  if (reviewReady) return 'review';
+  if (listing.status === 'draft') return 'drafts';
+  return 'drafts';
 }
 
 function isCompleteForOperatorReview(listing) {
   const readiness = getReadinessSummary(listing);
+  const qualityReady = Boolean(listing?.quality_summary?.ready_for_publish_queue);
+  const preflightReady = Boolean(
+    readiness?.status && ['ready', 'ready_with_warnings', 'published'].includes(String(readiness.status).toLowerCase()),
+  );
   const hasPrice = Boolean(listing?.listing_price || listing?.suggested_price || listing?.price);
   const hasCategory = Boolean(listing?.category_id || listing?.category_suggestion || listing?.detected_category_guess);
   const hasCondition = Boolean(listing?.condition || listing?.condition_data?.condition_bucket);
   const imageCount = Number(readiness?.actual_image_count || getListingImageCount(listing) || 0);
-  return Boolean((listing?.title || listing?.suggested_title) && listing?.description && hasPrice && hasCategory && hasCondition && imageCount > 0);
+  return Boolean(
+    qualityReady
+      && preflightReady
+      && (listing?.title || listing?.suggested_title)
+      && listing?.description
+      && hasPrice
+      && hasCategory
+      && hasCondition
+      && imageCount > 0,
+  );
 }
 
 function matchesTab(listing, tab) {
-  if (tab === 'all') return true;
-  if (tab === 'vine') return isAmazonVineSource(listing);
   if (tab === 'sold') return isSoldListing(listing);
-  if (isSoldListing(listing)) return false;
   if (tab === 'archived') return isArchivedListing(listing);
   if (isArchivedListing(listing)) return false;
+  if (tab === 'all') return true;
+  if (isSoldListing(listing)) return false;
   if (tab === 'drafts') return getListingBucket(listing) === 'drafts';
   if (tab === 'review') return getListingBucket(listing) === 'review';
+  if (tab === 'attention') return getListingBucket(listing) === 'attention';
   if (tab === 'ready') return getListingBucket(listing) === 'ready';
   if (tab === 'published') return Boolean(listing.ebay_publish_status === 'POSTED' || listing.ebay_listing_id);
   if (tab === 'failed') return Boolean(listing.status === 'error' || listing.ebay_publish_status === 'FAILED');
@@ -326,84 +347,6 @@ function summarizeBlockerCodes(rows, marketplace = null) {
   return Array.from(counter.entries()).sort((a, b) => b[1] - a[1]);
 }
 
-function matchesReadinessFilter(listing, filterValue) {
-  if (filterValue === 'all') return true;
-  const summary = getReadinessSummary(listing);
-  const shippingChecklist = summary.shipping_checklist || {};
-  const conditionData = listing?.condition_data || {};
-  const pricing = listing?.marketplace_data?.pricing_analysis || {};
-  const quality = listing?.quality_summary || {};
-  const ebayPreflight = getMarketplacePreflightSummary(listing, 'ebay');
-  const facebookPreflight = getMarketplacePreflightSummary(listing, 'facebook');
-  switch (filterValue) {
-    case 'missing_photos':
-      return Boolean(summary.images_missing || summary.manual_photo_needed);
-    case 'reference_only':
-      return Boolean(summary.reference_image_count) && !summary.actual_image_count;
-    case 'missing_weight':
-      return !shippingChecklist.weight_present;
-    case 'missing_dimensions':
-      return !shippingChecklist.package_dimensions_present;
-    case 'missing_condition':
-      return Boolean(conditionData.operator_review_required) || !listing?.condition;
-    case 'missing_category':
-      return !(listing?.category_id || listing?.category_suggestion);
-    case 'missing_price':
-      return !(listing?.listing_price || listing?.suggested_price);
-    case 'weak_pricing':
-      return Number(pricing.price_confidence || pricing.confidence || 0) < 0.45;
-    case 'stale_pricing':
-      return Boolean(pricing.stale);
-    case 'ready_for_ebay':
-      return Boolean(quality.ready_for_ebay);
-    case 'ready_for_facebook':
-      return Boolean(quality.ready_for_facebook);
-    case 'high_confidence_ready':
-      return Boolean(quality.ready_for_publish_queue) && Number(pricing.price_confidence || pricing.confidence || 0) >= 0.7;
-    case 'likely_low_value':
-      return Number(pricing.recommended_price || listing?.listing_price || 0) > 0 && Number(pricing.recommended_price || listing?.listing_price || 0) <= 20;
-    case 'oversize_low_margin':
-      return Boolean(listing?.shipping_profile?.oversize || listing?.shipping_profile?.local_pickup_recommended)
-        && Number(pricing.recommended_price || listing?.listing_price || 0) <= 40;
-    case 'ebay_ready':
-      return isMarketplaceReady(ebayPreflight);
-    case 'ebay_blocked':
-      return isMarketplaceBlocked(ebayPreflight);
-    case 'ebay_warning_only':
-      return isMarketplaceWarningOnly(ebayPreflight);
-    case 'ebay_missing_category':
-      return Boolean(!ebayPreflight || (ebayPreflight.missing_fields || []).some((field) => String(field).includes('category')));
-    case 'ebay_missing_aspects':
-      return Boolean(ebayPreflight && (ebayPreflight.blocker_codes || []).some((code) => code === 'EBAY_REQUIRED_ASPECT_MISSING'));
-    case 'ebay_missing_policies':
-      return Boolean(ebayPreflight && (ebayPreflight.blocker_codes || []).some((code) => String(code).includes('POLICY')));
-    case 'ebay_missing_shipping':
-      return Boolean(ebayPreflight && (ebayPreflight.blocker_codes || []).some((code) => String(code).includes('SHIPPING') || String(code).includes('WEIGHT') || String(code).includes('DIMENSIONS')));
-    case 'ebay_missing_photos':
-      return Boolean(ebayPreflight && (ebayPreflight.blocker_codes || []).some((code) => String(code).includes('PHOTOS') || String(code).includes('IMAGE')));
-    case 'facebook_ready':
-      return isMarketplaceReady(facebookPreflight);
-    case 'facebook_blocked':
-      return isMarketplaceBlocked(facebookPreflight);
-    case 'facebook_warning_only':
-      return isMarketplaceWarningOnly(facebookPreflight);
-    case 'facebook_missing_photos':
-      return Boolean(facebookPreflight && (facebookPreflight.blocker_codes || []).some((code) => String(code).includes('PHOTOS')));
-    case 'facebook_missing_price':
-      return Boolean(facebookPreflight && (facebookPreflight.blocker_codes || []).some((code) => String(code).includes('PRICE')));
-    case 'facebook_missing_category':
-      return Boolean(facebookPreflight && (facebookPreflight.blocker_codes || []).some((code) => String(code).includes('CATEGORY')));
-    case 'ready_except_shipping':
-      return Boolean((isMarketplaceReady(ebayPreflight) || isMarketplaceReady(facebookPreflight)) && ((ebayPreflight && (ebayPreflight.blocker_codes || []).some((code) => String(code).includes('SHIPPING') || String(code).includes('WEIGHT') || String(code).includes('DIMENSIONS'))) || (facebookPreflight && (facebookPreflight.blocker_codes || []).some((code) => String(code).includes('SHIPPING') || String(code).includes('WEIGHT') || String(code).includes('DIMENSIONS')))));
-    case 'ready_except_photos':
-      return Boolean((isMarketplaceReady(ebayPreflight) || isMarketplaceReady(facebookPreflight)) && ((ebayPreflight && (ebayPreflight.blocker_codes || []).some((code) => String(code).includes('PHOTOS') || String(code).includes('IMAGE'))) || (facebookPreflight && (facebookPreflight.blocker_codes || []).some((code) => String(code).includes('PHOTOS') || String(code).includes('IMAGE')))));
-    case 'ready_except_policies':
-      return Boolean((isMarketplaceReady(ebayPreflight) || isMarketplaceReady(facebookPreflight)) && ((ebayPreflight && (ebayPreflight.blocker_codes || []).some((code) => String(code).includes('POLICY'))) || (facebookPreflight && (facebookPreflight.blocker_codes || []).some((code) => String(code).includes('POLICY')))));
-    default:
-      return true;
-  }
-}
-
 function getListingMarketplaces(listing, enabledPlatforms, { allowFallback = true } = {}) {
   const names = new Set();
   if (listing.ebay_publish_status || listing.ebay_listing_id) names.add('ebay');
@@ -441,6 +384,51 @@ function getListingFailureMessage(listing) {
   return listing.marketplace_data?.error || '';
 }
 
+function buildListingsQuery({
+  tab = 'all',
+  page = 1,
+  pageSize = 25,
+  search = '',
+  market = 'all',
+  source = 'all',
+  readiness = 'all',
+  sortBy = 'updated',
+  sortDir = 'desc',
+  view = 'table',
+  workspace = 'results',
+  refresh = false,
+}) {
+  const query = {
+    ...(tab && tab !== 'all' ? { tab } : {}),
+    ...(Number(page) > 1 ? { page: String(page) } : {}),
+    ...(Number(pageSize) !== 25 ? { page_size: String(pageSize) } : {}),
+    ...(search ? { q: search } : {}),
+    ...(market && market !== 'all' ? { market } : {}),
+    ...(source && source !== 'all' ? { source } : {}),
+    ...(readiness && readiness !== 'all' ? { readiness } : {}),
+    ...(sortBy && sortBy !== 'updated' ? { sort: `${sortBy}:${sortDir || 'desc'}` } : (sortDir && sortDir !== 'desc' ? { sort: `${sortBy}:${sortDir}` } : {})),
+    ...(view && view !== 'table' ? { view } : {}),
+    ...(workspace && workspace !== 'results' ? { workspace } : {}),
+    ...(refresh ? { refresh: '1' } : {}),
+  };
+  return query;
+}
+
+function sameListingsQuery(left = {}, right = {}) {
+  const normalize = (value) => {
+    if (Array.isArray(value)) return value.join(',');
+    if (value == null) return '';
+    return String(value);
+  };
+  const leftQuery = Object.prototype.hasOwnProperty.call(left, 'q') || Object.prototype.hasOwnProperty.call(left, 'page_size') || Object.prototype.hasOwnProperty.call(left, 'source') ? left : buildListingsQuery(left);
+  const rightQuery = Object.prototype.hasOwnProperty.call(right, 'q') || Object.prototype.hasOwnProperty.call(right, 'page_size') || Object.prototype.hasOwnProperty.call(right, 'source') ? right : buildListingsQuery(right);
+  const keys = new Set([...Object.keys(leftQuery), ...Object.keys(rightQuery)]);
+  for (const key of keys) {
+    if (normalize(leftQuery[key]) !== normalize(rightQuery[key])) return false;
+  }
+  return true;
+}
+
 export default function ListingsPage() {
   const { user } = useAuth();
   const router = useRouter();
@@ -452,10 +440,22 @@ export default function ListingsPage() {
   // the hook caused a temporal-dead-zone render failure on /listings.
   const [activeTab, setActiveTab] = useState('all');
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [marketFilter, setMarketFilter] = useState('all');
   const [sourceFilter, setSourceFilter] = useState('all');
   const [readinessFilter, setReadinessFilter] = useState('all');
-  const { listings, listingError, listingPagination, autonomousConfig, enabledPlatforms, listingTemplates, reload } = useDashboardData(user?.id, {
+  const [sortBy, setSortBy] = useState('updated');
+  const [sortDir, setSortDir] = useState('desc');
+  const {
+    listings,
+    listingError,
+    listingPagination,
+    listingBucketCounts,
+    autonomousConfig,
+    enabledPlatforms,
+    listingTemplates,
+    reload,
+  } = useDashboardData(user?.id, {
     includeClusters: false,
     includeMarketplaces: false,
     includeAnalytics: false,
@@ -465,11 +465,16 @@ export default function ListingsPage() {
     paginateListings: true,
     listingPage: catalogPage,
     listingPageSize: catalogPageSize,
-    listingSourceType: sourceFilter === 'amazon_vine' || activeTab === 'vine' ? 'amazon_vine' : sourceFilter,
-    listingSearch: search,
-    listingQueue: activeTab === 'vine' ? 'all' : activeTab,
+    listingSourceType: sourceFilter,
+    listingMarketplace: marketFilter,
+    listingReadiness: readinessFilter,
+    listingSearch: debouncedSearch,
+    listingQueue: activeTab,
+    listingSortBy: sortBy,
+    listingSortDir: sortDir,
   });
   const [selectedIds, setSelectedIds] = useState([]);
+  const [bulkSendTarget, setBulkSendTarget] = useState('drafts');
   const [selectedListingId, setSelectedListingId] = useState(null);
   const [viewMode, setViewMode] = useState('table');
   const [workspaceMode, setWorkspaceMode] = useState('results');
@@ -493,6 +498,8 @@ export default function ListingsPage() {
   const [repairQueueReport, setRepairQueueReport] = useState(null);
   const [repairQueueLoading, setRepairQueueLoading] = useState(false);
   const [repairQueueImageStatusFilter, setRepairQueueImageStatusFilter] = useState('all');
+  const [pageInput, setPageInput] = useState('1');
+  const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(false);
   const [workflowPreferences, setWorkflowPreferences] = useState({
     review_before_publish: true,
     auto_publish_after_approval: false,
@@ -534,12 +541,82 @@ export default function ListingsPage() {
     }
   }, [router.query.tab]);
 
+  useEffect(() => {
+    const pageValue = Number(router.query.page || 1);
+    const pageSizeValue = Number(router.query.page_size || 25);
+    if (Number.isFinite(pageValue) && pageValue > 0) setCatalogPage(pageValue);
+    if (Number.isFinite(pageSizeValue) && pageSizeValue > 0) setCatalogPageSize(pageSizeValue);
+    const marketValue = typeof router.query.market === 'string' ? router.query.market : '';
+    if (marketValue) setMarketFilter(marketValue);
+    const sourceValue = typeof router.query.source === 'string' ? router.query.source : '';
+    if (sourceValue) setSourceFilter(sourceValue);
+    const readinessValue = typeof router.query.readiness === 'string' ? router.query.readiness : '';
+    if (readinessValue) setReadinessFilter(readinessValue);
+    const sortValue = typeof router.query.sort === 'string' ? router.query.sort : '';
+    if (sortValue) {
+      const [field, direction] = sortValue.split(':');
+      if (field) setSortBy(field);
+      if (direction === 'asc' || direction === 'desc') setSortDir(direction);
+    }
+    const viewValue = typeof router.query.view === 'string' ? router.query.view : '';
+    if (viewValue === 'table' || viewValue === 'grid') setViewMode(viewValue);
+    const workspaceValue = typeof router.query.workspace === 'string' ? router.query.workspace : '';
+    if (workspaceValue && ['results', 'repair', 'launch', 'queue', 'all'].includes(workspaceValue)) setWorkspaceMode(workspaceValue);
+    const refreshValue = typeof router.query.refresh === 'string' ? router.query.refresh : '';
+    setAutoRefreshEnabled(refreshValue === '1' || refreshValue === 'true' || refreshValue === 'on');
+  }, [router.query.market, router.query.page, router.query.page_size, router.query.readiness, router.query.refresh, router.query.source, router.query.sort, router.query.view, router.query.workspace]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedSearch(search.trim()), 250);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+
+  useEffect(() => {
+    if (!router.isReady) return;
+    setPageInput(String(catalogPage));
+  }, [catalogPage, router.isReady]);
+
+  useEffect(() => {
+    if (!router.isReady) return;
+    const nextQuery = buildListingsQuery({
+      tab: activeTab,
+      page: catalogPage,
+      pageSize: catalogPageSize,
+      search: debouncedSearch,
+      market: marketFilter,
+      source: sourceFilter,
+      readiness: readinessFilter,
+      sortBy,
+      sortDir,
+      view: viewMode,
+      workspace: workspaceMode,
+      refresh: autoRefreshEnabled,
+    });
+    if (sameListingsQuery(nextQuery, router.query)) return;
+    router.push({ pathname: router.pathname, query: nextQuery }, undefined, { shallow: true, scroll: false });
+  }, [activeTab, autoRefreshEnabled, catalogPage, catalogPageSize, debouncedSearch, marketFilter, router, readinessFilter, sortBy, sortDir, sourceFilter, viewMode, workspaceMode]);
+
+  const commitPageChange = useCallback((nextPage) => {
+    const safePage = Number.isFinite(nextPage) ? Math.max(1, nextPage) : 1;
+    const totalPages = Math.max(1, Number(listingPagination.total_pages || 1));
+    const clamped = Math.min(totalPages, safePage);
+    setCatalogPage(clamped);
+    setSelectedIds([]);
+  }, [listingPagination.total_pages]);
+
+  const commitPageInput = useCallback(() => {
+    const parsed = Number(pageInput);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      setPageInput(String(catalogPage));
+      return;
+    }
+    commitPageChange(parsed);
+  }, [catalogPage, commitPageChange, pageInput]);
+
   const selectTab = (nextTab) => {
     setActiveTab(nextTab);
     setCatalogPage(1);
     setSelectedIds([]);
-    if (!router.isReady) return;
-    router.replace({ pathname: router.pathname, query: { ...router.query, tab: nextTab } }, undefined, { shallow: true });
   };
 
   const clearAllFilters = () => {
@@ -550,7 +627,6 @@ export default function ListingsPage() {
     setReadinessFilter('all');
     setSelectedIds([]);
     setCatalogPage(1);
-    if (router.isReady) router.replace({ pathname: router.pathname }, undefined, { shallow: true });
   };
 
   useEffect(() => {
@@ -566,6 +642,14 @@ export default function ListingsPage() {
       .then((data) => setEbayAccountReadiness(data))
       .catch(() => setEbayAccountReadiness(null));
   }, [user?.id]);
+
+  useEffect(() => {
+    if (!autoRefreshEnabled) return undefined;
+    const timer = window.setInterval(() => {
+      reload().catch(() => undefined);
+    }, 15000);
+    return () => window.clearInterval(timer);
+  }, [autoRefreshEnabled, reload]);
 
   useEffect(() => {
     let active = true;
@@ -589,29 +673,9 @@ export default function ListingsPage() {
     };
   }, []);
 
-  const filteredListings = useMemo(() => {
-    return listings.filter((listing) => {
-      const text = `${getListingTitle(listing)} ${listing.id}`.toLowerCase();
-      const marketplaces = getListingMarketplaces(listing, enabledPlatforms, { allowFallback: false });
-      const matchesSearch = !search || text.includes(search.toLowerCase());
-      const matchesMarket = marketFilter === 'all' || marketplaces.includes(marketFilter);
-      const matchesSource = sourceFilter === 'all' || (sourceFilter === 'amazon_vine' ? isAmazonVineSource(listing) : listing.source_type === sourceFilter);
-      const matchesReadiness = matchesReadinessFilter(listing, readinessFilter);
-      return matchesTab(listing, activeTab) && matchesSearch && matchesMarket && matchesSource && matchesReadiness;
-    });
-  }, [activeTab, enabledPlatforms, listings, marketFilter, readinessFilter, search, sourceFilter]);
+  const filteredListings = listings;
 
-  const baseFilteredListings = useMemo(() => {
-    return listings.filter((listing) => {
-      const text = `${getListingTitle(listing)} ${listing.id}`.toLowerCase();
-      const marketplaces = getListingMarketplaces(listing, enabledPlatforms, { allowFallback: false });
-      const matchesSearch = !search || text.includes(search.toLowerCase());
-      const matchesMarket = marketFilter === 'all' || marketplaces.includes(marketFilter);
-      const matchesSource = sourceFilter === 'all' || (sourceFilter === 'amazon_vine' ? isAmazonVineSource(listing) : listing.source_type === sourceFilter);
-      const matchesReadiness = matchesReadinessFilter(listing, readinessFilter);
-      return matchesSearch && matchesMarket && matchesSource && matchesReadiness;
-    });
-  }, [enabledPlatforms, listings, marketFilter, readinessFilter, search, sourceFilter]);
+  const baseFilteredListings = listings;
 
   const selectedListing = useMemo(
     () => listings.find((listing) => listing.id === selectedListingId) || null,
@@ -621,6 +685,10 @@ export default function ListingsPage() {
   const selectedRows = useMemo(
     () => listings.filter((listing) => selectedIds.includes(listing.id)),
     [listings, selectedIds],
+  );
+  const selectedVineRows = useMemo(
+    () => selectedRows.filter((listing) => isAmazonVineSource(listing)),
+    [selectedRows],
   );
 
   const isAlreadyPostedToEbay = useCallback(
@@ -653,9 +721,8 @@ export default function ListingsPage() {
   }, [selectedRows]);
 
   const tabCounts = useMemo(
-    () =>
-      Object.fromEntries(LISTING_TABS.map((tab) => [tab.value, listings.filter((listing) => matchesTab(listing, tab.value)).length])),
-    [listings],
+    () => Object.fromEntries(LISTING_TABS.map((tab) => [tab.value, Number(listingBucketCounts?.[tab.value] || 0)])),
+    [listingBucketCounts],
   );
   const activeTabLabel = LISTING_TABS.find((tab) => tab.value === activeTab)?.label || 'Listings';
 
@@ -817,6 +884,8 @@ export default function ListingsPage() {
                 ? 'Publishable listings'
                 : tab.value === 'published'
                 ? 'Live marketplace records'
+                : tab.value === 'archived'
+                ? 'Archived records'
                 : 'Rows with publish problems',
             onClick: () => selectTab(tab.value),
           })),
@@ -1128,7 +1197,7 @@ export default function ListingsPage() {
     });
     if (!silent) {
       await reload();
-      toast.success('Listing archived from active review queues.');
+      toast.success('Listing archived.');
     }
   };
 
@@ -1144,16 +1213,14 @@ export default function ListingsPage() {
     });
     if (!silent) {
       await reload();
-      toast.success('Listing restored to active review queues.');
+      toast.success('Listing restored.');
     }
   };
 
   const archiveSelected = async () => {
-    const targetRows = listings.filter(
-      (listing) => selectedIds.includes(listing.id) && isAmazonVineSource(listing) && !isArchivedListing(listing),
-    );
+    const targetRows = listings.filter((listing) => selectedIds.includes(listing.id) && !isArchivedListing(listing));
     if (!targetRows.length) {
-      toast.error('Select one or more active Vine listings to archive.');
+      toast.error('Select one or more active listings to archive.');
       return;
     }
     let archived = 0;
@@ -1172,7 +1239,71 @@ export default function ListingsPage() {
     if (failed) {
       toast.error(`Archived ${archived}, failed ${failed}. Please retry failed rows.`);
     } else {
-      toast.success(`Archived ${archived} Vine listing${archived === 1 ? '' : 's'}.`);
+      toast.success(`Archived ${archived} listing${archived === 1 ? '' : 's'}.`);
+    }
+  };
+
+  const sendSelectedTo = async (destination) => {
+    const normalizedDestination = String(destination || '').trim().toLowerCase();
+    const targetRows = listings.filter((listing) => selectedIds.includes(listing.id));
+    if (!targetRows.length) {
+      toast.error('Select one or more listings first.');
+      return;
+    }
+
+    let updatedCount = 0;
+    let failed = 0;
+    const chunkSize = 20;
+    for (let i = 0; i < targetRows.length; i += chunkSize) {
+      const chunk = targetRows.slice(i, i + chunkSize);
+      const results = await Promise.allSettled(
+        chunk.map((listing) => {
+          const currentLabels = Array.isArray(listing.custom_labels) ? listing.custom_labels : [];
+          const labelsWithoutArchive = currentLabels.filter((label) => !['archived_vine', 'archived_sold'].includes(label));
+          const updater = (() => {
+            switch (normalizedDestination) {
+              case 'ready':
+                return {
+                  status: 'ready',
+                  needs_review: false,
+                  custom_labels: labelsWithoutArchive,
+                };
+              case 'review':
+                return {
+                  status: listing.status || 'draft',
+                  needs_review: true,
+                  custom_labels: labelsWithoutArchive,
+                };
+              case 'archived':
+                return {
+                  status: listing.status === 'draft' ? 'draft' : listing.status,
+                  needs_review: false,
+                  custom_labels: Array.from(new Set([...currentLabels, 'archived_vine'])),
+                };
+              case 'drafts':
+              default:
+                return {
+                  status: 'draft',
+                  needs_review: false,
+                  custom_labels: labelsWithoutArchive,
+                };
+            }
+          })();
+          return updateListing(listing.id, updater);
+        }),
+      );
+      results.forEach((result) => {
+        if (result.status === 'fulfilled') updatedCount += 1;
+        else failed += 1;
+      });
+    }
+
+    await reload();
+    if (failed) {
+      toast.error(`Sent ${updatedCount}, failed ${failed}. Please retry failed rows.`);
+    } else {
+      const label = normalizedDestination === 'review' ? 'needs review' : normalizedDestination;
+      toast.success(`Sent ${updatedCount} listing${updatedCount === 1 ? '' : 's'} to ${label}.`);
     }
   };
 
@@ -1200,6 +1331,24 @@ export default function ListingsPage() {
     } else {
       toast.success(`Restored ${restored} archived listing${restored === 1 ? '' : 's'}.`);
     }
+  };
+
+  const retrySelectedVineImages = async () => {
+    if (!selectedVineRows.length) {
+      toast.error('Select one or more Vine listings first.');
+      return;
+    }
+    const result = await backfillVineListingImages({
+      includeArchived: false,
+      forceRefresh: true,
+      strictMatch: true,
+      onlyMissingImages: false,
+      listingIds: selectedVineRows.map((listing) => listing.id),
+    });
+    await reload();
+    toast.success(
+      `Retried image fetch for ${Number(result?.updated || 0)} listing${Number(result?.updated || 0) === 1 ? '' : 's'} across ${selectedVineRows.length} selected Vine row${selectedVineRows.length === 1 ? '' : 's'}.`,
+    );
   };
 
   const deleteListing = async (listingId, { silent = false } = {}) => {
@@ -1691,7 +1840,7 @@ export default function ListingsPage() {
         />
         <PageFrame>
           <SectionPanel title="Find listings" description={`${listingPagination.total.toLocaleString()} records · ${catalogPageSize} per page`}>
-            <div className="grid gap-3 lg:grid-cols-[minmax(220px,1fr)_190px_auto] lg:items-center">
+            <div className="grid gap-3 lg:grid-cols-[minmax(220px,1fr)_190px_190px_190px_auto] lg:items-center">
               <input
                 value={search}
                 onChange={(event) => { setSearch(event.target.value); setCatalogPage(1); }}
@@ -1701,11 +1850,20 @@ export default function ListingsPage() {
               <select value={catalogPageSize} onChange={(event) => { setCatalogPageSize(Number(event.target.value)); setCatalogPage(1); }} className="h-10 rounded-[10px] border border-[#d0d5dd] bg-white px-3 text-sm text-[#101828]">
                 {[25, 50, 100, 250].map((size) => <option key={size} value={size}>{size} per page</option>)}
               </select>
+              <select aria-label="Listings source modifier" value={sourceFilter} onChange={(event) => { setSourceFilter(event.target.value); setCatalogPage(1); }} className="h-10 rounded-[10px] border border-amber-300 bg-amber-50 px-3 text-sm font-semibold text-amber-900">
+                {SOURCE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+              <select aria-label="Listings sort" value={sortBy} onChange={(event) => { setSortBy(event.target.value); setCatalogPage(1); }} className="h-10 rounded-[10px] border border-[#d0d5dd] bg-white px-3 text-sm text-[#101828]">
+                <option value="updated">Sort: Date updated</option><option value="created">Sort: Date created</option><option value="price">Sort: Price</option><option value="title">Sort: Title</option><option value="source">Sort: Source</option><option value="status">Sort: Status</option>
+              </select>
               <Button variant="outline" onClick={clearAllFilters}>Clear filters</Button>
             </div>
             <div className="mt-4 flex flex-wrap gap-2" aria-label="Listing filters">
-              {LISTING_TABS.map((tab) => <button key={tab.value} type="button" onClick={() => { setActiveTab(tab.value); setCatalogPage(1); }} className={`rounded-full border px-3 py-2 text-sm font-semibold ${activeTab === tab.value ? 'border-[#2563eb] bg-[#eef4ff] text-[#1d4ed8]' : 'border-[#e5e7eb] bg-white text-[#475467]'}`}>{tab.label}</button>)}
+              {LISTING_TABS.map((tab) => <button key={tab.value} type="button" onClick={() => selectTab(tab.value)} className={`rounded-full border px-3 py-2 text-sm font-semibold ${activeTab === tab.value ? 'border-[#2563eb] bg-[#eef4ff] text-[#1d4ed8]' : 'border-[#e5e7eb] bg-white text-[#475467]'}`}>{tab.label}</button>)}
             </div>
+            {sourceFilter === 'amazon_vine' ? <div className="mt-3 flex flex-wrap gap-2 rounded-[14px] border border-amber-200 bg-amber-50 p-2" aria-label="Amazon Vine lifecycle filters">
+              {[['all','All Vine'],['review','Vine Needs Review'],['attention','Vine Needs Attention'],['drafts','Vine Drafts'],['ready','Vine Ready'],['published','Vine Published'],['sold','Vine Sold'],['archived','Vine Archived'],['failed','Vine Failed']].map(([value,label]) => <button key={value} type="button" onClick={() => selectTab(value)} className={`rounded-full px-2.5 py-1 text-xs font-semibold ${activeTab === value ? 'bg-white text-amber-900 ring-1 ring-amber-400' : 'text-amber-800'}`}>{label}</button>)}
+            </div> : null}
             <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-[#eaecf0] pt-3">
               <Button
                 variant="outline"
@@ -1733,6 +1891,31 @@ export default function ListingsPage() {
                 {workflowPreferences.bulk_approval_enabled && selectedReviewRows.length ? <Button variant="outline" size="sm" onClick={approveSelected}>Approve selected</Button> : null}
                 <Button variant="outline" size="sm" onClick={approveAndPublishSelected}>{selectedReviewRows.length ? 'Approve & queue publish' : 'Queue selected for publishing'}</Button>
                 <Button variant="outline" size="sm" onClick={() => runBulkMarketplacePreflight(['ebay'])} disabled={bulkPreflightLoading}>Run eBay preflight</Button>
+                <div className="flex items-center gap-2 rounded-lg border border-[#d0d5dd] bg-white px-2 py-1">
+                  <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Send selected to</span>
+                  <select
+                    value={bulkSendTarget}
+                    onChange={(event) => setBulkSendTarget(event.target.value)}
+                    className="rounded-md border border-[#d0d5dd] bg-white px-2 py-1 text-sm text-[#101828]"
+                  >
+                    <option value="drafts">Drafts</option>
+                    <option value="review">Needs review</option>
+                    <option value="ready">Ready</option>
+                    <option value="archived">Archived</option>
+                  </select>
+                  <Button variant="outline" size="sm" onClick={() => sendSelectedTo(bulkSendTarget)}>
+                    Send
+                  </Button>
+                </div>
+                {activeTab !== 'archived' ? (
+                  <Button variant="outline" size="sm" onClick={archiveSelected}>
+                    Archive selected listings
+                  </Button>
+                ) : (
+                  <Button variant="outline" size="sm" onClick={unarchiveSelected}>
+                    Unarchive selected
+                  </Button>
+                )}
                 <Button variant="outline" size="sm" onClick={() => setSelectedIds([])}>Clear selection</Button>
               </div>
             </SectionPanel>
@@ -1785,7 +1968,30 @@ export default function ListingsPage() {
           <SectionPanel title={`${activeTabLabel} · page ${listingPagination.page} of ${listingPagination.total_pages}`} description="Select listings for approval or publishing, or open one to review its marketplace preview, photos, details, and readiness.">
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3 border-b border-[#eaecf0] pb-3">
               <p className="text-sm text-[#667085]">Showing {filteredListings.length} records on this page.</p>
-              <div className="flex items-center gap-2"><Button size="sm" variant="outline" disabled={listingPagination.page <= 1} onClick={() => { setCatalogPage(Math.max(1, listingPagination.page - 1)); setSelectedIds([]); }}>Previous</Button><span className="text-sm font-semibold text-[#344054]">{listingPagination.page} / {listingPagination.total_pages}</span><Button size="sm" variant="outline" disabled={listingPagination.page >= listingPagination.total_pages} onClick={() => { setCatalogPage(Math.min(listingPagination.total_pages, listingPagination.page + 1)); setSelectedIds([]); }}>Next</Button></div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button size="sm" variant="outline" disabled={listingPagination.page <= 1} onClick={() => { commitPageChange(listingPagination.page - 1); }}>Previous</Button>
+                <div className="flex items-center gap-2 rounded-[10px] border border-[#d0d5dd] bg-white px-2 py-1.5">
+                  <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]" htmlFor="listings-page-input">Page</label>
+                  <input
+                    id="listings-page-input"
+                    type="number"
+                    min={1}
+                    max={listingPagination.total_pages || 1}
+                    value={pageInput}
+                    onChange={(event) => setPageInput(event.target.value)}
+                    onBlur={commitPageInput}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        commitPageInput();
+                      }
+                    }}
+                    className="h-8 w-20 rounded-[8px] border border-[#d0d5dd] bg-white px-2 text-sm font-semibold text-[#101828] outline-none focus:border-[#2563eb]"
+                  />
+                  <span className="text-sm font-semibold text-[#344054]">/ {listingPagination.total_pages}</span>
+                </div>
+                <Button size="sm" variant="outline" disabled={listingPagination.page >= listingPagination.total_pages} onClick={() => { commitPageChange(listingPagination.page + 1); }}>Next</Button>
+              </div>
             </div>
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
               {filteredListings.map((listing) => (
@@ -1822,7 +2028,30 @@ export default function ListingsPage() {
             </div>
             <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-[#eaecf0] pt-4">
               <p className="text-sm text-[#667085]">Showing {filteredListings.length} records on this page.</p>
-              <div className="flex items-center gap-2"><Button size="sm" variant="outline" disabled={listingPagination.page <= 1} onClick={() => setCatalogPage(Math.max(1, listingPagination.page - 1))}>Previous</Button><span className="text-sm font-semibold text-[#344054]">{listingPagination.page} / {listingPagination.total_pages}</span><Button size="sm" variant="outline" disabled={listingPagination.page >= listingPagination.total_pages} onClick={() => setCatalogPage(Math.min(listingPagination.total_pages, listingPagination.page + 1))}>Next</Button></div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button size="sm" variant="outline" disabled={listingPagination.page <= 1} onClick={() => { commitPageChange(listingPagination.page - 1); }}>Previous</Button>
+                <div className="flex items-center gap-2 rounded-[10px] border border-[#d0d5dd] bg-white px-2 py-1.5">
+                  <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]" htmlFor="listings-page-input-bottom">Page</label>
+                  <input
+                    id="listings-page-input-bottom"
+                    type="number"
+                    min={1}
+                    max={listingPagination.total_pages || 1}
+                    value={pageInput}
+                    onChange={(event) => setPageInput(event.target.value)}
+                    onBlur={commitPageInput}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        commitPageInput();
+                      }
+                    }}
+                    className="h-8 w-20 rounded-[8px] border border-[#d0d5dd] bg-white px-2 text-sm font-semibold text-[#101828] outline-none focus:border-[#2563eb]"
+                  />
+                  <span className="text-sm font-semibold text-[#344054]">/ {listingPagination.total_pages}</span>
+                </div>
+                <Button size="sm" variant="outline" disabled={listingPagination.page >= listingPagination.total_pages} onClick={() => { commitPageChange(listingPagination.page + 1); }}>Next</Button>
+              </div>
             </div>
           </SectionPanel>
         </PageFrame>
@@ -1847,6 +2076,18 @@ export default function ListingsPage() {
         description="Manage all listing drafts in one workspace: create, import, intake photos, preview per marketplace, approve, and publish."
         actions={
           <div className="flex flex-wrap gap-2">
+            <label className="flex items-center gap-2 rounded-[10px] border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-xs font-semibold text-amber-900">
+              <span>Source</span>
+              <select aria-label="Listings source modifier" value={sourceFilter} onChange={(event) => { setSourceFilter(event.target.value); setCatalogPage(1); }} className="rounded-md border border-amber-200 bg-white px-2 py-1 text-xs text-slate-900">
+                {SOURCE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+            </label>
+            <label className="flex items-center gap-2 rounded-[10px] border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700">
+              <span>Sort</span>
+              <select aria-label="Listings sort" value={sortBy} onChange={(event) => setSortBy(event.target.value)} className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-900">
+                <option value="updated">Date updated</option><option value="created">Date created</option><option value="price">Price</option><option value="title">Title</option><option value="source">Source</option><option value="status">Status</option>
+              </select>
+            </label>
             <Button href="/listings/new" variant="outline">
               New item
             </Button>
@@ -1885,7 +2126,17 @@ export default function ListingsPage() {
         listingMetrics={listingMetrics}
         bulkPreflightSummary={bulkPreflightSummary}
         publishJobStats={publishJobStats}
-        tabs={<ListingsQueueTabs listingTabs={LISTING_TABS} tabCounts={tabCounts} activeTab={activeTab} selectTab={selectTab} />}
+        tabs={(
+          <ListingsQueueTabs
+            listingTabs={LISTING_TABS}
+            tabCounts={tabCounts}
+            activeTab={activeTab}
+            selectTab={selectTab}
+            sourceOptions={SOURCE_OPTIONS}
+            sourceFilter={sourceFilter}
+            selectSource={setSourceFilter}
+          />
+        )}
         toolbar={(
           <ListingsToolbar
             search={search}
@@ -1896,12 +2147,19 @@ export default function ListingsPage() {
             setSourceFilter={setSourceFilter}
             readinessFilter={readinessFilter}
             setReadinessFilter={setReadinessFilter}
+            sortBy={sortBy}
+            setSortBy={setSortBy}
+            sortDir={sortDir}
+            setSortDir={setSortDir}
             activeTab={activeTab}
-            setActiveTab={setActiveTab}
+            setActiveTab={selectTab}
             setSelectedIds={setSelectedIds}
             filteredListingsLength={filteredListings.length}
             viewMode={viewMode}
             setViewMode={setViewMode}
+            workspaceMode={workspaceMode}
+            autoRefreshEnabled={autoRefreshEnabled}
+            setAutoRefreshEnabled={setAutoRefreshEnabled}
             onBulkRetryFetchImages={async () => {
               const result = await backfillVineListingImages({
                 includeArchived: false,
@@ -1911,6 +2169,19 @@ export default function ListingsPage() {
               await reload();
               toast.success(
                 `Vine image retry complete: ${Number(result?.updated || 0)} updated across ${Number(result?.processed || 0)} drafts, ${Number(result?.discovered || 0)} discovered, ${Number(result?.no_cache || 0)} still missing.`,
+              );
+            }}
+            onForceRecentVineImages={async () => {
+              const result = await backfillVineListingImages({
+                includeArchived: false,
+                forceRefresh: true,
+                strictMatch: true,
+                onlyMissingImages: false,
+                sinceOrderDate: '2026-06-15',
+              });
+              await reload();
+              toast.success(
+                `Recent Vine backfill complete: ${Number(result?.updated || 0)} updated across ${Number(result?.processed || 0)} drafts, ${Number(result?.bridge_refetched || 0)} bridge refresh(es).`,
               );
             }}
             onRetryMissingVineImages={async () => {
@@ -1923,6 +2194,28 @@ export default function ListingsPage() {
               await reload();
               toast.success(
                 `Missing-image retry complete: ${Number(result?.updated || 0)} updated across ${Number(result?.processed || 0)} drafts, ${Number(result?.no_cache || 0)} still missing.`,
+              );
+            }}
+            onRefreshVineMetadata={async () => {
+              const result = await refreshVineListingMetadata({
+                includeArchived: false,
+                sinceOrderDate: '2026-06-15',
+              });
+              await reload();
+              toast.success(
+                `Vine metadata refresh complete: ${Number(result?.updated || 0)} drafts updated, ${Number(result?.missing_facts || 0)} rows still missing stored Amazon facts.`,
+              );
+            }}
+            onRepairAllVineImages={async () => {
+              const result = await repairAllVineListingImages({
+                includeArchived: false,
+                forceRefresh: true,
+                useBridgeSession: true,
+                onlyMissingImages: true,
+              });
+              await reload();
+              toast.success(
+                `Full Vine repair complete: ${Number(result?.updated || 0)} updated across ${Number(result?.processed || 0)} drafts, ${Number(result?.bridge_refetched || 0)} bridge refresh(es), ${Number(result?.no_cache || 0)} still missing.`,
               );
             }}
             filterOptions={FILTER_OPTIONS}
@@ -2024,6 +2317,11 @@ export default function ListingsPage() {
               <Button variant="outline" size="sm" onClick={() => runBulkPublishReady(['facebook'], { dryRun: false, forceRefresh: true })}>
                 Facebook assisted handoff
               </Button>
+              {selectedVineRows.length ? (
+                <Button variant="outline" size="sm" onClick={retrySelectedVineImages}>
+                  Retry image fetch
+                </Button>
+              ) : null}
               <Button variant="outline" size="sm" onClick={exportBulkPreflightCsv}>
                 Export blocker CSV
               </Button>
@@ -2128,9 +2426,29 @@ export default function ListingsPage() {
               <Button variant="outline" size="sm" onClick={() => runBulkPricingAction('apply_floor', 'Applied floor pricing to selected drafts.')}>
                 Apply floor
               </Button>
+              <div className="flex items-center gap-2 rounded-lg border border-[#d0d5dd] bg-white px-2 py-1">
+                <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Send selected to</span>
+                <select
+                  value={bulkSendTarget}
+                  onChange={(event) => setBulkSendTarget(event.target.value)}
+                  className="rounded-md border border-[#d0d5dd] bg-white px-2 py-1 text-sm text-[#101828]"
+                >
+                  <option value="drafts">Drafts</option>
+                  <option value="review">Needs review</option>
+                  <option value="ready">Ready</option>
+                  <option value="archived">Archived</option>
+                </select>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => sendSelectedTo(bulkSendTarget)}
+                >
+                  Send
+                </Button>
+              </div>
               {activeTab !== 'archived' ? (
                 <Button variant="outline" size="sm" onClick={archiveSelected}>
-                  Archive selected
+                  Archive selected listings
                 </Button>
               ) : (
                 <Button variant="outline" size="sm" onClick={unarchiveSelected}>
@@ -2153,6 +2471,7 @@ export default function ListingsPage() {
       <div className={`grid gap-5 ${selectedListing ? 'xl:grid-cols-[minmax(0,1fr)_480px]' : 'grid-cols-1'}`}>
         {viewMode === 'table' ? (
           <DataTable
+          density="compact"
           columns={[
             {
               key: 'thumbnail',
@@ -2298,7 +2617,7 @@ export default function ListingsPage() {
           title={workflowPreferences.listing_preview_mode === 'marketplace' ? 'Listing review preview' : 'Listing editor'}
           description="Inspect, review pricing reasoning, edit listing data, and approve or publish the draft."
           onClose={() => setSelectedListingId(null)}
-          widthClassName="xl:w-[720px]"
+          widthClassName="xl:w-[1100px]"
         >
           {selectedListing ? (
             <ListingEditor
@@ -2399,7 +2718,7 @@ export default function ListingsPage() {
         title="Workspace signals and repair tools"
         description="Pricing posture, readiness counts, eBay preflight summary, and the repair queue live together here instead of crowding the first screen."
         badge={`${listingMetrics.blockedCount} blocked`}
-        defaultOpen
+        defaultOpen={false}
       >
         <PageSplit columnsClassName="xl:grid-cols-[minmax(0,1fr)_380px]">
       <PageMain>
@@ -2454,7 +2773,7 @@ export default function ListingsPage() {
         title="Launch drill and publish readiness"
         description="Candidate selection, dry-run launch QA, and the latest publish-ready reports are grouped here so they stay available without owning the first screen."
         badge={launchCandidatesReport?.candidates?.length ? `${launchCandidatesReport.candidates.length} launch candidates` : 'Launch QA'}
-        defaultOpen
+        defaultOpen={false}
       >
         <div className="space-y-6">
           <ListingsLaunchCandidatesPanel

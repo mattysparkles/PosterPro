@@ -17,6 +17,7 @@ import {
 import { useRouter } from 'next/router';
 
 import AppShell from '../components/layout/AppShell';
+import GooglePhotosConnectionGuide from '../components/google/GooglePhotosConnectionGuide';
 import ActionBar from '../components/ui/action-bar';
 import Button from '../components/ui/button';
 import CollapsiblePanel from '../components/ui/collapsible-panel';
@@ -42,8 +43,11 @@ import {
   runIntakeMonitor,
   fetchSalesDashboard,
   toggleAutonomousMode,
+  setIntakeDraftingPaused,
   updateIntakeSettings,
   uploadVineReport,
+  getGooglePhotosConnectUrl,
+  startGooglePhotosOAuth,
 } from '../lib/api';
 import { formatPublishFailureMessage } from '../lib/publish-status';
 
@@ -79,6 +83,11 @@ function toStatusTone(connected, warning = false) {
 export default function Dashboard() {
   const router = useRouter();
   const { user } = useAuth();
+  const googlePhotosConnectUrl = getGooglePhotosConnectUrl();
+  const googlePhotosRedirectUri =
+    typeof window !== 'undefined'
+      ? `${window.location.origin}/api/intake/google-photos/callback`
+      : 'https://posterpro.sparkleserver.site/api/intake/google-photos/callback';
   const vineFileInputRef = useRef(null);
   const { listings, autonomousConfig, readyCount, reload } = useDashboardData(user?.id, {
     includeClusters: false,
@@ -103,7 +112,7 @@ export default function Dashboard() {
   const [vineUploading, setVineUploading] = useState(false);
   const [loadingPanels, setLoadingPanels] = useState(false);
   const [operatorPrompt, setOperatorPrompt] = useState(DEFAULT_OPERATOR_PROMPT);
-  const [operatorConfirmation, setOperatorConfirmation] = useState('');
+  const [operatorConfirmationAcknowledged, setOperatorConfirmationAcknowledged] = useState(false);
   const [operatorCommandResult, setOperatorCommandResult] = useState(null);
   const [operatorCommandRunning, setOperatorCommandRunning] = useState(false);
   const [intakeSettings, setIntakeSettings] = useState(null);
@@ -112,6 +121,8 @@ export default function Dashboard() {
   const [intakeFolderId, setIntakeFolderId] = useState('');
   const [intakeSaving, setIntakeSaving] = useState(false);
   const [intakeSyncing, setIntakeSyncing] = useState(false);
+  const systemStatus = jobsOverview.system_status || {};
+  const googlePhotosConnected = Boolean(intakeSettings?.google_photos?.connected);
 
   const draftCount = useMemo(
     () => listings.filter((listing) => listing.status !== 'ready' && listing.ebay_publish_status !== 'POSTED' && !listing.ebay_listing_id).length,
@@ -211,6 +222,14 @@ export default function Dashboard() {
   }, [setupSummary]);
 
   const marketplaceWidgets = (setupSummary?.marketplace_connections || []).slice(0, 6);
+  const activeBridgeConnectSession = setupSummary?.active_bridge_connect_session || null;
+  const browserAssistPromptTargets = useMemo(() => {
+    const browserTargets = ['facebook', 'mercari'];
+    return (setupSummary?.marketplace_connections || [])
+      .filter((connection) => browserTargets.includes(String(connection.marketplace || '').toLowerCase()))
+      .filter((connection) => !connection.connected || !connection.bridge_account_key);
+  }, [setupSummary]);
+  const showBrowserAssistPrompt = Boolean(browserAssistPromptTargets.length || activeBridgeConnectSession);
   const topMetrics = [
     { label: 'Ready to publish', value: readyCount, detail: 'Listings that can move straight into marketplace publishing.', href: '/listings?tab=ready' },
     { label: 'Pending review', value: reviewCount, detail: 'Drafts still waiting for operator approval.', href: '/listings?tab=review' },
@@ -227,9 +246,9 @@ export default function Dashboard() {
     ['OpenAI', setupSummary?.server_readiness?.openai_configured, 'AI enrichment and pricing help'],
     ['PhotoRoom', setupSummary?.server_readiness?.photoroom_configured, 'Image cleanup workflows'],
     ['eBay OAuth', setupSummary?.server_readiness?.ebay_oauth_configured, 'Direct eBay publishing'],
+    ['Google Photos OAuth', setupSummary?.server_readiness?.google_photos_oauth_configured, 'Slate upload authorization'],
     ['Session security', setupSummary?.server_readiness?.session_secret_configured, 'Encrypted secret handling'],
   ];
-  const activeBridgeConnectSession = setupSummary?.active_bridge_connect_session || null;
   const intakeMetrics = useMemo(() => {
     const batches = intakeQueue?.batches || [];
     return {
@@ -279,6 +298,22 @@ export default function Dashboard() {
     }
   };
 
+  const toggleIntakeDraftingPause = async (paused) => {
+    if (!intakeSettings) return;
+    setIntakeSaving(true);
+    try {
+      const payload = await setIntakeDraftingPaused(intakeSettings, paused);
+      setIntakeSettings(payload);
+      setIntakeAlbumUrl(payload?.album_url || '');
+      setIntakeFolderId(payload?.folder_id || '');
+      toast.success(paused ? 'Drafting paused.' : 'Drafting resumed.');
+    } catch (error) {
+      toast.error(error.message || 'Failed to update drafting state.');
+    } finally {
+      setIntakeSaving(false);
+    }
+  };
+
   const runDashboardIntakeMonitor = async () => {
     setIntakeSyncing(true);
     try {
@@ -297,6 +332,23 @@ export default function Dashboard() {
     }
   };
 
+  const startGoogleLogin = async () => {
+    try {
+      const authPayload = await startGooglePhotosOAuth();
+      if (authPayload?.auth_url) {
+        window.location.assign(authPayload.auth_url);
+        return;
+      }
+      throw new Error('Google Photos OAuth URL was not returned by the server.');
+    } catch (error) {
+      if (String(error?.message || '').toLowerCase().includes('missing google photos oauth client settings')) {
+        router.push('/settings/intake?google_photos=missing-config#google-photos-oauth');
+        return;
+      }
+      toast.error(error.message || 'Unable to start Google login.');
+    }
+  };
+
   const dashboardSections = useMemo(
     () => [
       { key: 'overview', label: 'Overview', description: 'Primary metrics and workspace summary' },
@@ -308,6 +360,10 @@ export default function Dashboard() {
       { key: 'system', label: 'System', description: 'Runtime readiness and integrations' },
     ],
     [],
+  );
+  const activeSectionMeta = useMemo(
+    () => dashboardSections.find((section) => section.key === activeSection) || dashboardSections[0],
+    [activeSection, dashboardSections],
   );
 
   useEffect(() => {
@@ -337,17 +393,22 @@ export default function Dashboard() {
       toast.error('Enter an operator command first.');
       return;
     }
+    if (applyLive && !operatorConfirmationAcknowledged) {
+      toast.error('Confirm the live checkbox before applying changes.');
+      return;
+    }
     setOperatorCommandRunning(true);
     try {
       const result = await runDashboardOperatorCommand({
         prompt: operatorPrompt,
         dry_run: !applyLive,
         apply_live: applyLive,
-        confirmation_phrase: applyLive ? operatorConfirmation : undefined,
-      });
+        confirm_live_apply: applyLive ? operatorConfirmationAcknowledged : false,
+      }, applyLive ? { timeoutMs: 300000 } : {});
       setOperatorCommandResult(result);
       if (applyLive) {
         toast.success(result?.message || 'Live operator command finished.');
+        setOperatorConfirmationAcknowledged(false);
         await reload();
       } else {
         toast.success(result?.message || 'Operator command preview ready.');
@@ -361,15 +422,83 @@ export default function Dashboard() {
 
   const renderOverview = () => (
     <div className="space-y-5">
+      {showBrowserAssistPrompt ? (
+        <div className="rounded-[18px] border border-[#dbe7ff] bg-[linear-gradient(135deg,#f8fbff_0%,#ffffff_100%)] p-5 shadow-[0_12px_32px_rgba(15,23,42,0.06)]">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div className="max-w-3xl">
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">Browser-assist setup</p>
+              <h2 className="mt-2 text-xl font-semibold tracking-[-0.03em] text-[#101828]">Install the marketplace browser assistant and connect Facebook or Mercari.</h2>
+              <p className="mt-2 text-sm leading-6 text-[#475467]">
+                PosterPro uses the browser assistant for Facebook Marketplace and Mercari so sessions can be captured and reused without repeating the whole login flow every time.
+              </p>
+              {browserAssistPromptTargets.length ? (
+                <p className="mt-2 text-sm text-[#344054]">
+                  Needs setup for: <span className="font-medium text-[#101828]">{browserAssistPromptTargets.map((item) => item.display_name || item.marketplace).join(', ')}</span>
+                </p>
+              ) : null}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button href="/settings?tab=marketplaces" variant="outline">
+                Open marketplace setup
+              </Button>
+              <Button href="/bridge-desktop" variant="outline">
+                Open bridge desktop
+              </Button>
+              {activeBridgeConnectSession ? (
+                <Button href={`/bridge-desktop?connectSessionId=${encodeURIComponent(activeBridgeConnectSession.connect_session_id)}`}>
+                  Resume Facebook login
+                </Button>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
       <ActionBar
         left={<HealthIndicator healthy={!blockers.length} label={blockers.length ? `${blockers.length} setup blockers` : 'Setup healthy'} />}
         right={<span>{jobsSummary.queued} jobs running/queued</span>}
       />
       <CollapsiblePanel title="Head Slate intake" description="Connect or run the photo intake workflow when you need it." defaultOpen={false}>
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]">
+        <div className="mb-4">
+          <GooglePhotosConnectionGuide
+            connected={googlePhotosConnected}
+            accountLabel={intakeSettings?.google_photos?.account_email || intakeSettings?.google_photos?.account_name || intakeSettings?.google_photos?.account_subject}
+            albumLabel={intakeSettings?.album_url || intakeSettings?.folder_id || 'PosterPro'}
+            albumId={intakeSettings?.google_photos?.album_id || intakeSettings?.google_photos?.album_identifier}
+            connectionState={intakeSettings?.google_photos?.connection_state}
+            redirectUri={intakeSettings?.google_photos?.redirect_uri || googlePhotosRedirectUri}
+            connectUrl={googlePhotosConnectUrl}
+            apiKeysUrl="/settings/intake?google_photos=missing-config#google-photos-oauth"
+            slateUrl="/intake/slate"
+            onRefresh={async () => {
+              try {
+                const nextIntakeSettings = await fetchIntakeSettings();
+                setIntakeSettings(nextIntakeSettings || null);
+                toast.success('Google Photos status refreshed.');
+              } catch (error) {
+                toast.error(error.message || 'Failed to refresh Google Photos status.');
+              }
+            }}
+            onStartLogin={startGoogleLogin}
+            missingConfig={!Boolean(intakeSettings?.google_photos?.connected) && !Boolean(intakeSettings?.google_photos?.account_email || intakeSettings?.google_photos?.account_name || intakeSettings?.google_photos?.account_subject)}
+            compact
+          />
+        </div>
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]">
           <div className="rounded-[18px] border border-[#e5e7eb] bg-white p-5">
+            {!googlePhotosConnected ? (
+              <div className="mb-4 rounded-[18px] border border-red-200 bg-red-50 p-4 text-red-900">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold uppercase tracking-[0.16em]">Google Photos not connected</p>
+                    <p className="mt-1 text-sm text-red-800">Authorize PosterPro with Google before expecting automatic slate upload.</p>
+                  </div>
+                  <Button onClick={startGoogleLogin} variant="secondary"><Upload size={16} /> Connect Google Photos</Button>
+                </div>
+              </div>
+            ) : null}
             <div className="flex flex-wrap items-center gap-2">
               <StatusPill status={intakeSettings?.enabled ? 'success' : 'warning'} label={intakeSettings?.enabled ? 'Monitor enabled' : 'Monitor disabled'} />
+              <StatusPill status={intakeSettings?.drafting_paused ? 'warning' : 'success'} label={intakeSettings?.drafting_paused ? 'Drafting paused' : 'Drafting active'} />
               <StatusPill status={intakeMetrics.unassigned ? 'warning' : intakeMetrics.ready || intakeMetrics.drafted ? 'success' : 'default'} label={intakeMetrics.unassigned ? 'Needs slate grouping' : 'Stable'} />
             </div>
             <label className="mt-4 block">
@@ -393,7 +522,13 @@ export default function Dashboard() {
               <Button onClick={saveIntakeAlbum} disabled={intakeSaving || !(intakeAlbumUrl.trim() || intakeFolderId.trim())}>
                 {intakeSaving ? 'Saving…' : 'Save source + enable monitor'}
               </Button>
-              <Button variant="secondary" onClick={runDashboardIntakeMonitor} disabled={intakeSyncing || !(intakeSettings?.album_url || intakeSettings?.folder_id)}>
+              <Button onClick={() => toggleIntakeDraftingPause(true)} variant="outline" disabled={intakeSaving || intakeSettings?.drafting_paused}>
+                Pause drafting
+              </Button>
+              <Button onClick={() => toggleIntakeDraftingPause(false)} variant="secondary" disabled={intakeSaving || !intakeSettings?.drafting_paused}>
+                Resume drafting
+              </Button>
+              <Button variant="secondary" onClick={runDashboardIntakeMonitor} disabled={intakeSyncing || !googlePhotosConnected}>
                 {intakeSyncing ? 'Running…' : 'Run intake now'}
               </Button>
               <Button href="/intake/slate" variant="outline">Generate head slate</Button>
@@ -407,7 +542,7 @@ export default function Dashboard() {
               ))}
             </div>
           </div>
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
             <div className="rounded-[18px] border border-[#e5e7eb] bg-[#fcfcfd] p-4">
               <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Queued intake batches</p>
               <p className="mt-2 text-2xl font-semibold text-[#101828]">{intakeMetrics.batches}</p>
@@ -459,7 +594,7 @@ export default function Dashboard() {
           </Link>
         }
       >
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,1.25fr)_360px]">
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,1.25fr)_360px]">
           <div className="space-y-4">
             <div className="rounded-[18px] border border-[#e5e7eb] bg-white p-5">
               <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">Control room</p>
@@ -474,7 +609,7 @@ export default function Dashboard() {
                   <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">Operator prompt</p>
                   <h3 className="mt-2 text-xl font-semibold tracking-[-0.03em] text-[#101828]">Type an operational request and preview it before it touches live eBay.</h3>
                   <p className="mt-2 max-w-2xl text-sm leading-6 text-[#475467]">
-                    The first supported command is live eBay repricing by listing age. Example: lower all item prices by ten percent if they have been posted for more than 1 week on eBay.
+                    Natural-language repricing is supported for live eBay listings. Example: reduce all item prices by 10% if they are above $50, or lower published eBay prices by 10% for listings older than 1 week.
                   </p>
                 </div>
                 <StatusPill status={setupSummary?.server_readiness?.openai_configured ? 'success' : 'default'} label={setupSummary?.server_readiness?.openai_configured ? 'OpenAI configured' : 'Rule-backed command mode'} />
@@ -513,7 +648,7 @@ export default function Dashboard() {
                     </div>
                     {operatorCommandResult.parsed ? (
                       <>
-                        <div className="mt-4 grid gap-3 md:grid-cols-4">
+                        <div className="mt-4 grid gap-3 lg:grid-cols-4">
                           <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
                             <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Eligible</p>
                             <p className="mt-2 text-2xl font-semibold text-[#101828]">{operatorCommandResult.summary?.eligible_count || 0}</p>
@@ -534,17 +669,20 @@ export default function Dashboard() {
                         {operatorCommandResult.requires_confirmation ? (
                           <div className="mt-4 rounded-[12px] border border-[#fecdca] bg-[#fff6f3] p-4">
                             <p className="text-sm font-semibold text-[#912018]">Live eBay changes require explicit confirmation.</p>
-                            <p className="mt-1 text-sm text-[#7a271a]">Type <span className="font-mono">{operatorCommandResult.confirmation_phrase}</span> before applying live price revisions.</p>
-                            <div className="mt-3 flex flex-col gap-3 lg:flex-row">
-                              <input
-                                value={operatorConfirmation}
-                                onChange={(event) => setOperatorConfirmation(event.target.value)}
-                                className="min-w-0 flex-1 rounded-[12px] border border-[#fda29b] bg-white px-3 py-2 text-sm text-[#101828] outline-none focus:border-[#d92d20] focus:ring-2 focus:ring-[#fecdc9]"
-                                placeholder={operatorCommandResult.confirmation_phrase}
-                              />
+                            <p className="mt-1 text-sm text-[#7a271a]">Confirm the checkbox below, then apply the live price changes.</p>
+                            <div className="mt-3 flex flex-col gap-3 lg:flex-row lg:items-center">
+                              <label className="flex flex-1 cursor-pointer items-start gap-2 text-sm text-[#344054]">
+                                <input
+                                  type="checkbox"
+                                  checked={operatorConfirmationAcknowledged}
+                                  onChange={(event) => setOperatorConfirmationAcknowledged(event.target.checked)}
+                                  className="mt-1 h-4 w-4"
+                                />
+                                <span>I understand this will queue real live eBay price changes for the eligible listings.</span>
+                              </label>
                               <Button
                                 onClick={() => runOperatorCommand({ applyLive: true })}
-                                disabled={operatorCommandRunning || !operatorCommandResult.summary?.eligible_count}
+                                disabled={operatorCommandRunning || !operatorCommandResult.summary?.eligible_count || !operatorConfirmationAcknowledged}
                               >
                                 {operatorCommandRunning ? 'Applying...' : 'Apply live eBay changes'}
                               </Button>
@@ -573,7 +711,7 @@ export default function Dashboard() {
                 ) : null}
               </div>
             </div>
-            <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-4">
+            <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
               {topMetrics.map((card) => (
                 <MetricCard key={card.label} label={card.label} value={card.value} detail={card.detail} href={card.href} />
               ))}
@@ -693,6 +831,18 @@ export default function Dashboard() {
 
   const renderJobs = () => (
     <div className="space-y-5">
+      <CollapsiblePanel title="Live system status" description={systemStatus.status_message || 'A consolidated snapshot of intake, drafts, jobs, and backlog.'} defaultOpen>
+        <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
+          <MetricCard label="Visible catalog" value={systemStatus.catalog_visible || 0} detail={`${systemStatus.catalog_total || 0} total listings in the catalog.`} />
+          <MetricCard label="Draft backlog" value={systemStatus.catalog_drafts || 0} detail="Listings still being refined automatically." />
+          <MetricCard label="Needs review" value={systemStatus.catalog_review || 0} detail="Review-ready drafts awaiting approval." />
+          <MetricCard label="Published / sold" value={(systemStatus.catalog_published || 0) + (systemStatus.catalog_sold || 0)} detail="Listings already live or no longer available." />
+          <MetricCard label="Intake active" value={(systemStatus.intake_batches_active || 0) + (systemStatus.intake_photos_processing || 0)} detail="Batches and photos still moving through intake." />
+          <MetricCard label="Queued work" value={(systemStatus.queued_jobs || 0) + (systemStatus.running_jobs || 0)} detail="Worker tasks currently waiting or executing." />
+          <MetricCard label="Failed work" value={systemStatus.failed_jobs || 0} detail="Jobs that need attention or retry." />
+          <MetricCard label="Unread notices" value={systemStatus.unread_notifications || 0} detail="Process updates waiting for review." />
+        </div>
+      </CollapsiblePanel>
       <CollapsiblePanel title="Batch processing status" description="Recent import and cross-post jobs without leaving the dashboard." defaultOpen>
         <DataTableCard
           title="Batch processing status"
@@ -730,7 +880,7 @@ export default function Dashboard() {
         />
       </CollapsiblePanel>
       <CollapsiblePanel title="Job summary" description="Worker load at a glance." defaultOpen={false}>
-        <div className="grid gap-3 md:grid-cols-3">
+        <div className="grid gap-3 md:grid-cols-3 lg:grid-cols-4">
           <MetricCard label="Queued or running" value={jobsSummary.queued} detail="Current job execution load." href="/jobs/active" />
           <MetricCard label="Completed" value={jobsSummary.completed} detail="Jobs that finished successfully." href="/jobs/completed" />
           <MetricCard label="Failed" value={jobsSummary.failed} detail="Jobs that need review or retry." href="/jobs/failed" />
@@ -742,7 +892,7 @@ export default function Dashboard() {
   const renderOperations = () => (
     <div className="space-y-5">
       <CollapsiblePanel title="Operational posture" description="Short-form status modules instead of one oversized narrative dashboard." defaultOpen>
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           <div className="rounded-[14px] border border-[#e5e7eb] bg-white p-4">
             <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Marketplace sync</p>
             <div className="mt-3">
@@ -758,7 +908,7 @@ export default function Dashboard() {
             <p className="mt-2 text-sm text-[#667085]">Controls how aggressively drafts advance without human intervention.</p>
           </div>
         </div>
-        <div className="mt-4 grid gap-3 sm:grid-cols-2 2xl:grid-cols-4">
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           {workspaceStats.map((item) => (
             <div key={item.label} className="rounded-[14px] border border-[#e5e7eb] bg-[#fcfcfd] p-4">
               <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">{item.label}</p>
@@ -770,7 +920,7 @@ export default function Dashboard() {
       </CollapsiblePanel>
 
       <CollapsiblePanel title="Quick actions" description="Most common workflow moves kept in a dedicated command module." defaultOpen={false}>
-        <div className="grid gap-3 2xl:grid-cols-2">
+        <div className="grid gap-3 xl:grid-cols-2">
           <QuickActionCard href="/intake" icon={Upload} eyebrow="Intake" title="Upload Photos" description="Start a new intake batch with loose photos or a zip import." meta={`${listings.length} items`} />
           <QuickActionCard href="/listings/new" icon={PlusCircle} eyebrow="Listings" title="Create Listing" description="Open the listing workspace directly for a manual item or imported draft." meta={`${draftCount} drafts`} />
           <QuickActionCard href="/publishing" icon={RefreshCcw} eyebrow="Publishing" title="Publish Queue" description="Review approvals, queue health, and live marketplace rows." meta={`${readyCount} ready`} />
@@ -803,7 +953,7 @@ export default function Dashboard() {
             </div>
           ) : null}
           {marketplaceWidgets.length ? (
-            <div className="grid gap-3 2xl:grid-cols-2">
+            <div className="grid gap-3 xl:grid-cols-2">
               {marketplaceWidgets.map((connection) => (
                 <div key={connection.marketplace} className="rounded-[14px] border border-[#e5e7eb] bg-white p-4">
                   <div className="flex items-center justify-between gap-3">
@@ -853,7 +1003,7 @@ export default function Dashboard() {
   const renderSystem = () => (
     <div className="space-y-5">
       <CollapsiblePanel title="System readiness" description="Live dependencies that still control automation depth." defaultOpen>
-        <div className="grid gap-3 2xl:grid-cols-2">
+        <div className="grid gap-3 xl:grid-cols-2">
           {readinessRows.map(([label, ok, note]) => (
             <div key={label} className="rounded-[12px] border border-[#e5e7eb] bg-white p-4">
               <div className="flex items-center justify-between gap-3">
@@ -870,7 +1020,7 @@ export default function Dashboard() {
           ))}
         </div>
       </CollapsiblePanel>
-      <div className="grid gap-3 2xl:grid-cols-2">
+      <div className="grid gap-3 xl:grid-cols-2">
         <QuickActionCard href="/settings?tab=ebay" icon={Store} eyebrow="Integrations" title="Connect eBay" description="Finish OAuth setup or reconnect the current operator account." meta={setupSummary?.server_readiness?.ebay_oauth_configured ? 'Configured' : 'Needs setup'} />
         <QuickActionCard href="/inventory" icon={Package} eyebrow="Inventory" title="View Inventory" description="Inspect intake, active items, sold units, and storage batches." meta={`${listings.length} tracked`} />
       </div>
@@ -946,39 +1096,52 @@ export default function Dashboard() {
         />
       ) : null}
 
-      <div className="space-y-5">
-        <SectionPanel
-          title="Workspace sections"
-          description="Switch views without a second wall of full-width controls."
-        >
-          <div className="flex flex-wrap gap-2">
-            {dashboardSections.map((section) => {
-              const active = activeSection === section.key;
-              return (
-                <button
-                  key={section.key}
-                  type="button"
-                  onClick={() => selectSection(section.key)}
-                  className={[
-                    'rounded-full border px-4 py-2.5 text-left transition',
-                    active
-                      ? 'border-[#bfd4ef] bg-[linear-gradient(135deg,#eef5ff_0%,#ffffff_100%)] text-[#173a63] shadow-[0_16px_32px_rgba(23,58,99,0.12)]'
-                      : 'border-[#d0d5dd] bg-white text-[#344054] hover:border-[#98a2b3] hover:bg-[#f9fafb]',
-                  ].join(' ')}
-                >
-                  <span className="block text-sm font-semibold">{section.label}</span>
-                </button>
-              );
-            })}
+      <div className="grid gap-5 sm:grid-cols-[300px_minmax(0,1fr)]">
+        <aside className="space-y-5 sm:sticky sm:top-[112px] sm:self-start">
+          <SectionPanel title="Workspace sections" description="Switch views without a second wall of full-width controls.">
+            <div className="space-y-2">
+              {dashboardSections.map((section) => {
+                const active = activeSection === section.key;
+                return (
+                  <button
+                    key={section.key}
+                    type="button"
+                    onClick={() => selectSection(section.key)}
+                    className={[
+                      'w-full rounded-[14px] border px-4 py-3 text-left transition',
+                      active
+                        ? 'border-[#bfd4ef] bg-[linear-gradient(135deg,#eef5ff_0%,#ffffff_100%)] text-[#173a63] shadow-[0_16px_32px_rgba(23,58,99,0.12)]'
+                        : 'border-[#d0d5dd] bg-white text-[#344054] hover:border-[#98a2b3] hover:bg-[#f9fafb]',
+                    ].join(' ')}
+                  >
+                    <span className="block text-sm font-semibold">{section.label}</span>
+                    <span className="mt-1 block text-xs leading-5 text-[#667085]">{section.description}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </SectionPanel>
+
+          <div className="rounded-[18px] border border-[#e5e7eb] bg-white p-4 shadow-[0_16px_34px_rgba(15,23,42,0.06)]">
+            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#667085]">Current view</p>
+            <p className="mt-2 text-base font-semibold text-[#172033]">{activeSectionMeta.label}</p>
+            <p className="mt-1 text-sm leading-6 text-[#516079]">{activeSectionMeta.description}</p>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <StatusPill status={autonomousConfig?.autonomous_mode ? 'success' : 'default'} label={autonomousConfig?.autonomous_mode ? 'Automation on' : 'Automation off'} />
+              <StatusPill status={blockers.length ? 'warning' : 'success'} label={blockers.length ? `${blockers.length} blockers` : 'Setup healthy'} />
+            </div>
           </div>
-        </SectionPanel>
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-          <MetricCard label="Ready to publish" value={readyCount} detail="Listings that can move straight into marketplace publishing." href="/listings?tab=ready" />
-          <MetricCard label="Pending review" value={reviewCount} detail="Drafts still waiting for operator approval." href="/listings?tab=review" />
-          <MetricCard label="Live listings" value={liveCount} detail="Listings already posted or actively synced." href="/listings?tab=published" />
-          <MetricCard label="Draft backlog" value={draftCount} detail="Items still moving through enrichment and manual edits." href="/listings?tab=drafts" />
+        </aside>
+
+        <div className="space-y-5">
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <MetricCard label="Ready to publish" value={readyCount} detail="Listings that can move straight into marketplace publishing." href="/listings?tab=ready" />
+            <MetricCard label="Pending review" value={reviewCount} detail="Drafts still waiting for operator approval." href="/listings?tab=review" />
+            <MetricCard label="Live listings" value={liveCount} detail="Listings already posted or actively synced." href="/listings?tab=published" />
+            <MetricCard label="Draft backlog" value={draftCount} detail="Items still moving through enrichment and manual edits." href="/listings?tab=drafts" />
+          </div>
+          {sectionContent[activeSection] || sectionContent.overview}
         </div>
-        {sectionContent[activeSection] || sectionContent.overview}
       </div>
     </AppShell>
   );

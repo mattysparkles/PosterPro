@@ -27,8 +27,13 @@ class AmazonProductDiscoveryService:
         if normalized_asin:
             media = self.provider.lookup_by_asin(normalized_asin, title_hint=product_name)
             product_facts = self.provider.fetch_product_page_facts(normalized_asin, title_hint=product_name)
+            has_images = bool(media.get("gallery_image_urls") or media.get("primary_image_url"))
+            if (not has_images) and allow_title_search and product_name:
+                title_result = self._discover_from_title(product_name)
+                if title_result.get("status") == "matched":
+                    return title_result
             result = {
-                "status": "matched" if (media.get("gallery_image_urls") or media.get("primary_image_url")) else "manual_review_needed",
+                "status": "matched" if has_images else "manual_review_needed",
                 "confidence": "high",
                 "asin": normalized_asin,
                 "title": product_name,
@@ -97,6 +102,7 @@ class AmazonProductDiscoveryService:
             resolved_title = best_candidate["title"] or title
             media = self.provider.lookup_by_asin(asin, title_hint=resolved_title)
             product_facts = self.provider.fetch_product_page_facts(asin, title_hint=resolved_title)
+            description = self.provider.fetch_product_page_description(asin, title_hint=resolved_title) or product_facts.get("description")
             return {
                 "status": "matched",
                 "confidence": "high" if best_score >= 0.75 else "medium",
@@ -106,7 +112,7 @@ class AmazonProductDiscoveryService:
                 "images": media.get("gallery_image_urls") or ([media.get("primary_image_url")] if media.get("primary_image_url") else []),
                 "local_asset_ids": media.get("local_asset_ids") or [],
                 "image_status": media.get("status") or "pending",
-                "description": product_facts.get("description"),
+                "description": description,
                 "product_facts": product_facts,
                 "search_score": round(best_score, 3),
             }
