@@ -331,7 +331,9 @@ def _listing_visibility_filter(normalized_queue: str | None):
         return and_(archived, not_(sold), not_(merged_child))
     # SQLite and older PostgreSQL rows may have NULL recovery metadata; JSON
     # null comparisons otherwise make the entire visibility predicate NULL.
-    return and_(not_(sold), not_(archived))
+    # Merged recovery children are projections of their winning parent and
+    # must not appear as standalone catalog rows in any queue.
+    return and_(not_(sold), not_(archived), not_(merged_child))
 
 _DEFAULT_WORKFLOW_PREFERENCES = {
     "review_before_publish": True,
@@ -1093,13 +1095,20 @@ def create_listing_template(
 
 
 @router.post("/listings/{listing_id}/apply-template", response_model=ListingResponse)
-def apply_template_to_listing(listing_id: int, payload: ListingTemplateApplyRequest, db: Session = Depends(get_db)):
+def apply_template_to_listing(
+    listing_id: int,
+    payload: ListingTemplateApplyRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     listing = db.get(Listing, listing_id)
     if not listing:
         raise HTTPException(status_code=404, detail="Listing not found")
+    ensure_user_owns_resource(current_user, listing.user_id)
     template = db.get(ListingTemplate, payload.template_id)
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
+    ensure_user_owns_resource(current_user, template.user_id)
     if template.user_id != listing.user_id:
         raise HTTPException(status_code=403, detail="Template does not belong to listing owner")
     return listing_template_service.apply_template(db, listing, template)

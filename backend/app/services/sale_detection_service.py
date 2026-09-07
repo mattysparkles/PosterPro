@@ -50,10 +50,10 @@ class SaleDetectionService:
             logger.warning("Invalid sold_at format from marketplace", extra={"sold_at": raw_value})
             return datetime.now(UTC).replace(tzinfo=None)
 
-    def _already_processed(self, db: Session, marketplace: str, order_id: str | None, listing_id: str | None) -> bool:
+    def _already_processed(self, db: Session, user_id: int, marketplace: str, order_id: str | None, listing_id: str | None) -> bool:
         if not order_id and not listing_id:
             return False
-        filters = [Sale.platform == MarketplaceName(marketplace)]
+        filters = [Sale.user_id == user_id, Sale.platform == MarketplaceName(marketplace)]
         if order_id:
             filters.append(Sale.marketplace_order_id == order_id)
         if listing_id:
@@ -74,7 +74,11 @@ class SaleDetectionService:
                 return listing
             marketplace_listing = db.execute(
                 select(MarketplaceListing)
-                .where(MarketplaceListing.marketplace_listing_id == listing_key)
+                .join(Listing, Listing.id == MarketplaceListing.listing_id)
+                .where(
+                    Listing.user_id == user_id,
+                    MarketplaceListing.marketplace_listing_id == listing_key,
+                )
                 .order_by(MarketplaceListing.id.desc())
             ).scalar_one_or_none()
             if marketplace_listing:
@@ -292,7 +296,7 @@ class SaleDetectionService:
             if event_key in seen_event_keys:
                 continue
             seen_event_keys.add(event_key)
-            if self._already_processed(db, platform, event.get("marketplace_order_id"), event.get("marketplace_listing_id")):
+            if self._already_processed(db, user.id, platform, event.get("marketplace_order_id"), event.get("marketplace_listing_id")):
                 continue
 
             listing = self._find_listing(db, user.id, event)

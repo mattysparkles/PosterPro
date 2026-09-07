@@ -136,6 +136,7 @@ def _best_recovery_payload_from_merged_group(
     query = (
         select(Listing)
         .where(
+            Listing.user_id == listing.user_id,
             Listing.source_type == "media_inventory_recovery",
             Listing.id != listing.id,
         )

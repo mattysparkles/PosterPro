@@ -72,7 +72,14 @@ class OfferService:
             ebay_listing_id = str(offer.get("listingId") or offer.get("itemId") or "") or None
             listing = None
             if ebay_listing_id:
-                listing = db.execute(select(Listing).where(Listing.ebay_listing_id == ebay_listing_id)).scalar_one_or_none()
+                # eBay IDs are scoped to an account; never resolve an offer
+                # against another tenant's local listing when IDs collide.
+                listing = db.execute(
+                    select(Listing).where(
+                        Listing.user_id == account.user_id,
+                        Listing.ebay_listing_id == ebay_listing_id,
+                    )
+                ).scalar_one_or_none()
 
             decision = self.evaluate_offer(listing, offer)
 

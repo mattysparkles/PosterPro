@@ -902,8 +902,17 @@ def get_marketplace_status(
 
 
 @router.post("/listings/sync_sold")
-def sync_sold(payload: SoldSyncRequest, current_user: User = Depends(get_current_user)):
-    return trigger_sync_sold(payload.listing_ids)
+def sync_sold(
+    payload: SoldSyncRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    requested_ids = [int(value) for value in (payload.listing_ids or [])]
+    if requested_ids:
+        rows = db.execute(select(Listing).where(Listing.user_id == current_user.id, Listing.id.in_(requested_ids))).scalars().all()
+        if len(rows) != len(set(requested_ids)):
+            raise HTTPException(status_code=404, detail="One or more listings were not found")
+    return trigger_sync_sold(requested_ids)
 
 
 @router.get("/users/{user_id}/platform-config")

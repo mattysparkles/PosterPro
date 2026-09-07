@@ -1562,7 +1562,14 @@ def bulk_process_inventory_chunk(job_id: str, action: str, payload: dict, listin
             return {"processed": 0, "errors": [{"message": "Bulk job not found"}]}
         job.status = "running"
         db.add(job)
-        listings = db.execute(select(Listing).where(Listing.id.in_(listing_ids))).scalars().all()
+        # The durable BulkJob is the tenant boundary for worker execution;
+        # never trust a stale/mutated chunk to reach another user's listing.
+        listings = db.execute(
+            select(Listing).where(
+                Listing.user_id == job.user_id,
+                Listing.id.in_(listing_ids),
+            )
+        ).scalars().all()
         for listing in listings:
             try:
                 if action == "edit":

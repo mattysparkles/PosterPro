@@ -5,7 +5,16 @@ import pytest
 
 from app.core import database as database_module
 from app.models.enums import EbayPublishStatus, ListingStatus, MarketplaceName
-from app.models.models import Cluster, IntakePhoto, Listing, Sale
+from app.models.models import (
+    Cluster,
+    IntakeNotification,
+    IntakePhoto,
+    Listing,
+    ListingTemplate,
+    MarketplaceCrosspostJob,
+    MarketplaceImportJob,
+    Sale,
+)
 from app.api import routes as listings_routes
 from app.api import marketplaces as marketplaces_api
 from app.services.listing_specificity import classify_listing_reviewability, is_bare_identifier_title, is_caption_like_title
@@ -1211,3 +1220,69 @@ async def test_public_storefront_lists_only_published_items(async_client):
     assert storefront_item["price"] == 24.99
     assert storefront_item["thumbnail_url"]
     assert "ebay" in storefront_item["marketplaces"]
+
+
+@pytest.mark.anyio
+async def test_listing_template_apply_is_tenant_scoped(async_client):
+    owner = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Template Owner", "email": f"template-owner-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert owner.status_code == 201
+    owner_id = owner.json()["user"]["id"]
+    listing_id = seed_bucket_listing(owner_id, status=ListingStatus.draft, title="Owner listing", description="Owner copy")
+    template = await async_client.post("/listing-templates", json={"name": "Owner template", "fields": {"condition": "New"}})
+    assert template.status_code == 200
+    template_id = template.json()["id"]
+
+    other = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Other Tenant", "email": f"template-other-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert other.status_code == 201
+    denied = await async_client.post(f"/listings/{listing_id}/apply-template", json={"template_id": template_id})
+    assert denied.status_code in {403, 404}
+
+
+@pytest.mark.anyio
+async def test_jobs_and_notifications_are_tenant_scoped(async_client):
+    first = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Tenant A", "email": f"tenant-a-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert first.status_code == 201
+    user_a = first.json()["user"]["id"]
+    listing_a = seed_bucket_listing(user_a, status=ListingStatus.draft, title="Tenant A listing", description="A")
+    db = database_module.SessionLocal()
+    notification = IntakeNotification(user_id=user_a, title="A notice", message="private", notification_type="test")
+    crosspost = MarketplaceCrosspostJob(user_id=user_a, listing_id=listing_a, target_marketplaces=["ebay"], status="queued")
+    import_job = MarketplaceImportJob(user_id=user_a, source_marketplace="ebay", status="queued")
+    db.add_all([notification, crosspost, import_job]); db.commit(); db.refresh(notification); db.refresh(crosspost); db.refresh(import_job)
+    ids = (notification.id, crosspost.id, import_job.id)
+    db.close()
+
+    second = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Tenant B", "email": f"tenant-b-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert second.status_code == 201
+    assert (await async_client.post(f"/notifications/{ids[0]}/read")).status_code == 404
+    assert (await async_client.get(f"/marketplace-crosspost-jobs/{ids[1]}")).status_code == 404
+    assert (await async_client.get(f"/marketplace-import-jobs/{ids[2]}")).status_code == 404
+
+
+@pytest.mark.anyio
+async def test_sync_sold_rejects_foreign_listing_ids(async_client):
+    first = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Sale Tenant A", "email": f"sale-a-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert first.status_code == 201
+    listing_id = seed_bucket_listing(first.json()["user"]["id"], status=ListingStatus.draft, title="A sale", description="A")
+    second = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Sale Tenant B", "email": f"sale-b-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert second.status_code == 201
+    response = await async_client.post("/listings/sync_sold", json={"listing_ids": [listing_id]})
+    assert response.status_code == 404
