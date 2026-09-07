@@ -121,6 +121,7 @@ def _serialize_photo(row: IntakePhoto) -> dict[str, Any]:
         "is_internal_only": bool(row.is_internal_only),
         "item_id": row.item_id,
         "batch_id": row.batch_id,
+        "slate_id": row.slate_id,
         "thumbnail_url": service.public_media_url(row.local_path),
         "display_url": service.public_media_url(row.local_path),
         "metadata_json": row.metadata_json or {},
@@ -968,9 +969,13 @@ def classify_timeline_assets(payload: dict, db: Session = Depends(get_db), curre
     for row in rows:
         meta = dict(row.metadata_json or {}); before.append({"id": row.id, "metadata_json": meta, "is_slate": row.is_slate, "image_type": row.image_type, "is_internal_only": row.is_internal_only}); meta["classification_source"] = "MANUAL_OPERATOR"; meta["classification"] = classification; row.metadata_json = meta
         row.is_slate = classification != "PHOTO"; row.image_type = classification.lower(); row.is_internal_only = row.is_slate; db.add(row)
+        if row.is_slate and not row.slate_id:
+            slate_payload = {"retroactive": True, "item_id": str(row.item_id or f"SLATE-{row.id}"), "title": meta.get("title") or row.original_filename or "", "notes": meta.get("notes") or "", "location": meta.get("location") or ""}
+            official_slate, _, _ = service.create_slate(db, user=current_user, payload=slate_payload)
+            row.slate_id = official_slate.id; db.add(row)
     db.add(IntakeReconciliationEvent(user_id=current_user.id, event_type="timeline_classification_change", status="completed", details_json={"before": before, "after": {"classification": classification, "photo_ids": ids}, "scope": "selected"}))
     db.commit()
-    return {"updated": len(rows), "classification": classification}
+    return {"updated": len(rows), "classification": classification, "official_slate_ids": [row.slate_id for row in rows if row.slate_id]}
 
 @router.post("/timeline/reset-classifications")
 def reset_timeline_classifications(payload: dict, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
