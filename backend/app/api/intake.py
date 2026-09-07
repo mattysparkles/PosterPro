@@ -62,6 +62,8 @@ def _serialize_session(row: IntakeSession) -> dict[str, Any]:
         "box_prefix": row.box_prefix,
         "status": row.status,
         "metadata_json": row.metadata_json or {},
+        "classification": (row.metadata_json or {}).get("classification") or row.image_type,
+        "classification_source": (row.metadata_json or {}).get("classification_source"),
         "created_at": _iso(row.created_at),
         "updated_at": _iso(row.updated_at),
     }
