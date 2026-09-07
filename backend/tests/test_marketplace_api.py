@@ -1006,7 +1006,7 @@ async def test_sales_dashboard_reports_profit_and_cost_metrics(async_client):
 
 
 @pytest.mark.anyio
-async def test_listings_and_sales_dashboard_default_to_all_rows(async_client):
+async def test_listings_and_sales_dashboard_default_to_authenticated_tenant(async_client):
     register_one = await async_client.post(
         "/auth/register",
         json={
@@ -1077,18 +1077,18 @@ async def test_listings_and_sales_dashboard_default_to_all_rows(async_client):
     listings_resp = await async_client.get("/listings", params={"page": 1, "page_size": 50, "queue": "all"})
     assert listings_resp.status_code == 200
     listings_payload = listings_resp.json()
-    assert listings_payload["total"] >= 2
+    assert listings_payload["total"] == 1
     titles = {item["title"] for item in listings_payload["items"]}
     assert "Shoes" in titles
-    assert any(item["id"] == second_listing_id for item in listings_payload["items"])
+    assert second_listing_id in {item["id"] for item in listings_payload["items"]}
+    assert first_listing_id not in {item["id"] for item in listings_payload["items"]}
 
     sales_resp = await async_client.get("/sales/dashboard", params={"limit": 50})
     assert sales_resp.status_code == 200
     sales_payload = sales_resp.json()
-    assert sales_payload["summary"]["total_sales"] >= 2
+    assert sales_payload["summary"]["total_sales"] == 1
     sale_listing_ids = {sale["listing_id"] for sale in sales_payload["sales"]}
-    assert first_listing_id in sale_listing_ids
-    assert second_listing_id in sale_listing_ids
+    assert sale_listing_ids == {second_listing_id}
 
 
 @pytest.mark.anyio

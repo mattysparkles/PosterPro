@@ -778,7 +778,9 @@ def register(
         full_name=payload.full_name.strip() if payload.full_name else None,
         password_hash=hash_password(payload.password),
         is_admin=user_count == 0,
-        role="owner" if user_count == 0 else "public",
+        # Every registered account is a normal tenant/store owner.  The
+        # bootstrap flag remains the sole source of platform-admin privilege.
+        role="owner",
         enabled_platforms=[MarketplaceName.ebay.value],
     )
     db.add(user)
