@@ -1,5 +1,6 @@
 import Head from 'next/head';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useRouter } from 'next/router';
 import { createPortal } from 'react-dom';
 import toast from 'react-hot-toast';
 import { CheckCircle2, ChevronDown, CloudUpload, Download, Expand, FileJson2, FolderOpen, Mic, MicOff, Printer, QrCode, RefreshCcw, Save, Sparkles, Undo2, X, PencilLine } from 'lucide-react';
@@ -16,6 +17,7 @@ import {
   analyzeVoiceIntake,
   createIntakeSlate,
   fetchGooglePhotosStatus,
+  fetchIntakeSlate,
   fetchIntakeSessions,
   fetchIntakeSettings,
   getGooglePhotosConnectUrl,
@@ -25,6 +27,7 @@ import {
   updateIntakeSettings,
   runIntakeMonitor,
   retryIntakeSlateBridgeUpload,
+  updateIntakeSlate,
   transcribeVoiceIntake,
 } from '../../lib/api';
 
@@ -565,6 +568,7 @@ function parseVoiceCommands(text) {
 }
 
 export default function IntakeSlatePage() {
+  const router = useRouter();
   const { user } = useAuth();
   const googlePhotosConnectUrl = getGooglePhotosConnectUrl();
   const googlePhotosRedirectUri =
@@ -664,6 +668,17 @@ export default function IntakeSlatePage() {
       }
     })();
   }, [user?.id]);
+
+  useEffect(() => {
+    const rawId = router.query.slate_id;
+    if (!rawId || Array.isArray(rawId)) return;
+    fetchIntakeSlate(rawId).then((payload) => {
+      const slate = payload?.slate;
+      if (!slate) return;
+      setSlateResult({ slate });
+      setForm((current) => ({ ...current, ...Object.fromEntries(Object.keys(DEFAULT_FORM).map((key) => [key, slate[key] ?? current[key]])) }));
+    }).catch((error) => toast.error(error.message || 'Could not load Slate details.'));
+  }, [router.query.slate_id]);
 
   const sessionOptions = useMemo(() => sessions.map((session) => session.session_id), [sessions]);
   const activeSession = useMemo(() => sessions.find((session) => session.session_id === (form.session_id || selectedSessionId)) || sessions[0] || null, [form.session_id, selectedSessionId, sessions]);
@@ -1004,7 +1019,7 @@ export default function IntakeSlatePage() {
     try {
       await ensureVoiceEnrichment();
       const durableNotes = [form.notes, voiceTranscript ? `Voice note: ${voiceTranscript}` : ''].filter(Boolean).join('\n\n');
-      const payload = await createIntakeSlate({
+      const slatePayload = {
         ...form,
         boundary_position: boundaryPosition,
         voice_transcript: voiceTranscript || null,
@@ -1013,7 +1028,10 @@ export default function IntakeSlatePage() {
         voice_audio_data_url: voiceAudioDataUrl || null,
         voice_intelligence: voiceAnalysis?.voice_intelligence || null,
         quantity: form.quantity || '1',
-      });
+      };
+      const payload = slateResult?.slate?.id
+        ? { slate: (await updateIntakeSlate(slateResult.slate.id, slatePayload)).slate }
+        : await createIntakeSlate(slatePayload);
       setSlateResult(payload || null);
       setSlateSuccessOpen(true);
       setOfflineMode(false);
@@ -1023,7 +1041,7 @@ export default function IntakeSlatePage() {
       setVoiceAnalysis(null);
       setLastVoiceSnapshot(null);
       lastAnalyzedTranscriptRef.current = '';
-      toast.success(`${boundaryPosition === 'tail' ? 'Tail' : 'Head'} slate created for ${payload?.slate?.item_id || 'item'}.`);
+      toast.success(`${slateResult?.slate?.id ? 'Slate updated' : `${boundaryPosition === 'tail' ? 'Tail' : 'Head'} slate created`} for ${payload?.slate?.item_id || 'item'}.`);
       if (typeof window !== 'undefined') {
         const renderedSlateAsset = payload?.rendered_slate_url || payload?.rendered_slate_data_url || payload?.slate?.metadata_json?.rendered_slate?.storage_path || payload?.slate?.metadata_json?.rendered_slate?.data_url || null;
         const mobileLikely = window.matchMedia?.('(pointer: coarse)').matches || window.innerWidth < 900 || /iphone|ipad|android|mobile/i.test(navigator.userAgent || '');

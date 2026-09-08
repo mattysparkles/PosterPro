@@ -120,6 +120,26 @@ async def test_retroactive_slate_is_visible_as_modern_timeline_marker(async_clie
 
 
 @pytest.mark.anyio
+async def test_add_slate_boundary_and_adjacent_marker_are_stable(async_client):
+    register = await async_client.post("/auth/register", json={"full_name": "Boundary Owner", "email": f"boundary-{uuid4()}@example.com", "password": "supersecret123"})
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    db = database_module.SessionLocal(); start = datetime.now(timezone.utc)
+    photos = [IntakePhoto(user_id=user_id, source_provider="test", source_photo_id=f"boundary-{i}-{uuid4()}", local_path=f"/tmp/boundary-{i}.jpg", captured_at=start + timedelta(minutes=i), imported_at=start, image_type="photo", metadata_json={}) for i in range(2)]
+    db.add_all(photos); db.commit(); [db.refresh(p) for p in photos]; ids = [p.id for p in photos]; db.close()
+    first = await async_client.post("/intake/slates/retroactive", json={"retroactive": True, "after_photo_id": ids[0], "before_photo_id": ids[1], "item_id": "BOUNDARY-1", "box_id": "BOX-1", "location": "Shelf 1"})
+    assert first.status_code == 200, first.text
+    first_id = first.json()["slate"]["id"]
+    adjacent = await async_client.post("/intake/slates/retroactive", json={"retroactive": True, "after_photo_id": f"slate-{first_id}", "before_photo_id": ids[1], "item_id": "BOUNDARY-2"})
+    assert adjacent.status_code == 200, adjacent.text
+    rows = (await async_client.get("/intake/timeline?limit=20")).json()["items"]
+    markers = [row for row in rows if row.get("is_slate_marker")]
+    assert len(markers) == 2
+    assert all(marker["photo"]["slate"]["id"] for marker in markers)
+    assert [row["photo"]["id"] for row in rows if not row.get("is_slate_marker")] == ids
+
+
+@pytest.mark.anyio
 async def test_legacy_image_slates_are_replaced_in_original_positions_idempotently(async_client):
     register = await async_client.post("/auth/register", json={"full_name": "Legacy Slate Owner", "email": f"legacy-slate-{uuid4()}@example.com", "password": "supersecret123"})
     assert register.status_code == 201
@@ -128,18 +148,33 @@ async def test_legacy_image_slates_are_replaced_in_original_positions_idempotent
     start = datetime.now(timezone.utc)
     photos = []
     for index in range(5):
-        photos.append(IntakePhoto(user_id=user_id, source_provider="test", source_photo_id=f"legacy-{uuid4()}", local_path=f"/tmp/legacy-{index}.jpg", captured_at=start + timedelta(minutes=index), imported_at=start, image_type="slate" if index in (1, 3) else "photo", is_slate=index in (1, 3), metadata_json=({"item_id": f"ITEM-{index}", "box_id": f"BOX-{index}", "location": f"Shelf {index}", "notes": f"Voice note {index}", "voice_notes": f"Audio {index}"} if index in (1, 3) else {})))
+        photos.append(IntakePhoto(user_id=user_id, source_provider="test", source_photo_id=f"legacy-source-{index}", original_filename=f"legacy-{index}.jpg", local_path=f"/tmp/legacy-{index}.jpg", captured_at=start + timedelta(minutes=index), imported_at=start, image_type="slate" if index in (1, 3) else "photo", is_slate=index in (1, 3), metadata_json=({"item_id": f"ITEM-{index}", "box_id": f"BOX-{index}", "location": f"Shelf {index}", "notes": f"Voice note {index}", "voice_notes": f"Audio {index}"} if index in (1, 3) else {})))
     db.add_all(photos); db.commit(); [db.refresh(photo) for photo in photos]; db.close()
     first = await async_client.get("/intake/timeline?limit=20")
     assert first.status_code == 200
     rows = first.json()["items"]
     markers = [row for row in rows if row.get("is_slate_marker")]
     assert [row["photo"]["item_id"] for row in markers] == ["ITEM-1", "ITEM-3"]
-    assert [bool(row.get("is_slate_marker")) for row in rows] == [False, True, False, True, False]
-    assert markers[0]["photo"]["slate"]["box_id"] == "BOX-1"
+    assert [
+        ("SLATE", row["photo"]["slate"]["item_id"], row["photo"]["metadata_json"].get("legacy_photo_id"))
+        if row.get("is_slate_marker") else ("PHOTO", row["photo"]["id"])
+        for row in rows
+    ] == [("PHOTO", photos[0].id), ("SLATE", "ITEM-1", photos[1].id), ("PHOTO", photos[2].id), ("SLATE", "ITEM-3", photos[3].id), ("PHOTO", photos[4].id)]
+    for index, marker in zip((1, 3), markers):
+        assert marker["photo"]["slate"]["id"]
+        assert marker["photo"]["slate"]["item_id"] == f"ITEM-{index}"
+        assert marker["photo"]["slate"]["box_id"] == f"BOX-{index}"
+        assert marker["photo"]["slate"]["location"] == f"Shelf {index}"
+        assert marker["photo"]["slate"]["notes"] == f"Voice note {index}"
+        assert marker["photo"]["slate"]["voice_notes"] == f"Audio {index}"
+        assert marker["photo"]["metadata_json"]["legacy_metadata"]["voice_notes"] == f"Audio {index}"
+        assert marker["photo"]["metadata_json"]["legacy_metadata"]["item_id"] == f"ITEM-{index}"
+        assert marker["photo"]["metadata_json"]["legacy_photo_id"] == photos[index].id
+        assert marker["timeline_key"][1]
     db = database_module.SessionLocal(); count = db.query(IntakeSlate).filter(IntakeSlate.user_id == user_id).count(); db.close(); assert count == 2
     second = await async_client.get("/intake/timeline?limit=20")
     assert second.status_code == 200
+    assert [(row.get("is_slate_marker"), row["photo"].get("id"), row["photo"].get("metadata_json", {}).get("legacy_photo_id")) for row in second.json()["items"]] == [(row.get("is_slate_marker"), row["photo"].get("id"), row["photo"].get("metadata_json", {}).get("legacy_photo_id")) for row in rows]
     db = database_module.SessionLocal(); assert db.query(IntakeSlate).filter(IntakeSlate.user_id == user_id).count() == 2; db.close()
 
 

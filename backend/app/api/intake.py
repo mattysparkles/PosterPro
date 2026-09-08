@@ -121,7 +121,7 @@ def _serialize_photo(row: IntakePhoto, *, compact: bool = False) -> dict[str, An
         "local_path": row.local_path,
         "downloaded_url": row.downloaded_url,
         "content_hash": row.content_hash,
-        "captured_at": _iso(row.captured_at),
+            "captured_at": _iso(row.captured_at),
         "uploaded_at": _iso(row.uploaded_at),
         "imported_at": _iso(row.imported_at),
         "image_type": row.image_type,
@@ -464,7 +464,7 @@ def create_retroactive_intake_slate(
         if not isinstance(value, str) or not value.startswith("slate-"):
             return value
         try:
-            marker_slate = db.get(IntakeSlate, int(value.removeprefix("slate-")))
+            marker_slate = db.execute(select(IntakeSlate).where(IntakeSlate.id == int(value.removeprefix("slate-")), IntakeSlate.user_id == current_user.id)).scalar_one_or_none()
         except (TypeError, ValueError):
             marker_slate = None
         boundary = (marker_slate.metadata_json or {}).get("retroactive_boundary") if marker_slate else None
@@ -546,8 +546,8 @@ def apply_retroactive_regroup(payload: dict, db: Session = Depends(get_db), curr
     boundary_photo = db.get(IntakePhoto, int(before_id))
     if not boundary_photo or boundary_photo.user_id != current_user.id:
         raise HTTPException(status_code=400, detail="Boundary photo is unavailable")
-    scope_batch = boundary_photo.batch_id
-    photos = db.execute(select(IntakePhoto).where(IntakePhoto.user_id == current_user.id, IntakePhoto.batch_id == scope_batch).order_by(IntakePhoto.captured_at, IntakePhoto.id)).scalars().all() if scope_batch else db.execute(select(IntakePhoto).where(IntakePhoto.user_id == current_user.id, IntakePhoto.id == boundary_photo.id)).scalars().all()
+    scope_batch = db.get(IntakePhotoBatch, boundary_photo.batch_id) if boundary_photo.batch_id else None
+    photos = db.execute(select(IntakePhoto).where(IntakePhoto.user_id == current_user.id, IntakePhoto.batch_id == scope_batch.id).order_by(IntakePhoto.captured_at, IntakePhoto.id)).scalars().all() if scope_batch else db.execute(select(IntakePhoto).where(IntakePhoto.user_id == current_user.id, IntakePhoto.id == boundary_photo.id)).scalars().all()
     idx = next((i for i,p in enumerate(photos) if p.id == int(before_id)), None)
     if idx is None: raise HTTPException(status_code=400, detail="Boundary photo is unavailable")
     target = next((p for p in photos[idx:] if p.batch_id), None)
@@ -555,7 +555,7 @@ def apply_retroactive_regroup(payload: dict, db: Session = Depends(get_db), curr
     before_state = {"batch_id": scope_batch.id if scope_batch else None, "batch_slate_id": scope_batch.slate_id if scope_batch else None, "photos": {str(p.id): {"batch_id": p.batch_id, "item_id": p.item_id, "official_slate_id": (p.metadata_json or {}).get("official_slate_id")} for p in affected}}
     event = IntakeReconciliationEvent(user_id=current_user.id, event_type="timeline_retroactive_regroup", status="planned", source_media_id=slate.id, details_json={"slate_id": slate.id, "before": before_state, "boundary": boundary})
     db.add(event); db.flush()
-    if target:
+    if target and scope_batch:
         scope_batch.slate_id = slate.id; db.add(scope_batch)
     metadata["retroactive_boundary"]["regroup_applied_at"] = datetime.now(UTC).isoformat()
     slate.metadata_json = metadata; db.add(slate); event.status = "completed"; event.details_json = {**(event.details_json or {}), "after": {"batch_id": scope_batch.id if scope_batch else None, "batch_slate_id": scope_batch.slate_id if scope_batch else slate.id, "photos": {str(p.id): {"batch_id": p.batch_id, "item_id": p.item_id, "official_slate_id": (p.metadata_json or {}).get("official_slate_id")} for p in affected}}}; db.commit()
@@ -1072,6 +1072,7 @@ def intake_timeline(
             "local_path": rendered.get("storage_path") or metadata.get("rendered_slate_url"),
             "thumbnail_url": rendered.get("storage_path") or metadata.get("rendered_slate_url"),
             "display_url": rendered.get("storage_path") or metadata.get("rendered_slate_url"),
+            "captured_at": _iso(linked_photo.captured_at) if linked_photo else None,
             "image_type": "slate",
             "is_slate": True,
             "is_internal_only": True,
@@ -1079,10 +1080,19 @@ def intake_timeline(
             "slate_id": slate.id,
             "classification": "SLATE",
             "classification_source": "MODERN_SLATE",
-            "metadata_json": {"classification": "SLATE", "classification_source": "MODERN_SLATE", "official_slate_id": slate.id},
+            "metadata_json": {
+                "classification": "SLATE",
+                "classification_source": "MODERN_SLATE",
+                "official_slate_id": slate.id,
+                "legacy_photo_id": (metadata.get("legacy_photo_id") or linked_photo_id),
+                "legacy_metadata": metadata.get("legacy_metadata") or {},
+                "legacy_replaced_at": metadata.get("legacy_replaced_at"),
+                "legacy_captured_at": _iso(linked_photo.captured_at) if linked_photo else None,
+                "legacy_source_photo_id": linked_photo.source_photo_id if linked_photo else None,
+            },
             # Keep timeline markers compact; full QR/label payloads are loaded
             # only by the Slate editor/detail route.
-            "slate": {"id": slate.id, "item_id": slate.item_id, "box_id": slate.box_id, "location": slate.location, "title": slate.title, "notes": slate.notes},
+            "slate": {"id": slate.id, "item_id": slate.item_id, "box_id": slate.box_id, "location": slate.location, "title": slate.title, "notes": slate.notes, "voice_notes": (metadata.get("legacy_metadata") or {}).get("voice_notes")},
         }
         marker_row = {"photo": marker, "timeline_key": (items[linked_position]["timeline_key"] if linked_position is not None else [str((boundary or {}).get("effective_boundary_at") or ""), "slate", str(slate.id)]), "late_arrival": False, "is_slate_marker": True}
         if linked_position is not None:

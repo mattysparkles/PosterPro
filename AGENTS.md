@@ -183,3 +183,15 @@ requirements above. Credentials were not rotated or printed.
   using a shifted list index. Added a two-Slate idempotence regression fixture;
   it verifies exact photo/Slate/photo/Slate/photo ordering and inherited
   metadata.
+
+# 2026-09-08 - Slate boundary hardening
+
+- Strengthened the legacy replacement fixture to assert every ordered photo and
+  modern marker identity, inherited metadata, and stable IDs across repeated
+  timeline reads. Marker payloads now expose legacy photo/source/capture
+  provenance for auditability.
+- Hardened retroactive marker resolution to enforce current-user Slate
+  ownership and fixed regroup apply's batch lookup so Add Slate boundaries do
+  not dereference an integer as an ORM object. Adjacent Add Slate boundaries
+  have focused coverage. The compatibility migration remains bounded and
+  idempotent on GET; a dedicated one-time backfill remains follow-up work.

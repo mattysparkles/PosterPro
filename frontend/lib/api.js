@@ -297,6 +297,10 @@ export async function updateIntakeSlate(slateId, body) {
   });
 }
 
+export async function fetchIntakeSlate(slateId) {
+  return jsonFetch(`${API_BASE}/intake/slates/${slateId}`);
+}
+
 export async function fetchIntakeQueue() {
   return jsonFetch(`${API_BASE}/intake/queue`);
 }
@@ -327,8 +331,8 @@ export async function runIntakeIntegrityScan() {
   return jsonFetch(`${API_BASE}/intake/integrity-scan`, { method: "POST" });
 }
 
-export async function fetchIntakeTimeline() {
-  return jsonFetch(`${API_BASE}/intake/timeline`);
+export async function fetchIntakeTimeline({ limit = 500, offset = 0 } = {}) {
+  return jsonFetch(`${API_BASE}/intake/timeline?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`);
 }
 
 export async function createRetroactiveSlate(body) {
