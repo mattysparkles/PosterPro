@@ -172,8 +172,10 @@ def process_listing_correction_jobs_task(limit: int = 10) -> dict[str, Any]:
                     ranked = sorted(candidates, key=lambda c: len(query_terms & set(re.findall(r"[a-z0-9]+", str(c.get('category_name') or '').lower()))), reverse=True)
                     top_score = len(query_terms & set(re.findall(r"[a-z0-9]+", str((ranked[0] if ranked else {}).get('category_name') or '').lower()))) if ranked else 0
                     next_score = len(query_terms & set(re.findall(r"[a-z0-9]+", str((ranked[1] if len(ranked)>1 else {}).get('category_name') or '').lower()))) if len(ranked)>1 else -1
-                    if ranked and ranked[0].get("category_id") and ranked[0].get("publishable") is True and (len(ranked) == 1 or top_score > next_score):
-                        chosen = ranked[0]; cid = str(chosen["category_id"])
+                    existing_category_valid = bool(listing.category_id and source_meta.get("leaf_verified") is True and source_meta.get("publishable") is True)
+                    if existing_category_valid or (ranked and ranked[0].get("category_id") and ranked[0].get("publishable") is True and (len(ranked) == 1 or top_score > next_score)):
+                        chosen = ranked[0] if ranked else {"category_id": listing.category_id, "category_name": listing.category_suggestion, "breadcrumb": source_meta.get("category_path"), "taxonomy_tree_id": source_meta.get("taxonomy_tree_id")}
+                        cid = str(chosen["category_id"])
                         verification = asyncio.run(verify_ebay_category(account, cid, str(chosen.get("taxonomy_tree_id") or "0"))) if account else {"verified": False, "publishable": False}
                         if not verification.get("verified") or not verification.get("publishable"):
                             category_blocked = True; job.result = {**(job.result or {}), "category_state": "CATEGORY_NON_LEAF" if verification.get("verified") else "CATEGORY_LOOKUP_FAILED"}

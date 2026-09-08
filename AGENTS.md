@@ -1,5 +1,11 @@
 # PosterPro Deployment Log
 
+## 2026-09-08 - Ten-listing Vine correction diagnostics
+
+- Runtime-safe in-application audit executed for listings 2177, 2167, 2170, 2174, 2186, 2178, 2179, 2185, 2187, 2191.
+- All ten now have `condition=New`; bounded correction rerun produced material description/condition changes for every row. Listings 2167, 2170, 2174, 2178, 2185 completed correction; 2177/2186 retained valid ready categories but need category result reconciliation; 2179/2187/2191 remain blocked by exact required aspects/category review.
+- Fresh eBay preflight blockers are persisted and exposed through admin diagnostics. No marketplace create/publish was invoked.
+
 ## 2026-09-08 - Correction queue durability and fresh preflight blockers
 
 ### Fixed
