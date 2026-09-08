@@ -1,5 +1,17 @@
 # PosterPro Deployment Log
 
+## 2026-09-08 - Correction queue durability and fresh preflight blockers
+
+### Fixed
+- Vine correction workers now expose persisted Amazon facts through both capability input aliases and deterministically generate evidence-backed buyer copy when a model returns unchanged/empty text.
+- Correction workers refuse cross-tenant listing/job ownership mismatches instead of mutating a listing from another tenant.
+- Explicit preflight requests now persist the compact fresh result so Draft Editor, Listings, and Jobs share current blocker data.
+- Need-a-Correction persists a queued job and returns a truthful queued response when the broker is temporarily unavailable; the durable worker/beat can claim it later.
+
+### Validation
+- Focused correction API and stale-preflight tests: passed (including transient broker failure coverage).
+- Production inspection of listings 2177, 2167, 2170, 2174, 2186, 2178, 2179, 2185, 2187, 2191 remains runtime-blocked: the shell namespace cannot reach 127.0.0.1:5432 or PosterPro services. No production row was guessed or modified.
+
 This file is the accountability contract for the production remediation. Code
 presence is `SOURCE_VERIFIED`; passing tests is `AUTOMATED_TESTED`; only a real
 user/runtime workflow is `LIVE_VERIFIED`.

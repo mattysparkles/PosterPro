@@ -66,6 +66,21 @@ async def test_need_a_correction_api_creates_authenticated_durable_job(async_cli
 
 
 @pytest.mark.anyio
+async def test_need_a_correction_survives_transient_broker_failure(async_client, monkeypatch):
+    register = await async_client.post("/auth/register", json={"full_name": "Broker Failure Owner", "email": f"broker-{uuid4()}@example.com", "password": "supersecret123"})
+    listing_id = seed_bucket_listing(register.json()["user"]["id"], status=ListingStatus.draft, title="Generic", description="Draft", source_type="amazon_vine")
+    def fail_delay(**_kwargs):
+        raise RuntimeError("broker unavailable")
+    monkeypatch.setattr(tasks.process_listing_correction_jobs_task, "delay", fail_delay)
+    response = await async_client.post(f"/listings/{listing_id}/request-revision", json={"fields": ["description"], "note": "Use source evidence", "priority": 0})
+    assert response.status_code == 200
+    metadata = response.json()["source_metadata"]
+    assert metadata["correction_status"] == "QUEUED"
+    assert "broker unavailable" in metadata["correction_enqueue_error"]
+    db = database_module.SessionLocal(); job = db.query(ListingCorrectionJob).filter(ListingCorrectionJob.listing_id == listing_id).one(); assert job.status == "queued"; db.close()
+
+
+@pytest.mark.anyio
 async def test_listing_condition_patch_persists_value(async_client):
     register = await async_client.post("/auth/register", json={"full_name": "Condition Owner", "email": f"condition-{uuid4()}@example.com", "password": "supersecret123"})
     assert register.status_code == 201

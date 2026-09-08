@@ -2673,7 +2673,18 @@ def request_listing_revision(
     listing.restricted_review_required = False
     db.add(listing)
     db.commit()
-    process_listing_correction_jobs_task.delay(limit=1)
+    # Persistence of the request is authoritative.  A transient broker outage
+    # must not turn a successfully-created correction into a misleading 500;
+    # the durable worker/beat sweep can claim the queued row later.
+    try:
+        process_listing_correction_jobs_task.delay(limit=1)
+    except Exception as exc:
+        metadata = dict(listing.source_metadata or {})
+        metadata["correction_enqueue_error"] = str(exc)[:240]
+        metadata["correction_enqueue_error_at"] = datetime.utcnow().isoformat()
+        listing.source_metadata = metadata
+        db.add(listing)
+        db.commit()
     db.refresh(listing)
     metadata = dict(listing.source_metadata or {})
     metadata["correction_job_id"] = correction.id

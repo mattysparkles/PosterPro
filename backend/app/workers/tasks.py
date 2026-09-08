@@ -87,7 +87,7 @@ def process_listing_correction_jobs_task(limit: int = 10) -> dict[str, Any]:
             listing = db.get(Listing, job.listing_id)
             before = dict(job.before_snapshot or {})
             changed = {}
-            if listing:
+            if listing and getattr(listing, "user_id", None) == getattr(job, "user_id", None):
                 listing.source_metadata = {**dict(listing.source_metadata or {}), "correction_status": "PROCESSING", "correction_job_id": job.id}
                 fields = {str(f).lower() for f in (job.fields or [])}
                 category_blocked = False
@@ -119,10 +119,26 @@ def process_listing_correction_jobs_task(limit: int = 10) -> dict[str, Any]:
                 if generated and "title" in fields and generated.get("title"):
                     value = str(generated["title"])[:80]
                     if value != before.get("title"): listing.title = value; changed["title"] = {"before": before.get("title"), "after": value}
-                if generated and "description" in fields and generated.get("description"):
+                if "description" in fields:
+                    # A provider/model may legitimately return the existing
+                    # copy (or no copy at all).  Vine corrections must still
+                    # make a deterministic, evidence-backed material change;
+                    # otherwise the queue reports NO_PROGRESS and the draft is
+                    # sent back to review with no explanation.
+                    candidate_description = generated.get("description") if generated else None
+                    if not candidate_description and isinstance(evidence, dict):
+                        from app.services.listing_ai import build_listing_description
+                        candidate_description = build_listing_description(
+                            title=str(evidence.get("title") or evidence.get("product_name") or listing.title or "Item"),
+                            item_specifics=listing.item_specifics or {},
+                            source_label="Amazon/Vine product facts",
+                            source_metadata={"recovery": {"identity": evidence}},
+                        )
                     from app.services.customer_description import sanitize_customer_description
-                    safe, _removed = sanitize_customer_description(generated["description"])
-                    if safe and safe != before.get("description"): listing.description = safe; changed["description"] = {"before": before.get("description"), "after": safe}
+                    safe, _removed = sanitize_customer_description(candidate_description or "")
+                    if safe and safe != before.get("description"):
+                        listing.description = safe
+                        changed["description"] = {"before": before.get("description"), "after": safe, "validation": "evidence_backed_rewrite"}
                 if "condition" in fields and str(listing.source_type or "").lower() == "amazon_vine":
                     # Vine inventory is received as new; operator correction
                     # cannot turn it into an AI-inferred used/open-box state.
@@ -185,6 +201,9 @@ def process_listing_correction_jobs_task(limit: int = 10) -> dict[str, Any]:
                 prior_result = dict(job.result or {}); prior_result.update({"fields_requested": list(fields), "fields_changed": list(changed), "field_results": field_results, "material_change": bool(changed), "decision": "COMPLETE" if complete else ("PARTIAL" if changed else "NO_PROGRESS")}); job.material_delta = changed; job.result = prior_result
                 job.status = "completed" if complete else "needs_review"; job.failure_reason = None if complete else (job.failure_reason or "Requested corrections remain unresolved")
                 listing.source_metadata = {**dict(listing.source_metadata or {}), "correction_status": "COMPLETE" if complete else "NEEDS REVIEW", "correction_job_id": job.id}
+            elif listing:
+                # Never let a globally ordered queue cross a tenant boundary.
+                job.status = "blocked"; job.failure_reason = "Listing owner does not match correction job tenant"
             else:
                 job.status = "blocked"; job.failure_reason = "Listing not found"
             job.completed_at = datetime.now(UTC); db.commit(); processed.append({"job_id": job.id, "status": job.status, "material_change": bool(changed)})

@@ -311,7 +311,14 @@ def get_marketplace_preflight(
     if not listing:
         raise HTTPException(status_code=404, detail="Listing not found")
     ensure_user_owns_resource(current_user, listing.user_id)
-    return MarketplacePreflightService().preflight_listing(db, listing, market)
+    service = MarketplacePreflightService()
+    # A preflight request is an explicit operator validation action. Persist
+    # its compact result so the editor, Listings queue, and Jobs console all
+    # show the same fresh blocker state instead of rehydrating stale JSON.
+    result = service.preflight_listing(db, listing, market)
+    service.cache_preflight_summary(db, listing, result)
+    db.commit()
+    return result
 
 
 @router.get("/marketplaces/{marketplace}/listings/{listing_id}/payload-preview")
