@@ -985,7 +985,10 @@ def intake_timeline(
     }
     linked_ids = {int(value) for value in linked_ids if str(value).isdigit()}
     if linked_ids:
-        items = [item for item in items if (item["photo"].get("metadata_json") or {}).get("official_slate_id") not in linked_ids]
+        items = [
+            item for item in items
+            if str((item["photo"].get("metadata_json") or {}).get("official_slate_id") or "") not in {str(value) for value in linked_ids}
+        ]
     for slate in slates:
         boundary = (slate.metadata_json or {}).get("retroactive_boundary") if isinstance(slate.metadata_json, dict) else None
         before_id = boundary.get("before_photo_id") if isinstance(boundary, dict) else None

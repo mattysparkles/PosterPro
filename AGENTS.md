@@ -137,3 +137,12 @@ requirements above. Credentials were not rotated or printed.
 - Vine correction execution fix: queued revision requests now clear stale review flags so corrected Vine drafts remain in Drafts while work is queued; the worker loads persisted `amazon_product_facts`, passes them as source evidence, enforces Vine condition `New`, and derives category search terms from product facts. Draft workspace now exposes condition selection and candidate category selection controls. Added a regression test proving API request -> queued draft -> worker uses source evidence, rewrites title/description, and enforces New condition. Frontend build and targeted test pass; live Celery execution remains runtime-dependent.
 - Vine correction deployment: backend/frontend/worker services restarted successfully and backend health reports `database_ready: true`; targeted correction/API tests pass. The end-to-end test initially exposed the test fixture's separately imported worker SessionLocal, which is now explicitly patched in the regression test. Production Vine correction execution remains observable through durable job status; no marketplace publication was invoked.
 - Multi-tenant worker/query continuation: inventory bulk worker chunks now scope listings to the owning durable BulkJob; sold-sync API rejects foreign listing IDs before queueing; pricing AI guard signatures include listing tenant identity. Merged recovery children remain hidden from all catalog queues. Added two-user notification/job and sold-sync IDOR tests; focused marketplace suite (27 passed) and duplicate-ID matrix test pass. Media static mount, AI funding policy, settings/storefront/cache inventory, and remaining worker/query audit are still open; no Kevin account created.
+# 2026-09-07 - Modern Slate timeline markers
+
+- Timeline now replaces classified legacy Slate image rows with durable modern
+  Slate markers in the authenticated timeline response, preserving item/box/
+  location metadata and the existing edit/voice-note links. Retroactive Slates
+  are inserted at their effective boundary and remain internal-only.
+- Added regression coverage for retroactive Slate marker visibility and modern
+  provenance. Backend compile and focused timeline tests pass. Service restart
+  is runtime-blocked in this shell (systemd bus unavailable).
