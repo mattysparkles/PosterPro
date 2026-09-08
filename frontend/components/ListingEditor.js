@@ -358,7 +358,10 @@ export default function ListingEditor({
   const [browseNodes, setBrowseNodes] = useState([]);
   const [browseTrail, setBrowseTrail] = useState([]);
   const [conditionValue, setConditionValue] = useState(listing.condition || "");
-  useEffect(() => setConditionValue(listing.condition || ""), [listing.id, listing.condition]);
+  // Do not reset an explicit operator selection when the compact catalog
+  // refreshes and returns a stale summary row; the PATCH response is the
+  // authoritative value for this open editor.
+  useEffect(() => setConditionValue(listing.condition || ""), [listing.id]);
   const persistCondition = async (value) => {
     setConditionValue(value);
     try { await onSave(listing.id, { condition: value }); }
