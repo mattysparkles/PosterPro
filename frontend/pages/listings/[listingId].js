@@ -216,6 +216,8 @@ export default function ListingWorkspacePage() {
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
   const [form, setForm] = useState(() => normalizeListingForm(null));
   const [ebayCategoryRoots, setEbayCategoryRoots] = useState([]);
+  const [categoryBrowseNodes, setCategoryBrowseNodes] = useState([]);
+  const [categoryBrowseTrail, setCategoryBrowseTrail] = useState([]);
   const categoryChoices = useMemo(() => {
     const metadata = listing?.source_metadata || {};
     const candidates = Array.isArray(metadata.category_candidates) ? metadata.category_candidates : [];
@@ -226,6 +228,25 @@ export default function ListingWorkspacePage() {
   useEffect(() => {
     browseEbayCategories().then((result) => setEbayCategoryRoots(result?.categories || [])).catch(() => undefined);
   }, []);
+  const loadCategoryChildren = async (parentId = "", label = "All Categories", trail = []) => {
+    try {
+      const result = await browseEbayCategories(parentId);
+      setCategoryBrowseNodes(result?.categories || []);
+      setCategoryBrowseTrail(parentId ? [...trail, { id: String(parentId), label }] : []);
+    } catch (error) {
+      toast.error(error.message || "Could not load eBay categories.");
+      setCategoryBrowseNodes([]);
+    }
+  };
+  const selectBrowseCategory = async (node) => {
+    if (!node?.category_id || node.has_children || node.leaf === false || node.publishable === false) return;
+    const path = [...categoryBrowseTrail.map((entry) => entry.label), node.category_name].filter(Boolean).join(" > ");
+    try {
+      const saved = await updateListing(listing.id, { category_id: String(node.category_id), category_suggestion: path });
+      setListing(saved); setForm((current) => ({ ...current, category_id: String(saved?.category_id || node.category_id), category_suggestion: saved?.category_suggestion || path }));
+      toast.success("Category saved.");
+    } catch (error) { toast.error(error.message || "Could not save category."); }
+  };
   const [importForm, setImportForm] = useState({
     source_marketplace: "facebook",
     import_mode: "manual",
@@ -712,8 +733,10 @@ export default function ListingWorkspacePage() {
                 <select className="h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm" value={form.category_id} onChange={(event) => autosaveListingField("category_id", event.target.value)}>
                   <option value="">Select eBay category</option>
                   {categoryChoices.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-                  {ebayCategoryRoots.filter((node) => node.category_id && !categoryChoices.some((option) => option.value === String(node.category_id))).map((node) => <option key={node.category_id} value={String(node.category_id)} disabled={node.has_children || node.leaf === false}>{node.category_name}{node.has_children ? " (browse subcategories in Listings editor)" : ""}</option>)}
+                  {ebayCategoryRoots.filter((node) => node.category_id && !categoryChoices.some((option) => option.value === String(node.category_id)) && node.leaf && node.publishable).map((node) => <option key={node.category_id} value={String(node.category_id)}>{node.category_name}</option>)}
                 </select>
+                <Button type="button" variant="outline" className="mt-2" onClick={() => loadCategoryChildren()}>Browse eBay categories</Button>
+                {categoryBrowseNodes.length ? <div className="mt-2 max-h-64 space-y-1 overflow-y-auto rounded-lg border border-[#e5e7eb] bg-slate-50 p-2"><div className="mb-1 flex flex-wrap items-center gap-1 text-xs text-slate-600"><Button type="button" size="sm" variant="outline" onClick={() => loadCategoryChildren()}>All Categories</Button>{categoryBrowseTrail.map((entry, index) => <Button key={entry.id} type="button" size="sm" variant="outline" onClick={() => loadCategoryChildren(entry.id, entry.label, categoryBrowseTrail.slice(0, index))}>{entry.label}</Button>)}</div>{categoryBrowseNodes.map((node) => <div key={node.category_id} className="flex items-center justify-between gap-2 rounded border bg-white px-2 py-1 text-xs"><span>{node.category_name} <span className="text-slate-500">({node.category_id})</span></span>{node.has_children ? <Button type="button" size="sm" variant="outline" onClick={() => loadCategoryChildren(node.category_id, node.category_name, categoryBrowseTrail)}>Open</Button> : node.leaf && node.publishable ? <Button type="button" size="sm" onClick={() => selectBrowseCategory(node)}>Select</Button> : <span className="text-amber-700">Unverified</span>}</div>)}</div> : null}
                 <Input className="mt-2" value={form.category_id} onChange={(event) => setForm((current) => ({ ...current, category_id: event.target.value }))} placeholder="Or enter verified eBay category ID" />
               </div>
               <div className="space-y-2">

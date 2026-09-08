@@ -104,7 +104,12 @@ def process_listing_correction_jobs_task(limit: int = 10) -> dict[str, Any]:
                     or {}
                 )
                 if fields & {"title", "description", "identity", "condition"}:
-                    generated = ListingAIService().generate({"title_hint": listing.title, "source_type": listing.source_type, "image_count": len(listing.image_urls or []), "existing_specifics": listing.item_specifics or {}, "existing_condition": listing.condition, "source_evidence": evidence, "operator_instruction": job.operator_note}, db=db, user_id=job.user_id, listing_id=listing.id)
+                    # ListingAI's bounded fallback and prompt builder consume
+                    # source facts through source_metadata. Keep the explicit
+                    # source_evidence alias for diagnostics, but also provide
+                    # the facts under the capability's canonical input key so
+                    # Vine corrections cannot silently regenerate generic copy.
+                    generated = ListingAIService().generate({"title_hint": listing.title, "source_type": listing.source_type, "image_count": len(listing.image_urls or []), "existing_specifics": listing.item_specifics or {}, "existing_condition": listing.condition, "source_metadata": evidence, "source_evidence": evidence, "operator_instruction": job.operator_note}, db=db, user_id=job.user_id, listing_id=listing.id)
                 if generated and "title" in fields and generated.get("title"):
                     value = str(generated["title"])[:80]
                     if value != before.get("title"): listing.title = value; changed["title"] = {"before": before.get("title"), "after": value}
