@@ -168,6 +168,12 @@ def process_listing_correction_jobs_task(limit: int = 10) -> dict[str, Any]:
                         category_blocked = True
                         job.result = {"category_state": "NEEDS_OPERATOR_REVIEW", "category_candidates": ranked[:10]}
                 job.after_snapshot = {"title": listing.title, "description": listing.description, "category_id": listing.category_id, "category_suggestion": listing.category_suggestion, "item_specifics": listing.item_specifics, "listing_price": listing.listing_price, "condition": listing.condition, "image_urls": listing.image_urls}
+                # Do not leave a pre-correction eBay readiness decision cached
+                # after the worker has changed any publish-facing field.
+                if changed:
+                    marketplace_data = dict(listing.marketplace_data or {})
+                    marketplace_data.pop("marketplace_preflight", None)
+                    listing.marketplace_data = marketplace_data
                 after_values = job.after_snapshot or {}
                 keymap = {"category": "category_id", "item specifics": "item_specifics", "aspects": "item_specifics", "price": "listing_price", "images": "image_urls"}
                 category_state = (job.result or {}).get("category_state")

@@ -77,6 +77,16 @@ async def test_listing_condition_patch_persists_value(async_client):
 
 
 @pytest.mark.anyio
+async def test_listing_publish_fields_invalidate_cached_preflight(async_client):
+    register = await async_client.post("/auth/register", json={"full_name": "Preflight Cache Owner", "email": f"preflight-cache-{uuid4()}@example.com", "password": "supersecret123"})
+    assert register.status_code == 201
+    listing_id = seed_bucket_listing(register.json()["user"]["id"], status=ListingStatus.draft, title="Cached", marketplace_data={"marketplace_preflight": {"by_marketplace": {"ebay": {"status": "blocked"}}}})
+    response = await async_client.patch(f"/listings/{listing_id}", json={"title": "Corrected product title"})
+    assert response.status_code == 200
+    db = database_module.SessionLocal(); row = db.get(Listing, listing_id); assert "marketplace_preflight" not in (row.marketplace_data or {}); db.close()
+
+
+@pytest.mark.anyio
 async def test_timeline_manual_classification_round_trip(async_client):
     register = await async_client.post("/auth/register", json={"full_name": "Timeline Owner", "email": f"timeline-{uuid4()}@example.com", "password": "supersecret123"})
     assert register.status_code == 201

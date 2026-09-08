@@ -1906,6 +1906,13 @@ def update_listing(
         direct_updates["status"] = ListingStatus(direct_updates["status"])
     for key, value in direct_updates.items():
         setattr(listing, key, value)
+    # Any material listing edit invalidates cached marketplace readiness. A
+    # stale preflight was allowing corrected drafts to keep failing (or hiding
+    # the new blocker set) until an unrelated refresh happened.
+    if set(direct_updates) & {"title", "description", "category_id", "category_suggestion", "item_specifics", "condition", "listing_price", "image_urls", "quantity"}:
+        marketplace_data = dict(listing.marketplace_data or {})
+        marketplace_data.pop("marketplace_preflight", None)
+        listing.marketplace_data = marketplace_data
     manual_fields = [field for field in ("title", "description", "category_suggestion", "item_specifics", "condition", "estimated_value", "suggested_price", "listing_price", "buy_it_now_price") if field in direct_updates]
     if manual_fields:
         source_metadata = mark_manual_field_provenance(dict(listing.source_metadata or {}), manual_fields)
