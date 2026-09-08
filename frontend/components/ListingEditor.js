@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/router";
 import { Camera, Sparkles, Trash2, WandSparkles } from "lucide-react";
 
@@ -357,6 +357,13 @@ export default function ListingEditor({
   const [categoryResults, setCategoryResults] = useState([]);
   const [browseNodes, setBrowseNodes] = useState([]);
   const [browseTrail, setBrowseTrail] = useState([]);
+  const [conditionValue, setConditionValue] = useState(listing.condition || "");
+  useEffect(() => setConditionValue(listing.condition || ""), [listing.id, listing.condition]);
+  const persistCondition = async (value) => {
+    setConditionValue(value);
+    try { await onSave(listing.id, { condition: value }); }
+    catch (error) { setConditionValue(listing.condition || ""); }
+  };
   const router = useRouter();
   const requiresApproval = workflowPreferences?.review_before_publish ?? true;
   const intelligence = listingIntelligence?.intelligence || {};
@@ -984,8 +991,8 @@ export default function ListingEditor({
             <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Condition label</label>
             <select
               className="mt-1 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]"
-              value={listing.condition || ""}
-              onChange={(e) => onSave(listing.id, { condition: e.target.value })}
+              value={conditionValue}
+              onChange={(e) => { void persistCondition(e.target.value); }}
             >
               <option value="">Select condition</option>
               {conditionOptions.map((option) => (
@@ -994,9 +1001,9 @@ export default function ListingEditor({
             </select>
             <Input
               className="mt-3"
-              defaultValue={listing.condition || ""}
+              value={conditionValue}
               placeholder="Needs review / Used / Open box"
-              onBlur={(e) => onSave(listing.id, { condition: e.target.value })}
+              onChange={(e) => { void persistCondition(e.target.value); }}
             />
           </div>
             <div>
