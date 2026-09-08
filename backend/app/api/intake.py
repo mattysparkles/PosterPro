@@ -1003,29 +1003,17 @@ def intake_timeline(
         for row in timeline
         if (row["photo"].metadata_json or {}).get("official_slate_id") is not None
     }
-    # Replace legacy image-based Slate rows with the durable modern Slate
-    # marker wherever an official Slate is linked.  Keep ordinary product
-    # photos untouched; only the classified Slate image itself is replaced.
-    linked_ids = {
-        (item["photo"].get("metadata_json") or {}).get("official_slate_id")
-        for item in items
-        if isinstance(item.get("photo"), dict)
-    }
-    linked_ids = {int(value) for value in linked_ids if str(value).isdigit()}
-    if linked_ids:
-        items = [
-            item for item in items
-            if str((item["photo"].get("metadata_json") or {}).get("official_slate_id") or "") not in {str(value) for value in linked_ids}
-        ]
+    # Replace legacy image-based Slate rows in-place so their chronological
+    # position is preserved exactly.
     for slate in slates:
         boundary = (slate.metadata_json or {}).get("retroactive_boundary") if isinstance(slate.metadata_json, dict) else None
         before_id = boundary.get("before_photo_id") if isinstance(boundary, dict) else None
         linked_photo = linked_photo_by_slate.get(slate.id) or linked_photo_by_slate.get(str(slate.id))
         linked_photo_id = linked_photo.id if linked_photo else None
-        position = next((index for index, item in enumerate(items) if item["photo"].get("id") == before_id), None)
-        if position is None and linked_photo_id is not None:
-            original = next((index for index, item in enumerate(timeline) if item["photo"].get("id") == linked_photo_id), len(timeline))
-            position = min(original, len(items))
+        position = next((index for index, item in enumerate(items) if str(item["photo"].get("id")) == str(before_id)), None)
+        linked_position = next((index for index, item in enumerate(items) if str(item["photo"].get("id")) == str(linked_photo_id)), None) if linked_photo_id is not None else None
+        if linked_position is not None:
+            position = linked_position
         if position is None:
             position = len(items)
         metadata = slate.metadata_json if isinstance(slate.metadata_json, dict) else {}
@@ -1050,7 +1038,11 @@ def intake_timeline(
             # only by the Slate editor/detail route.
             "slate": {"id": slate.id, "item_id": slate.item_id, "box_id": slate.box_id, "location": slate.location, "title": slate.title, "notes": slate.notes},
         }
-        items.insert(position, {"photo": marker, "timeline_key": [str((boundary or {}).get("effective_boundary_at") or ""), "slate", str(slate.id)], "late_arrival": False, "is_slate_marker": True})
+        marker_row = {"photo": marker, "timeline_key": (items[linked_position]["timeline_key"] if linked_position is not None else [str((boundary or {}).get("effective_boundary_at") or ""), "slate", str(slate.id)]), "late_arrival": False, "is_slate_marker": True}
+        if linked_position is not None:
+            items[linked_position] = marker_row
+        else:
+            items.insert(position, marker_row)
     return {"items": items}
 
 @router.post("/timeline/classify")
