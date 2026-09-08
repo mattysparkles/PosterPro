@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, UTC
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -980,10 +980,12 @@ def export_intake_csv(
 
 @router.get("/timeline")
 def intake_timeline(
+    limit: int = Query(500, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    timeline = service.timeline_items(db, user_id=current_user.id)
+    timeline = service.timeline_items(db, user_id=current_user.id, limit=limit, offset=offset)
     items = [
             {
                 "photo": _serialize_photo(row["photo"], compact=True),
@@ -1044,7 +1046,9 @@ def intake_timeline(
             "classification": "SLATE",
             "classification_source": "MODERN_SLATE",
             "metadata_json": {"classification": "SLATE", "classification_source": "MODERN_SLATE", "official_slate_id": slate.id},
-            "slate": _serialize_slate(slate),
+            # Keep timeline markers compact; full QR/label payloads are loaded
+            # only by the Slate editor/detail route.
+            "slate": {"id": slate.id, "item_id": slate.item_id, "box_id": slate.box_id, "location": slate.location, "title": slate.title, "notes": slate.notes},
         }
         items.insert(position, {"photo": marker, "timeline_key": [str((boundary or {}).get("effective_boundary_at") or ""), "slate", str(slate.id)], "late_arrival": False, "is_slate_marker": True})
     return {"items": items}

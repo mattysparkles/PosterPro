@@ -2299,7 +2299,14 @@ class IntakeSlateService:
             href=f"/listings/{listing.id}",
         )
 
-    def timeline_items(self, db: Session, *, user_id: int) -> list[dict[str, Any]]:
+    def timeline_items(self, db: Session, *, user_id: int, limit: int | None = None, offset: int = 0) -> list[dict[str, Any]]:
+        photos = self._ordered_photos(db, user_id=user_id)
+        if limit is not None:
+            if not isinstance(limit, int):
+                limit = 500
+            if not isinstance(offset, int):
+                offset = 0
+            photos = photos[max(0, offset): max(0, offset) + max(1, limit)]
         return [
             {
                 "photo": photo,
@@ -2308,7 +2315,7 @@ class IntakeSlateService:
                     photo.captured_at and photo.imported_at and photo.captured_at.replace(tzinfo=UTC) < photo.imported_at.replace(tzinfo=UTC)
                 ),
             }
-            for photo in self._ordered_photos(db, user_id=user_id)
+            for photo in photos
         ]
 
     def set_canonical_fact(
