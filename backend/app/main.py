@@ -28,6 +28,7 @@ from app.api.browser_extension import router as browser_extension_router
 from app.api.processing import router as processing_router
 from app.api.notifications import router as notifications_router
 from app.api.marketplaces import router as marketplaces_router
+from app.api.admin_diagnostics import router as admin_diagnostics_router
 from app.api.marketplace_jobs import router as marketplace_jobs_router
 from app.api.routes import router
 from app.api.sales import router as sales_router
@@ -403,6 +404,7 @@ app.include_router(browser_extension_router)
 app.include_router(processing_router)
 app.include_router(notifications_router)
 app.include_router(marketplaces_router)
+app.include_router(admin_diagnostics_router)
 app.include_router(marketplace_jobs_router)
 app.include_router(intelligence_router)
 app.include_router(intake_router)
