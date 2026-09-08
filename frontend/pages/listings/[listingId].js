@@ -691,7 +691,11 @@ export default function ListingWorkspacePage() {
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium text-[#101828]">Marketplace category ID</label>
-                {categoryChoices.length ? <select className="h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm" value={form.category_id} onChange={(event) => setForm((current) => ({ ...current, category_id: event.target.value }))}><option value="">Select verified category</option>{categoryChoices.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select> : <Input value={form.category_id} onChange={(event) => setForm((current) => ({ ...current, category_id: event.target.value }))} placeholder="30090" />}
+                <select className="h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm" value={form.category_id} onChange={(event) => setForm((current) => ({ ...current, category_id: event.target.value }))}>
+                  <option value="">Select eBay category</option>
+                  {categoryChoices.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </select>
+                <Input className="mt-2" value={form.category_id} onChange={(event) => setForm((current) => ({ ...current, category_id: event.target.value }))} placeholder="Or enter verified eBay category ID" />
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium text-[#101828]">Category suggestion / path</label>

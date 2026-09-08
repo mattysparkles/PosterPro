@@ -146,3 +146,10 @@ requirements above. Credentials were not rotated or printed.
 - Added regression coverage for retroactive Slate marker visibility and modern
   provenance. Backend compile and focused timeline tests pass. Service restart
   is runtime-blocked in this shell (systemd bus unavailable).
+
+# 2026-09-07 - Draft category selector visibility
+
+- The listing draft workspace now always renders a dedicated eBay category
+  selector, even when no ranked candidates are present, alongside a verified
+  category-ID field for manual entry. Existing taxonomy browser/search remains
+  available in the full ListingEditor. Frontend production build passed.
