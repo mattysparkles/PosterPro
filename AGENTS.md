@@ -195,3 +195,11 @@ requirements above. Credentials were not rotated or printed.
   not dereference an integer as an ORM object. Adjacent Add Slate boundaries
   have focused coverage. The compatibility migration remains bounded and
   idempotent on GET; a dedicated one-time backfill remains follow-up work.
+
+# 2026-09-08 - Timeline chronology and display counts
+
+- Timeline chronology is assembled before pagination, keeping modern replacement
+  Slates at the exact legacy capture position instead of appending markers whose
+  source photo falls outside the first window. The endpoint now reports total,
+  photo, and Slate counts separately and adds independent Slate/photo/group
+  display numbering without inflating the underlying photo count.
