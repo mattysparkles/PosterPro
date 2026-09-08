@@ -83,6 +83,31 @@ async def test_timeline_manual_classification_round_trip(async_client):
 
 
 @pytest.mark.anyio
+async def test_retroactive_slate_is_visible_as_modern_timeline_marker(async_client):
+    register = await async_client.post("/auth/register", json={"full_name": "Slate Owner", "email": f"slate-{uuid4()}@example.com", "password": "supersecret123"})
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    db = database_module.SessionLocal()
+    from datetime import datetime, timedelta, timezone
+    start = datetime.now(timezone.utc)
+    photos = [
+        IntakePhoto(user_id=user_id, source_provider="test", source_photo_id=f"before-{uuid4()}", local_path="/tmp/before.jpg", captured_at=start, imported_at=start, image_type="photo", metadata_json={}),
+        IntakePhoto(user_id=user_id, source_provider="test", source_photo_id=f"after-{uuid4()}", local_path="/tmp/after.jpg", captured_at=start + timedelta(minutes=1), imported_at=start + timedelta(minutes=1), image_type="photo", metadata_json={}),
+    ]
+    db.add_all(photos); db.commit(); [db.refresh(photo) for photo in photos]; before_id, after_id = photos[0].id, photos[1].id; db.close()
+    created = await async_client.post("/intake/slates/retroactive", json={"retroactive": True, "after_photo_id": before_id, "before_photo_id": after_id, "item_id": "ITEM-TEST"})
+    assert created.status_code == 200, created.text
+    slate_id = created.json()["slate"]["id"]
+    timeline = await async_client.get("/intake/timeline")
+    assert timeline.status_code == 200
+    markers = [row for row in timeline.json()["items"] if row.get("is_slate_marker")]
+    marker = next(row for row in markers if row["photo"]["slate_id"] == slate_id)
+    assert marker["photo"]["classification"] == "SLATE"
+    assert marker["photo"]["classification_source"] == "MODERN_SLATE"
+    assert marker["photo"]["slate"]["item_id"] == "ITEM-TEST"
+
+
+@pytest.mark.anyio
 async def test_marketplace_discovery_and_publish_queue(async_client, monkeypatch):
     register = await async_client.post(
         "/auth/register",

@@ -101,6 +101,8 @@ def _serialize_slate(row: IntakeSlate | None) -> dict[str, Any] | None:
 
 
 def _serialize_photo(row: IntakePhoto) -> dict[str, Any]:
+    if isinstance(row, dict):
+        return row
     return {
         "id": row.id,
         "user_id": row.user_id,
@@ -482,6 +484,14 @@ def create_retroactive_intake_slate(
             "generated_at": datetime.now(UTC).isoformat(),
             "type": "HEAD_RETROACTIVE",
         }
+        try:
+            rendered = service.render_slate_preview_asset(slate.qr_payload_json or {}, item_id=slate.item_id, session_id=slate.session_id)
+            if rendered:
+                metadata["rendered_slate"] = rendered
+        except Exception:
+            # The durable Slate remains usable/editable even if preview artwork
+            # cannot be rendered in this request.
+            pass
         slate.metadata_json = metadata
         db.commit(); db.refresh(slate)
         all_photos = db.execute(select(IntakePhoto).where(IntakePhoto.user_id == current_user.id).order_by(IntakePhoto.captured_at, IntakePhoto.id)).scalars().all()
@@ -952,16 +962,63 @@ def intake_timeline(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return {
-        "items": [
+    timeline = service.timeline_items(db, user_id=current_user.id)
+    items = [
             {
                 "photo": _serialize_photo(row["photo"]),
                 "timeline_key": row["timeline_key"],
                 "late_arrival": row["late_arrival"],
             }
-            for row in service.timeline_items(db, user_id=current_user.id)
+            for row in timeline
         ]
+    # Render retroactive/system Slates as first-class timeline markers at the
+    # requested boundary. They are not marketplace photos, but remain visible
+    # with the same edit/voice-note links as any official Slate.
+    slates = db.execute(select(IntakeSlate).where(IntakeSlate.user_id == current_user.id)).scalars().all()
+    # Replace legacy image-based Slate rows with the durable modern Slate
+    # marker wherever an official Slate is linked.  Keep ordinary product
+    # photos untouched; only the classified Slate image itself is replaced.
+    linked_ids = {
+        (item["photo"].get("metadata_json") or {}).get("official_slate_id")
+        for item in items
+        if isinstance(item.get("photo"), dict)
     }
+    linked_ids = {int(value) for value in linked_ids if str(value).isdigit()}
+    if linked_ids:
+        items = [item for item in items if (item["photo"].get("metadata_json") or {}).get("official_slate_id") not in linked_ids]
+    for slate in slates:
+        boundary = (slate.metadata_json or {}).get("retroactive_boundary") if isinstance(slate.metadata_json, dict) else None
+        before_id = boundary.get("before_photo_id") if isinstance(boundary, dict) else None
+        linked_photo = next((item for item in timeline if ((item["photo"].metadata_json or {}).get("official_slate_id") == slate.id)), None)
+        linked_photo_id = linked_photo["photo"].id if linked_photo else None
+        position = next((index for index, item in enumerate(items) if item["photo"].get("id") == before_id), None)
+        if position is None and linked_photo_id is not None:
+            original = next((index for index, item in enumerate(timeline) if item["photo"].get("id") == linked_photo_id), len(timeline))
+            position = min(original, len(items))
+        if position is None:
+            position = len(items)
+        metadata = slate.metadata_json if isinstance(slate.metadata_json, dict) else {}
+        rendered = metadata.get("rendered_slate") if isinstance(metadata.get("rendered_slate"), dict) else {}
+        marker_id = f"slate-{slate.id}"
+        marker = {
+            "id": marker_id,
+            "user_id": current_user.id,
+            "original_filename": f"Slate {slate.item_id or slate.id}",
+            "local_path": rendered.get("storage_path") or metadata.get("rendered_slate_url"),
+            "thumbnail_url": rendered.get("storage_path") or metadata.get("rendered_slate_url"),
+            "display_url": rendered.get("storage_path") or metadata.get("rendered_slate_url"),
+            "image_type": "slate",
+            "is_slate": True,
+            "is_internal_only": True,
+            "item_id": slate.item_id,
+            "slate_id": slate.id,
+            "classification": "SLATE",
+            "classification_source": "MODERN_SLATE",
+            "metadata_json": {"classification": "SLATE", "classification_source": "MODERN_SLATE", "official_slate_id": slate.id},
+            "slate": _serialize_slate(slate),
+        }
+        items.insert(position, {"photo": marker, "timeline_key": [str((boundary or {}).get("effective_boundary_at") or ""), "slate", str(slate.id)], "late_arrival": False, "is_slate_marker": True})
+    return {"items": items}
 
 @router.post("/timeline/classify")
 def classify_timeline_assets(payload: dict, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -975,7 +1032,8 @@ def classify_timeline_assets(payload: dict, db: Session = Depends(get_db), curre
         meta = dict(row.metadata_json or {}); before.append({"id": row.id, "metadata_json": meta, "is_slate": row.is_slate, "image_type": row.image_type, "is_internal_only": row.is_internal_only}); meta["classification_source"] = "MANUAL_OPERATOR"; meta["classification"] = classification; row.metadata_json = meta
         row.is_slate = classification != "PHOTO"; row.image_type = classification.lower(); row.is_internal_only = row.is_slate; db.add(row)
         if row.is_slate and not (meta.get("official_slate_id") or (row.batch_id and db.get(IntakePhotoBatch, row.batch_id) and db.get(IntakePhotoBatch, row.batch_id).slate_id)):
-            slate_payload = {"retroactive": True, "item_id": str(row.item_id or f"SLATE-{row.id}"), "title": meta.get("title") or row.original_filename or "", "notes": meta.get("notes") or "", "location": meta.get("location") or ""}
+            batch = db.get(IntakePhotoBatch, row.batch_id) if row.batch_id else None
+            slate_payload = {"retroactive": True, "item_id": str(row.item_id or (batch.item_id if batch else "") or f"SLATE-{row.id}"), "title": meta.get("title") or row.original_filename or "", "notes": meta.get("notes") or "", "location": meta.get("location") or (batch.metadata_json or {}).get("location", "") if batch else "", "box_id": meta.get("box_id") or ((batch.metadata_json or {}).get("box_id") if batch else None), "source_photo_id": row.id}
             official_slate, _, _ = service.create_slate(db, user=current_user, payload=slate_payload)
             meta["official_slate_id"] = official_slate.id; row.metadata_json = meta; db.add(row)
     db.add(IntakeReconciliationEvent(user_id=current_user.id, event_type="timeline_classification_change", status="completed", details_json={"before": before, "after": {"classification": classification, "photo_ids": ids}, "scope": "selected"}))
