@@ -17,6 +17,7 @@ import {
   fetchCrosspostJobs,
   fetchCrosspostPreview,
   fetchListing,
+  fetchMarketplacePreflight,
   fetchSettingsPanels,
   browseEbayCategories,
   queueCrosspostJob,
@@ -522,6 +523,15 @@ export default function ListingWorkspacePage() {
     }
   };
 
+  const refreshEbayPreflight = async () => {
+    if (!listing?.id) return;
+    try {
+      const result = await fetchMarketplacePreflight(listing.id, "ebay");
+      setListing((current) => ({ ...current, marketplace_preflight_summary: { ...(current?.marketplace_preflight_summary || {}), by_marketplace: { ...((current?.marketplace_preflight_summary || {}).by_marketplace || {}), ebay: result } } }));
+      toast.success(result?.status === "blocked" ? "eBay blockers refreshed." : "eBay preflight refreshed.");
+    } catch (error) { toast.error(error.message || "Could not run eBay preflight."); }
+  };
+
   const runGenerate = async () => {
     const currentListing = listing || (await saveListing("draft"));
     if (!currentListing?.id) return;
@@ -700,6 +710,7 @@ export default function ListingWorkspacePage() {
       {(listing?.readiness_summary?.blockers?.length || listing?.marketplace_preflight_summary) ? (
         <section className="mb-5 rounded-[16px] border border-amber-200 bg-amber-50 p-4">
           <h3 className="text-sm font-bold text-amber-900">Why this listing is not publishable</h3>
+          <Button type="button" size="sm" variant="outline" className="mt-2" onClick={refreshEbayPreflight}>Run eBay preflight</Button>
           {listing?.readiness_summary?.blockers?.length ? <ul className="mt-2 list-disc pl-5 text-sm text-amber-900">{listing.readiness_summary.blockers.map((reason) => <li key={reason}>{reason}</li>)}</ul> : null}
           {Object.entries(listing?.marketplace_preflight_summary?.by_marketplace || {}).map(([market, summary]) => ((summary?.blockers || []).length ? <div key={market} className="mt-3"><p className="text-xs font-bold uppercase tracking-wide text-amber-800">{market} preflight</p><ul className="mt-1 list-disc pl-5 text-sm text-amber-900">{summary.blockers.map((issue, index) => <li key={`${market}-${index}`}>{issue.message || issue.code || String(issue)}</li>)}</ul></div> : null))}
           {!listing?.readiness_summary?.blockers?.length && !Object.values(listing?.marketplace_preflight_summary?.by_marketplace || {}).some((summary) => (summary?.blockers || []).length) ? <p className="mt-2 text-sm text-amber-900">Preflight has not produced a current blocker report. Run eBay preflight before retrying publication.</p> : null}
