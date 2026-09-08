@@ -126,6 +126,17 @@ def process_listing_correction_jobs_task(limit: int = 10) -> dict[str, Any]:
                     # otherwise the queue reports NO_PROGRESS and the draft is
                     # sent back to review with no explanation.
                     candidate_description = generated.get("description") if generated else None
+                    # Vine copy must be rebuilt from the persisted product
+                    # record on an explicit description correction, even when
+                    # a prior fallback happens to resemble the current text.
+                    if str(listing.source_type or "").lower() == "amazon_vine" and isinstance(evidence, dict):
+                        from app.services.listing_ai import build_listing_description
+                        candidate_description = build_listing_description(
+                            title=str(evidence.get("title") or evidence.get("product_name") or listing.title or "Item"),
+                            item_specifics=listing.item_specifics or {},
+                            source_label="Amazon/Vine product facts",
+                            source_metadata={"recovery": {"identity": evidence}},
+                        )
                     if not candidate_description and isinstance(evidence, dict):
                         from app.services.listing_ai import build_listing_description
                         candidate_description = build_listing_description(
