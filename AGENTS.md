@@ -167,3 +167,11 @@ requirements above. Credentials were not rotated or printed.
   resolves them to persisted boundary photos. Add Slate therefore remains
   usable beside an existing modern Slate instead of submitting ``slate-<id>``
   to the integer-only boundary API.
+
+# 2026-09-08 - Legacy Slate metadata migration
+
+- Timeline reads now perform an idempotent compatibility migration for legacy
+  image-based Slates: each is linked to an official tenant-owned Slate at the
+  same capture position, carrying item ID, box, location, notes, and legacy
+  metadata. The timeline then replaces that image in-place with the modern
+  Slate marker and its edit/voice-note actions. Focused timeline tests pass.

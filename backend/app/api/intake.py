@@ -597,6 +597,18 @@ def update_intake_slate(
     return {"slate": _serialize_slate(slate)}
 
 
+@router.get("/slates/{slate_id}")
+def get_intake_slate(
+    slate_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    slate = db.execute(select(IntakeSlate).where(IntakeSlate.id == slate_id, IntakeSlate.user_id == current_user.id)).scalar_one_or_none()
+    if slate is None:
+        raise HTTPException(status_code=404, detail="Slate not found")
+    return {"slate": _serialize_slate(slate)}
+
+
 @router.post("/voice/analyze")
 def analyze_voice_intake(
     payload: IntakeVoiceIntelligenceRequest,
@@ -985,6 +997,40 @@ def intake_timeline(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    # One-time compatibility bridge: convert legacy image Slates into durable
+    # Slates before building the response. Their capture timestamp remains the
+    # placement key, and all decoded/manual metadata is carried forward.
+    legacy = db.execute(select(IntakePhoto).where(IntakePhoto.user_id == current_user.id, IntakePhoto.is_slate.is_(True))).scalars().all()
+    migrated = False
+    for photo in legacy:
+        meta = dict(photo.metadata_json or {})
+        if meta.get("official_slate_id"):
+            continue
+        batch = db.get(IntakePhotoBatch, photo.batch_id) if photo.batch_id else None
+        slate = db.get(IntakeSlate, batch.slate_id) if batch and batch.slate_id else None
+        if slate is None:
+            payload = {
+                "retroactive": True,
+                "item_id": str(photo.item_id or (batch.item_id if batch else "") or f"SLATE-{photo.id}"),
+                "box_id": meta.get("box_id") or ((batch.metadata_json or {}).get("box_id") if batch else None),
+                "location": meta.get("location") or ((batch.metadata_json or {}).get("location") if batch else None),
+                "title": meta.get("title") or photo.original_filename or "",
+                "notes": meta.get("notes") or meta.get("voice_notes") or "",
+            }
+            try:
+                slate, _, _ = service.create_slate(db, user=current_user, payload=payload)
+            except ValueError:
+                slate = db.execute(select(IntakeSlate).where(IntakeSlate.user_id == current_user.id, IntakeSlate.item_id == payload["item_id"])).scalar_one_or_none()
+        if slate is None:
+            continue
+        slate.slate_image_id = photo.id
+        slate.metadata_json = {**(slate.metadata_json or {}), "legacy_photo_id": photo.id, "legacy_metadata": meta, "legacy_replaced_at": datetime.now(UTC).isoformat()}
+        meta["official_slate_id"] = slate.id
+        meta["classification_source"] = meta.get("classification_source") or "MODERN_SLATE"
+        photo.metadata_json = meta
+        db.add_all([slate, photo]); migrated = True
+    if migrated:
+        db.commit()
     timeline = service.timeline_items(db, user_id=current_user.id, limit=limit, offset=offset)
     items = [
             {
