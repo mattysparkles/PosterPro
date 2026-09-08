@@ -170,6 +170,7 @@ async def test_legacy_image_slates_are_replaced_in_original_positions_idempotent
         assert marker["photo"]["metadata_json"]["legacy_metadata"]["voice_notes"] == f"Audio {index}"
         assert marker["photo"]["metadata_json"]["legacy_metadata"]["item_id"] == f"ITEM-{index}"
         assert marker["photo"]["metadata_json"]["legacy_photo_id"] == photos[index].id
+        assert marker["photo"]["metadata_json"]["legacy_source_photo_id"] == f"legacy-source-{index}"
         assert marker["timeline_key"][1]
     db = database_module.SessionLocal(); count = db.query(IntakeSlate).filter(IntakeSlate.user_id == user_id).count(); db.close(); assert count == 2
     second = await async_client.get("/intake/timeline?limit=20")
