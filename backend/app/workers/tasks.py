@@ -74,7 +74,13 @@ def process_listing_correction_jobs_task(limit: int = 10) -> dict[str, Any]:
     db = SessionLocal(); processed = []
     try:
         for _ in range(max(1, min(limit, 50))):
-            q = select(ListingCorrectionJob).where(ListingCorrectionJob.status == "queued").order_by(ListingCorrectionJob.priority.asc(), case((ListingCorrectionJob.priority == 0, ListingCorrectionJob.created_at), else_=None).desc(), case((ListingCorrectionJob.priority != 0, ListingCorrectionJob.created_at), else_=None).asc()).with_for_update(skip_locked=True).limit(1)
+            q = select(ListingCorrectionJob).where(ListingCorrectionJob.status == "queued").order_by(
+                ListingCorrectionJob.priority.asc(),
+                case((ListingCorrectionJob.priority == 0, ListingCorrectionJob.created_at), else_=None).desc(),
+                case((ListingCorrectionJob.priority != 0, ListingCorrectionJob.created_at), else_=None).asc(),
+                case((ListingCorrectionJob.priority == 0, ListingCorrectionJob.id), else_=None).desc(),
+                case((ListingCorrectionJob.priority != 0, ListingCorrectionJob.id), else_=None).asc(),
+            ).with_for_update(skip_locked=True).limit(1)
             job = db.execute(q).scalars().first()
             if not job: break
             job.status = "processing"; job.claimed_at = datetime.now(UTC); job.started_at = datetime.now(UTC); job.attempt_count = (job.attempt_count or 0) + 1
@@ -87,7 +93,16 @@ def process_listing_correction_jobs_task(limit: int = 10) -> dict[str, Any]:
                 category_blocked = False
                 generated = None
                 source_meta = dict(listing.source_metadata or {})
-                evidence = source_meta.get("amazon_evidence") or source_meta.get("amazon_product") or source_meta.get("source_evidence") or {}
+                # Vine drafts persist normalized facts under several historical
+                # keys. Feed the actual stored product facts to the capability,
+                # never the operator note as customer content.
+                evidence = (
+                    source_meta.get("amazon_evidence")
+                    or source_meta.get("amazon_product_facts")
+                    or source_meta.get("amazon_product")
+                    or source_meta.get("source_evidence")
+                    or {}
+                )
                 if fields & {"title", "description", "identity", "condition"}:
                     generated = ListingAIService().generate({"title_hint": listing.title, "source_type": listing.source_type, "image_count": len(listing.image_urls or []), "existing_specifics": listing.item_specifics or {}, "existing_condition": listing.condition, "source_evidence": evidence, "operator_instruction": job.operator_note}, db=db, user_id=job.user_id, listing_id=listing.id)
                 if generated and "title" in fields and generated.get("title"):
@@ -97,8 +112,19 @@ def process_listing_correction_jobs_task(limit: int = 10) -> dict[str, Any]:
                     from app.services.customer_description import sanitize_customer_description
                     safe, _removed = sanitize_customer_description(generated["description"])
                     if safe and safe != before.get("description"): listing.description = safe; changed["description"] = {"before": before.get("description"), "after": safe}
+                if "condition" in fields and str(listing.source_type or "").lower() == "amazon_vine":
+                    # Vine inventory is received as new; operator correction
+                    # cannot turn it into an AI-inferred used/open-box state.
+                    previous_condition = listing.condition
+                    listing.condition = "New"
+                    condition_data = dict(listing.condition_data or {})
+                    condition_data.update({"condition_bucket": "new_in_box", "new_in_box": True, "open_box": False, "used": False, "condition_source": "VINE_POLICY"})
+                    listing.condition_data = condition_data
+                    changed["condition"] = {"before": previous_condition, "after": "New", "validation": "VINE_CONDITION_NEW"}
                 if "category" in fields:
-                    suggestion = listing.category_suggestion or listing.title or job.operator_note
+                    evidence_title = evidence.get("title") or evidence.get("amazon_title") or evidence.get("product_name") if isinstance(evidence, dict) else None
+                    evidence_type = evidence.get("product_type") or evidence.get("category") if isinstance(evidence, dict) else None
+                    suggestion = " ".join(str(v).strip() for v in (evidence_title, evidence_type, listing.title) if str(v or "").strip()) or listing.category_suggestion or job.operator_note
                     account = db.execute(select(MarketplaceAccount).where(MarketplaceAccount.user_id == job.user_id, MarketplaceAccount.marketplace == MarketplaceName.ebay)).scalars().first()
                     try:
                         candidates = asyncio.run(search_ebay_categories(str(suggestion or listing.title or ""), account)) if account else []

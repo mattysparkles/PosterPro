@@ -100,6 +100,8 @@ const FACEBOOK_RENEWAL_OPTIONS = [
   { value: "scheduled", label: "Scheduled renewal plan" },
 ];
 
+const CONDITION_OPTIONS = ["New", "Used", "Open box", "Refurbished", "Pre-owned", "For parts or not working", "Parts only"];
+
 function defaultMarketplaceData() {
   return {
     crosspost_mode: "approval_required",
@@ -212,6 +214,13 @@ export default function ListingWorkspacePage() {
   const [previewMarketplace, setPreviewMarketplace] = useState('ebay');
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
   const [form, setForm] = useState(() => normalizeListingForm(null));
+  const categoryChoices = useMemo(() => {
+    const metadata = listing?.source_metadata || {};
+    const candidates = Array.isArray(metadata.category_candidates) ? metadata.category_candidates : [];
+    const rows = candidates.map((candidate) => ({ value: String(candidate.category_id || ""), label: `${candidate.category_name || candidate.category_id} — ${candidate.breadcrumb || candidate.category_tree || ""}` })).filter((row) => /^\d+$/.test(row.value));
+    if (listing?.category_id && /^\d+$/.test(String(listing.category_id)) && !rows.some((row) => row.value === String(listing.category_id))) rows.unshift({ value: String(listing.category_id), label: `${listing.category_suggestion || "Current category"} — ${listing.category_id}` });
+    return rows;
+  }, [listing]);
   const [importForm, setImportForm] = useState({
     source_marketplace: "facebook",
     import_mode: "manual",
@@ -682,7 +691,7 @@ export default function ListingWorkspacePage() {
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium text-[#101828]">Marketplace category ID</label>
-                <Input value={form.category_id} onChange={(event) => setForm((current) => ({ ...current, category_id: event.target.value }))} placeholder="30090" />
+                {categoryChoices.length ? <select className="h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm" value={form.category_id} onChange={(event) => setForm((current) => ({ ...current, category_id: event.target.value }))}><option value="">Select verified category</option>{categoryChoices.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select> : <Input value={form.category_id} onChange={(event) => setForm((current) => ({ ...current, category_id: event.target.value }))} placeholder="30090" />}
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium text-[#101828]">Category suggestion / path</label>
@@ -690,7 +699,7 @@ export default function ListingWorkspacePage() {
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium text-[#101828]">Condition</label>
-                <Input value={form.condition} onChange={(event) => setForm((current) => ({ ...current, condition: event.target.value }))} placeholder="Used - Good" />
+                <select className="h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm" value={form.condition} onChange={(event) => setForm((current) => ({ ...current, condition: event.target.value }))}><option value="">Select condition</option>{CONDITION_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}</select>
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium text-[#101828]">Tags</label>

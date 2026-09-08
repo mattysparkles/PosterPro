@@ -2661,6 +2661,9 @@ def request_listing_revision(
     listing.source_metadata = metadata
     listing.status = "draft"
     listing.needs_review = False
+    # A queued correction is not an approval/review result. Clear stale review
+    # flags so it remains in Drafts until the worker records its real outcome.
+    listing.restricted_review_required = False
     db.add(listing)
     db.commit()
     process_listing_correction_jobs_task.delay(limit=1)

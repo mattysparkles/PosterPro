@@ -1286,3 +1286,51 @@ async def test_sync_sold_rejects_foreign_listing_ids(async_client):
     assert second.status_code == 201
     response = await async_client.post("/listings/sync_sold", json={"listing_ids": [listing_id]})
     assert response.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_vine_correction_stays_draft_until_worker_and_uses_source_facts(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Vine Correction", "email": f"vine-correction-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    listing_id = seed_bucket_listing(
+        user_id,
+        status=ListingStatus.draft,
+        title="Generic Vine Product",
+        description="Needs work",
+        condition="Used",
+        needs_review=True,
+        restricted_review_required=True,
+        source_type="amazon_vine",
+        source_metadata={"amazon_product_facts": {"asin": "B123", "title": "160-in-1 Electronic Learning Kit", "brand": "ExampleCo", "features": ["Hands-on experiments"]}},
+    )
+    monkeypatch.setattr(tasks.process_listing_correction_jobs_task, "delay", lambda **_kwargs: None)
+    response = await async_client.post(
+        f"/listings/{listing_id}/request-revision",
+        json={"fields": ["title", "description", "category", "condition"], "note": "Use the actual Vine source evidence.", "priority": 0},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "draft"
+    assert response.json()["needs_review"] is False
+    db_check = database_module.SessionLocal(); queued = db_check.query(ListingCorrectionJob).filter(ListingCorrectionJob.listing_id == listing_id).one(); assert queued.status == "queued"; db_check.close()
+
+    class FakeAI:
+        def generate(self, payload, **_kwargs):
+            assert payload["source_evidence"]["asin"] == "B123"
+            assert payload["operator_instruction"] == "Use the actual Vine source evidence."
+            return {"title": "ExampleCo 160-in-1 Electronic Learning Kit", "description": "Hands-on electronic learning kit with 160 experiments and components."}
+
+    monkeypatch.setattr(tasks, "ListingAIService", lambda: FakeAI())
+    monkeypatch.setattr(tasks, "SessionLocal", database_module.SessionLocal)
+    result = tasks.process_listing_correction_jobs_task.run(limit=1)
+    assert result["processed"]
+    db = database_module.SessionLocal()
+    row = db.get(Listing, listing_id)
+    assert row.condition == "New"
+    assert "Hands-on electronic learning kit" in row.description
+    assert row.title != "Use the actual Vine source evidence."
+    assert row.needs_review is False
+    db.close()
