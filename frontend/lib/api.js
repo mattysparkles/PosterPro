@@ -1486,3 +1486,10 @@ export async function processListingPhoto({
     body: form,
   });
 }
+
+export async function diagnoseListings(listingIds, { runFreshPreflight = true, marketplace = "ebay" } = {}) {
+  return jsonFetch(`${API_BASE}/admin/listing-diagnostics`, {
+    method: "POST",
+    body: JSON.stringify({ listing_ids: listingIds, marketplace, run_fresh_preflight: runFreshPreflight }),
+  });
+}
