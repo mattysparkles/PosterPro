@@ -175,3 +175,11 @@ requirements above. Credentials were not rotated or printed.
   same capture position, carrying item ID, box, location, notes, and legacy
   metadata. The timeline then replaces that image in-place with the modern
   Slate marker and its edit/voice-note actions. Focused timeline tests pass.
+
+# 2026-09-08 - Deterministic legacy Slate positioning
+
+- Corrected replacement ordering so each migrated legacy image Slate is
+  replaced at its original timeline index rather than removed and reinserted
+  using a shifted list index. Added a two-Slate idempotence regression fixture;
+  it verifies exact photo/Slate/photo/Slate/photo ordering and inherited
+  metadata.

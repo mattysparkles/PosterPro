@@ -1011,7 +1011,7 @@ def intake_timeline(
         if slate is None:
             payload = {
                 "retroactive": True,
-                "item_id": str(photo.item_id or (batch.item_id if batch else "") or f"SLATE-{photo.id}"),
+                "item_id": str(photo.item_id or meta.get("item_id") or (batch.item_id if batch else "") or f"SLATE-{photo.id}"),
                 "box_id": meta.get("box_id") or ((batch.metadata_json or {}).get("box_id") if batch else None),
                 "location": meta.get("location") or ((batch.metadata_json or {}).get("location") if batch else None),
                 "title": meta.get("title") or photo.original_filename or "",
