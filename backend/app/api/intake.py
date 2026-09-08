@@ -1031,7 +1031,12 @@ def intake_timeline(
         db.add_all([slate, photo]); migrated = True
     if migrated:
         db.commit()
-    timeline = service.timeline_items(db, user_id=current_user.id, limit=limit, offset=offset)
+    # Build the canonical chronology before paging. Paging the raw photos first
+    # causes Slate markers whose source photo falls outside the window to be
+    # appended at the end (or appear at a false boundary), which breaks item
+    # grouping. Markers must replace/insert against the complete ordered stream
+    # and only then be sliced for transport.
+    timeline = service.timeline_items(db, user_id=current_user.id, limit=None, offset=0)
     items = [
             {
                 "photo": _serialize_photo(row["photo"], compact=True),
@@ -1100,7 +1105,40 @@ def intake_timeline(
             items[linked_position] = marker_row
         else:
             items.insert(position, marker_row)
-    return {"items": items}
+    # Attach stable operator-facing numbering without changing the underlying
+    # photo count when a legacy image is replaced by a modern Slate marker.
+    # Slate numbers and photo numbers are independent; group letters restart
+    # after each Slate while the global photo number keeps increasing.
+    slate_number = 0
+    photo_number = 0
+    group_photo_number = 0
+    current_group = None
+    for entry in items:
+        photo = entry.get("photo") or {}
+        if entry.get("is_slate_marker"):
+            slate_number += 1
+            group_photo_number = 0
+            current_group = photo.get("slate", {}).get("item_id") or photo.get("item_id") or f"ITEM-{slate_number}"
+            photo["slate_number"] = slate_number
+            photo["group_id"] = current_group
+            photo.setdefault("metadata_json", {})["slate_number"] = slate_number
+            continue
+        photo_number += 1
+        group_photo_number += 1
+        group_letter = chr(64 + group_photo_number) if group_photo_number <= 26 else f"{group_photo_number}"
+        photo["photo_number"] = photo_number
+        photo["group_id"] = current_group
+        photo["group_photo_number"] = group_photo_number
+        photo["group_photo_label"] = f"{photo_number}-{group_letter}"
+    rendered_items = items[offset: offset + limit]
+    return {
+        "items": rendered_items,
+        "total": len(items),
+        "photo_count": sum(1 for row in items if not row.get("is_slate_marker")),
+        "slate_count": sum(1 for row in items if row.get("is_slate_marker")),
+        "offset": offset,
+        "limit": limit,
+    }
 
 @router.post("/timeline/classify")
 def classify_timeline_assets(payload: dict, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
