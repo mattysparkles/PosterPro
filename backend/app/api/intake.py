@@ -100,9 +100,16 @@ def _serialize_slate(row: IntakeSlate | None) -> dict[str, Any] | None:
     }
 
 
-def _serialize_photo(row: IntakePhoto) -> dict[str, Any]:
+def _serialize_photo(row: IntakePhoto, *, compact: bool = False) -> dict[str, Any]:
     if isinstance(row, dict):
         return row
+    metadata = row.metadata_json or {}
+    if compact:
+        metadata = {
+            key: metadata.get(key)
+            for key in ("classification", "classification_source", "official_slate_id", "slate_provenance", "title", "notes", "box_id", "location")
+            if metadata.get(key) is not None
+        }
     return {
         "id": row.id,
         "user_id": row.user_id,
@@ -126,9 +133,9 @@ def _serialize_photo(row: IntakePhoto) -> dict[str, Any]:
         "slate_id": (row.metadata_json or {}).get("official_slate_id"),
         "thumbnail_url": service.public_media_url(row.local_path),
         "display_url": service.public_media_url(row.local_path),
-        "metadata_json": row.metadata_json or {},
-        "classification": (row.metadata_json or {}).get("classification") or row.image_type,
-        "classification_source": (row.metadata_json or {}).get("classification_source"),
+        "metadata_json": metadata,
+        "classification": metadata.get("classification") or row.image_type,
+        "classification_source": metadata.get("classification_source"),
         "created_at": _iso(row.created_at),
         "updated_at": _iso(row.updated_at),
     }
@@ -979,7 +986,7 @@ def intake_timeline(
     timeline = service.timeline_items(db, user_id=current_user.id)
     items = [
             {
-                "photo": _serialize_photo(row["photo"]),
+                "photo": _serialize_photo(row["photo"], compact=True),
                 "timeline_key": row["timeline_key"],
                 "late_arrival": row["late_arrival"],
             }
@@ -989,6 +996,11 @@ def intake_timeline(
     # requested boundary. They are not marketplace photos, but remain visible
     # with the same edit/voice-note links as any official Slate.
     slates = db.execute(select(IntakeSlate).where(IntakeSlate.user_id == current_user.id)).scalars().all()
+    linked_photo_by_slate = {
+        (row["photo"].metadata_json or {}).get("official_slate_id"): row["photo"]
+        for row in timeline
+        if (row["photo"].metadata_json or {}).get("official_slate_id") is not None
+    }
     # Replace legacy image-based Slate rows with the durable modern Slate
     # marker wherever an official Slate is linked.  Keep ordinary product
     # photos untouched; only the classified Slate image itself is replaced.
@@ -1006,8 +1018,8 @@ def intake_timeline(
     for slate in slates:
         boundary = (slate.metadata_json or {}).get("retroactive_boundary") if isinstance(slate.metadata_json, dict) else None
         before_id = boundary.get("before_photo_id") if isinstance(boundary, dict) else None
-        linked_photo = next((item for item in timeline if ((item["photo"].metadata_json or {}).get("official_slate_id") == slate.id)), None)
-        linked_photo_id = linked_photo["photo"].id if linked_photo else None
+        linked_photo = linked_photo_by_slate.get(slate.id) or linked_photo_by_slate.get(str(slate.id))
+        linked_photo_id = linked_photo.id if linked_photo else None
         position = next((index for index, item in enumerate(items) if item["photo"].get("id") == before_id), None)
         if position is None and linked_photo_id is not None:
             original = next((index for index, item in enumerate(timeline) if item["photo"].get("id") == linked_photo_id), len(timeline))
