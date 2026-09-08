@@ -483,6 +483,19 @@ export default function ListingWorkspacePage() {
     }
   };
 
+  const autosaveListingField = async (field, value) => {
+    setForm((current) => ({ ...current, [field]: value }));
+    if (isNew || !listing?.id) return;
+    try {
+      const saved = await updateListing(listing.id, { [field]: value || null });
+      setListing(saved);
+      setForm((current) => ({ ...current, [field]: saved?.[field] ?? value }));
+      toast.success(`${field === "condition" ? "Condition" : "Category"} saved.`);
+    } catch (error) {
+      toast.error(error.message || `Could not save ${field}.`);
+    }
+  };
+
   const runGenerate = async () => {
     const currentListing = listing || (await saveListing("draft"));
     if (!currentListing?.id) return;
@@ -691,7 +704,7 @@ export default function ListingWorkspacePage() {
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium text-[#101828]">Marketplace category ID</label>
-                <select className="h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm" value={form.category_id} onChange={(event) => setForm((current) => ({ ...current, category_id: event.target.value }))}>
+                <select className="h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm" value={form.category_id} onChange={(event) => autosaveListingField("category_id", event.target.value)}>
                   <option value="">Select eBay category</option>
                   {categoryChoices.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                 </select>
@@ -703,7 +716,7 @@ export default function ListingWorkspacePage() {
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium text-[#101828]">Condition</label>
-                <select className="h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm" value={form.condition} onChange={(event) => setForm((current) => ({ ...current, condition: event.target.value }))}><option value="">Select condition</option>{CONDITION_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}</select>
+                <select className="h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm" value={form.condition} onChange={(event) => autosaveListingField("condition", event.target.value)}><option value="">Select condition</option>{CONDITION_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}</select>
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium text-[#101828]">Tags</label>

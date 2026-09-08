@@ -153,3 +153,10 @@ requirements above. Credentials were not rotated or printed.
   selector, even when no ranked candidates are present, alongside a verified
   category-ID field for manual entry. Existing taxonomy browser/search remains
   available in the full ListingEditor. Frontend production build passed.
+
+# 2026-09-07 - Draft condition/category autosave
+
+- Selecting a condition or eBay category in the listing draft workspace now
+  immediately PATCHes the selected field, updates local state from the server
+  response, and provides success/error feedback; Save Draft is no longer
+  required for those selections. Frontend build completed successfully.
