@@ -18,6 +18,7 @@ import {
   fetchCrosspostPreview,
   fetchListing,
   fetchSettingsPanels,
+  browseEbayCategories,
   queueCrosspostJob,
   generateListing,
   requestListingRevision,
@@ -214,6 +215,7 @@ export default function ListingWorkspacePage() {
   const [previewMarketplace, setPreviewMarketplace] = useState('ebay');
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
   const [form, setForm] = useState(() => normalizeListingForm(null));
+  const [ebayCategoryRoots, setEbayCategoryRoots] = useState([]);
   const categoryChoices = useMemo(() => {
     const metadata = listing?.source_metadata || {};
     const candidates = Array.isArray(metadata.category_candidates) ? metadata.category_candidates : [];
@@ -221,6 +223,9 @@ export default function ListingWorkspacePage() {
     if (listing?.category_id && /^\d+$/.test(String(listing.category_id)) && !rows.some((row) => row.value === String(listing.category_id))) rows.unshift({ value: String(listing.category_id), label: `${listing.category_suggestion || "Current category"} — ${listing.category_id}` });
     return rows;
   }, [listing]);
+  useEffect(() => {
+    browseEbayCategories().then((result) => setEbayCategoryRoots(result?.categories || [])).catch(() => undefined);
+  }, []);
   const [importForm, setImportForm] = useState({
     source_marketplace: "facebook",
     import_mode: "manual",
@@ -707,6 +712,7 @@ export default function ListingWorkspacePage() {
                 <select className="h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm" value={form.category_id} onChange={(event) => autosaveListingField("category_id", event.target.value)}>
                   <option value="">Select eBay category</option>
                   {categoryChoices.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                  {ebayCategoryRoots.filter((node) => node.category_id && !categoryChoices.some((option) => option.value === String(node.category_id))).map((node) => <option key={node.category_id} value={String(node.category_id)} disabled={node.has_children || node.leaf === false}>{node.category_name}{node.has_children ? " (browse subcategories in Listings editor)" : ""}</option>)}
                 </select>
                 <Input className="mt-2" value={form.category_id} onChange={(event) => setForm((current) => ({ ...current, category_id: event.target.value }))} placeholder="Or enter verified eBay category ID" />
               </div>
