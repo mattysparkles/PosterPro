@@ -697,6 +697,15 @@ export default function ListingWorkspacePage() {
         </div>
       </section>
 
+      {(listing?.readiness_summary?.blockers?.length || listing?.marketplace_preflight_summary) ? (
+        <section className="mb-5 rounded-[16px] border border-amber-200 bg-amber-50 p-4">
+          <h3 className="text-sm font-bold text-amber-900">Why this listing is not publishable</h3>
+          {listing?.readiness_summary?.blockers?.length ? <ul className="mt-2 list-disc pl-5 text-sm text-amber-900">{listing.readiness_summary.blockers.map((reason) => <li key={reason}>{reason}</li>)}</ul> : null}
+          {Object.entries(listing?.marketplace_preflight_summary?.by_marketplace || {}).map(([market, summary]) => ((summary?.blockers || []).length ? <div key={market} className="mt-3"><p className="text-xs font-bold uppercase tracking-wide text-amber-800">{market} preflight</p><ul className="mt-1 list-disc pl-5 text-sm text-amber-900">{summary.blockers.map((issue, index) => <li key={`${market}-${index}`}>{issue.message || issue.code || String(issue)}</li>)}</ul></div> : null))}
+          {!listing?.readiness_summary?.blockers?.length && !Object.values(listing?.marketplace_preflight_summary?.by_marketplace || {}).some((summary) => (summary?.blockers || []).length) ? <p className="mt-2 text-sm text-amber-900">Preflight has not produced a current blocker report. Run eBay preflight before retrying publication.</p> : null}
+        </section>
+      ) : null}
+
       <details className="listing-editor-correction mb-5 rounded-[16px] border border-[#d9e2ef] bg-white">
         <summary className="cursor-pointer px-5 py-3 text-sm font-semibold text-[#344054]">Need a correction? Send this listing back to Drafts</summary>
         <div className="border-t border-[#e5e7eb] p-5">

@@ -1417,6 +1417,7 @@ async def test_vine_correction_stays_draft_until_worker_and_uses_source_facts(as
     class FakeAI:
         def generate(self, payload, **_kwargs):
             assert payload["source_evidence"]["asin"] == "B123"
+            assert payload["source_metadata"]["recovery"]["identity"]["asin"] == "B123"
             assert payload["operator_instruction"] == "Use the actual Vine source evidence."
             return {"title": "ExampleCo 160-in-1 Electronic Learning Kit", "description": "Hands-on electronic learning kit with 160 experiments and components."}
 
