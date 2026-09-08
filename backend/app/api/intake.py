@@ -1077,6 +1077,7 @@ def intake_timeline(
             "is_slate": True,
             "is_internal_only": True,
             "item_id": slate.item_id,
+            "source_photo_id": linked_photo.source_photo_id if linked_photo else None,
             "slate_id": slate.id,
             "classification": "SLATE",
             "classification_source": "MODERN_SLATE",
