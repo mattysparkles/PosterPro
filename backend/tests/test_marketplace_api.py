@@ -66,6 +66,17 @@ async def test_need_a_correction_api_creates_authenticated_durable_job(async_cli
 
 
 @pytest.mark.anyio
+async def test_listing_condition_patch_persists_value(async_client):
+    register = await async_client.post("/auth/register", json={"full_name": "Condition Owner", "email": f"condition-{uuid4()}@example.com", "password": "supersecret123"})
+    assert register.status_code == 201
+    listing_id = seed_bucket_listing(register.json()["user"]["id"], status=ListingStatus.draft, title="Condition Test", condition="Used")
+    response = await async_client.patch(f"/listings/{listing_id}", json={"condition": "New"})
+    assert response.status_code == 200
+    assert response.json()["condition"] == "New"
+    db = database_module.SessionLocal(); row = db.get(Listing, listing_id); assert row.condition == "New"; db.close()
+
+
+@pytest.mark.anyio
 async def test_timeline_manual_classification_round_trip(async_client):
     register = await async_client.post("/auth/register", json={"full_name": "Timeline Owner", "email": f"timeline-{uuid4()}@example.com", "password": "supersecret123"})
     assert register.status_code == 201

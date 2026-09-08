@@ -373,6 +373,7 @@ class ListingResponse(BaseModel):
     sale_price: float | None = None
     profit: float | None = None
     roi_percentage: float | None = None
+    condition: str | None = None
     condition_data: dict | None = None
     ebay_listing_id: str | None = None
     ebay_publish_status: str | None = None
