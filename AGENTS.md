@@ -160,3 +160,10 @@ requirements above. Credentials were not rotated or printed.
   immediately PATCHes the selected field, updates local state from the server
   response, and provides success/error feedback; Save Draft is no longer
   required for those selections. Frontend build completed successfully.
+
+# 2026-09-07 - Slate marker insertion boundaries
+
+- Retroactive Slate creation now accepts modern timeline marker references and
+  resolves them to persisted boundary photos. Add Slate therefore remains
+  usable beside an existing modern Slate instead of submitting ``slate-<id>``
+  to the integer-only boundary API.

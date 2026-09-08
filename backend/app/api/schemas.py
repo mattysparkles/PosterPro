@@ -61,8 +61,11 @@ class IntakeSessionCreateRequest(BaseModel):
 
 
 class IntakeSlateCreateRequest(BaseModel):
-    after_photo_id: int | None = None
-    before_photo_id: int | None = None
+    # Timeline Slate markers use stable ``slate-<id>`` IDs. Accept those
+    # references so inserting a Slate next to an existing modern marker can
+    # resolve the marker's persisted boundary instead of returning a 422.
+    after_photo_id: int | str | None = None
+    before_photo_id: int | str | None = None
     effective_boundary_at: str | None = None
     retroactive: bool = False
     session_id: str | None = None

@@ -453,14 +453,28 @@ def create_retroactive_intake_slate(
     effective boundary are persisted separately so Google display order cannot
     alter PosterPro grouping semantics.
     """
-    if not payload.retroactive or (payload.after_photo_id is None and payload.before_photo_id is None):
+    def resolve_marker(value, edge):
+        if not isinstance(value, str) or not value.startswith("slate-"):
+            return value
+        try:
+            marker_slate = db.get(IntakeSlate, int(value.removeprefix("slate-")))
+        except (TypeError, ValueError):
+            marker_slate = None
+        boundary = (marker_slate.metadata_json or {}).get("retroactive_boundary") if marker_slate else None
+        # A marker represents the boundary itself; use its preceding photo for
+        # an ``after`` edge and following photo for a ``before`` edge below.
+        return (boundary or {}).get(f"{edge}_photo_id") or (boundary or {}).get("after_photo_id") or (boundary or {}).get("before_photo_id")
+
+    after_photo_id = resolve_marker(payload.after_photo_id, "after")
+    before_photo_id = resolve_marker(payload.before_photo_id, "before")
+    if not payload.retroactive or (after_photo_id is None and before_photo_id is None):
         raise HTTPException(status_code=400, detail="Retroactive Slate requires after_photo_id or before_photo_id")
-    boundary_ids = [value for value in (payload.after_photo_id, payload.before_photo_id) if value is not None]
+    boundary_ids = [value for value in (after_photo_id, before_photo_id) if value is not None]
     boundary_photos = db.execute(select(IntakePhoto).where(IntakePhoto.id.in_(boundary_ids), IntakePhoto.user_id == current_user.id)).scalars().all()
     if len(boundary_photos) != len(set(boundary_ids)):
         raise HTTPException(status_code=400, detail="Boundary photos were not found in your intake timeline")
     by_id = {photo.id: photo for photo in boundary_photos}
-    after = by_id.get(payload.after_photo_id); before = by_id.get(payload.before_photo_id)
+    after = by_id.get(after_photo_id); before = by_id.get(before_photo_id)
     if after and before:
         after_key = (after.captured_at or after.imported_at or after.created_at, after.id)
         before_key = (before.captured_at or before.imported_at or before.created_at, before.id)
@@ -478,8 +492,8 @@ def create_retroactive_intake_slate(
         slate, qr_payload, _ = service.create_slate(db, user=current_user, payload=payload.model_dump(exclude_none=True))
         metadata = dict(slate.metadata_json or {})
         metadata["retroactive_boundary"] = {
-            "after_photo_id": payload.after_photo_id,
-            "before_photo_id": payload.before_photo_id,
+            "after_photo_id": after_photo_id,
+            "before_photo_id": before_photo_id,
             "effective_boundary_at": effective,
             "generated_at": datetime.now(UTC).isoformat(),
             "type": "HEAD_RETROACTIVE",
@@ -496,12 +510,12 @@ def create_retroactive_intake_slate(
         db.commit(); db.refresh(slate)
         all_photos = db.execute(select(IntakePhoto).where(IntakePhoto.user_id == current_user.id).order_by(IntakePhoto.captured_at, IntakePhoto.id)).scalars().all()
         ids = [p.id for p in all_photos]
-        split_at = ids.index(payload.before_photo_id) if payload.before_photo_id in ids else len(ids)
+        split_at = ids.index(before_photo_id) if before_photo_id in ids else len(ids)
         before_group = all_photos[:split_at]
         after_group = all_photos[split_at:]
         current_batch = next((p.batch_id for p in before_group if p.batch_id and p.batch_id == next((q.batch_id for q in after_group if q.batch_id), None)), None)
         moved = [p.id for p in after_group if current_batch and p.batch_id == current_batch]
-        preview = {"status": "preview_ready", "after_photo_id": payload.after_photo_id, "before_photo_id": payload.before_photo_id,
+        preview = {"status": "preview_ready", "after_photo_id": after_photo_id, "before_photo_id": before_photo_id,
                    "effective_boundary_at": effective, "current_group": {"batch_id": current_batch, "photo_ids": [p.id for p in before_group + after_group if p.batch_id == current_batch]},
                    "proposed_groups": {"before_photo_ids": [p.id for p in before_group if not current_batch or p.batch_id == current_batch], "after_photo_ids": moved},
                    "photos_moved": moved, "affected_drafts": sorted({p.batch_id for p in before_group + after_group if p.batch_id}), "manual_conflicts": [], "draft_invalidation_reason": "PHOTO_GROUP_CHANGED_BY_RETROACTIVE_SLATE"}
