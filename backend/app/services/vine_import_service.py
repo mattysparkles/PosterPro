@@ -93,8 +93,27 @@ def _clean_amazon_facts(raw: dict | None) -> dict:
         "current_price": _positive_price(source.get("current_price")),
         "feature_bullets": [_sanitize_vine_text(value)[:300] for value in (source.get("feature_bullets") or []) if _sanitize_vine_text(value)][:12],
         "specifications": {str(key).strip()[:100]: _sanitize_vine_text(value)[:300] for key, value in specifications.items() if str(key).strip() and _sanitize_vine_text(value)},
+        "dimensions": dict(source.get("dimensions") or {}) if isinstance(source.get("dimensions"), dict) else {},
         "breadcrumbs": [_sanitize_vine_text(value)[:120] for value in (source.get("breadcrumbs") or []) if _sanitize_vine_text(value)][:12],
     }
+
+
+def _merge_dimension_specifics(specifics: dict, provenance: dict, facts: dict) -> None:
+    """Add only evidence-backed item/product dimensions to marketplace specifics."""
+    dimensions = facts.get("dimensions") if isinstance(facts.get("dimensions"), dict) else {}
+    if not dimensions or dimensions.get("dimension_type") == "package":
+        return
+    unit = str(dimensions.get("unit") or "in").strip()
+    suffix = {"in": "in", "cm": "cm", "mm": "mm", "ft": "ft"}.get(unit, unit)
+    for field, key in (("length", "Item Length"), ("width", "Item Width"), ("height", "Item Height")):
+        value = dimensions.get(field)
+        if value is None:
+            continue
+        rendered = f"{value:g} {suffix}" if isinstance(value, (int, float)) else str(value)
+        existing = specifics.get(key)
+        if existing is None or str(existing).strip().lower() in {"does not apply", "unknown", "n/a", "not applicable"} or (isinstance(existing, list) and any(str(v).strip().lower() in {"does not apply", "unknown", "n/a", "not applicable"} for v in existing)):
+            specifics[key] = rendered
+            provenance[key] = "amazon_product_page_dimensions"
 
 
 def _positive_price(value) -> float | None:
@@ -510,6 +529,7 @@ class VineImportService:
                 if key not in specifics and value:
                     specifics[key] = value
                     provenance[key] = "amazon_product_page"
+            _merge_dimension_specifics(specifics, provenance, amazon_facts)
             listing.item_specifics = specifics
             listing.tags = self._build_tags(item, listing.tags)
             marketplace_data = normalize_marketplace_data(dict(listing.marketplace_data or {}))
@@ -642,6 +662,7 @@ class VineImportService:
                 if key not in specifics and value:
                     specifics[key] = value
                     provenance[key] = "amazon_product_page"
+            _merge_dimension_specifics(specifics, provenance, facts)
             listing.item_specifics = specifics
             marketplace_data = normalize_marketplace_data(dict(listing.marketplace_data or {}))
             buyer_pays_shipping = bool(pricing["listing_price"] is not None and pricing["listing_price"] < 10)
@@ -731,6 +752,7 @@ class VineImportService:
                 if key not in specifics and value:
                     specifics[key] = value
                     provenance[key] = "amazon_product_page"
+            _merge_dimension_specifics(specifics, provenance, facts)
             listing.item_specifics = specifics
             marketplace_data = normalize_marketplace_data(dict(listing.marketplace_data or {}))
             buyer_pays_shipping = bool(pricing["listing_price"] is not None and pricing["listing_price"] < 10)

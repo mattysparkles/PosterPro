@@ -21,13 +21,30 @@ from app.api.vine_imports import (
     upload_vine_report,
 )
 from app.models.models import Image, IntakeNotification, Listing, ProductMediaCache, User, VineImportBatch, VineImportItem
-from app.services.amazon_media import AmazonProductMediaProvider
+from app.services.amazon_media import AmazonProductMediaProvider, _extract_amazon_product_facts
 from app.services.amazon_product_discovery import AmazonProductDiscoveryService
 from app.services.listing_review import normalize_listing_images
 from app.services.listing_review import derive_shipping_profile
 from app.services.vine_import_service import VineImportService, _is_unsafe_vine_image
 from app.services.vine_parser import calculate_vine_eligibility, parse_vine_csv, parse_vine_pdf, parse_vine_xlsx
 from app.services.vine_policy import review_vine_product
+
+
+@pytest.mark.parametrize(
+    ("label", "value", "expected"),
+    [
+        ("Item Dimensions L x W x H", "12 x 18 x 24 inches", (12.0, 18.0, 24.0, "item")),
+        ("Product Dimensions", '12\" L x 18\" W x 24\" H', (12.0, 18.0, 24.0, "product")),
+        ("Package Dimensions", "30 x 20 x 10 cm", (30.0, 20.0, 10.0, "package")),
+        ("Dimensions", "1.5 x 2.25 x 3 ft", (1.5, 2.25, 3.0, "product")),
+    ],
+)
+def test_amazon_dimension_formats_are_normalized(label, value, expected):
+    html = f'<span id="productTitle">Test Product</span><table><tr><th>{label}</th><td>{value}</td></tr></table>'
+    facts = _extract_amazon_product_facts(html)
+    dimensions = facts["dimensions"]
+    assert (dimensions["length"], dimensions["width"], dimensions["height"], dimensions["dimension_type"]) == expected
+    assert dimensions["raw_text"] == value
 
 
 def _xlsx_sheet_xml(rows):

@@ -57,6 +57,47 @@ def _clean_text(value: str | None) -> str:
     return text.strip()
 
 
+_DIMENSION_KEY_RE = re.compile(r"(?:item|product|package)?\s*dimensions?(?:\s*l\s*[x×]\s*w(?:\s*[x×]\s*h)?)?", re.I)
+_DIMENSION_VALUE_RE = re.compile(
+    r"(?P<a>\d+(?:\.\d+)?)\s*(?P<ua>inches|inch|in|\"|cm|mm|ft)?\s*(?:l(?:ength)?\s*)?"
+    r"[x×]\s*(?P<b>\d+(?:\.\d+)?)\s*(?P<ub>inches|inch|in|\"|cm|mm|ft)?\s*(?:w(?:idth)?\s*)?"
+    r"(?:[x×]\s*(?P<c>\d+(?:\.\d+)?)\s*(?P<uc>inches|inch|in|\"|cm|mm|ft)?\s*(?:h(?:eight)?\s*)?)?",
+    re.I,
+)
+
+
+def _normalize_dimension_facts(specifications: dict[str, str]) -> dict:
+    """Extract structured product dimensions while preserving raw evidence.
+
+    Amazon uses several labels and spacing/casing variants.  We retain the
+    dimension type so package measurements are never silently treated as item
+    measurements by downstream marketplace aspect completion.
+    """
+    for raw_key, raw_value in specifications.items():
+        key = _clean_text(raw_key)
+        value = _clean_text(raw_value)
+        if not value or not _DIMENSION_KEY_RE.search(key) and not re.search(r"\bdimensions?\b", key, re.I):
+            continue
+        match = _DIMENSION_VALUE_RE.search(value)
+        if not match:
+            continue
+        unit = (match.group("ua") or match.group("ub") or match.group("uc") or "in").lower()
+        unit = {"inches": "in", "inch": "in", '"': "in"}.get(unit, unit)
+        dimension_type = "package" if re.search(r"\bpackage\b", key, re.I) else ("item" if re.search(r"\bitem\b", key, re.I) else "product")
+        result = {
+            "length": float(match.group("a")),
+            "width": float(match.group("b")),
+            "height": float(match.group("c")) if match.group("c") else None,
+            "unit": unit,
+            "dimension_type": dimension_type,
+            "source": "amazon_product_page",
+            "raw_text": value[:300],
+            "source_key": key[:100],
+        }
+        return result
+    return {}
+
+
 def _extract_product_description(html: str) -> str | None:
     candidates: list[str] = []
     og_description = re.search(r'<meta\s+property="og:description"\s+content="([^"]+)"', html, flags=re.IGNORECASE)
@@ -141,6 +182,7 @@ def _extract_amazon_product_facts(html: str) -> dict:
         "current_price": price,
         "feature_bullets": bullets[:12],
         "specifications": details,
+        "dimensions": _normalize_dimension_facts(details),
         "breadcrumbs": breadcrumbs[:12],
         "description": _extract_product_description(html),
     }
