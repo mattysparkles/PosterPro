@@ -89,9 +89,11 @@ export default function useDashboardData(userId, options = {}) {
     ],
   );
   const staticCacheRef = useRef({ key: null, loaded: false });
+  const listingRequestRef = useRef(0);
 
   const reload = useCallback(async () => {
     if (!userId) return;
+    const requestId = ++listingRequestRef.current;
     const shouldReloadStatic = staticCacheRef.current.key !== staticCacheKey || !staticCacheRef.current.loaded;
     const staticRequests = shouldReloadStatic ? [
       includeClusters ? fetchClusters() : Promise.resolve([]),
@@ -132,6 +134,9 @@ export default function useDashboardData(userId, options = {}) {
     ]);
 
     const listingsResult = settled[0];
+    // A slower response for an older page/filter must never overwrite the
+    // catalog selected by the operator (e.g. 25 rows arriving after 100).
+    if (requestId !== listingRequestRef.current) return;
     const listingResult = listingsResult.status === "fulfilled" ? listingsResult.value : [];
     const l = Array.isArray(listingResult) ? listingResult : asArray(listingResult?.items);
 
