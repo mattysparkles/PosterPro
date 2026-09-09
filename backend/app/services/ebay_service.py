@@ -859,6 +859,31 @@ def _derive_item_type(title: str) -> str | None:
         return "Back Glass"
     if "battery" in lowered:
         return "Battery"
+    # Product-family fallbacks for Vine rows whose source facts do not expose
+    # a separate type field. These are category-safe labels, not fabricated
+    # model claims, and prevent required eBay Type from remaining blank.
+    for token, value in (
+        ("first aid", "First Aid Kit"),
+        ("blind", "Blind"),
+        ("trimmer", "Trimmer"),
+        ("slipper", "Slipper"),
+        ("toothpaste", "Toothpaste"),
+        ("ottoman", "Ottoman"),
+        ("pillow", "Pillow"),
+        ("blanket", "Blanket"),
+        ("basket", "Basket"),
+        ("microphone", "Microphone"),
+        ("printer", "Printer"),
+        ("selfie stick", "Selfie Stick"),
+        ("pump", "Pump"),
+        ("fan", "Fan"),
+        ("switch", "Switch"),
+        ("mount", "Mount"),
+        ("replacement", "Replacement Part"),
+        ("kit", "Kit"),
+    ):
+        if token in lowered:
+            return value
     if "torch" in lowered:
         return "Torch"
     return None
@@ -1986,6 +2011,12 @@ def _ebay_candidate_aspect_values(listing: Listing) -> dict[str, str]:
     source = listing.source_metadata if isinstance(listing.source_metadata, dict) else {}
     condition = listing.condition_data if isinstance(listing.condition_data, dict) else {}
     title = str(listing.title or "").strip()
+    facts = source.get("amazon_product_facts") if isinstance(source.get("amazon_product_facts"), dict) else {}
+    fact_specs = facts.get("specifications") if isinstance(facts.get("specifications"), dict) else {}
+    def usable(value: Any) -> str:
+        text = str(value or "").strip()
+        return "" if text.lower() in {"does not apply", "unknown", "n/a", "not applicable"} else text
+    type_from_facts = next((usable(fact_specs.get(key)) for key in ("Type", "Product Type", "Item Type", "Product type")), "")
     candidates = {
         "brand": _derive_brand(listing),
         "model": str(specifics.get("Model") or specifics.get("MPN") or source.get("model") or "").strip(),
@@ -1996,7 +2027,7 @@ def _ebay_candidate_aspect_values(listing: Listing) -> dict[str, str]:
         "color": str(specifics.get("Color") or source.get("color") or "").strip(),
         "size": str(specifics.get("Size") or source.get("size") or "").strip(),
         "material": str(specifics.get("Material") or source.get("material") or "").strip(),
-        "type": str(specifics.get("Type") or source.get("type") or _derive_item_type(title) or "").strip(),
+        "type": usable(specifics.get("Type")) or usable(source.get("type")) or type_from_facts or _derive_item_type(title) or "",
         "style": str(specifics.get("Style") or source.get("style") or "").strip(),
         "compatible brand": str(specifics.get("Compatible Brand") or source.get("compatible_brand") or "").strip(),
         "compatible model": str(specifics.get("Compatible Model") or source.get("compatible_model") or "").strip(),
