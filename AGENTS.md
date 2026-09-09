@@ -231,3 +231,13 @@ requirements above. Credentials were not rotated or printed.
   source photo falls outside the first window. The endpoint now reports total,
   photo, and Slate counts separately and adds independent Slate/photo/group
   display numbering without inflating the underlying photo count.
+
+# 2026-09-09 - Amazon dimension evidence recovery
+
+- Amazon product-page extraction now normalizes Item/Product/Package Dimensions
+  into structured evidence while retaining raw source text and dimension type.
+  Vine refresh maps supported item/product dimensions into eBay
+  Item Length/Width/Height, replacing stale ``Does Not Apply`` placeholders.
+- Live listing 2179 (ASIN B0H6WSH554) was refreshed from the original Amazon
+  page: 24.04 x 24.04 x 14.57 inches. Fresh eBay preflight is now
+  ``ready_with_warnings`` with no blockers. No marketplace publish was run.
