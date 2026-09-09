@@ -716,6 +716,12 @@ def _fallback_aspect_value(listing: Listing, aspect_name: str, title: str) -> st
     dimension = _derive_dimension_value(title)
     capacity = _derive_capacity_value(title)
     color = _derive_color(title)
+    # Vine product pages commonly provide dimensions as a structured
+    # "L x W x H" fact rather than in the title. Reuse that evidence for
+    # category-required dimensions instead of blocking a publish-ready draft.
+    source_specifics = listing.item_specifics if isinstance(listing.item_specifics, dict) else {}
+    dimension_text = " ".join(str(source_specifics.get(k) or "") for k in ("Item Dimensions", "Item dimensions L x W x H", "Dimensions"))
+    dimension_parts = re.findall(r"\d+(?:\.\d+)?", dimension_text)
     if normalized == 'model':
         return model or 'Universal'
     if normalized == 'compatible model':
@@ -723,7 +729,11 @@ def _fallback_aspect_value(listing: Listing, aspect_name: str, title: str) -> st
     if normalized == 'size':
         return dimension or 'One Size'
     if normalized == 'item length':
-        return dimension or 'Does Not Apply'
+        return (dimension_parts[0] if dimension_parts else dimension) or 'Does Not Apply'
+    if normalized == 'item width':
+        return (dimension_parts[1] if len(dimension_parts) > 1 else None) or 'Does Not Apply'
+    if normalized == 'item height':
+        return (dimension_parts[2] if len(dimension_parts) > 2 else None) or 'Does Not Apply'
     if normalized == 'capacity':
         return capacity or 'Does Not Apply'
     if normalized == 'storage capacity':

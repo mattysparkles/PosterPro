@@ -1,5 +1,10 @@
 # PosterPro Deployment Log
 
+## 2026-09-09 - Vine required-aspect enrichment
+
+- Fresh eBay checks identified the remaining blockers: 2179 lacks evidence for ottoman height/length/width; 2187 lacked Style/Type and is now ready with evidence-supported values; 2185 and 2191 are now ready with warnings.
+- eBay aspect fallback now parses persisted `Item Dimensions` / `Item dimensions L x W x H` facts for required length/width/height fields instead of relying only on title tokens. No fabricated dimensions were written for 2179 because Amazon facts contain none.
+
 ## 2026-09-08 - Vine pricing evidence floor and newest batch refresh
 
 - Corrected Vine pricing precedence: when scraped Amazon current price is below the durable spreadsheet ETV, the listing uses the higher ETV floor and records both values/source (`vine_estimated_tax_value_floor`).
