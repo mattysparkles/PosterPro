@@ -1550,12 +1550,17 @@ class VineImportService:
         facts = _clean_amazon_facts(amazon_facts)
         current_price = facts.get("current_price")
         etv = _positive_price(item.estimated_tax_value)
-        listing_price = current_price or etv
+        # Amazon page extraction can capture a promotional/variant price that
+        # is materially below the Vine spreadsheet value.  Never let that
+        # transient low value replace the durable ETV baseline; retain the
+        # higher evidence-backed amount and record the source explicitly.
+        listing_price = max(value for value in (current_price, etv) if value is not None) if (current_price is not None or etv is not None) else None
         return {
             "listing_price": listing_price,
             "quick_sale_price": round(listing_price * 0.85, 2) if listing_price else None,
             "reference_market_price": current_price,
-            "price_source": "amazon_current_price" if current_price else "vine_estimated_tax_value" if etv else "needs_price_research",
+            "price_source": "amazon_current_price" if current_price is not None and (etv is None or current_price >= etv) else "vine_estimated_tax_value_floor" if etv is not None else "needs_price_research",
+            "amazon_current_price": current_price,
             "needs_price_research": listing_price is None,
         }
 

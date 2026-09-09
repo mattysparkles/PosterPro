@@ -1,5 +1,10 @@
 # PosterPro Deployment Log
 
+## 2026-09-08 - Vine pricing evidence floor and newest batch refresh
+
+- Corrected Vine pricing precedence: when scraped Amazon current price is below the durable spreadsheet ETV, the listing uses the higher ETV floor and records both values/source (`vine_estimated_tax_value_floor`).
+- Refreshed batch 6 (119 newest Vine drafts) from stored product facts; 21 currently pass eBay preflight (ready/with warnings) and 9 have explicit blockers. Listing 2205 now uses `$45.99` (ETV), not the erroneous `$12.00` scrape value; no marketplace publish was invoked.
+
 ## 2026-09-08 - Ten-listing Vine correction diagnostics
 
 - Runtime-safe in-application audit executed for listings 2177, 2167, 2170, 2174, 2186, 2178, 2179, 2185, 2187, 2191.
