@@ -551,10 +551,19 @@ export default function ListingsPage() {
   }, [router.query.tab]);
 
   useEffect(() => {
-    const pageValue = Number(router.query.page || 1);
-    const pageSizeValue = Number(router.query.page_size || 25);
-    if (Number.isFinite(pageValue) && pageValue > 0) setCatalogPage(pageValue);
-    if (Number.isFinite(pageSizeValue) && pageSizeValue > 0) setCatalogPageSize(pageSizeValue);
+    // URL state is an override, not a continuously re-applied default.  When
+    // a shallow route update temporarily omits page_size, falling back to 25
+    // here races the user's selected value (for example 100) and creates an
+    // alternating 25/100 fetch loop.  Only apply a query value when it is
+    // explicitly present; local state remains authoritative otherwise.
+    if (Object.prototype.hasOwnProperty.call(router.query, 'page')) {
+      const pageValue = Number(router.query.page);
+      if (Number.isFinite(pageValue) && pageValue > 0) setCatalogPage(pageValue);
+    }
+    if (Object.prototype.hasOwnProperty.call(router.query, 'page_size')) {
+      const pageSizeValue = Number(router.query.page_size);
+      if (Number.isFinite(pageSizeValue) && pageSizeValue > 0) setCatalogPageSize(Math.min(250, Math.max(1, pageSizeValue)));
+    }
     const marketValue = typeof router.query.market === 'string' ? router.query.market : '';
     if (marketValue) setMarketFilter(marketValue);
     const sourceValue = typeof router.query.source === 'string' ? router.query.source : '';
