@@ -318,3 +318,18 @@ requirements above. Credentials were not rotated or printed.
   Jobs, 2098/2186, and assisted marketplaces remains `OPERATOR_TEST_REQUIRED` /
   `LIVE_RUNTIME_VERIFICATION=BLOCKED_EXTERNAL` when the runtime namespace is
   unavailable; no false LIVE_VERIFIED claim is made.
+
+# 2026-09-10 - Vine description quality gate
+
+- Vine Amazon evidence normalization now retains brand, model, MPN, material,
+  color, size, product type, capacity, included components, and product
+  description alongside bullets/specifications instead of silently dropping
+  those fields before copy generation.
+- Vine rewrite copy no longer emits the `verified Amazon product record`
+  boilerplate. It produces buyer-facing evidence summaries and includes
+  available identity/specification/component facts.
+- eBay preflight now adds `DESCRIPTION_INADEQUATE` for Vine placeholder/title-
+  only copy when canonical source evidence is substantive, preventing such
+  drafts from being treated as review/publish ready. The two latest Vine batch
+  audit and listing 2141 production refresh remain runtime-dependent and are
+  not marked verified.

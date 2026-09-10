@@ -378,6 +378,14 @@ class MarketplacePreflightService:
             blockers.append(_issue("TITLE_MISSING", "Draft title is missing.", field="title", fix_hint="Enter a concise product title."))
         if not (listing.description or "").strip():
             blockers.append(_issue("DESCRIPTION_MISSING", "Draft description is missing.", field="description", fix_hint="Add the key item details, defects, and included accessories."))
+        elif str(getattr(listing, "source_type", "") or "").lower() == "amazon_vine":
+            description = " ".join(str(listing.description or "").split()).lower()
+            facts = (listing.source_metadata or {}).get("amazon_product_facts") if isinstance(listing.source_metadata, dict) else {}
+            substantive = len((facts or {}).get("feature_bullets") or []) + len((facts or {}).get("specifications") or {}) + sum(bool((facts or {}).get(key)) for key in ("brand", "model", "material", "capacity", "product_description"))
+            placeholder = "verified amazon product record" in description or "being prepared from" in description
+            title_only = len(description) < 180 and description.replace(".", "") == " ".join(str(listing.title or "").split()).lower().replace(".", "")
+            if placeholder or (substantive >= 2 and (len(description) < 180 or title_only)):
+                blockers.append(_issue("DESCRIPTION_INADEQUATE", "Vine description is placeholder or too brief for the available source evidence.", field="description", fix_hint="Regenerate original buyer-facing copy from the canonical Amazon facts."))
         listing_price = getattr(listing, "listing_price", None)
         suggested_price = getattr(listing, "suggested_price", None)
         if not (listing_price or suggested_price or pricing.get("current_price") or pricing.get("recommended_price")):

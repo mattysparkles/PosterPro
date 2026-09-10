@@ -90,6 +90,16 @@ def _clean_amazon_facts(raw: dict | None) -> dict:
     specifications = source.get("specifications") if isinstance(source.get("specifications"), dict) else {}
     return {
         "title": _sanitize_vine_text(source.get("title"))[:512],
+        "brand": _sanitize_vine_text(source.get("brand"))[:160],
+        "model": _sanitize_vine_text(source.get("model") or source.get("model_number"))[:160],
+        "mpn": _sanitize_vine_text(source.get("mpn") or source.get("part_number"))[:160],
+        "material": _sanitize_vine_text(source.get("material"))[:160],
+        "color": _sanitize_vine_text(source.get("color") or source.get("colour"))[:120],
+        "size": _sanitize_vine_text(source.get("size"))[:120],
+        "product_type": _sanitize_vine_text(source.get("product_type") or source.get("type"))[:160],
+        "capacity": _sanitize_vine_text(source.get("capacity"))[:120],
+        "included_components": [_sanitize_vine_text(value)[:200] for value in (source.get("included_components") or []) if _sanitize_vine_text(value)][:12],
+        "product_description": _sanitize_vine_text(source.get("product_description") or source.get("description"))[:2000],
         "current_price": _positive_price(source.get("current_price")),
         "feature_bullets": [_sanitize_vine_text(value)[:300] for value in (source.get("feature_bullets") or []) if _sanitize_vine_text(value)][:12],
         "specifications": {str(key).strip()[:100]: _sanitize_vine_text(value)[:300] for key, value in specifications.items() if str(key).strip() and _sanitize_vine_text(value)},
@@ -1606,14 +1616,26 @@ class VineImportService:
         facts = _clean_amazon_facts(amazon_facts)
         name = facts.get("title") or _sanitize_vine_text(item.product_name) or "New retail product"
         category, _ = self._resolve_category(item, amazon_facts=facts)
-        lines = [f"{name}.", "", "This new retail item is being prepared from its verified Amazon product record."]
+        intro_parts = [f"{name} is a new item for buyers seeking a dependable replacement or addition." ]
+        identity = [facts.get(key) for key in ("brand", "model", "product_type") if facts.get(key)]
+        if identity:
+            intro_parts.append(f"Product details identify it as {', '.join(identity)}.")
+        lines = [" ".join(intro_parts)]
         features = facts.get("feature_bullets") or []
         if features:
             lines.extend(["Key product details:", *[f"• {feature}" for feature in features[:5]]])
         specifications = facts.get("specifications") or {}
         useful_specs = list(specifications.items())[:6]
         if useful_specs:
-            lines.extend(["", "Specifications reported by the manufacturer:", *[f"• {key}: {value}" for key, value in useful_specs]])
+            lines.extend(["", "Specifications:", *[f"• {key}: {value}" for key, value in useful_specs]])
+        for label, key in (("Material", "material"), ("Color", "color"), ("Size", "size"), ("Capacity", "capacity")):
+            if facts.get(key): lines.append(f"• {label}: {facts[key]}")
+        if facts.get("included_components"):
+            lines.extend(["", f"Included components: {', '.join(facts['included_components'][:5])}."])
+        if facts.get("product_description") and not features and not useful_specs:
+            # Preserve facts while avoiding verbatim source prose.
+            summary = re.sub(r"\s+", " ", facts["product_description"]).strip()
+            if summary: lines.extend(["", f"Product overview: {summary[:900]}"])
         lines.extend(["", "Condition: New."])
         return "\n".join(lines)[:4000]
 
