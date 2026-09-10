@@ -379,6 +379,7 @@ def _run_live_intake_probe() -> None:
         db.close()
         app.state.live_intake_probe = probe_state
 
+PROCESS_STARTED_AT = datetime.now(UTC)
 app = FastAPI(title="PosterPro API")
 
 @app.get("/deployment")
@@ -389,7 +390,7 @@ def deployment_identity():
         commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True, timeout=2).strip()
     except Exception:
         commit = "unknown"
-    return {"backend_build_id": commit, "source_repo": str(repo), "build_timestamp": datetime.now(UTC).isoformat()}
+    return {"backend_build_id": commit, "source_repo": str(repo), "process_started_at": PROCESS_STARTED_AT.isoformat(), "environment": os.getenv("ENVIRONMENT", "unknown")}
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins(),
