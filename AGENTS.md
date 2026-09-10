@@ -1,5 +1,19 @@
 # PosterPro Deployment Log
 
+## 2026-09-09 - Vine cohort blocker convergence after image normalization
+
+### Verified
+- Fresh eBay preflight was rerun for all 119 listings in newest Vine batch 6 through the running backend database configuration.
+- Post-`49ff5aa` result: 116 `ready_with_warnings`, 3 blocked; counts reconcile to 119.
+- Shared evidence aliases now resolve department/style/material/shoe size/form factor and explicit iPhone/Samsung compatibility from canonical Vine facts and title evidence.
+- Safe category corrections were applied for marine hardware, microphones, lingerie, shears, ARGB controllers, and iPhone parts; quantity-zero Vine inventory rows normalize to quantity 1.
+- Image repair recovered valid media for listings 2093 and 1826; both now preflight with warnings only.
+
+### Remaining operator evidence blockers
+- 1652: only a 60x40 GIF is available, below eBay image policy; requires a usable product image.
+- 1084 and 1085: eBay category requires Item Height/Width/Length, but canonical Amazon facts contain no item/product dimensions; operator must supply measurements or confirm a semantically correct alternate category.
+- No marketplace publishing was performed.
+
 ## 2026-09-09 - Vine required-aspect enrichment
 
 - Fresh eBay checks identified the remaining blockers: 2179 lacks evidence for ottoman height/length/width; 2187 lacked Style/Type and is now ready with evidence-supported values; 2185 and 2191 are now ready with warnings.

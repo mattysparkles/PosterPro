@@ -865,6 +865,18 @@ def _derive_item_type(title: str) -> str | None:
         return "Tire Pressure Monitoring System"
     if "screen replacement" in lowered or "digitizer" in lowered or "lcd display" in lowered:
         return "Screen"
+    if "through wall microphone" in lowered or "contact microphone" in lowered:
+        return "Piezo/Crystal Microphone"
+    if "headset microphone" in lowered or "headset mic" in lowered:
+        return "Headset"
+    if "hair thinning shear" in lowered or "hair cutting shear" in lowered or "texturizing scissor" in lowered:
+        return "Hair Cutting Shears"
+    if "flex cable" in lowered or "power button cable" in lowered:
+        return "Replacement Part"
+    if "argb controller" in lowered or "rgb controller" in lowered:
+        return "Controller"
+    if "thong" in lowered or "lingerie" in lowered:
+        return "Panties"
     if "back glass" in lowered:
         return "Back Glass"
     if "battery" in lowered:
@@ -2042,6 +2054,17 @@ def _ebay_candidate_aspect_values(listing: Listing) -> dict[str, str]:
             value = next((item for item in value if str(item or "").strip()), "")
         text = str(value or "").strip()
         return "" if text.lower() in {"does not apply", "unknown", "n/a", "not applicable"} else text
+    def lookup(*keys: str) -> str:
+        """Read normalized/source facts using case-insensitive label aliases."""
+        pools = (specifics, fact_specs, facts, source)
+        wanted = {str(key).strip().lower() for key in keys}
+        for pool in pools:
+            for key, value in pool.items():
+                if str(key).strip().lower() in wanted:
+                    found = usable(value)
+                    if found:
+                        return found
+        return ""
     type_from_facts = next((usable(fact_specs.get(key)) for key in ("Type", "Product Type", "Item Type", "Product type")), "")
     candidates = {
         "brand": _derive_brand(listing),
@@ -2050,13 +2073,21 @@ def _ebay_candidate_aspect_values(listing: Listing) -> dict[str, str]:
         "upc": str(specifics.get("UPC") or source.get("upc") or "").strip(),
         "ean": str(specifics.get("EAN") or source.get("ean") or "").strip(),
         "isbn": str(specifics.get("ISBN") or source.get("isbn") or "").strip(),
-        "color": str(specifics.get("Color") or source.get("color") or "").strip(),
-        "size": str(specifics.get("Size") or source.get("size") or "").strip(),
-        "material": str(specifics.get("Material") or source.get("material") or "").strip(),
-        "type": usable(specifics.get("Type")) or usable(source.get("type")) or type_from_facts or _derive_item_type(title) or "",
-        "style": str(specifics.get("Style") or source.get("style") or "").strip(),
-        "compatible brand": str(specifics.get("Compatible Brand") or source.get("compatible_brand") or "").strip(),
-        "compatible model": str(specifics.get("Compatible Model") or source.get("compatible_model") or "").strip(),
+        "color": lookup("Color", "Colour", "Color Name"),
+        "size": lookup("Size", "Size Name"),
+        "material": lookup("Material", "Primary Material", "Material Type", "Outer Material"),
+        "type": lookup("Type", "Product Type", "Item Type", "Item Type Name") or type_from_facts or _derive_item_type(title) or "",
+        "style": lookup("Style", "Style Name", "Product Style", "Bottom Style"),
+        "department": lookup("Department", "Department Name") or ("Women" if re.search(r"\bwomens?\b|\bwoman\b|\bthong\b|\bpant(?:y|ies)\b|\blingerie\b|\bcrop top\b", title, re.I) else "Men" if re.search(r"\bmens?\b|\bman\b", title, re.I) else ""),
+        "upper material": lookup("Upper Material", "Outer Material", "Material Type"),
+        "us shoe size": lookup("US Shoe Size", "Shoe Size", "Size"),
+        "size type": lookup("Size Type") or ("Regular" if re.search(r"\b(thong|pant(?:y|ies)|lingerie|bra|top|dress|shirt)\b", title, re.I) else ""),
+        "form factor": lookup("Form Factor", "Microphone Form Factor") or ("Headset" if re.search(r"\bheadset\b", title, re.I) else "Piezo/Crystal Microphone" if re.search(r"through wall microphone|contact microphone", title, re.I) else ""),
+        "storage capacity": lookup("Storage Capacity"),
+        "screen size": lookup("Screen Size"),
+        "internet connectivity": lookup("Internet Connectivity", "Connectivity Technology"),
+        "compatible brand": lookup("Compatible Brand", "Brand Compatibility") or ("Apple" if re.search(r"\biphone\b|\bipad\b|\bmacbook\b", title, re.I) else "Samsung" if re.search(r"\bgalaxy\b", title, re.I) else ""),
+        "compatible model": lookup("Compatible Model", "Model Compatibility", "Compatible Devices"),
         "condition": str(condition.get("condition_bucket") or listing.condition or "").strip(),
         "condition description": str(condition.get("item_condition_notes") or listing.description or "").strip(),
     }

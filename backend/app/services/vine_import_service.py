@@ -491,6 +491,12 @@ class VineImportService:
             listing.status = ListingStatus.draft
             listing.needs_review = True
             listing.condition = "New"
+            # Vine quantity is seller inventory, not the product's pack count.
+            # Historical drafts occasionally carried zero and then failed eBay
+            # preflight; repair only non-positive import-managed quantities.
+            quantity_source = str((listing.marketplace_data or {}).get("quantity_source") or "").lower() if isinstance(listing.marketplace_data, dict) else ""
+            if int(listing.quantity or 0) <= 0 and quantity_source not in {"manual", "operator"}:
+                listing.quantity = 1
             listing.condition_data = derive_condition_data(
                 listing={"condition": listing.condition, "source_type": "amazon_vine"},
                 source_type="amazon_vine",
@@ -650,6 +656,9 @@ class VineImportService:
             category, category_source = self._resolve_category(item, amazon_facts=facts)
             pricing = self._pricing_from_amazon(item, amazon_facts=facts)
             listing.condition = "New"
+            quantity_source = str((listing.marketplace_data or {}).get("quantity_source") or "").lower() if isinstance(listing.marketplace_data, dict) else ""
+            if int(listing.quantity or 0) <= 0 and quantity_source not in {"manual", "operator"}:
+                listing.quantity = 1
             listing.category_suggestion = category
             if str(category).strip().isdigit():
                 listing.category_id = str(category).strip()
