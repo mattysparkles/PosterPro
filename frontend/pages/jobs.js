@@ -323,12 +323,16 @@ export default function JobsPage() {
   useEffect(() => {
     if (!activeJob?.job?.id) return undefined;
     let cancelled = false;
+    setDetailLoading(true);
+    setDetailError("");
     const hydrate = async () => {
       try {
         const detail = activeJob.type === "crosspost" ? await fetchCrosspostJob(activeJob.job.id) : await fetchMarketplaceImportJob(activeJob.job.id);
         if (!cancelled && detail) setActiveJob((current) => current && current.job.id === activeJob.job.id ? { ...current, job: detail } : current);
       } catch (error) {
-        if (!cancelled) toast.error(`Unable to load job details: ${error.message}`);
+        if (!cancelled) { setDetailError(error?.message || "The job details request failed."); toast.error(`Unable to load job details: ${error.message}`); }
+      } finally {
+        if (!cancelled) setDetailLoading(false);
       }
     };
     hydrate();
@@ -399,15 +403,6 @@ export default function JobsPage() {
     setDetailError("");
     setDetailLoading(true);
     setActiveJob({ type, job });
-    try {
-      const detail = type === "crosspost" ? await fetchCrosspostJob(job.id) : await fetchMarketplaceImportJob(job.id);
-      setActiveJob({ type, job: detail });
-    } catch (error) {
-      setDetailError(error?.message || "The job details request failed.");
-      toast.error(`Could not load job details: ${error.message}`);
-    } finally {
-      setDetailLoading(false);
-    }
     await updateRouteState({ tab: type === "import" ? "imports" : "crosspost", type, jobId: job.id });
   };
 
