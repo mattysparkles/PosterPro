@@ -125,10 +125,10 @@ def _listing_bucket_expression():
     return case(
         (or_(Listing.sold_at.is_not(None), Listing.quantity <= 0), "sold"),
         (custom_labels_text.contains("archived_vine"), "archived"),
-        (or_(Listing.processing_state == "needs_attention", Listing.processing_state == "blocked"), "needs_attention"),
-        (generic_caption, "needs_attention"),
         (or_(Listing.status == ListingStatus.FAILED, Listing.ebay_publish_status == "FAILED"), "failed"),
         (or_(Listing.status == ListingStatus.PUBLISHED, Listing.ebay_publish_status == "POSTED", Listing.ebay_listing_id.is_not(None)), "published"),
+        (or_(Listing.processing_state == "needs_attention", Listing.processing_state == "blocked"), "needs_attention"),
+        (generic_caption, "needs_attention"),
         (or_(Listing.restricted_review_required.is_(True), Listing.needs_review.is_(True)), "review"),
         (and_(
             Listing.status == ListingStatus.ready,
@@ -155,15 +155,15 @@ def _listing_bucket(listing: Listing) -> str:
         return "sold"
     if {"archived_vine", "archived_sold"} & labels:
         return "archived"
+    if str(listing.status).lower() == "error" or str(listing.ebay_publish_status or "").upper() == "FAILED":
+        return "failed"
     if str(listing.ebay_publish_status or "").upper() == "POSTED" or bool(listing.ebay_listing_id):
         return "published"
     if str(listing.processing_state or "").strip().lower() in {"needs_attention", "blocked"}:
         return "needs_attention"
     if reviewability.get("caption_like_title") or reviewability.get("bare_identifier_title"):
         return "needs_attention"
-    if str(listing.status).lower() == "error" or str(listing.ebay_publish_status or "").upper() == "FAILED":
-        return "failed"
-    if (listing.restricted_review_required or listing.needs_review) and not explicitly_approved:
+    if (listing.restricted_review_required or listing.needs_review) and not explicitly_approved and str(listing.status).lower() not in {"ready", "posted", "published"}:
         # Needs Review is strictly the publishable approval queue. A row that
         # still has a blocker belongs in Needs Attention so it cannot be
         # accidentally approved as if it were ready.
@@ -184,7 +184,11 @@ def _listing_bucket(listing: Listing) -> str:
             and str((by_marketplace.get(market) or {}).get("status") or "").strip().lower() in {"ready", "ready_with_warnings", "published"}
             for market in target_markets
         )
-        return "ready" if explicitly_approved and approved_target else "drafts"
+        if explicitly_approved and approved_target:
+            return "ready"
+        # An approved row whose fresh readiness has blockers must not remain
+        # in Ready: surface it in the operator repair queue instead.
+        return "needs_attention" if explicitly_approved else "drafts"
     if not bool(listing.image_urls or []):
         return "drafts"
     return "drafts"
@@ -1379,7 +1383,7 @@ def get_listings(
     needs_python_filtering = (
         (normalized_marketplace and normalized_marketplace != "all")
         or (normalized_readiness and normalized_readiness != "all")
-        or normalized_queue in {"drafts", "ready", "review", "needs_attention", "published", "failed"}
+        or normalized_queue in {"all", "drafts", "ready", "review", "needs_attention", "published", "failed"}
     )
 
     sort_map = {

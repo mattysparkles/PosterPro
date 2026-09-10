@@ -150,7 +150,7 @@ function isAmazonVineSource(listing) {
 }
 
 function isArchivedListing(listing) {
-  return (listing.custom_labels || []).some((label) => ['archived_vine', 'archived_sold'].includes(label)) || listing.status === 'archived';
+  return (listing.custom_labels || []).some((label) => ['archived_vine', 'archived_sold'].includes(String(label).toLowerCase())) || String(listing.status || '').toLowerCase() === 'archived';
 }
 
 function isSoldListing(listing) {
@@ -194,8 +194,14 @@ function getListingBucket(listing) {
   const explicitlyApproved = Boolean(listing?.source_metadata?.operator_approved_at);
   const reviewReady = isCompleteForOperatorReview(listing);
   if (isRecovery && !explicitlyApproved) return 'drafts';
-  if (listing.restricted_review_required || listing.needs_review) return reviewReady ? 'review' : 'attention';
-  if (listing.status === 'ready') return explicitlyApproved ? 'ready' : 'drafts';
+  if (listing.restricted_review_required || listing.needs_review) {
+    return String(listing.status || '').toLowerCase() === 'ready'
+      ? (explicitlyApproved && reviewReady ? 'ready' : 'attention')
+      : (reviewReady ? 'review' : 'attention');
+  }
+  if (String(listing.status || '').toLowerCase() === 'ready') {
+    return explicitlyApproved && reviewReady ? 'ready' : (explicitlyApproved ? 'attention' : 'drafts');
+  }
   if (reviewReady) return 'review';
   if (listing.status === 'draft') return 'drafts';
   return 'drafts';
@@ -226,9 +232,9 @@ function isCompleteForOperatorReview(listing) {
 function matchesTab(listing, tab) {
   if (tab === 'sold') return isSoldListing(listing);
   if (tab === 'archived') return isArchivedListing(listing);
+  if (isSoldListing(listing)) return false;
   if (isArchivedListing(listing)) return false;
   if (tab === 'all') return true;
-  if (isSoldListing(listing)) return false;
   if (tab === 'drafts') return getListingBucket(listing) === 'drafts';
   if (tab === 'review') return getListingBucket(listing) === 'review';
   if (tab === 'attention') return getListingBucket(listing) === 'attention';

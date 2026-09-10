@@ -635,6 +635,45 @@ async def test_listing_source_and_queue_filters_compose(async_client):
 
 
 @pytest.mark.anyio
+async def test_all_queue_excludes_sold_archived_and_review_requires_publishable_preflight(async_client):
+    register = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Queue Semantics Owner", "email": f"queue-semantics-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    active_review = seed_bucket_listing(
+        user_id, status=ListingStatus.draft, title="Ready review", description="Specific product", source_type="amazon_vine",
+        needs_review=True, marketplace_data={"targets": ["ebay"], "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "ready"}}}},
+    )
+    blocked_review = seed_bucket_listing(
+        user_id, status=ListingStatus.draft, title="Blocked review", description="Specific product", source_type="amazon_vine",
+        needs_review=True, marketplace_data={"targets": ["ebay"], "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "blocked", "blockers": [{"code": "ASPECT_REQUIRED"}]}}}},
+    )
+    approved_but_blocked = seed_bucket_listing(
+        user_id, status=ListingStatus.ready, title="Approved but blocked", description="Specific product", source_type="amazon_vine",
+        needs_review=False, source_metadata={"operator_approved_at": "2026-09-09T12:00:00Z"},
+        marketplace_data={"targets": ["ebay"], "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "blocked", "blockers": [{"code": "ASPECT_REQUIRED"}]}}}},
+    )
+    active_draft = seed_bucket_listing(user_id, status=ListingStatus.draft, title="Active draft", source_type="amazon_vine")
+    sold = seed_bucket_listing(user_id, status=ListingStatus.PUBLISHED, title="Sold item", source_type="amazon_vine", sold_at=datetime.utcnow(), quantity=0)
+    archived = seed_bucket_listing(user_id, status=ListingStatus.draft, title="Archived item", source_type="amazon_vine", custom_labels=["archived_vine"])
+
+    all_payload = (await async_client.get("/listings?queue=all&source_type=amazon_vine&page_size=50")).json()
+    all_ids = {row["id"] for row in all_payload["items"]}
+    assert {active_review, blocked_review, active_draft, approved_but_blocked}.issubset(all_ids)
+    assert sold not in all_ids and archived not in all_ids
+
+    review_payload = (await async_client.get("/listings?queue=review&source_type=amazon_vine&page_size=50")).json()
+    assert {row["id"] for row in review_payload["items"]} == {active_review}
+    attention_payload = (await async_client.get("/listings?queue=attention&source_type=amazon_vine&page_size=50")).json()
+    attention_ids = {row["id"] for row in attention_payload["items"]}
+    assert blocked_review in attention_ids and approved_but_blocked in attention_ids
+    ready_ids = {row["id"] for row in (await async_client.get("/listings?queue=ready&source_type=amazon_vine&page_size=50")).json()["items"]}
+    assert approved_but_blocked not in ready_ids
+
+
+@pytest.mark.anyio
 async def test_published_ebay_listing_queues_facebook_only(async_client, monkeypatch):
     register = await async_client.post(
         "/auth/register",
