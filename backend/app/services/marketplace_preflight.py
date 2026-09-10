@@ -10,6 +10,7 @@ import mimetypes
 from typing import Any
 
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.config import settings
 from app.models.enums import ListingStatus, MarketplaceName
@@ -662,6 +663,10 @@ class MarketplacePreflightService:
         )
         marketplace_data["marketplace_preflight"] = preflight_state
         listing.marketplace_data = marketplace_data
+        # JSON columns may already contain the same dict identity after a
+        # prior read; explicitly mark it dirty so fresh blocker state cannot
+        # be silently skipped on commit.
+        flag_modified(listing, "marketplace_data")
         db.add(listing)
         return cached
 
