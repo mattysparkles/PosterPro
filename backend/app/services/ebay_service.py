@@ -2014,6 +2014,8 @@ def _ebay_candidate_aspect_values(listing: Listing) -> dict[str, str]:
     facts = source.get("amazon_product_facts") if isinstance(source.get("amazon_product_facts"), dict) else {}
     fact_specs = facts.get("specifications") if isinstance(facts.get("specifications"), dict) else {}
     def usable(value: Any) -> str:
+        if isinstance(value, list):
+            value = next((item for item in value if str(item or "").strip()), "")
         text = str(value or "").strip()
         return "" if text.lower() in {"does not apply", "unknown", "n/a", "not applicable"} else text
     type_from_facts = next((usable(fact_specs.get(key)) for key in ("Type", "Product Type", "Item Type", "Product type")), "")
