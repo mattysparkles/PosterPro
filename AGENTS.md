@@ -18,6 +18,7 @@
 - Focused marketplace preflight/API suites now pass cleanly: 54 passed.
 - Queue classification now treats persisted preflight blockers as Needs Attention even when legacy rows lack `processing_state`.
 - Correction worker preserves substantive provider-generated descriptions and uses deterministic evidence fallback only when no usable provider copy is returned.
+- Queue visibility now treats an existing external eBay listing ID as Published even when a later revise attempt is marked failed; the failed job remains available in Jobs for diagnosis.
 
 ## 2026-09-09 - Vine required-aspect enrichment
 

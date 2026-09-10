@@ -125,8 +125,11 @@ def _listing_bucket_expression():
     return case(
         (or_(Listing.sold_at.is_not(None), Listing.quantity <= 0), "sold"),
         (custom_labels_text.contains("archived_vine"), "archived"),
-        (or_(Listing.status == ListingStatus.FAILED, Listing.ebay_publish_status == "FAILED"), "failed"),
         (or_(Listing.status == ListingStatus.PUBLISHED, Listing.ebay_publish_status == "POSTED", Listing.ebay_listing_id.is_not(None)), "published"),
+        # An existing external listing is authoritative for queue visibility;
+        # a later failed revise must not make an already-live item disappear
+        # from Published. The failed job remains visible in Jobs/details.
+        (or_(Listing.status == ListingStatus.FAILED, Listing.ebay_publish_status == "FAILED"), "failed"),
         (or_(Listing.processing_state == "needs_attention", Listing.processing_state == "blocked"), "needs_attention"),
         (generic_caption, "needs_attention"),
         (or_(Listing.restricted_review_required.is_(True), Listing.needs_review.is_(True)), "review"),
@@ -155,10 +158,10 @@ def _listing_bucket(listing: Listing) -> str:
         return "sold"
     if {"archived_vine", "archived_sold"} & labels:
         return "archived"
-    if str(listing.status).lower() == "error" or str(listing.ebay_publish_status or "").upper() == "FAILED":
-        return "failed"
     if str(listing.ebay_publish_status or "").upper() == "POSTED" or bool(listing.ebay_listing_id):
         return "published"
+    if str(listing.status).lower() == "error" or str(listing.ebay_publish_status or "").upper() == "FAILED":
+        return "failed"
     # Persisted preflight is authoritative even when an older worker did not
     # set processing_state. Keep blocked rows in the repair queue instead of
     # allowing them to masquerade as Needs Review.
