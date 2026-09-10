@@ -264,8 +264,22 @@ export default function JobsPage() {
     });
   };
 
+  const resetMetricLayout = () => {
+    setOverviewOrder(overviewMetricOrder);
+    setSystemOrder(systemMetricOrder);
+    setProcessingOrder(defaultProcessingOrder);
+    try {
+      if (user?.id) {
+        ["overview", "system", "processing"].forEach((section) => window.localStorage.removeItem(`posterpro.jobs.${section}-order.${user.id}`));
+      }
+    } catch {}
+  };
+
   const draggableMetric = (section, key, node) => (
-    <div key={key} draggable role="group" aria-label={`Reorder ${key} metric`} onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; setDraggingMetric(`${section}:${key}`); }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const [fromSection, from] = String(draggingMetric || "").split(":"); if (fromSection === section) moveSectionMetric(section, from, key); setDraggingMetric(null); }} onDragEnd={() => setDraggingMetric(null)} className="min-w-0 cursor-grab active:cursor-grabbing">{node}</div>
+    <div key={key} role="group" aria-label={`Reorder ${key} metric`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const [fromSection, from] = String(draggingMetric || "").split(":"); if (fromSection === section) moveSectionMetric(section, from, key); setDraggingMetric(null); }} className="relative min-w-0">
+      <button type="button" draggable data-drag-handle aria-label={`Drag ${key} metric`} title="Drag to reorder" onClick={(event) => event.stopPropagation()} onDragStart={(event) => { event.stopPropagation(); event.dataTransfer.effectAllowed = "move"; setDraggingMetric(`${section}:${key}`); }} onDragEnd={() => setDraggingMetric(null)} className="absolute right-3 top-3 z-10 cursor-grab rounded px-1 text-xs text-slate-400 hover:bg-slate-100 active:cursor-grabbing">⋮⋮</button>
+      {node}
+    </div>
   );
 
   const load = async () => {
@@ -565,11 +579,7 @@ export default function JobsPage() {
     },
   ];
 
-  const metricCard = (key, node) => (
-    <div key={key} draggable role="group" aria-label={`Reorder ${key} metric`} onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; setDraggingMetric(key); }} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; }} onDrop={(event) => { event.preventDefault(); moveMetric(draggingMetric, key); setDraggingMetric(null); }} onDragEnd={() => setDraggingMetric(null)} className="min-w-0 cursor-grab active:cursor-grabbing">
-      {node}
-    </div>
-  );
+  const metricCard = (key, node) => draggableMetric("processing", key, node);
   const processingMetrics = {
     worker: <MetricCard label="Worker health" value={loading && !processingHealth ? "—" : (processingHealth?.worker_health?.worker_count ?? "—")} detail={processingHealth?.worker_health?.worker_count ? "Celery worker ping responded." : "Awaiting worker health response."} onClick={() => router.push("/jobs?tab=crosspost")} />,
     queued: <MetricCard label="Queued" value={loading && !processingHealth ? "—" : (processingHealth?.backlog?.queued ?? "—")} detail="Eligible backlog waiting to be resumed." onClick={() => router.push("/listings?queue=drafts")} />,
@@ -630,6 +640,7 @@ export default function JobsPage() {
         description="Monitor import and cross-post execution across direct API, provider-assist, browser-assist, and manual handoff paths."
         actions={
           <div className="flex flex-wrap gap-2">
+            <Button variant="outline" onClick={resetMetricLayout}>Reset Layout</Button>
             <Button variant="outline" onClick={runBridgeTest} disabled={testingBridge}>
               {testingBridge ? "Testing bridge..." : "Test bridge"}
             </Button>
