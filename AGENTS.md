@@ -296,3 +296,25 @@ requirements above. Credentials were not rotated or printed.
   checking only a stale compatibility path. Added regression coverage for the
   normalized-image payload path; live cohort classification remains runtime
   dependent.
+
+# 2026-09-10 - Jobs detail feedback and notification management
+
+- Jobs detail drawers now enter an explicit loading state immediately and show
+  a visible error panel when a detail request fails; promise failures no longer
+  present as a dead Details button.
+- Jobs metric destinations were aligned with their displayed populations for
+  cross-post failures, active work, and separate Published/Sold counts. Saved
+  metric layouts now merge new cards safely instead of discarding valid prior
+  ordering.
+- Notifications now support paginated management, row/page selection, bulk
+  read/unread, dismiss, delete, selection clearing, and related listing/job
+  links. The backend bulk endpoint remains tenant-scoped and only deletes
+  notification records.
+- Admin listing diagnostics now include listing state and recent durable
+  marketplace jobs. `/deployment` reports a stable backend process start time
+  and commit identity rather than treating request time as build time.
+- Focused marketplace regression suites: 54 passed. Frontend production build
+  passed with existing lint warnings. Live interaction/runtime verification for
+  Jobs, 2098/2186, and assisted marketplaces remains `OPERATOR_TEST_REQUIRED` /
+  `LIVE_RUNTIME_VERIFICATION=BLOCKED_EXTERNAL` when the runtime namespace is
+  unavailable; no false LIVE_VERIFIED claim is made.
