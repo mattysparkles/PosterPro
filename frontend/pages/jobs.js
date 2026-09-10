@@ -209,6 +209,8 @@ export default function JobsPage() {
   const [retrying, setRetrying] = useState({});
   const [canceling, setCanceling] = useState({});
   const [activeJob, setActiveJob] = useState(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState("");
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [bridgeSmoke, setBridgeSmoke] = useState(null);
   const [testingBridge, setTestingBridge] = useState(false);
@@ -222,7 +224,7 @@ export default function JobsPage() {
   const [processingOrder, setProcessingOrder] = useState(defaultProcessingOrder);
   const [draggingMetric, setDraggingMetric] = useState(null);
   const overviewMetricOrder = ["crosspost", "imports", "queued", "failed"];
-  const systemMetricOrder = ["catalog", "drafts", "review", "published", "intake", "queued_work", "failed_work", "notices"];
+  const systemMetricOrder = ["catalog", "drafts", "review", "published", "sold", "intake", "queued_work", "failed_work", "notices"];
   const [overviewOrder, setOverviewOrder] = useState(overviewMetricOrder);
   const [systemOrder, setSystemOrder] = useState(systemMetricOrder);
 
@@ -233,7 +235,7 @@ export default function JobsPage() {
       if (Array.isArray(saved) && saved.length === defaultProcessingOrder.length && saved.every((key) => defaultProcessingOrder.includes(key))) setProcessingOrder(saved);
       const loadOrder = (section, defaults, setter) => {
         const value = JSON.parse(window.localStorage.getItem(`posterpro.jobs.${section}-order.${user.id}`) || "null");
-        if (Array.isArray(value) && value.length === defaults.length && value.every((key) => defaults.includes(key))) setter(value);
+        if (Array.isArray(value)) { const merged = [...value.filter((key) => defaults.includes(key)), ...defaults.filter((key) => !value.includes(key))]; setter(merged); }
       };
       loadOrder("overview", overviewMetricOrder, setOverviewOrder);
       loadOrder("system", systemMetricOrder, setSystemOrder);
@@ -354,8 +356,9 @@ export default function JobsPage() {
   const importJobs = jobsOverview.import_jobs || [];
   const crosspostJobs = jobsOverview.crosspost_jobs || [];
   const correctionJobs = jobsOverview.correction_jobs || [];
-  const visibleCrosspostJobs = statusFilter ? crosspostJobs.filter((job) => String(job.status || "").toLowerCase() === statusFilter) : crosspostJobs;
-  const visibleImportJobs = statusFilter ? importJobs.filter((job) => String(job.status || "").toLowerCase() === statusFilter) : importJobs;
+  const matchesStatus = (job) => statusFilter === "active" ? ["queued", "running"].includes(String(job.status || "").toLowerCase()) : String(job.status || "").toLowerCase() === statusFilter;
+  const visibleCrosspostJobs = statusFilter ? crosspostJobs.filter(matchesStatus) : crosspostJobs;
+  const visibleImportJobs = statusFilter ? importJobs.filter(matchesStatus) : importJobs;
   const systemStatus = jobsOverview.system_status || {};
   const metricValue = (value) => (loading && !jobsOverview.system_status ? "—" : (value ?? "—"));
 
@@ -393,18 +396,25 @@ export default function JobsPage() {
   };
 
   const openJobDetails = async (type, job) => {
+    setDetailError("");
+    setDetailLoading(true);
     setActiveJob({ type, job });
     try {
       const detail = type === "crosspost" ? await fetchCrosspostJob(job.id) : await fetchMarketplaceImportJob(job.id);
       setActiveJob({ type, job: detail });
     } catch (error) {
+      setDetailError(error?.message || "The job details request failed.");
       toast.error(`Could not load job details: ${error.message}`);
+    } finally {
+      setDetailLoading(false);
     }
     await updateRouteState({ tab: type === "import" ? "imports" : "crosspost", type, jobId: job.id });
   };
 
   const closeJobDetails = async () => {
     setActiveJob(null);
+    setDetailError("");
+    setDetailLoading(false);
     await updateRouteState({ tab: activeTab });
   };
 
@@ -610,17 +620,18 @@ export default function JobsPage() {
   const overviewMetrics = {
     crosspost: <MetricCard onClick={() => router.push("/jobs?tab=crosspost")} label="Cross-post jobs" value={loading && !crosspostJobs.length ? "—" : crosspostJobs.length} detail="Queued and completed outbound marketplace orchestration." />,
     imports: <MetricCard onClick={() => router.push("/jobs?tab=imports")} label="Import jobs" value={loading && !importJobs.length ? "—" : importJobs.length} detail="Normalized inbound marketplace imports and draft creation." />,
-    queued: <MetricCard onClick={() => router.push("/jobs?tab=crosspost&status=queued")} label="Queued / running" value={loading && !jobsOverview.system_status ? "—" : summary.queued} detail="Jobs still moving through workers or awaiting execution." />,
-    failed: <MetricCard onClick={() => router.push("/jobs?tab=crosspost&status=failed")} label="Failed" value={loading && !jobsOverview.system_status ? "—" : summary.failed} detail="Jobs that should be reviewed and potentially retried." />,
+    queued: <MetricCard onClick={() => router.push("/jobs?tab=crosspost&status=active")} label="Queued / running cross-post" value={loading && !jobsOverview.system_status ? "—" : crosspostJobs.filter((job) => ["queued", "running"].includes(String(job.status).toLowerCase())).length} detail="Cross-post jobs waiting or executing." />,
+    failed: <MetricCard onClick={() => router.push("/jobs?tab=crosspost&status=failed")} label="Failed cross-post" value={loading && !jobsOverview.system_status ? "—" : crosspostJobs.filter((job) => String(job.status).toLowerCase() === "failed").length} detail="Cross-post jobs that need review or retry." />,
   };
   const systemMetrics = {
     catalog: <MetricCard onClick={() => router.push("/listings?queue=all")} label="Visible catalog" value={metricValue(systemStatus.catalog_visible)} detail={`${metricValue(systemStatus.catalog_total)} total listings in the catalog.`} />,
     drafts: <MetricCard onClick={() => router.push("/listings?queue=drafts")} label="Draft backlog" value={metricValue(systemStatus.catalog_drafts)} detail="Listings still being refined automatically." />,
     review: <MetricCard onClick={() => router.push("/listings?queue=review")} label="Needs review" value={metricValue(systemStatus.catalog_review)} detail="Review-ready drafts awaiting approval." />,
-    published: <MetricCard onClick={() => router.push("/listings?queue=published")} label="Published / sold" value={metricValue((systemStatus.catalog_published ?? 0) + (systemStatus.catalog_sold ?? 0))} detail="Listings already live or no longer available." />,
+    published: <MetricCard onClick={() => router.push("/listings?queue=published")} label="Published" value={metricValue(systemStatus.catalog_published)} detail="Listings currently live and not sold." />,
+    sold: <MetricCard onClick={() => router.push("/listings?queue=sold")} label="Sold" value={metricValue(systemStatus.catalog_sold)} detail="Listings sold and no longer active." />,
     intake: <MetricCard onClick={() => router.push("/intake/queue")} label="Intake active" value={metricValue((systemStatus.intake_batches_active ?? 0) + (systemStatus.intake_photos_processing ?? 0))} detail="Batches and photos still moving through intake." />,
-    queued_work: <MetricCard onClick={() => router.push("/jobs?status=queued")} label="Queued work" value={metricValue((systemStatus.queued_jobs ?? 0) + (systemStatus.running_jobs ?? 0))} detail="Worker tasks currently waiting or executing." />,
-    failed_work: <MetricCard onClick={() => router.push("/jobs?status=failed")} label="Failed work" value={metricValue(systemStatus.failed_jobs)} detail="Jobs that need attention or retry." />,
+    queued_work: <MetricCard onClick={() => router.push("/jobs?status=active")} label="Queued / running work" value={metricValue((systemStatus.queued_jobs ?? 0) + (systemStatus.running_jobs ?? 0))} detail="Worker tasks currently waiting or executing." />,
+    failed_work: <MetricCard onClick={() => router.push("/jobs?tab=crosspost&status=failed")} label="Failed cross-post work" value={metricValue(crosspostJobs.filter((job) => String(job.status || '').toLowerCase() === 'failed').length)} detail="Cross-post jobs that need attention or retry." />,
     notices: <MetricCard onClick={() => router.push("/notifications")} label="Unread notices" value={metricValue(systemStatus.unread_notifications)} detail="Process updates waiting for review." />,
   };
 
@@ -785,6 +796,8 @@ export default function JobsPage() {
       >
         {activeJob ? (
           <div className="space-y-4">
+            {detailLoading ? <div role="status" className="rounded-[12px] border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800">Loading job details…</div> : null}
+            {detailError ? <div role="alert" className="rounded-[12px] border border-red-200 bg-red-50 p-4 text-sm text-red-800"><p className="font-semibold">Unable to load job details</p><p className="mt-1">{detailError}</p></div> : null}
             {(() => {
               const artifacts = extractJobArtifacts(activeJob.job);
               return artifacts.length ? (

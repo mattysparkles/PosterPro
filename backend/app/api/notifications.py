@@ -88,7 +88,7 @@ def bulk_notifications(
     current_user: User = Depends(get_current_user),
 ):
     action = str(payload.action or "").strip().lower()
-    if action not in {"read", "archive", "delete"}:
+    if action not in {"read", "unread", "archive", "delete"}:
         raise HTTPException(status_code=400, detail="Unsupported notification bulk action")
     query = db.query(IntakeNotification).filter(IntakeNotification.user_id == current_user.id)
     if not payload.select_all:
@@ -102,6 +102,8 @@ def bulk_notifications(
         for row in rows:
             if action == "read":
                 row.read_at = row.read_at or datetime.now(timezone.utc).replace(tzinfo=None)
+            elif action == "unread":
+                row.read_at = None
             else:
                 metadata = dict(row.metadata_json or {}) if isinstance(row.metadata_json, dict) else {}
                 metadata["archived"] = True
