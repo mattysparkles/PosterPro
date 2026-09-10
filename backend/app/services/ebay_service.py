@@ -881,6 +881,20 @@ def _derive_item_type(title: str) -> str | None:
         ("mount", "Mount"),
         ("replacement", "Replacement Part"),
         ("kit", "Kit"),
+        ("router", "Router"),
+        ("lamp", "Lamp"),
+        ("drill", "Nail Drill"),
+        ("razor", "Razor"),
+        ("trash bag", "Trash Bag"),
+        ("accessories bag", "Accessories Bag"),
+        ("pdu", "Power Distribution Unit"),
+        ("trainer", "Trainer"),
+        ("stool", "Stool"),
+        ("alarm", "Alarm"),
+        ("extender", "Extender"),
+        ("call button", "Call Button"),
+        ("well light", "Light"),
+        ("gel", "Gel"),
     ):
         if token in lowered:
             return value
