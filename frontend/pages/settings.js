@@ -3906,8 +3906,8 @@ export default function SettingsPage() {
             <p className="text-sm font-semibold text-[#101828]">Quick copy values</p>
             <div className="mt-3 space-y-2">
               <div className="rounded-[10px] border border-[#f2f4f7] bg-[#fcfcfd] p-3">
-                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">Extension path</p>
-                <p className="mt-1 break-all font-mono text-xs text-[#101828]">/opt/apps/posterpro/repo/browser-extension</p>
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">Install source</p>
+                <p className="mt-1 text-xs text-[#101828]">Use the Download latest extension ZIP button below, then load the extracted folder in your browser&apos;s extension manager.</p>
               </div>
               <div className="rounded-[10px] border border-[#f2f4f7] bg-[#fcfcfd] p-3">
                 <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">PosterPro URL</p>
@@ -3922,9 +3922,9 @@ export default function SettingsPage() {
             <Button
               type="button"
               variant="outline"
-              onClick={() => copyBrowserExtensionInstallText('/opt/apps/posterpro/repo/browser-extension', 'Extension path')}
+              onClick={() => copyBrowserExtensionInstallText('/api/browser-extension/download', 'Download endpoint')}
             >
-              Copy extension path
+              Copy download endpoint
             </Button>
             <Button
               type="button"
