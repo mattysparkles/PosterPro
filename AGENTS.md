@@ -241,3 +241,15 @@ requirements above. Credentials were not rotated or printed.
 - Live listing 2179 (ASIN B0H6WSH554) was refreshed from the original Amazon
   page: 24.04 x 24.04 x 14.57 inches. Fresh eBay preflight is now
   ``ready_with_warnings`` with no blockers. No marketplace publish was run.
+
+# 2026-09-10 - Mutually exclusive catalog queues
+
+- The Listings catalog now treats ``All Listings`` as the active catalog for
+  every source: published, ready, drafts, review, attention, and failed rows
+  are included while sold and archived rows are excluded.
+- Needs Review is limited to unpublished rows with a ready/ready-with-warnings
+  preflight; blocked review rows and approved rows whose readiness regressed are
+  surfaced in Needs Attention. Sold rows cannot appear in Published, and queue
+  classification is shared by the paginated API and the workspace.
+- Added regression coverage for Vine source composition, sold/archive
+  exclusion, blocked review routing, and approved-but-blocked rows.
