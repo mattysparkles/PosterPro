@@ -853,8 +853,8 @@ def test_bulk_publish_ready_dry_run_and_live_queue_behavior(db_session, monkeypa
 
     monkeypatch.setattr(
         marketplace_orchestrator.process_marketplace_crosspost_job_task,
-        "delay",
-        lambda job_id: called.append(job_id) or DummyTask(f"task-{job_id}"),
+        "apply_async",
+        lambda args, **_kwargs: called.append(args[0]) or DummyTask(f"task-{args[0]}"),
     )
 
     dry_run_report = marketplace_orchestrator.bulk_publish_ready(
@@ -943,8 +943,8 @@ def test_bulk_publish_ready_skips_already_queued_items(db_session, monkeypatch):
 
     monkeypatch.setattr(
         marketplace_orchestrator.process_marketplace_crosspost_job_task,
-        "delay",
-        lambda job_id: called.append(job_id) or DummyTask(f"task-{job_id}"),
+        "apply_async",
+        lambda args, **_kwargs: called.append(args[0]) or DummyTask(f"task-{args[0]}"),
     )
 
     report = marketplace_orchestrator.bulk_publish_ready(

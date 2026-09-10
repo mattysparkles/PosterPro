@@ -159,6 +159,18 @@ def _listing_bucket(listing: Listing) -> str:
         return "failed"
     if str(listing.ebay_publish_status or "").upper() == "POSTED" or bool(listing.ebay_listing_id):
         return "published"
+    # Persisted preflight is authoritative even when an older worker did not
+    # set processing_state. Keep blocked rows in the repair queue instead of
+    # allowing them to masquerade as Needs Review.
+    preflight_state = marketplace_data.get("marketplace_preflight") if isinstance(marketplace_data, dict) else {}
+    by_marketplace = preflight_state.get("by_marketplace") if isinstance(preflight_state, dict) else {}
+    if any(
+        isinstance(by_marketplace, dict)
+        and isinstance(by_marketplace.get(market), dict)
+        and bool((by_marketplace.get(market) or {}).get("blockers"))
+        for market in ("ebay", "facebook", "mercari", "poshmark", "vinted")
+    ):
+        return "needs_attention"
     if str(listing.processing_state or "").strip().lower() in {"needs_attention", "blocked"}:
         return "needs_attention"
     if reviewability.get("caption_like_title") or reviewability.get("bare_identifier_title"):
@@ -1343,15 +1355,10 @@ def get_listings(
         elif normalized_queue == "failed":
             queue_filters.append(or_(Listing.status == ListingStatus.FAILED, Listing.ebay_publish_status == "FAILED"))
         elif normalized_queue == "needs_attention":
-            # Attention is strictly an unpublished repair queue.  A listing
-            # that has already gone live belongs in Published even if an old
-            # processing blocker was left behind on the row.
-            queue_filters.append(and_(
-                or_(Listing.processing_state == "needs_attention", Listing.processing_state == "blocked"),
-                Listing.status != ListingStatus.PUBLISHED,
-                or_(Listing.ebay_publish_status.is_(None), Listing.ebay_publish_status != "POSTED"),
-                Listing.ebay_listing_id.is_(None),
-            ))
+            # Detailed preflight blockers live in JSON and are evaluated by
+            # _listing_bucket below; avoid a SQL predicate that would hide
+            # legacy rows whose processing_state was never populated.
+            pass
         elif normalized_queue == "published":
             queue_filters.append(or_(
                 Listing.status == ListingStatus.PUBLISHED,

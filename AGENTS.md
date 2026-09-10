@@ -14,6 +14,11 @@
 - 1084 and 1085: eBay category requires Item Height/Width/Length, but canonical Amazon facts contain no item/product dimensions; operator must supply measurements or confirm a semantically correct alternate category.
 - No marketplace publishing was performed.
 
+### Follow-up validation
+- Focused marketplace preflight/API suites now pass cleanly: 54 passed.
+- Queue classification now treats persisted preflight blockers as Needs Attention even when legacy rows lack `processing_state`.
+- Correction worker preserves substantive provider-generated descriptions and uses deterministic evidence fallback only when no usable provider copy is returned.
+
 ## 2026-09-09 - Vine required-aspect enrichment
 
 - Fresh eBay checks identified the remaining blockers: 2179 lacks evidence for ottoman height/length/width; 2187 lacked Style/Type and is now ready with evidence-supported values; 2185 and 2191 are now ready with warnings.

@@ -546,6 +546,7 @@ def test_reviewability_classifier_is_consistent_across_example_titles():
             status=ListingStatus.ready,
             needs_review=True,
             processing_state="complete",
+            marketplace_data={"marketplace_preflight": {"by_marketplace": {"ebay": {"status": "ready", "blockers": []}}}},
         )
         bucket = listings_routes._listing_bucket(dummy)
         assert bucket == ("needs_attention" if expected == "weak" else "review")

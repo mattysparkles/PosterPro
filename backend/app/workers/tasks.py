@@ -129,14 +129,10 @@ def process_listing_correction_jobs_task(limit: int = 10) -> dict[str, Any]:
                     # Vine copy must be rebuilt from the persisted product
                     # record on an explicit description correction, even when
                     # a prior fallback happens to resemble the current text.
-                    if str(listing.source_type or "").lower() == "amazon_vine" and isinstance(evidence, dict):
-                        from app.services.listing_ai import build_listing_description
-                        candidate_description = build_listing_description(
-                            title=str(evidence.get("title") or evidence.get("product_name") or listing.title or "Item"),
-                            item_specifics=listing.item_specifics or {},
-                            source_label="Amazon/Vine product facts",
-                            source_metadata={"recovery": {"identity": evidence}},
-                        )
+                    # Preserve a substantive provider-generated rewrite.  The
+                    # deterministic evidence fallback is only for providers
+                    # that return no usable copy; overwriting a valid result
+                    # made correction jobs appear to do nothing.
                     if not candidate_description and isinstance(evidence, dict):
                         from app.services.listing_ai import build_listing_description
                         candidate_description = build_listing_description(
