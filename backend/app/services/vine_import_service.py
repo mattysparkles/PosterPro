@@ -63,6 +63,24 @@ def _sanitize_vine_text(value: str | None) -> str:
     return raw.strip(" \t\r\n-")
 
 
+def description_source_similarity(description: str | None, source_prose: list[str] | None) -> float:
+    """Bounded token-overlap score for catching accidental source copying."""
+    candidate = set(re.findall(r"[a-z0-9]+", str(description or "").lower()))
+    if len(candidate) < 8:
+        return 0.0
+    best = 0.0
+    for prose in source_prose or []:
+        tokens = re.findall(r"[a-z0-9]+", str(prose or "").lower())
+        if len(tokens) < 8:
+            continue
+        source_tokens = set(tokens)
+        best = max(best, len(candidate & source_tokens) / max(1, len(source_tokens)))
+        normalized = " ".join(tokens)
+        if normalized and normalized in " ".join(re.findall(r"[a-z0-9]+", str(description or "").lower())):
+            best = 1.0
+    return round(best, 4)
+
+
 # These are marketplace-facing category paths, not eBay taxonomy IDs.  They
 # are intentionally narrow only where the product wording is decisive; an
 # uncertain product remains in a reviewable generic category instead of being
@@ -1632,10 +1650,9 @@ class VineImportService:
             if facts.get(key): lines.append(f"• {label}: {facts[key]}")
         if facts.get("included_components"):
             lines.extend(["", f"Included components: {', '.join(facts['included_components'][:5])}."])
-        if facts.get("product_description") and not features and not useful_specs:
-            # Preserve facts while avoiding verbatim source prose.
-            summary = re.sub(r"\s+", " ", facts["product_description"]).strip()
-            if summary: lines.extend(["", f"Product overview: {summary[:900]}"])
+        # Do not paste Amazon product-description prose into customer copy.
+        # Structured facts above remain usable; the provider rewrite path is
+        # responsible for paraphrasing source prose when it is available.
         lines.extend(["", "Condition: New."])
         return "\n".join(lines)[:4000]
 

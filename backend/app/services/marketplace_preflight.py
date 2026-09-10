@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import hashlib
 import mimetypes
+import re
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -382,10 +383,14 @@ class MarketplacePreflightService:
             description = " ".join(str(listing.description or "").split()).lower()
             facts = (listing.source_metadata or {}).get("amazon_product_facts") if isinstance(listing.source_metadata, dict) else {}
             substantive = len((facts or {}).get("feature_bullets") or []) + len((facts or {}).get("specifications") or {}) + sum(bool((facts or {}).get(key)) for key in ("brand", "model", "material", "capacity", "product_description"))
+            source_prose = [str((facts or {}).get("product_description") or "")] + [str(v) for v in ((facts or {}).get("feature_bullets") or [])]
+            source_copy = any(len(re.findall(r"[a-z0-9]+", prose.lower())) >= 12 and " ".join(re.findall(r"[a-z0-9]+", prose.lower())) in " ".join(re.findall(r"[a-z0-9]+", description)) for prose in source_prose if prose)
             placeholder = "verified amazon product record" in description or "being prepared from" in description
             title_only = len(description) < 180 and description.replace(".", "") == " ".join(str(listing.title or "").split()).lower().replace(".", "")
             if placeholder or (substantive >= 2 and (len(description) < 180 or title_only)):
                 blockers.append(_issue("DESCRIPTION_INADEQUATE", "Vine description is placeholder or too brief for the available source evidence.", field="description", fix_hint="Regenerate original buyer-facing copy from the canonical Amazon facts."))
+            elif source_copy:
+                blockers.append(_issue("DESCRIPTION_SOURCE_COPY_TOO_SIMILAR", "Vine description reproduces source prose too closely.", field="description", fix_hint="Rewrite from structured facts without copying source paragraphs."))
         listing_price = getattr(listing, "listing_price", None)
         suggested_price = getattr(listing, "suggested_price", None)
         if not (listing_price or suggested_price or pricing.get("current_price") or pricing.get("recommended_price")):
