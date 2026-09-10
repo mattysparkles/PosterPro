@@ -1,5 +1,16 @@
 # PosterPro Deployment Log
 
+## 2026-09-10 - Deployment identity and Jobs interaction follow-up
+
+### Findings
+- Systemd unit files point all PosterPro services at `/opt/apps/posterpro/repo`: frontend `WorkingDirectory=/opt/apps/posterpro/repo/frontend`, backend/worker/beat `WorkingDirectory=/opt/apps/posterpro/repo/backend`; Caddy routes `/api/*` and `/media/*` to 8030 and the browser routes to 3030.
+- The shell runtime namespace currently cannot inspect systemd PIDs or reach 8030/3030, so live component verification remains deployment/runtime-required rather than claimed complete.
+- Jobs source has one active route (`frontend/pages/jobs.js`) and its Cross-post Details button calls `fetchCrosspostJob` and opens the shared Drawer. Three metric sections were found; the first two were not draggable and several cards lacked drilldown handlers.
+
+### Fix staged
+- Added per-user persisted drag/reorder and click drilldown behavior to the overview and live-system metric grids, matching the existing processing-grid behavior. Frontend build compiles successfully; live deployment identity/interaction still requires runtime verification.
+- Item 2098 marketplace state could not be queried from this isolated shell; no publish/update mutation was performed.
+
 ## 2026-09-09 - Vine cohort blocker convergence after image normalization
 
 ### Verified

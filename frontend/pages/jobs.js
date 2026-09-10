@@ -221,12 +221,22 @@ export default function JobsPage() {
   const defaultProcessingOrder = ["worker", "queued", "processing", "retrying", "attention", "review", "complete", "stalled", "queue_summary"];
   const [processingOrder, setProcessingOrder] = useState(defaultProcessingOrder);
   const [draggingMetric, setDraggingMetric] = useState(null);
+  const overviewMetricOrder = ["crosspost", "imports", "queued", "failed"];
+  const systemMetricOrder = ["catalog", "drafts", "review", "published", "intake", "queued_work", "failed_work", "notices"];
+  const [overviewOrder, setOverviewOrder] = useState(overviewMetricOrder);
+  const [systemOrder, setSystemOrder] = useState(systemMetricOrder);
 
   useEffect(() => {
     if (!user?.id) return;
     try {
       const saved = JSON.parse(window.localStorage.getItem(`posterpro.jobs.processing-order.${user.id}`) || "null");
       if (Array.isArray(saved) && saved.length === defaultProcessingOrder.length && saved.every((key) => defaultProcessingOrder.includes(key))) setProcessingOrder(saved);
+      const loadOrder = (section, defaults, setter) => {
+        const value = JSON.parse(window.localStorage.getItem(`posterpro.jobs.${section}-order.${user.id}`) || "null");
+        if (Array.isArray(value) && value.length === defaults.length && value.every((key) => defaults.includes(key))) setter(value);
+      };
+      loadOrder("overview", overviewMetricOrder, setOverviewOrder);
+      loadOrder("system", systemMetricOrder, setSystemOrder);
     } catch { /* preference cache is optional */ }
   }, [user?.id]);
 
@@ -241,6 +251,22 @@ export default function JobsPage() {
       return next;
     });
   };
+
+  const moveSectionMetric = (section, from, to) => {
+    if (!from || !to || from === to) return;
+    const setter = section === "overview" ? setOverviewOrder : setSystemOrder;
+    setter((current) => {
+      const next = [...current]; const a = next.indexOf(from); const b = next.indexOf(to);
+      if (a < 0 || b < 0) return current;
+      next.splice(a, 1); next.splice(b, 0, from);
+      try { if (user?.id) window.localStorage.setItem(`posterpro.jobs.${section}-order.${user.id}`, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  };
+
+  const draggableMetric = (section, key, node) => (
+    <div key={key} draggable role="group" aria-label={`Reorder ${key} metric`} onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; setDraggingMetric(`${section}:${key}`); }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const [fromSection, from] = String(draggingMetric || "").split(":"); if (fromSection === section) moveSectionMetric(section, from, key); setDraggingMetric(null); }} onDragEnd={() => setDraggingMetric(null)} className="min-w-0 cursor-grab active:cursor-grabbing">{node}</div>
+  );
 
   const load = async () => {
     if (loadInFlight.current) return;
@@ -571,6 +597,22 @@ export default function JobsPage() {
       </div>
     ),
   };
+  const overviewMetrics = {
+    crosspost: <MetricCard onClick={() => router.push("/jobs?tab=crosspost")} label="Cross-post jobs" value={loading && !crosspostJobs.length ? "—" : crosspostJobs.length} detail="Queued and completed outbound marketplace orchestration." />,
+    imports: <MetricCard onClick={() => router.push("/jobs?tab=imports")} label="Import jobs" value={loading && !importJobs.length ? "—" : importJobs.length} detail="Normalized inbound marketplace imports and draft creation." />,
+    queued: <MetricCard onClick={() => router.push("/jobs?tab=crosspost&status=queued")} label="Queued / running" value={loading && !jobsOverview.system_status ? "—" : summary.queued} detail="Jobs still moving through workers or awaiting execution." />,
+    failed: <MetricCard onClick={() => router.push("/jobs?tab=crosspost&status=failed")} label="Failed" value={loading && !jobsOverview.system_status ? "—" : summary.failed} detail="Jobs that should be reviewed and potentially retried." />,
+  };
+  const systemMetrics = {
+    catalog: <MetricCard onClick={() => router.push("/listings?queue=all")} label="Visible catalog" value={metricValue(systemStatus.catalog_visible)} detail={`${metricValue(systemStatus.catalog_total)} total listings in the catalog.`} />,
+    drafts: <MetricCard onClick={() => router.push("/listings?queue=drafts")} label="Draft backlog" value={metricValue(systemStatus.catalog_drafts)} detail="Listings still being refined automatically." />,
+    review: <MetricCard onClick={() => router.push("/listings?queue=review")} label="Needs review" value={metricValue(systemStatus.catalog_review)} detail="Review-ready drafts awaiting approval." />,
+    published: <MetricCard onClick={() => router.push("/listings?queue=published")} label="Published / sold" value={metricValue((systemStatus.catalog_published ?? 0) + (systemStatus.catalog_sold ?? 0))} detail="Listings already live or no longer available." />,
+    intake: <MetricCard onClick={() => router.push("/intake/queue")} label="Intake active" value={metricValue((systemStatus.intake_batches_active ?? 0) + (systemStatus.intake_photos_processing ?? 0))} detail="Batches and photos still moving through intake." />,
+    queued_work: <MetricCard onClick={() => router.push("/jobs?status=queued")} label="Queued work" value={metricValue((systemStatus.queued_jobs ?? 0) + (systemStatus.running_jobs ?? 0))} detail="Worker tasks currently waiting or executing." />,
+    failed_work: <MetricCard onClick={() => router.push("/jobs?status=failed")} label="Failed work" value={metricValue(systemStatus.failed_jobs)} detail="Jobs that need attention or retry." />,
+    notices: <MetricCard onClick={() => router.push("/notifications")} label="Unread notices" value={metricValue(systemStatus.unread_notifications)} detail="Process updates waiting for review." />,
+  };
 
   return (
     <AppShell
@@ -599,23 +641,9 @@ export default function JobsPage() {
         }
       />
 
-      <section className="pp-jobs-metric-grid">
-        <MetricCard onClick={() => router.push("/jobs?tab=crosspost")} label="Cross-post jobs" value={loading && !jobsOverview.crosspost_jobs?.length ? "—" : crosspostJobs.length} detail="Queued and completed outbound marketplace orchestration." />
-        <MetricCard onClick={() => router.push("/jobs?tab=imports")} label="Import jobs" value={loading && !jobsOverview.import_jobs?.length ? "—" : importJobs.length} detail="Normalized inbound marketplace imports and draft creation." />
-        <MetricCard onClick={() => router.push("/jobs?tab=crosspost")} label="Queued / running" value={loading && !jobsOverview.system_status ? "—" : summary.queued} detail="Jobs still moving through workers or awaiting execution." />
-        <MetricCard onClick={() => router.push("/jobs?tab=crosspost&status=failed")} label="Failed" value={loading && !jobsOverview.system_status ? "—" : summary.failed} detail="Jobs that should be reviewed and potentially retried." />
-      </section>
+      <section className="pp-jobs-metric-grid">{overviewOrder.map((key) => draggableMetric("overview", key, overviewMetrics[key]))}</section>
       <SectionPanel title="Live system status" description={systemStatus.status_message || "A consolidated snapshot of catalog, intake, and queue activity."}>
-        <div className="pp-jobs-metric-grid">
-          <MetricCard label="Visible catalog" value={metricValue(systemStatus.catalog_visible)} detail={`${metricValue(systemStatus.catalog_total)} total listings in the catalog.`} />
-          <MetricCard label="Draft backlog" value={metricValue(systemStatus.catalog_drafts)} detail="Listings still being refined automatically." />
-          <MetricCard label="Needs review" value={metricValue(systemStatus.catalog_review)} detail="Review-ready drafts awaiting approval." />
-          <MetricCard label="Published / sold" value={metricValue((systemStatus.catalog_published ?? 0) + (systemStatus.catalog_sold ?? 0))} detail="Listings already live or no longer available." />
-          <MetricCard label="Intake active" value={metricValue((systemStatus.intake_batches_active ?? 0) + (systemStatus.intake_photos_processing ?? 0))} detail="Batches and photos still moving through intake." />
-          <MetricCard label="Queued work" value={metricValue((systemStatus.queued_jobs ?? 0) + (systemStatus.running_jobs ?? 0))} detail="Worker tasks currently waiting or executing." />
-          <MetricCard label="Failed work" value={metricValue(systemStatus.failed_jobs)} detail="Jobs that need attention or retry." />
-          <MetricCard label="Unread notices" value={metricValue(systemStatus.unread_notifications)} detail="Process updates waiting for review." />
-        </div>
+        <div className="pp-jobs-metric-grid">{systemOrder.map((key) => draggableMetric("system", key, systemMetrics[key]))}</div>
       </SectionPanel>
 
       <SectionPanel title="Processing health" description="Live backlog drain for Amazon Vine and recovered inventory. Processing state and review state are separate; complete can still also need review.">
