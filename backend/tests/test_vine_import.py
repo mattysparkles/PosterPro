@@ -25,7 +25,7 @@ from app.services.amazon_media import AmazonProductMediaProvider, _extract_amazo
 from app.services.amazon_product_discovery import AmazonProductDiscoveryService
 from app.services.listing_review import normalize_listing_images
 from app.services.listing_review import derive_shipping_profile
-from app.services.vine_import_service import VineImportService, _is_unsafe_vine_image
+from app.services.vine_import_service import VineImportService, _is_unsafe_vine_image, description_source_similarity
 from app.services.vine_parser import calculate_vine_eligibility, parse_vine_csv, parse_vine_pdf, parse_vine_xlsx
 from app.services.vine_policy import review_vine_product
 
@@ -45,6 +45,16 @@ def test_amazon_dimension_formats_are_normalized(label, value, expected):
     dimensions = facts["dimensions"]
     assert (dimensions["length"], dimensions["width"], dimensions["height"], dimensions["dimension_type"]) == expected
     assert dimensions["raw_text"] == value
+
+
+def test_vine_fallback_does_not_copy_source_product_prose():
+    item = VineImportItem(product_name="Nilight RV Bumper Tote Tank Carrier", asin="B0TEST2141")
+    source_sentence = "This carrier provides a secure and convenient way to transport a portable tote tank on a square RV bumper."
+    description = VineImportService()._generate_description(item, amazon_facts={"title": item.product_name, "product_description": source_sentence, "brand": "Nilight", "capacity": "15 gallons"})
+    assert source_sentence not in description
+    assert "Nilight" in description
+    assert "15 gallons" in description
+    assert description_source_similarity(description, [source_sentence]) < 1.0
 
 
 def _xlsx_sheet_xml(rows):
