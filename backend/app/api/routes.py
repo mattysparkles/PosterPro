@@ -164,7 +164,17 @@ def _listing_bucket(listing: Listing) -> str:
     if str(listing.status).lower() == "error" or str(listing.ebay_publish_status or "").upper() == "FAILED":
         return "failed"
     if (listing.restricted_review_required or listing.needs_review) and not explicitly_approved:
-        return "review"
+        # Needs Review is strictly the publishable approval queue. A row that
+        # still has a blocker belongs in Needs Attention so it cannot be
+        # accidentally approved as if it were ready.
+        preflight = marketplace_data.get("marketplace_preflight") if isinstance(marketplace_data, dict) else {}
+        by_marketplace = preflight.get("by_marketplace") if isinstance(preflight, dict) else {}
+        ready = any(
+            isinstance(by_marketplace, dict)
+            and str((by_marketplace.get(market) or {}).get("status") or "").lower() in {"ready", "ready_with_warnings", "published"}
+            for market in ("ebay", "facebook", "mercari", "poshmark", "vinted")
+        )
+        return "review" if ready else "needs_attention"
     if listing.status == ListingStatus.ready:
         preflight_state = marketplace_data.get("marketplace_preflight") if isinstance(marketplace_data, dict) else {}
         by_marketplace = preflight_state.get("by_marketplace") if isinstance(preflight_state, dict) else {}

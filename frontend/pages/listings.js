@@ -186,15 +186,15 @@ function getListingThumbnail(listing) {
 function getListingBucket(listing) {
   if (isSoldListing(listing)) return 'sold';
   if (isArchivedListing(listing)) return 'archived';
-  if (['needs_attention', 'blocked'].includes(String(listing?.processing_state || '').toLowerCase())) return 'attention';
   if (listing.status === 'error' || listing.ebay_publish_status === 'FAILED') return 'failed';
+  if (['needs_attention', 'blocked'].includes(String(listing?.processing_state || '').toLowerCase())) return 'attention';
   if (listing.status === 'archived') return 'archived';
   if (listing.ebay_publish_status === 'POSTED' || listing.ebay_listing_id) return 'published';
   const isRecovery = listing?.source_type === 'media_inventory_recovery';
   const explicitlyApproved = Boolean(listing?.source_metadata?.operator_approved_at);
   const reviewReady = isCompleteForOperatorReview(listing);
   if (isRecovery && !explicitlyApproved) return 'drafts';
-  if (listing.restricted_review_required || listing.needs_review) return reviewReady ? 'review' : 'drafts';
+  if (listing.restricted_review_required || listing.needs_review) return reviewReady ? 'review' : 'attention';
   if (listing.status === 'ready') return explicitlyApproved ? 'ready' : 'drafts';
   if (reviewReady) return 'review';
   if (listing.status === 'draft') return 'drafts';
