@@ -614,6 +614,11 @@ class MarketplacePreflightService:
         return {
             "marketplace": preflight.get("marketplace"),
             "status": status,
+            # Preserve the normalized issue objects, not only parallel code
+            # and message arrays. Consumers such as Draft Editor, Jobs, and
+            # admin diagnostics need field/fix metadata to explain a block.
+            "blockers": blockers,
+            "warnings": warnings,
             "blocker_count": len(blockers),
             "warning_count": len(warnings),
             "blocker_codes": [str(item.get("code") or "").strip() for item in blockers if str(item.get("code") or "").strip()],
