@@ -253,3 +253,15 @@ requirements above. Credentials were not rotated or printed.
   classification is shared by the paginated API and the workspace.
 - Added regression coverage for Vine source composition, sold/archive
   exclusion, blocked review routing, and approved-but-blocked rows.
+
+# 2026-09-10 - Marketplace image path normalization
+
+- eBay image payload construction now considers normalized `listing_images` as
+  well as the legacy `image_urls` compatibility field, resolving valid local
+  media through the existing public media URL path without duplicating
+  canonical facts.
+- Preflight trusts the publish-plan image validation when a usable public image
+  URL was produced, avoiding false `EBAY_IMAGE_URL_INVALID` blockers caused by
+  checking only a stale compatibility path. Added regression coverage for the
+  normalized-image payload path; live cohort classification remains runtime
+  dependent.

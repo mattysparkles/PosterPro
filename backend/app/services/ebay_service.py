@@ -337,7 +337,17 @@ def _image_meets_ebay_policy(path: str) -> bool:
 
 def _build_ebay_image_urls(listing: Listing) -> list[str]:
     image_urls: list[str] = []
-    for candidate in listing.image_urls or []:
+    candidates: list[str] = [str(value) for value in (listing.image_urls or []) if str(value or '').strip()]
+    # Modern listing_images is the canonical source for imported/recovered
+    # media. Older rows may have an empty image_urls compatibility column even
+    # though their normalized image records contain usable storage paths.
+    for image in (getattr(listing, "listing_images", None) or []):
+        if not isinstance(image, dict) or str(image.get("operator_state") or "").lower() == "rejected":
+            continue
+        candidate = image.get("storage_path") or image.get("url") or image.get("local_path")
+        if candidate:
+            candidates.append(str(candidate))
+    for candidate in candidates:
         if not _image_meets_ebay_policy(candidate):
             continue
         public_url = _to_public_image_url(candidate)

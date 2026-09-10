@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 from app.models.enums import EbayPublishStatus
 from app.models.models import Listing, User
 from app.services import ebay_service
@@ -37,6 +39,15 @@ class DummyAccount:
         self.id = 1
         self.access_token = "token"
         self.refresh_token = "refresh-token"
+
+
+def test_ebay_image_builder_uses_normalized_listing_images(monkeypatch):
+    listing = DummyListing()
+    listing.image_urls = []
+    listing.listing_images = [{"storage_path": "/media/vine/item-1.jpg", "operator_state": "approved"}]
+    monkeypatch.setattr(ebay_service, "_image_meets_ebay_policy", lambda _path: True)
+    monkeypatch.setattr(ebay_service.settings, "app_base_url", "https://posterpro.example")
+    assert ebay_service._build_ebay_image_urls(listing) == ["https://posterpro.example/media/vine/item-1.jpg"]
 
 
 class DummyDB:
