@@ -1520,6 +1520,62 @@ def test_vine_fingerprint_ignores_spreadsheet_row_position_and_distinguishes_asi
     assert service._vine_row_fingerprint(base) != service._vine_row_fingerprint(changed)
 
 
+def test_synthetic_new_vine_batch_is_quality_ready_on_first_pass(db_session, monkeypatch):
+    """Acceptance proof for the normal import path before repair beat work."""
+    user = User(email=f"vine-synthetic-{uuid4()}@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.flush()
+    batch = VineImportBatch(user_id=user.id, filename="synthetic-next.xlsx", source_type="xlsx")
+    db_session.add(batch)
+    db_session.flush()
+    asins = ["B000SYNTHA", "B000SYNTHB", "B000SYNTHC", "B000SYNTHD", "B000SYNTHE", "B000SYNTHF"]
+    names = ["Known Desk Lamp", "New Ceramic Mug", "Portable Pool Pump", "RV Organizer", "Durable Evidence Tool", "Image Missing Widget"]
+    items = [VineImportItem(batch_id=batch.id, user_id=user.id, asin=asin, product_name=name,
+                            order_number=f"SYN-{idx}", order_type="ORDER", estimated_tax_value=etv,
+                            eligibility_status="eligible") for idx, (asin, name, etv) in enumerate(zip(asins, names, [10, 20, 30, 45, 15, 12]), start=1)]
+    db_session.add_all(items)
+    db_session.commit()
+
+    def _discover(self, *, asin=None, **kwargs):  # noqa: ANN001
+        facts = {"title": names[asins.index(asin)], "brand": "Synthetic Brand",
+                 "feature_bullets": ["Durable construction", "Designed for everyday use"],
+                 "specifications": {"Material": "Steel"},
+                 "current_price": 12.50 if asin == asins[3] else 24.99,
+                 "product_type": "Pool Pump" if asin == asins[2] else "Accessory"}
+        return {"status": "fetched", "asin": asin, "title": facts["title"],
+                "source_page_url": f"https://amazon.example/dp/{asin}",
+                "images": [] if asin == asins[5] else [f"https://images.example/{asin}.jpg"],
+                "product_facts": facts}
+
+    def _repair(self, db, **kwargs):  # noqa: ANN001
+        return {"updated": 0, "listing_ids": kwargs.get("listing_ids") or []}
+
+    def _preflight(self, db, listing, marketplace):  # noqa: ANN001
+        blocked = not bool(listing.image_urls)
+        return {"listing_id": listing.id, "marketplace": marketplace,
+                "status": "blocked" if blocked else "ready_with_warnings",
+                "blockers": ([{"code": "EBAY_IMAGE_URL_INVALID", "field": "image_urls", "message": "No usable source image"}] if blocked else []),
+                "warnings": [] if blocked else [{"code": "EBAY_CATEGORY_METADATA_UNAVAILABLE", "message": "Synthetic taxonomy"}],
+                "last_checked_at": None, "payload_preview": {"payload": {}}}
+
+    monkeypatch.setattr(AmazonProductDiscoveryService, "discover_for_vine_item", _discover)
+    monkeypatch.setattr(VineImportService, "repair_vine_listing_images", _repair)
+    monkeypatch.setattr("app.services.marketplace_preflight.MarketplacePreflightService.preflight_listing", _preflight)
+
+    result = VineImportService().auto_build_batch_drafts(db_session, batch=batch, new_only=False, include_cancelled=True)
+    listings = db_session.query(Listing).filter(Listing.user_id == user.id, Listing.source_type == "amazon_vine").order_by(Listing.id).all()
+    assert len(listings) == 6
+    assert result["preflight_result"]["count"] == 6
+    assert all(listing.needs_review for listing in listings if listing.image_urls)
+    missing = next(listing for listing in listings if not listing.image_urls)
+    assert missing.processing_state == "needs_attention" and missing.needs_review is False
+    priced = next(listing for listing in listings if listing.title == "RV Organizer")
+    assert priced.listing_price == 12.50  # current Amazon price beats ETV
+    pool = next(listing for listing in listings if listing.title == "Portable Pool Pump")
+    assert "Pool" in (pool.category_suggestion or "")
+    assert len((pool.description or "").split()) >= 8
+
+
 def test_vine_duplicate_import_rows_are_skipped_until_prior_listing_exists(db_session):
     service = VineImportService()
     user = User(email=f"vine-dup-skip-{uuid4()}@example.com", role="owner", is_admin=True)

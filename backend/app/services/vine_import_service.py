@@ -1053,6 +1053,11 @@ class VineImportService:
             "since_order_date": VINE_IMAGE_BACKFILL_CUTOFF.isoformat(),
         }
 
+        # The normal import path must leave drafts correctly classified on its
+        # first pass.  Background image repair remains a safety net, not the
+        # source of lifecycle truth.
+        preflight_result = self.preflight_batch_drafts(db, batch=batch, listing_ids=draft_listing_ids)
+
         result = {
             "batch_id": batch.id,
             "processed_item_ids": target_item_ids,
@@ -1061,6 +1066,7 @@ class VineImportService:
             "duplicates_skipped": duplicate_count,
             "draft_result": draft_result,
             "repair_result": repair_result,
+            "preflight_result": preflight_result,
         }
         self._update_batch_stats_json(
             db,
@@ -1074,10 +1080,58 @@ class VineImportService:
                 "auto_build_repair_updated": int(repair_result.get("updated") or 0),
                 "auto_build_bridge_refetched": int(repair_result.get("bridge_refetched") or 0),
                 "auto_build_bridge_failed": int(repair_result.get("bridge_failed") or 0),
+                "auto_build_preflighted": int(preflight_result.get("count") or 0),
             },
             commit=True,
         )
         return result
+
+    def preflight_batch_drafts(self, db: Session, *, batch: VineImportBatch, listing_ids: list[int] | None = None) -> dict:
+        """Run authoritative eBay preflight before an import is returned.
+
+        Image repair remains a recovery path; import-time lifecycle promotion is
+        based on the fresh marketplace result, never on image presence alone.
+        """
+        from app.services.marketplace_preflight import MarketplacePreflightService
+
+        query = (
+            select(Listing)
+            .join(VineImportItem, VineImportItem.listing_id == Listing.id)
+            .where(VineImportItem.batch_id == batch.id)
+        )
+        if listing_ids:
+            query = query.where(Listing.id.in_(listing_ids))
+        listings = db.execute(query).scalars().unique().all()
+        service = MarketplacePreflightService()
+        results = []
+        for listing in listings:
+            try:
+                preflight = service.preflight_listing(db, listing, MarketplaceName.ebay.value)
+                service.cache_preflight_summary(db, listing, preflight)
+                blockers = list(preflight.get("blockers") or [])
+                if blockers:
+                    listing.processing_state = "needs_attention"
+                    listing.needs_review = False
+                    listing.processing_blocking_reason = str(
+                        blockers[0].get("message") if isinstance(blockers[0], dict) else blockers[0]
+                    )
+                    listing.processing_error_stage = "preflight"
+                else:
+                    listing.processing_state = "complete"
+                    listing.needs_review = True
+                    listing.processing_blocking_reason = None
+                    listing.processing_error_stage = None
+                db.add(listing)
+                results.append({"listing_id": listing.id, "status": preflight.get("status"), "blockers": blockers})
+            except Exception as exc:  # keep import durable; expose exact retry state
+                listing.processing_state = "needs_attention"
+                listing.needs_review = False
+                listing.processing_blocking_reason = f"Fresh eBay preflight failed: {exc}"
+                listing.processing_error_stage = "preflight"
+                db.add(listing)
+                results.append({"listing_id": listing.id, "status": "blocked", "blockers": [{"code": "EBAY_PREFLIGHT_FAILED", "message": str(exc)}]})
+        db.commit()
+        return {"batch_id": batch.id, "count": len(results), "results": results}
 
     def export_problem_rows_csv(self, items: list[VineImportItem]) -> str:
         output = io.StringIO()

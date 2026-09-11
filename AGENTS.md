@@ -374,3 +374,16 @@ requirements above. Credentials were not rotated or printed.
   drafts from being treated as review/publish ready. The two latest Vine batch
   audit and listing 2141 production refresh remain runtime-dependent and are
   not marked verified.
+
+# 2026-09-11 - Vine import first-pass acceptance
+
+- Normal Vine batch construction now runs fresh eBay preflight after source
+  enrichment and image repair, before returning the import result. Blocker-free
+  rows become `complete`/Needs Review; any fresh blocker is persisted and routed
+  to Needs Attention with its exact reason. The scheduled repair task remains a
+  safety net and is not required for ordinary first-pass classification.
+- Added a synthetic six-row acceptance regression covering source-backed
+  descriptions, category derivation, current-price-over-ETV precedence, clean
+  review promotion, and exact missing-image attention routing. Full relevant
+  Vine/marketplace suites pass (`110 passed`); live marketplace publication was
+  not invoked.
