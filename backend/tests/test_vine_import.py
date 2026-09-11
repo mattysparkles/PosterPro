@@ -857,6 +857,19 @@ def test_shared_shipping_policy_charges_buyer_below_ten_dollars():
     assert regular["free_shipping"] is True
 
 
+def test_vine_pricing_prefers_current_amazon_price_over_etv():
+    item = VineImportItem(product_name="Example", estimated_tax_value=46.82, asin="B000000000")
+    pricing = VineImportService()._pricing_from_amazon(item, amazon_facts={"current_price": 41.0})
+    assert pricing["listing_price"] == 41.0
+    assert pricing["price_source"] == "amazon_current_price"
+
+
+def test_vine_normalized_facts_detects_substantive_evidence():
+    from app.services.vine_import_service import _facts_have_content
+    assert _facts_have_content({"current_price": 41.0})
+    assert not _facts_have_content({"title": "", "feature_bullets": [], "specifications": {}})
+
+
 def test_repair_vine_listing_images_replaces_unsafe_sources_with_amazon_cache(db_session, monkeypatch, tmp_path):
     user = User(email=f"vine-repair-{uuid4()}@example.com", role="owner", is_admin=True)
     db_session.add(user)
