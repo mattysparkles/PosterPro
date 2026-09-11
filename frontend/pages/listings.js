@@ -186,10 +186,13 @@ function getListingThumbnail(listing) {
 function getListingBucket(listing) {
   if (isSoldListing(listing)) return 'sold';
   if (isArchivedListing(listing)) return 'archived';
+  if (listing.ebay_publish_status === 'POSTED' || listing.ebay_listing_id) return 'published';
   if (listing.status === 'error' || listing.ebay_publish_status === 'FAILED') return 'failed';
   if (['needs_attention', 'blocked'].includes(String(listing?.processing_state || '').toLowerCase())) return 'attention';
   if (listing.status === 'archived') return 'archived';
-  if (listing.ebay_publish_status === 'POSTED' || listing.ebay_listing_id) return 'published';
+  const preflight = listing?.marketplace_data?.marketplace_preflight;
+  const byMarketplace = preflight?.by_marketplace && typeof preflight.by_marketplace === 'object' ? preflight.by_marketplace : {};
+  if (Object.values(byMarketplace).some((entry) => Array.isArray(entry?.blockers) && entry.blockers.length > 0)) return 'attention';
   const isRecovery = listing?.source_type === 'media_inventory_recovery';
   const explicitlyApproved = Boolean(listing?.source_metadata?.operator_approved_at);
   const reviewReady = isCompleteForOperatorReview(listing);
@@ -239,8 +242,8 @@ function matchesTab(listing, tab) {
   if (tab === 'review') return getListingBucket(listing) === 'review';
   if (tab === 'attention') return getListingBucket(listing) === 'attention';
   if (tab === 'ready') return getListingBucket(listing) === 'ready';
-  if (tab === 'published') return Boolean(listing.ebay_publish_status === 'POSTED' || listing.ebay_listing_id);
-  if (tab === 'failed') return Boolean(listing.status === 'error' || listing.ebay_publish_status === 'FAILED');
+  if (tab === 'published') return getListingBucket(listing) === 'published';
+  if (tab === 'failed') return getListingBucket(listing) === 'failed';
   return false;
 }
 
