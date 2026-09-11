@@ -1856,6 +1856,14 @@ class VineImportService:
             specifics[name] = _clip_specific_value(text)
             provenance[name] = source
 
+        # ``Does Not Apply`` was historically persisted as a placeholder for
+        # Type.  It must not block the evidence/category-aware resolver from
+        # deriving a product family from the stable title when that family is
+        # meaningful (the eBay mapper validates it against the category).
+        if str(specifics.get("Type") or "").strip().lower() in {"does not apply", "unknown", "n/a"}:
+            specifics.pop("Type", None)
+            provenance.pop("Type", None)
+
         set_specific("Brand", item.brand, "existing")
         set_specific("Type", item.category or item.detected_category_guess or _derive_item_type(title_text), "derived")
         set_specific("Model", item.asin or None, "derived")
