@@ -1,5 +1,18 @@
 # PosterPro Deployment Log
 
+## 2026-09-11 - Vine evidence preservation and description quality correction
+
+### Current truth
+- Vine quality tranche remains in progress; the two newest batches have not yet
+  reached a clean all-row audit.
+- Fixed a shared regression where transient Amazon fetch failures erased durable
+  facts, causing boilerplate descriptions and stale ETV pricing to return.
+- Current Amazon page price now takes precedence over Vine ETV when available.
+- Listing 2141 was corrected from verified source evidence: Amazon price $41.00,
+  RV Cargo Racks category path, 15/21/28/36 gallon capacity, model 91179B,
+  dimensions and original factual description; no marketplace publish occurred.
+- Runtime backend health is currently healthy (`database_ready=true`).
+
 ## 2026-09-10 - Deployment identity and Jobs interaction follow-up
 
 ### Findings
