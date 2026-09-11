@@ -51,7 +51,7 @@ export default function AuthPage({ title, subtitle, children }) {
           color: '#142033',
         }}
       >
-      <div className="mx-auto flex min-h-[calc(100vh-4rem)] w-full max-w-4xl items-center">
+      <div className="mx-auto flex min-h-[calc(100vh-4rem)] w-full max-w-xl items-center">
         <div
           className="w-full overflow-hidden rounded-[32px] border shadow-[0_24px_80px_rgba(15,23,42,0.12)]"
           style={{
@@ -66,8 +66,8 @@ export default function AuthPage({ title, subtitle, children }) {
             </Link>
           </div>
 
-          <div className="grid gap-0 lg:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)]">
-            <aside className="px-6 py-8 sm:px-8 sm:py-10" style={{ background: 'linear-gradient(180deg, #f8fbff 0%, #eef4fb 100%)' }}>
+          <div className="grid gap-0">
+            <aside className="hidden">
               <div className="inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.2em]" style={{ borderColor: '#dbe7f6', background: '#ffffff', color: '#355782' }}>
                 <CheckCircle2 size={13} />
                 Secure operator workspace
