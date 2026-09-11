@@ -210,6 +210,19 @@ function getListingBucket(listing) {
   return 'drafts';
 }
 
+function formatListingBucket(bucket) {
+  return ({
+    review: 'Needs Review',
+    attention: 'Needs Attention',
+    drafts: 'Drafts',
+    ready: 'Ready',
+    published: 'Published',
+    sold: 'Sold',
+    archived: 'Archived',
+    failed: 'Failed',
+  }[bucket] || String(bucket || 'Drafts').replaceAll('_', ' '));
+}
+
 function isCompleteForOperatorReview(listing) {
   const readiness = getReadinessSummary(listing);
   const qualityReady = Boolean(listing?.quality_summary?.ready_for_publish_queue);
@@ -2041,7 +2054,7 @@ export default function ListingsPage() {
                     <div className="min-w-0 flex-1">
                       <p className="line-clamp-2 text-sm font-semibold text-[#101828]">{getListingTitle(listing)}</p>
                       <p className="mt-1 text-base font-bold text-[#101828]">${getListingPrice(listing)}</p>
-                      <p className="mt-1 text-xs text-[#667085]">#{listing.id} · {getListingBucket(listing).replaceAll('_', ' ')}</p>
+                      <p className="mt-1 text-xs text-[#667085]">#{listing.id} · {formatListingBucket(getListingBucket(listing))}</p>
                     </div>
                   </div>
                   <div className="mt-3 flex flex-wrap gap-1.5">
