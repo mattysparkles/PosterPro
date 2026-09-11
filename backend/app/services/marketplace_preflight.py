@@ -478,9 +478,10 @@ class MarketplacePreflightService:
             plan = _run_async_sync(build_ebay_publish_plan(listing, db, allow_create_policies=False))
         except Exception as exc:
             translated = translate_marketplace_error("ebay", exc)
+            retryable_warning = bool(translated.get("retryable")) and str(translated.get("severity") or "").lower() == "warning"
             return {
-                "blockers": [translated],
-                "warnings": [],
+                "blockers": [] if retryable_warning else [translated],
+                "warnings": [translated] if retryable_warning else [],
                 "payload_preview": {},
                 "policy_summary": {
                     "payment_policy_id": "",
