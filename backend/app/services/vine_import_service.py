@@ -1678,7 +1678,8 @@ class VineImportService:
         facts = _clean_amazon_facts(amazon_facts)
         name = facts.get("title") or _sanitize_vine_text(item.product_name) or "New retail product"
         category, _ = self._resolve_category(item, amazon_facts=facts)
-        intro_parts = [f"{name} is a new item for buyers seeking a dependable replacement or addition." ]
+        # Start with the product identity; do not add generic resale filler.
+        intro_parts = [name]
         identity = [facts.get(key) for key in ("brand", "model", "product_type") if facts.get(key)]
         if identity:
             intro_parts.append(f"Product details identify it as {', '.join(identity)}.")
