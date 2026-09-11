@@ -1,5 +1,30 @@
 # PosterPro Deployment Log
 
+## 2026-09-11 - Vine quality lifecycle reconciliation
+
+### Current truth
+- Reconciled the live operator Vine catalog (1,061 listings): 1,043 now have
+  durable Amazon-derived metadata, `processing_state=complete`, and
+  `needs_review=true`; 18 remain explicitly `needs_attention` because the
+  source/media pipeline has no usable image for the marketplace payload.
+- The quality worker now reconciles both `VineImportItem.listing_id` and the
+  legacy `inventory_item_id` association, so historical rows cannot remain in
+  transient `queued` state after repair.
+- Listing 2141 remains corrected from durable source evidence: Amazon current
+  price $41.00 (ETV $46.82 fallback), New condition, RV cargo-rack category,
+  capacity `15, 21, 28, and 36 gallon`, and original factual description.
+- Placeholder/source-copy description audit across the two newest batches found
+  zero remaining placeholder descriptions after repair. The 18 media failures
+  remain concrete, per-listing image blockers; no unsupported marketplace data
+  was fabricated to force readiness.
+
+### Validation
+- Production-safe Vine quality worker rerun: `updated=1768`, `missing_facts=0`.
+- Focused Vine regression tests: `2 passed` (discovery image compatibility and
+  fact-driven rewrite); marketplace preflight/API suites were previously green.
+- Backend, worker, and beat restarted successfully; `/health` reports
+  `database_ready=true`.
+
 ## 2026-09-11 - Vine evidence preservation and description quality correction
 
 ### Current truth
