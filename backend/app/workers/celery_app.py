@@ -69,6 +69,10 @@ celery_app.conf.update(
             "task": "repair_recent_vine_images",
             "schedule": crontab(minute="*/5"),
         },
+        "repair-vine-listing-quality-every-15m": {
+            "task": "repair_vine_listing_quality",
+            "schedule": crontab(minute="*/15"),
+        },
         "resume-waiting-ai-work-every-minute": {
             "task": "resume_waiting_ai_work",
             "schedule": crontab(minute="*"),

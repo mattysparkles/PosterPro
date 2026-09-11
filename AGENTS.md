@@ -12,6 +12,9 @@
   RV Cargo Racks category path, 15/21/28/36 gallon capacity, model 91179B,
   dimensions and original factual description; no marketplace publish occurred.
 - Runtime backend health is currently healthy (`database_ready=true`).
+- Added a durable `repair_vine_listing_quality` worker/beat task that revisits
+  every active Vine listing from stored evidence without publishing; rows with
+  missing source facts remain explicitly counted for source retrieval follow-up.
 
 ## 2026-09-10 - Deployment identity and Jobs interaction follow-up
 

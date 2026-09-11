@@ -362,6 +362,30 @@ def repair_recent_vine_images_task(self, user_id: int | None = None, chunk_size:
         db.close()
 
 
+@celery_app.task(name="repair_vine_listing_quality")
+def repair_vine_listing_quality_task(user_id: int | None = None, chunk_size: int = 50) -> dict[str, Any]:
+    """Continuously reconcile every active Vine listing from durable evidence.
+
+    This is deliberately separate from image repair: it regenerates descriptions,
+    prices, categories, condition and item specifics for rows that previously
+    landed in Attention/Failed, without creating marketplace listings.
+    """
+    db = SessionLocal()
+    try:
+        service = VineImportService()
+        users = [int(user_id)] if user_id is not None else [int(row[0]) for row in db.execute(select(Listing.user_id).where(Listing.source_type == "amazon_vine").distinct()).all()]
+        totals = {"users": users, "updated": 0, "missing_facts": 0}
+        for uid in users:
+            ids = [int(row[0]) for row in db.execute(select(Listing.id).where(Listing.user_id == uid, Listing.source_type == "amazon_vine").order_by(Listing.id)).all()]
+            for offset in range(0, len(ids), max(1, int(chunk_size or 50))):
+                result = service.refresh_vine_listing_metadata(db, user_id=uid, listing_ids=ids[offset:offset + max(1, int(chunk_size or 50))])
+                totals["updated"] += int(result.get("updated") or 0)
+                totals["missing_facts"] += int(result.get("missing_facts") or 0)
+        return totals
+    finally:
+        db.close()
+
+
 @celery_app.task(name="resume_incomplete_listings", bind=True, max_retries=None)
 def resume_incomplete_listings_task(self, user_id: int | None = None, limit: int = 25, dry_run: bool = False) -> dict[str, Any]:
     """Resume incomplete listing-level work until the backlog drains."""
