@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, UTC
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -107,9 +108,14 @@ def _serialize_photo(row: IntakePhoto, *, compact: bool = False) -> dict[str, An
     if compact:
         metadata = {
             key: metadata.get(key)
-            for key in ("classification", "classification_source", "official_slate_id", "slate_provenance", "title", "notes", "box_id", "location")
+            for key in ("classification", "classification_source", "official_slate_id", "slate_provenance", "timeline_primary", "timeline_deleted", "title", "notes", "box_id", "location")
             if metadata.get(key) is not None
         }
+    local_path = str(row.local_path or "")
+    # Older Google Photos imports retained an absolute path from a previous
+    # storage root. If that file is gone, keep the provider URL usable so the
+    # timeline does not render a blank thumbnail while media is repaired.
+    display_path = local_path if Path(local_path).is_file() else (row.downloaded_url or local_path)
     return {
         "id": row.id,
         "user_id": row.user_id,
@@ -131,8 +137,8 @@ def _serialize_photo(row: IntakePhoto, *, compact: bool = False) -> dict[str, An
         "item_id": row.item_id,
         "batch_id": row.batch_id,
         "slate_id": (row.metadata_json or {}).get("official_slate_id"),
-        "thumbnail_url": service.public_media_url(row.local_path),
-        "display_url": service.public_media_url(row.local_path),
+        "thumbnail_url": service.public_media_url(display_path),
+        "display_url": service.public_media_url(display_path),
         "metadata_json": metadata,
         "classification": metadata.get("classification") or row.image_type,
         "classification_source": metadata.get("classification_source"),
@@ -1049,6 +1055,7 @@ def intake_timeline(
     # requested boundary. They are not marketplace photos, but remain visible
     # with the same edit/voice-note links as any official Slate.
     slates = db.execute(select(IntakeSlate).where(IntakeSlate.user_id == current_user.id)).scalars().all()
+    slates = [slate for slate in slates if not bool((slate.metadata_json or {}).get("timeline_deleted"))]
     linked_photo_by_slate = {
         (row["photo"].metadata_json or {}).get("official_slate_id"): row["photo"]
         for row in timeline
@@ -1159,6 +1166,45 @@ def classify_timeline_assets(payload: dict, db: Session = Depends(get_db), curre
     db.add(IntakeReconciliationEvent(user_id=current_user.id, event_type="timeline_classification_change", status="completed", details_json={"before": before, "after": {"classification": classification, "photo_ids": ids}, "scope": "selected"}))
     db.commit()
     return {"updated": len(rows), "classification": classification, "official_slate_ids": [(row.metadata_json or {}).get("official_slate_id") for row in rows if (row.metadata_json or {}).get("official_slate_id")]}
+
+
+@router.delete("/timeline/assets/{photo_id}")
+def delete_timeline_asset(photo_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    photo = db.execute(select(IntakePhoto).where(IntakePhoto.id == photo_id, IntakePhoto.user_id == current_user.id)).scalar_one_or_none()
+    if photo is None:
+        raise HTTPException(status_code=404, detail="Timeline image not found")
+    metadata = dict(photo.metadata_json or {})
+    metadata["timeline_deleted"] = True
+    metadata["timeline_deleted_at"] = datetime.now(UTC).isoformat()
+    metadata["timeline_deleted_by"] = current_user.id
+    photo.metadata_json = metadata
+    photo.is_public_listing_candidate = False
+    photo.is_internal_only = True
+    db.add(photo)
+    slate_id = metadata.get("official_slate_id") or (db.get(IntakePhotoBatch, photo.batch_id).slate_id if photo.batch_id and db.get(IntakePhotoBatch, photo.batch_id) else None)
+    if slate_id:
+        slate = db.get(IntakeSlate, int(slate_id))
+        if slate:
+            slate_meta = dict(slate.metadata_json or {}); slate_meta["timeline_deleted"] = True; slate.metadata_json = slate_meta; db.add(slate)
+    db.add(IntakeReconciliationEvent(user_id=current_user.id, event_type="timeline_asset_deleted", status="completed", details_json={"photo_id": photo.id, "slate_id": slate_id}))
+    db.commit()
+    return {"deleted": True, "photo_id": photo.id, "slate_id": slate_id}
+
+
+@router.post("/timeline/primary")
+def set_timeline_primary(payload: dict, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    photo_id = int((payload or {}).get("photo_id") or 0)
+    photo = db.execute(select(IntakePhoto).where(IntakePhoto.id == photo_id, IntakePhoto.user_id == current_user.id)).scalar_one_or_none()
+    if photo is None or photo.is_slate:
+        raise HTTPException(status_code=400, detail="Select a product photo")
+    batch_id = photo.batch_id
+    peers = db.execute(select(IntakePhoto).where(IntakePhoto.user_id == current_user.id, IntakePhoto.batch_id == batch_id, IntakePhoto.is_slate.is_(False))).scalars().all()
+    for peer in peers:
+        meta = dict(peer.metadata_json or {}); meta.pop("timeline_primary", None); peer.metadata_json = meta; db.add(peer)
+    meta = dict(photo.metadata_json or {}); meta["timeline_primary"] = True; meta["timeline_primary_source"] = "MANUAL_OPERATOR"; photo.metadata_json = meta; db.add(photo)
+    db.add(IntakeReconciliationEvent(user_id=current_user.id, event_type="timeline_primary_photo_set", status="completed", details_json={"photo_id": photo_id, "batch_id": batch_id}))
+    db.commit()
+    return {"photo_id": photo_id, "batch_id": batch_id, "primary": True}
 
 @router.post("/timeline/reset-classifications")
 def reset_timeline_classifications(payload: dict, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):

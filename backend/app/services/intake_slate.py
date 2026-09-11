@@ -1368,7 +1368,10 @@ class IntakeSlateService:
 
     def _ordered_photos(self, db: Session, *, user_id: int) -> list[IntakePhoto]:
         rows = db.execute(select(IntakePhoto).where(IntakePhoto.user_id == user_id)).scalars().all()
-        return sorted(rows, key=self._timeline_sort_key)
+        return sorted(
+            [row for row in rows if not bool((row.metadata_json or {}).get("timeline_deleted"))],
+            key=self._timeline_sort_key,
+        )
 
     def _source_state_for(self, db: Session, *, user_id: int, provider: str, source_key: str) -> IntakeSourceState:
         state = db.execute(
@@ -3347,6 +3350,9 @@ class IntakeSlateService:
         seo_title = self._slug_token(title, max_length=120) or "item"
         destination_dir = Path(settings.storage_root) / "intake-items" / item_id
         destination_dir.mkdir(parents=True, exist_ok=True)
+        # An operator-selected primary photo wins; otherwise chronology is the
+        # deterministic fallback used by marketplace payload generation.
+        photos = sorted(photos, key=lambda photo: (0 if (photo.metadata_json or {}).get("timeline_primary") else 1, self._timeline_sort_key(photo)))
         total = len(photos)
         for index, photo in enumerate(photos, start=1):
             source = Path(photo.local_path)
