@@ -530,7 +530,18 @@ class MarketplacePreflightService:
                 fix_hint=f"Enter {aspect_name} in the item specifics section or choose a category that does not require it.",
             ))
 
-        for aspect_name in aspect_summary.get("unsupported") or []:
+        outgoing_aspects = {}
+        try:
+            outgoing_aspects = ((plan.get("inventory_item_payload") or {}).get("product") or {}).get("aspects") or {}
+        except AttributeError:
+            outgoing_aspects = {}
+        # Canonical Amazon facts are intentionally richer than any one eBay
+        # category.  Only report an unsupported-aspect warning when the field
+        # actually survives into the eBay payload; filtered source facts are
+        # not marketplace warnings.
+        for aspect_name in (aspect_summary.get("unsupported") or []):
+            if aspect_name not in outgoing_aspects:
+                continue
             warnings.append(_issue(
                 "EBAY_UNSUPPORTED_ASPECT",
                 f"{aspect_name} is not supported in the selected eBay category.",
