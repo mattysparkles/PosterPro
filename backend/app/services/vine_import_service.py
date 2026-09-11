@@ -5,6 +5,7 @@ import io
 import hashlib
 import json
 import re
+from difflib import SequenceMatcher
 from datetime import date
 from pathlib import Path
 
@@ -64,20 +65,21 @@ def _sanitize_vine_text(value: str | None) -> str:
 
 
 def description_source_similarity(description: str | None, source_prose: list[str] | None) -> float:
-    """Bounded token-overlap score for catching accidental source copying."""
-    candidate = set(re.findall(r"[a-z0-9]+", str(description or "").lower()))
-    if len(candidate) < 8:
+    """Detect substantial prose copying without penalizing shared facts."""
+    candidate_text = " ".join(re.findall(r"[a-z0-9]+", str(description or "").lower()))
+    if len(candidate_text.split()) < 8:
         return 0.0
     best = 0.0
     for prose in source_prose or []:
-        tokens = re.findall(r"[a-z0-9]+", str(prose or "").lower())
-        if len(tokens) < 8:
+        source_text = " ".join(re.findall(r"[a-z0-9]+", str(prose or "").lower()))
+        if len(source_text.split()) < 8:
             continue
-        source_tokens = set(tokens)
-        best = max(best, len(candidate & source_tokens) / max(1, len(source_tokens)))
-        normalized = " ".join(tokens)
-        if normalized and normalized in " ".join(re.findall(r"[a-z0-9]+", str(description or "").lower())):
+        if source_text in candidate_text:
             best = 1.0
+            continue
+        # SequenceMatcher rewards long contiguous prose overlap; factual words
+        # scattered through an original rewrite do not trip this threshold.
+        best = max(best, SequenceMatcher(None, candidate_text, source_text).ratio())
     return round(best, 4)
 
 
@@ -1710,7 +1712,8 @@ class VineImportService:
                         values = re.findall(r"\b(?:\d+(?:\.\d+)?\s*(?:in|inch|cm|mm|lb|lbs|oz|count|pack)|[A-Z][A-Za-z0-9-]{2,})\b", body)
                         rewritten.append(f"• {label.strip()}: {', '.join(dict.fromkeys(values[:8])) or 'see the verified item specifics' }.")
                 elif text:
-                    rewritten.append(f"• Product information: {text[:160].rstrip('.')}.")
+                    values = re.findall(r"\b(?:\d+(?:\.\d+)?\s*(?:in|inch|cm|mm|lb|lbs|oz|gallon|count|pack)|[A-Z][A-Za-z0-9-]{2,})\b", text)
+                    rewritten.append(f"• Product information: {', '.join(dict.fromkeys(values[:10])) or 'see the verified item specifics'}.")
             lines.extend(["Key product details:", *rewritten])
         specifications = facts.get("specifications") or {}
         useful_specs = list(specifications.items())[:6]
