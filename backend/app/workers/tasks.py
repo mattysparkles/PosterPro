@@ -386,6 +386,9 @@ def repair_vine_listing_quality_task(user_id: int | None = None, chunk_size: int
                 # lifecycle state here so they cannot remain indefinitely in
                 # the transient queued bucket after quality reconciliation.
                 for listing in db.scalars(select(Listing).where(Listing.id.in_(ids[offset:offset + max(1, int(chunk_size or 50))]), Listing.user_id == uid, Listing.source_type == "amazon_vine")):
+                    quantity_source = str((listing.marketplace_data or {}).get("quantity_source") or "").lower() if isinstance(listing.marketplace_data, dict) else ""
+                    if int(listing.quantity or 0) <= 0 and quantity_source not in {"manual", "operator"}:
+                        listing.quantity = 1
                     if listing.listing_images or listing.image_urls:
                         listing.processing_state = "complete"
                         listing.processing_blocking_reason = None
