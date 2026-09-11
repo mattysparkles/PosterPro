@@ -9,7 +9,7 @@ from difflib import SequenceMatcher
 from datetime import date
 from pathlib import Path
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -502,11 +502,16 @@ class VineImportService:
             # discovery is slow/unavailable. The background repair path can
             # enrich images/facts later; CSV identity is sufficient to create
             # the initial draft record.
-            result = (discovery.discover_for_vine_item(
+            # A Vine draft must use the same source retrieval contract whether
+            # the caller is doing a fast seed or a full enrichment pass.  The
+            # ``fetch_media_first`` flag controls the bridge/media retry below;
+            # it must not silently discard the discovery response (facts,
+            # images, and provenance) returned by the existing provider.
+            result = discovery.discover_for_vine_item(
                 asin=item.asin,
                 product_name=item.product_name,
                 manual_url=item.manual_amazon_url,
-            ) if fetch_media_first else {})
+            )
             resolved_asin = str(result.get("asin") or item.asin or "").strip().upper()
             if resolved_asin and resolved_asin != item.asin:
                 item.asin = resolved_asin
@@ -781,6 +786,20 @@ class VineImportService:
                 },
             )
             _promote_vine_listing_to_review(listing)
+            # Metadata reconciliation is the final step of Vine draft
+            # preparation.  Do not leave a row in the transient ``queued``
+            # state after all durable evidence has been applied: rows with a
+            # usable marketplace image are reviewable, while rows genuinely
+            # missing media remain explicitly in the attention queue.
+            has_images = bool(listing.listing_images or listing.image_urls)
+            if has_images:
+                listing.processing_state = "complete"
+                listing.processing_blocking_reason = None
+                listing.processing_error_stage = None
+            else:
+                listing.processing_state = "needs_attention"
+                listing.processing_blocking_reason = "No usable Amazon/product image is available for the marketplace payload."
+                listing.processing_error_stage = "images"
             db.add(listing)
             updated += 1
         db.commit()
@@ -796,9 +815,17 @@ class VineImportService:
         since_order_date: date | None = None,
         limit: int | None = None,
     ) -> dict:
-        query = select(VineImportItem, Listing).join(Listing, Listing.id == VineImportItem.listing_id).where(
-            Listing.user_id == user_id,
-            Listing.source_type == "amazon_vine",
+        # Historical imports populated either ``listing_id`` or the older
+        # ``inventory_item_id`` column.  Reconcile both associations so no
+        # Vine draft is left in a transient queued state simply because its
+        # provenance row uses the compatibility column.
+        query = (
+            select(VineImportItem, Listing)
+            .join(
+                Listing,
+                or_(VineImportItem.listing_id == Listing.id, VineImportItem.inventory_item_id == Listing.id),
+            )
+            .where(Listing.user_id == user_id, Listing.source_type == "amazon_vine")
         )
         if batch_id is not None:
             query = query.where(VineImportItem.batch_id == batch_id)

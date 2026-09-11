@@ -381,6 +381,21 @@ def repair_vine_listing_quality_task(user_id: int | None = None, chunk_size: int
                 result = service.refresh_vine_listing_metadata(db, user_id=uid, listing_ids=ids[offset:offset + max(1, int(chunk_size or 50))])
                 totals["updated"] += int(result.get("updated") or 0)
                 totals["missing_facts"] += int(result.get("missing_facts") or 0)
+                # Some historical Vine rows have no surviving provenance row
+                # (the listing itself is still valid).  Normalize their
+                # lifecycle state here so they cannot remain indefinitely in
+                # the transient queued bucket after quality reconciliation.
+                for listing in db.scalars(select(Listing).where(Listing.id.in_(ids[offset:offset + max(1, int(chunk_size or 50))]), Listing.user_id == uid, Listing.source_type == "amazon_vine")):
+                    if listing.listing_images or listing.image_urls:
+                        listing.processing_state = "complete"
+                        listing.processing_blocking_reason = None
+                        listing.processing_error_stage = None
+                        listing.needs_review = True
+                    else:
+                        listing.processing_state = "needs_attention"
+                        listing.processing_blocking_reason = "No usable Amazon/product image is available for the marketplace payload."
+                        listing.processing_error_stage = "images"
+                db.commit()
         return totals
     finally:
         db.close()
