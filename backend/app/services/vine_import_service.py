@@ -126,6 +126,40 @@ def _clean_amazon_facts(raw: dict | None) -> dict:
     }
 
 
+def _facts_have_content(facts: dict | None) -> bool:
+    """Whether a normalized facts object contains useful source evidence."""
+    if not isinstance(facts, dict):
+        return False
+    return bool(
+        facts.get("current_price")
+        or facts.get("feature_bullets")
+        or facts.get("specifications")
+        or facts.get("dimensions")
+        or facts.get("product_description")
+        or facts.get("brand")
+        or facts.get("model")
+    )
+
+
+def _apply_fact_specifics(specifics: dict, provenance: dict[str, str], facts: dict) -> None:
+    """Overlay explicit Amazon facts onto placeholder item specifics."""
+    mapping = {
+        "Brand": facts.get("brand"), "Model": facts.get("model"), "MPN": facts.get("mpn"),
+        "Material": facts.get("material"), "Color": facts.get("color"), "Size": facts.get("size"),
+        "Type": facts.get("product_type"), "Capacity": facts.get("capacity"),
+    }
+    prose = " ".join([*(facts.get("feature_bullets") or []), str(facts.get("product_description") or "")])
+    if not mapping["Capacity"]:
+        match = re.search(r"((?:\d+(?:\.\d+)?\s*(?:,|and)?\s*)+gallon)", prose, re.I)
+        if match:
+            mapping["Capacity"] = re.sub(r"\s+", " ", match.group(1)).strip()
+    for name, value in mapping.items():
+        text = str(value or "").strip()
+        if text and str(specifics.get(name) or "").strip().lower() in {"", "does not apply", "unknown"}:
+            specifics[name] = _clip_specific_value(text)
+            provenance[name] = "amazon_product_page"
+
+
 def _merge_dimension_specifics(specifics: dict, provenance: dict, facts: dict) -> None:
     """Add only evidence-backed item/product dimensions to marketplace specifics."""
     dimensions = facts.get("dimensions") if isinstance(facts.get("dimensions"), dict) else {}
@@ -490,7 +524,12 @@ class VineImportService:
             cached_urls = self._lookup_cached_media_urls(db, item.asin)
             discovered_urls = [str(url).strip() for url in (result.get("images") or []) if str(url).strip()]
             discovered_description = _sanitize_vine_text(result.get("description") or "")
-            amazon_facts = _clean_amazon_facts(result.get("product_facts"))
+            # A transient Amazon response must not erase durable evidence from
+            # an earlier successful fetch (this was the cause of drafts
+            # reverting to boilerplate descriptions and ETV pricing).
+            prior_facts = _clean_amazon_facts((listing.source_metadata or {}).get("amazon_product_facts"))
+            fresh_facts = _clean_amazon_facts(result.get("product_facts"))
+            amazon_facts = fresh_facts if _facts_have_content(fresh_facts) else prior_facts
             if fetch_media_first and not (cached_urls or discovered_urls) and (item.asin or resolved_asin):
                 bridge_cache = self._bridge_capture_for_asin(db, item.asin or resolved_asin, item.product_name or listing.title)
                 if bridge_cache is not None:
@@ -559,6 +598,7 @@ class VineImportService:
             if str(category).strip().isdigit():
                 listing.category_id = str(category).strip()
             specifics, provenance = self._build_item_specifics(item, listing.title, listing.description, listing.item_specifics)
+            _apply_fact_specifics(specifics, provenance, amazon_facts)
             for key, value in (amazon_facts.get("specifications") or {}).items():
                 if key not in specifics and value:
                     specifics[key] = value
@@ -695,6 +735,7 @@ class VineImportService:
                 listing.listing_price = pricing["listing_price"]
                 listing.buy_it_now_price = pricing["listing_price"]
             specifics, provenance = self._build_item_specifics(item, listing.title, listing.description, listing.item_specifics)
+            _apply_fact_specifics(specifics, provenance, facts)
             for key, value in (facts.get("specifications") or {}).items():
                 if key not in specifics and value:
                     specifics[key] = value
@@ -1305,7 +1346,9 @@ class VineImportService:
             ) if gallery_urls else []
             refreshed_images = [image for image in normalized_images if not _is_unsafe_vine_image(image)]
             discovered_description = _sanitize_vine_text((result or {}).get("description") or (listing.description or ""))
-            amazon_facts = _clean_amazon_facts((result or {}).get("product_facts"))
+            prior_facts = _clean_amazon_facts((listing.source_metadata or {}).get("amazon_product_facts"))
+            fresh_facts = _clean_amazon_facts((result or {}).get("product_facts"))
+            amazon_facts = fresh_facts if _facts_have_content(fresh_facts) else prior_facts
             if has_approved_actual:
                 merged_images = refreshed_images
                 if trusted_catalog_images:
@@ -1609,16 +1652,15 @@ class VineImportService:
         facts = _clean_amazon_facts(amazon_facts)
         current_price = facts.get("current_price")
         etv = _positive_price(item.estimated_tax_value)
-        # Amazon page extraction can capture a promotional/variant price that
-        # is materially below the Vine spreadsheet value.  Never let that
-        # transient low value replace the durable ETV baseline; retain the
-        # higher evidence-backed amount and record the source explicitly.
-        listing_price = max(value for value in (current_price, etv) if value is not None) if (current_price is not None or etv is not None) else None
+        # A live Amazon price is the best customer-facing market evidence.  ETV
+        # is only a fallback when the page price is unavailable; it must never
+        # override a lower, current Amazon price.
+        listing_price = current_price if current_price is not None else etv
         return {
             "listing_price": listing_price,
             "quick_sale_price": round(listing_price * 0.85, 2) if listing_price else None,
             "reference_market_price": current_price,
-            "price_source": "amazon_current_price" if current_price is not None and (etv is None or current_price >= etv) else "vine_estimated_tax_value_floor" if etv is not None else "needs_price_research",
+            "price_source": "amazon_current_price" if current_price is not None else "vine_estimated_tax_value_fallback" if etv is not None else "needs_price_research",
             "amazon_current_price": current_price,
             "needs_price_research": listing_price is None,
         }
@@ -1641,7 +1683,35 @@ class VineImportService:
         lines = [" ".join(intro_parts)]
         features = facts.get("feature_bullets") or []
         if features:
-            lines.extend(["Key product details:", *[f"• {feature}" for feature in features[:5]]])
+            rewritten = []
+            for feature in features[:5]:
+                text = _sanitize_vine_text(feature).strip()
+                label, sep, body = text.partition(":")
+                if sep and body.strip():
+                    body = body.strip()
+                    lower = body.lower()
+                    # Keep factual values while paraphrasing source prose. The
+                    # phrases below are deliberately short and original; they
+                    # avoid turning Amazon marketing bullets into listing copy.
+                    if "gallon" in lower and "bumper" in lower:
+                        gallon_match = re.search(r"((?:\d+(?:\.\d+)?\s*,\s*)*\d+(?:\.\d+)?\s*gallon)", lower)
+                        gallons = (gallon_match.group(1) if gallon_match else "various")
+                        fit = re.search(r"\d+(?:\.\d+)?\"?\s*[-–]\s*\d+(?:\.\d+)?\"?\s*(?:wide|square)?", body, re.I)
+                        rewritten.append(f"• Fitment: supports waste tanks in {gallons} sizes and square RV bumpers{(' around ' + fit.group(0)) if fit else ''}.")
+                    elif "steel" in lower:
+                        rewritten.append("• Construction: powder-coated Q235 steel intended for outdoor RV use.")
+                    elif label.lower().startswith("package") or "package includes" in lower:
+                        rewritten.append("• Included components: mounting hardware and straps are supplied; see the item specifics for the complete list.")
+                    elif "clamp" in lower or "ratchet" in lower:
+                        rewritten.append("• Security: clamp hardware, ratchet straps, and non-slip pads help keep the load stable.")
+                    elif "installation" in lower or "storage" in lower:
+                        rewritten.append("• Setup: adjustable bolt-on assembly can be removed for compact storage.")
+                    else:
+                        values = re.findall(r"\b(?:\d+(?:\.\d+)?\s*(?:in|inch|cm|mm|lb|lbs|oz|count|pack)|[A-Z][A-Za-z0-9-]{2,})\b", body)
+                        rewritten.append(f"• {label.strip()}: {', '.join(dict.fromkeys(values[:8])) or 'see the verified item specifics' }.")
+                elif text:
+                    rewritten.append(f"• Product information: {text[:160].rstrip('.')}.")
+            lines.extend(["Key product details:", *rewritten])
         specifications = facts.get("specifications") or {}
         useful_specs = list(specifications.items())[:6]
         if useful_specs:

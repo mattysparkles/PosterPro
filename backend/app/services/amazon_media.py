@@ -176,7 +176,7 @@ def _extract_amazon_product_facts(html: str) -> dict:
             details[cells[0]] = cells[1]
 
     breadcrumbs = [_clean_text(value) for value in re.findall(r'<a[^>]+class="[^"]*a-link-normal[^"]*"[^>]*>(.*?)</a>', html, flags=re.I | re.S)]
-    breadcrumbs = [value for value in breadcrumbs if value and len(value) < 100]
+    breadcrumbs = [value for value in breadcrumbs if value and len(value) < 100 and not re.search(r'protection|plan|join prime|complete protect|^\d(?:\.\d)?\s', value, re.I)]
     return {
         "title": title[:512],
         "current_price": price,

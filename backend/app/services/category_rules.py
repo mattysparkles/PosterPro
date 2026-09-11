@@ -4,6 +4,7 @@ import re
 
 
 _CATEGORY_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("rv bumper", "tote tank carrier", "waste tank holder", "rv tote tank"), "Automotive > RV, Trailer & Camper Parts & Accessories > Exterior Accessories > Cargo Racks"),
     (("pool pump", "spa pump", "pool filter pump", "pool booster pump"), "Home & Garden > Yard, Garden & Outdoor Living > Pools & Spas > Pool Pumps"),
     (("coffee maker", "espresso machine", "keurig", "coffee machine"), "Home & Garden > Kitchen, Dining & Bar > Small Kitchen Appliances > Coffee Machines"),
     (("vacuum", "robot vacuum"), "Home & Garden > Household Supplies & Cleaning > Vacuum Cleaners"),
