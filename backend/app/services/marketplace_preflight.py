@@ -383,8 +383,31 @@ class MarketplacePreflightService:
             description = " ".join(str(listing.description or "").split()).lower()
             facts = (listing.source_metadata or {}).get("amazon_product_facts") if isinstance(listing.source_metadata, dict) else {}
             substantive = len((facts or {}).get("feature_bullets") or []) + len((facts or {}).get("specifications") or {}) + sum(bool((facts or {}).get(key)) for key in ("brand", "model", "material", "capacity", "product_description"))
-            source_prose = [str((facts or {}).get("product_description") or "")] + [str(v) for v in ((facts or {}).get("feature_bullets") or [])]
-            source_copy = any(len(re.findall(r"[a-z0-9]+", prose.lower())) >= 12 and " ".join(re.findall(r"[a-z0-9]+", prose.lower())) in " ".join(re.findall(r"[a-z0-9]+", description)) for prose in source_prose if prose)
+            # Feature bullets are normalized into factual fragments by the
+            # Vine formatter; compare long-form product prose here to avoid
+            # mistaking expected title/spec overlap for copied prose.
+            source_prose = [str((facts or {}).get("product_description") or "")]
+            desc_tokens = re.findall(r"[a-z0-9]+", description)
+            title_tokens = re.findall(r"[a-z0-9]+", str(listing.title or "").lower())
+            source_copy = False
+            for prose in source_prose:
+                source_tokens = re.findall(r"[a-z0-9]+", prose.lower())
+                if len(source_tokens) < 18:
+                    continue
+                # Amazon bullets frequently begin with the exact product title;
+                # that identity overlap is expected and is not plagiarism.
+                if title_tokens and source_tokens[: min(8, len(title_tokens))] == title_tokens[: min(8, len(title_tokens))]:
+                    source_tokens = source_tokens[len(title_tokens):]
+                if len(source_tokens) < 18:
+                    continue
+                # Product titles, model numbers, and short factual phrases are
+                # expected to overlap.  Flag only a long contiguous run that
+                # indicates source prose was copied into buyer-facing copy.
+                haystack = " ".join(desc_tokens)
+                needle = " ".join(source_tokens)
+                if needle in haystack or any(" ".join(source_tokens[i:i + 18]) in haystack for i in range(max(1, len(source_tokens) - 17))):
+                    source_copy = True
+                    break
             placeholder = "verified amazon product record" in description or "being prepared from" in description
             title_only = len(description) < 180 and description.replace(".", "") == " ".join(str(listing.title or "").split()).lower().replace(".", "")
             if placeholder or (substantive >= 2 and (len(description) < 180 or title_only)):
