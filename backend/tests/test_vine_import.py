@@ -1501,6 +1501,25 @@ def test_vine_duplicate_import_reuses_existing_listing(db_session):
     assert len(created) == 1
 
 
+def test_vine_fingerprint_ignores_spreadsheet_row_position_and_distinguishes_asin():
+    service = VineImportService()
+    base = {
+        "ASIN": "B0ROWMOVE01",
+        "Product Name": "Example storage organizer",
+        "Order Number": "111-2222222-3333333",
+        "Order Type": "Vine",
+        "Order Date": "2026-09-01",
+        "Estimated Tax Value": "$12.00",
+        "Brand": "Example",
+        "Category": "Office",
+        "Item URL": "https://www.amazon.com/dp/B0ROWMOVE01",
+    }
+    moved = {**base, "source_row": 1021}
+    changed = {**base, "ASIN": "B0ROWMOVE02", "Item URL": "https://www.amazon.com/dp/B0ROWMOVE02"}
+    assert service._vine_row_fingerprint(base) == service._vine_row_fingerprint(moved)
+    assert service._vine_row_fingerprint(base) != service._vine_row_fingerprint(changed)
+
+
 def test_vine_duplicate_import_rows_are_skipped_until_prior_listing_exists(db_session):
     service = VineImportService()
     user = User(email=f"vine-dup-skip-{uuid4()}@example.com", role="owner", is_admin=True)

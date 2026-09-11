@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from celery import chord, group
-from sqlalchemy import select, update as sql_update, case
+from sqlalchemy import or_, select, update as sql_update, case
 
 from app.core.config import settings
 from app.core.database import SessionLocal
@@ -376,7 +376,23 @@ def repair_vine_listing_quality_task(user_id: int | None = None, chunk_size: int
         users = [int(user_id)] if user_id is not None else [int(row[0]) for row in db.execute(select(Listing.user_id).where(Listing.source_type == "amazon_vine").distinct()).all()]
         totals = {"users": users, "updated": 0, "missing_facts": 0}
         for uid in users:
-            ids = [int(row[0]) for row in db.execute(select(Listing.id).where(Listing.user_id == uid, Listing.source_type == "amazon_vine").order_by(Listing.id)).all()]
+            # Keep the scheduled convergence loop bounded: clean, reviewable
+            # Vine rows are not regenerated every 15 minutes.  Revisit only
+            # transient/failed/incomplete rows (or rows that have not yet been
+            # promoted to review), plus explicit future repair requests.
+            ids = [
+                int(row[0])
+                for row in db.execute(
+                    select(Listing.id).where(
+                        Listing.user_id == uid,
+                        Listing.source_type == "amazon_vine",
+                        or_(
+                            Listing.processing_state.in_(["needs_attention", "queued", "processing", "failed"]),
+                            Listing.needs_review.is_(False),
+                        ),
+                    ).order_by(Listing.id)
+                ).all()
+            ]
             for offset in range(0, len(ids), max(1, int(chunk_size or 50))):
                 result = service.refresh_vine_listing_metadata(db, user_id=uid, listing_ids=ids[offset:offset + max(1, int(chunk_size or 50))])
                 totals["updated"] += int(result.get("updated") or 0)
