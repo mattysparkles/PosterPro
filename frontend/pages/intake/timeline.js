@@ -1,10 +1,328 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import AppShell from '../../components/layout/AppShell';
-import PageHeader from '../../components/ui/page-header';
-import SectionPanel from '../../components/ui/section-panel';
-import Button from '../../components/ui/button';
-import StatusPill from '../../components/ui/status-pill';
-import { fetchIntakeTimeline, createRetroactiveSlate, classifyTimelineAssets, resetTimelineClassifications, toThumbnailImageUrl } from '../../lib/api';
-const WIDTHS=[48,64,88,120,160];
-const cls=(p)=>{const m=p?.metadata_json||{},x=String(p?.classification||m.classification||p?.image_type||'').toUpperCase(),source=p?.classification_source||m.classification_source||'',manual=source==='MANUAL_OPERATOR',modern=source==='SYSTEM_GENERATED'||source==='MODERN_SLATE'||m.slate_provenance==='generated',explicit=['SLATE','HEAD','TAIL','RETROACTIVE','RETROACTIVE_HEAD','UNKNOWN'].includes(x);return {slate:manual?x!=='PHOTO':modern&&explicit,ambiguous:false,type:(manual||modern)&&x?x:'PHOTO'};};
-export default function IntakeTimeline(){const [items,setItems]=useState([]),[selected,setSelected]=useState(null),[loading,setLoading]=useState(true),[creating,setCreating]=useState(false),[busy,setBusy]=useState(false),[feedback,setFeedback]=useState(''),[zoom,setZoom]=useState(2),[filter,setFilter]=useState('ALL'),[selectedIds,setSelectedIds]=useState([]),scrollRef=useRef(null);const refresh=()=>fetchIntakeTimeline().then(r=>setItems(r?.items||[]));useEffect(()=>{try{const v=Number(localStorage.getItem('posterpro.timeline.zoom'));if(Number.isFinite(v))setZoom(Math.max(0,Math.min(4,v)));}catch{}refresh().finally(()=>setLoading(false));},[]);const zoomTo=v=>{const left=scrollRef.current?.scrollLeft||0;setZoom(v);try{localStorage.setItem('posterpro.timeline.zoom',String(v));}catch{}requestAnimationFrame(()=>{if(scrollRef.current)scrollRef.current.scrollLeft=left;});};const addSlate=async(a,b)=>{setCreating(true);try{await createRetroactiveSlate({retroactive:true,after_photo_id:a?.photo?.id||null,before_photo_id:b?.photo?.id||null,title:''});await refresh();setFeedback('Retroactive Slate created.');}catch(e){window.alert(e.message||'Could not create retroactive Slate');}finally{setCreating(false);}};const classify=async(p,v)=>{setBusy(true);setFeedback('');const previous=items;setItems(rows=>rows.map(e=>e.photo?.id===p.id?{...e,photo:{...e.photo,metadata_json:{...(e.photo.metadata_json||{}),classification:v,classification_source:'MANUAL_OPERATOR'},image_type:v,is_slate:v!=='PHOTO'}}:e));try{const result=await classifyTimelineAssets([p.id],v);setFeedback(`${result?.updated||1} asset marked ${v}.`);await refresh();}catch(e){setItems(previous);setFeedback(`Classification failed: ${e.message||'unknown error'}`);}finally{setBusy(false);}};const classifySelected=async(v)=>{if(!selectedIds.length)return;setBusy(true);setFeedback('');const ids=[...selectedIds].map(Number).filter(Number.isFinite),previous=items;setItems(rows=>rows.map(e=>ids.includes(e.photo?.id)?{...e,photo:{...e.photo,metadata_json:{...(e.photo.metadata_json||{}),classification:v,classification_source:'MANUAL_OPERATOR'},image_type:v,is_slate:v!=='PHOTO'}}:e));try{const result=await classifyTimelineAssets(ids,v);setSelectedIds([]);setFeedback(`${result?.updated||ids.length} assets marked ${v}.`);await refresh();}catch(e){setItems(previous);setFeedback(`Classification failed: ${e.message||'unknown error'}`);}finally{setBusy(false);}};const ordered=useMemo(()=>[...items].sort((a,b)=>String(a.timeline_key||'').localeCompare(String(b.timeline_key||''))).filter(e=>{const c=cls(e.photo||{});return filter==='ALL'||filter==='PHOTOS'&&!c.slate||filter==='SLATES'&&c.slate||filter==='AMBIGUOUS'&&c.ambiguous||filter==='HEAD'&&c.type==='HEAD'||filter==='TAIL'&&c.type==='TAIL';}),[items,filter]);const counts=useMemo(()=>items.reduce((a,e)=>{const c=cls(e.photo||{});c.slate?a.slates++:a.photos++;if(c.ambiguous)a.ambiguous++;return a;},{photos:0,slates:0,ambiguous:0}),[items]);return <AppShell><div className="space-y-6"><PageHeader title="Photo Timeline" description="Review PosterPro intake photos in capture order and recover missing Slate boundaries." actions={<Button variant="outline" onClick={refresh}>Refresh</Button>}/><SectionPanel title="Intake filmstrip" description="PosterPro capture chronology is authoritative; Google Photos display order is not."><div className="mb-3 flex flex-wrap items-center gap-2 text-sm"><span>Timeline zoom</span><button type="button" onClick={()=>zoomTo(Math.max(0,zoom-1))}>−</button><input aria-label="Timeline zoom" type="range" min="0" max="4" value={zoom} onChange={e=>zoomTo(Number(e.target.value))}/><button type="button" onClick={()=>zoomTo(Math.min(4,zoom+1))}>+</button><span className="text-xs text-slate-500">{WIDTHS[zoom]}px</span><select value={filter} onChange={e=>setFilter(e.target.value)} className="rounded border px-2 py-1 text-xs"><option>ALL</option><option>PHOTOS</option><option>SLATES</option><option>AMBIGUOUS</option><option>HEAD</option><option>TAIL</option></select><span className="text-xs text-slate-500">Photos {counts.photos} · Slates {counts.slates} · Ambiguous {counts.ambiguous}</span><Button variant="outline" onClick={async()=>{if(window.confirm(`Reset ${counts.slates} historical classifications to PHOTO?`)){await resetTimelineClassifications({scope:'all',preserve_modern:true});await refresh();setFeedback('Classifications reset to PHOTO.');}}}>Reset classifications</Button>{feedback?<span role="status" className="text-xs text-emerald-700">{feedback}</span>:null}</div>{loading?<p className="text-sm text-[var(--pp-muted)]">Loading timeline…</p>:<div ref={scrollRef} className="overflow-x-auto pb-3"><div className="flex min-w-max items-end gap-2">{ordered.map((entry,index)=>{const p=entry.photo||{},c=cls(p),src=toThumbnailImageUrl(p.thumbnail_url||p.display_url||p.local_path, WIDTHS[zoom], WIDTHS[zoom]),checked=selectedIds.includes(p.id);return <div key={p.id||index} className="flex items-center gap-2"><div className="flex flex-col items-center"><input type="checkbox" checked={checked} onChange={()=>setSelectedIds(ids=>checked?ids.filter(id=>id!==p.id):[...ids,p.id])}/><div role="button" tabIndex={0} id={`timeline-photo-${p.id}`} onClick={()=>setSelected(entry)} onKeyDown={e=>{if(e.key==='Enter'||e.key===' ')setSelected(entry)}} style={{width:WIDTHS[zoom]}} className={`rounded-xl border-4 p-1 text-left ${c.slate?'bg-lime-300 border-lime-400 shadow-[0_0_0_5px_rgba(57,255,20,.9)]':'bg-white'} ${selected?.photo?.id===p.id?'border-blue-500 ring-2 ring-blue-100':'border-slate-200'}`}><div className={`relative aspect-square overflow-hidden rounded-lg bg-slate-100 ${c.slate?'ring-4 ring-inset ring-lime-400':''}`}>{c.slate?<span className="absolute left-1 top-1 z-10 rounded bg-lime-400 px-1.5 py-0.5 text-[10px] font-black text-black shadow">SLATE</span>:null}{src?<img src={src} alt={p.original_filename||`Photo ${p.id}`} loading="lazy" decoding="async" className="h-full w-full object-cover"/>:null}</div><p className="mt-1 truncate text-[10px]">{p.original_filename||`Photo ${p.id}`}</p><StatusPill status={c.slate?'warning':c.ambiguous?'warning':'default'} label={c.slate?c.type:c.ambiguous?'POSSIBLE SLATE':'PHOTO'}/>{c.slate&&p.slate_id?<div className="mt-1 flex gap-1"><a href={`/intake/slate?slate_id=${p.slate_id}`} onClick={e=>e.stopPropagation()} className="rounded border border-lime-700 bg-lime-100 px-1 text-[9px] font-semibold text-lime-900">EDIT SLATE</a><a href={`/intake/slate?slate_id=${p.slate_id}#voice`} onClick={e=>e.stopPropagation()} className="rounded border border-lime-700 bg-lime-100 px-1 text-[9px] text-lime-900">VOICE NOTE</a></div>:null}<button type="button" disabled={busy} className="mt-1 block w-full rounded border px-1 py-0.5 text-[9px]" onClick={e=>{e.stopPropagation();classify(p,c.slate?'PHOTO':'SLATE')}}>{c.slate?'MARK AS PHOTO':'MARK AS SLATE'}</button></div></div>{index<ordered.length-1?<button type="button" disabled={creating} onClick={()=>addSlate(entry,ordered[index+1])} className="rounded-full border border-dashed border-blue-300 px-2 py-1 text-xs text-blue-600">+ Add Slate</button>:null}</div>})}</div></div>}{selectedIds.length?<div className="flex gap-2"><Button type="button" variant="outline" data-testid="timeline-mark-selected-photo" disabled={busy} onClick={event=>{event.preventDefault();event.stopPropagation();void classifySelected('PHOTO')}}>MARK SELECTED PHOTO</Button><Button type="button" variant="outline" data-testid="timeline-mark-selected-slate" disabled={busy} onClick={event=>{event.preventDefault();event.stopPropagation();void classifySelected('SLATE')}}>MARK SELECTED SLATE</Button></div>:null}</SectionPanel>{selected?<SectionPanel title="Selected photo"><p className="text-sm"><b>Photo:</b> {selected.photo?.id} · <b>Classification:</b> {cls(selected.photo).type} · <b>Timeline key:</b> {selected.timeline_key}</p></SectionPanel>:null}</div></AppShell>}
+import { useEffect, useMemo, useState } from "react";
+import AppShell from "../../components/layout/AppShell";
+import PageHeader from "../../components/ui/page-header";
+import SectionPanel from "../../components/ui/section-panel";
+import Button from "../../components/ui/button";
+import StatusPill from "../../components/ui/status-pill";
+import {
+  fetchIntakeTimeline,
+  createRetroactiveSlate,
+  classifyTimelineAssets,
+  resetTimelineClassifications,
+  deleteTimelineAsset,
+  setTimelinePrimary,
+  toThumbnailImageUrl,
+} from "../../lib/api";
+
+const WIDTHS = [48, 64, 88, 120, 160];
+const classify = (p) => {
+  const m = p?.metadata_json || {};
+  const type = String(
+    p?.classification || m.classification || p?.image_type || "",
+  ).toUpperCase();
+  const source = p?.classification_source || m.classification_source || "";
+  const slate =
+    source === "MANUAL_OPERATOR"
+      ? type !== "PHOTO"
+      : (source === "SYSTEM_GENERATED" ||
+          source === "MODERN_SLATE" ||
+          m.slate_provenance === "generated") &&
+        ["SLATE", "HEAD", "TAIL", "RETROACTIVE", "RETROACTIVE_HEAD"].includes(
+          type,
+        );
+  return {
+    slate,
+    type: slate ? type : "PHOTO",
+    tail: type === "TAIL",
+    primary: Boolean(m.timeline_primary),
+  };
+};
+
+export default function IntakeTimeline() {
+  const [items, setItems] = useState([]);
+  const [selected, setSelected] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [feedback, setFeedback] = useState("");
+  const [zoom, setZoom] = useState(2);
+  const [filter, setFilter] = useState("ALL");
+  const refresh = () =>
+    fetchIntakeTimeline().then((r) => setItems(r?.items || []));
+  useEffect(() => {
+    refresh().finally(() => setLoading(false));
+  }, []);
+  const ordered = useMemo(
+    () =>
+      [...items]
+        .sort((a, b) =>
+          String(a.timeline_key || "").localeCompare(
+            String(b.timeline_key || ""),
+          ),
+        )
+        .filter((e) => {
+          const c = classify(e.photo || {});
+          return (
+            filter === "ALL" ||
+            (filter === "PHOTOS" && !c.slate) ||
+            (filter === "SLATES" && c.slate) ||
+            (filter === "TAIL" && c.tail)
+          );
+        }),
+    [items, filter],
+  );
+  const mutate = async (fn, message) => {
+    setBusy(true);
+    try {
+      await fn();
+      await refresh();
+      setFeedback(message);
+    } catch (e) {
+      setFeedback(e.message || "Timeline update failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const mark = (p, value) =>
+    mutate(() => classifyTimelineAssets([p.id], value), `Marked ${value}.`);
+  const remove = (p) => {
+    if (window.confirm("Remove this image or Slate from the timeline?"))
+      mutate(() => deleteTimelineAsset(p.id), "Timeline asset removed.");
+  };
+  return (
+    <AppShell>
+      <div className="space-y-6">
+        <PageHeader
+          title="Photo Timeline"
+          description="Review capture chronology, remove duplicate Slates, and choose listing photos."
+          actions={
+            <Button variant="outline" onClick={refresh}>
+              Refresh
+            </Button>
+          }
+        />
+        <SectionPanel
+          title="Intake filmstrip"
+          description="Product groups alternate dark/light backgrounds. Head Slates are neon green; Tail Slates are neon purple."
+        >
+          <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
+            <span>Zoom</span>
+            <button
+              type="button"
+              onClick={() => setZoom(Math.max(0, zoom - 1))}
+            >
+              −
+            </button>
+            <input
+              aria-label="Timeline zoom"
+              type="range"
+              min="0"
+              max="4"
+              value={zoom}
+              onChange={(e) => setZoom(Number(e.target.value))}
+            />
+            <button
+              type="button"
+              onClick={() => setZoom(Math.min(4, zoom + 1))}
+            >
+              +
+            </button>
+            <select
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              className="rounded border px-2 py-1 text-xs"
+            >
+              <option>ALL</option>
+              <option>PHOTOS</option>
+              <option>SLATES</option>
+              <option>TAIL</option>
+            </select>
+            <Button
+              variant="outline"
+              disabled={busy}
+              onClick={() => {
+                if (window.confirm("Reset historical classifications?"))
+                  mutate(
+                    () =>
+                      resetTimelineClassifications({
+                        scope: "all",
+                        preserve_modern: true,
+                      }),
+                    "Classifications reset.",
+                  );
+              }}
+            >
+              Reset classifications
+            </Button>
+            {feedback && (
+              <span role="status" className="text-xs text-emerald-700">
+                {feedback}
+              </span>
+            )}
+          </div>
+          {loading ? (
+            <p>Loading timeline…</p>
+          ) : (
+            <div className="overflow-x-auto pb-3">
+              <div className="flex min-w-max items-end gap-2">
+                {ordered.map((entry, index) => {
+                  const p = entry.photo || {};
+                  const c = classify(p);
+                  const src = toThumbnailImageUrl(
+                    p.thumbnail_url ||
+                      p.display_url ||
+                      p.downloaded_url ||
+                      p.local_path,
+                    WIDTHS[zoom],
+                    WIDTHS[zoom],
+                  );
+              const groupIndex = [...ordered.slice(0, index + 1)].reverse().find((candidate) => classify(candidate.photo || {}).slate)?.photo?.slate_number || 0;
+              const bg = c.slate
+                ? c.tail
+                  ? "bg-fuchsia-500 border-fuchsia-300"
+                  : "bg-lime-300 border-lime-400"
+                : groupIndex % 2
+                  ? "bg-slate-200"
+                  : "bg-slate-700";
+                  return (
+                    <div
+                      key={p.id || index}
+                      className="flex items-center gap-2"
+                    >
+                      <div className="flex flex-col items-center">
+                        <div
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => setSelected(entry)}
+                          onKeyDown={(e) =>
+                            (e.key === "Enter" || e.key === " ") &&
+                            setSelected(entry)
+                          }
+                          style={{ width: WIDTHS[zoom] }}
+                          className={`rounded-xl border-4 p-1 text-left ${bg} ${c.primary ? "ring-4 ring-amber-300" : ""}`}
+                        >
+                          <div className="relative aspect-square overflow-hidden rounded-lg bg-slate-100">
+                            {src ? (
+                              <img
+                                src={src}
+                                alt={p.original_filename || `Photo ${p.id}`}
+                                loading="lazy"
+                                className="h-full w-full object-cover"
+                              />
+                            ) : (
+                              <span className="flex h-full items-center justify-center p-2 text-center text-[10px]">
+                                Image unavailable
+                              </span>
+                            )}
+                            {c.slate && (
+                              <span className="absolute left-1 top-1 rounded bg-black/70 px-1.5 py-0.5 text-[10px] font-black text-white">
+                                {c.tail ? "TAIL SLATE" : "HEAD SLATE"}
+                              </span>
+                            )}
+                          </div>
+                          <p className="mt-1 truncate text-[10px]">
+                            {p.original_filename || `Photo ${p.id}`}
+                          </p>
+                          <StatusPill
+                            status={c.slate ? "warning" : "default"}
+                            label={c.primary ? "PRIMARY" : c.type}
+                          />
+                        </div>
+                        <div className="mt-1 flex gap-1">
+                          <Button
+                            variant="outline"
+                            disabled={busy || c.slate}
+                            onClick={() =>
+                              mutate(
+                                () => setTimelinePrimary(p.id),
+                                "Primary listing photo selected.",
+                              )
+                            }
+                            className="px-1 py-0 text-[9px]"
+                          >
+                            Primary
+                          </Button>
+                          <Button
+                            variant="outline"
+                            disabled={busy}
+                            onClick={() => remove(p)}
+                            className="px-1 py-0 text-[9px]"
+                          >
+                            Delete
+                          </Button>
+                        </div>
+                        {c.slate ? (
+                          <>
+                          <Button
+                            variant="outline"
+                            disabled={busy}
+                            onClick={() => mark(p, "PHOTO")}
+                            className="mt-1 px-1 py-0 text-[9px]"
+                          >
+                            Remove Slate
+                          </Button>
+                          <Button
+                            variant="outline"
+                            disabled={busy}
+                            onClick={() => mark(p, "TAIL")}
+                            className="mt-1 ml-1 px-1 py-0 text-[9px]"
+                          >
+                            Tail Slate
+                          </Button>
+                          </>
+                        ) : (
+                          <Button
+                            variant="outline"
+                            disabled={busy}
+                            onClick={() => mark(p, "SLATE")}
+                            className="mt-1 px-1 py-0 text-[9px]"
+                          >
+                            Mark Slate
+                          </Button>
+                        )}
+                      </div>
+                      {index < ordered.length - 1 && (
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() =>
+                            mutate(
+                              () =>
+                                createRetroactiveSlate({
+                                  retroactive: true,
+                                  after_photo_id: entry.photo?.id || null,
+                                  before_photo_id:
+                                    ordered[index + 1]?.photo?.id || null,
+                                  title: "",
+                                }),
+                              "Slate created.",
+                            )
+                          }
+                          className="rounded-full border border-dashed border-blue-300 px-2 py-1 text-xs text-blue-600"
+                        >
+                          + Add Slate
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          {selected && (
+            <div className="rounded-lg border p-3 text-sm">
+              <b>Selected:</b> {selected.photo?.id} ·{" "}
+              {classify(selected.photo).type}
+              <Button
+                variant="outline"
+                className="ml-3"
+                onClick={() => setSelected(null)}
+              >
+                Close
+              </Button>
+            </div>
+          )}
+        </SectionPanel>
+      </div>
+    </AppShell>
+  );
+}
