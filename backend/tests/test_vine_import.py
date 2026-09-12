@@ -20,7 +20,7 @@ from app.api.vine_imports import (
     repair_vine_images,
     upload_vine_report,
 )
-from app.models.models import Image, IntakeNotification, Listing, ProductMediaCache, User, VineImportBatch, VineImportItem
+from app.models.models import Image, IntakeNotification, Listing, MarketplaceAccount, ProductMediaCache, User, VineImportBatch, VineImportItem
 from app.services.amazon_media import AmazonProductMediaProvider, _extract_amazon_product_facts
 from app.services.amazon_product_discovery import AmazonProductDiscoveryService
 from app.services.listing_review import normalize_listing_images
@@ -1501,6 +1501,49 @@ def test_vine_duplicate_import_reuses_existing_listing(db_session):
     assert len(created) == 1
 
 
+def test_real_batch_import_reuses_product_when_csv_row_moves(db_session, monkeypatch):
+    service = VineImportService()
+    user = User(email=f"vine-row-move-import-{uuid4()}@example.com", role="owner", is_admin=True)
+    db_session.add(user); db_session.commit(); db_session.refresh(user)
+    header = "Product Title,ASIN,Order Date,Order Number,Brand,Category,Status,Review Deadline,Item URL,Estimated Tax Value\n"
+    same = "Portable Work Light,B0ROWIMPORT1,01/01/2025,ROW-ORDER-1,Acme,Lighting,ordered,07/01/2025,https://www.amazon.com/dp/B0ROWIMPORT1,19.99\n"
+    # Empty CSV records move the exact same source content from physical row
+    # 999 to 1021 while parsing into the same stable Vine row identity.
+    filler = ",,,,,,,,,,\n"
+    first_payload = (header + filler * 997 + same).encode()
+    moved_payload = (header + filler * 1019 + same).encode()
+    assert first_payload.decode().splitlines().index(same.strip()) + 1 == 999
+    assert moved_payload.decode().splitlines().index(same.strip()) + 1 == 1021
+
+    def _discover(self, *, asin=None, **kwargs):  # noqa: ANN001
+        return {"status": "fetched", "asin": asin, "title": "Portable Work Light", "images": ["https://images.example/portable-light.jpg"], "product_facts": {"title": "Portable Work Light", "brand": "Acme", "feature_bullets": ["Steel body", "Portable lighting"], "current_price": 19.99}}
+    monkeypatch.setattr(AmazonProductDiscoveryService, "discover_for_vine_item", _discover)
+
+    batch_a = service.create_batch_from_upload(db_session, current_user=user, filename="row-999.csv", file_bytes=first_payload, reference_date=date(2026, 5, 5))
+    item_a = db_session.query(VineImportItem).filter(VineImportItem.batch_id == batch_a.id, VineImportItem.asin == "B0ROWIMPORT1").one()
+    result_a = service.create_listing_drafts(db_session, batch=batch_a, item_ids=[item_a.id], fetch_media_first=False, allow_drafts_without_media=True)
+    assert result_a["created"] == 1
+    listing_a_id = item_a.listing_id
+
+    batch_b = service.create_batch_from_upload(db_session, current_user=user, filename="row-1021.csv", file_bytes=moved_payload, reference_date=date(2026, 5, 5))
+    item_b = db_session.query(VineImportItem).filter(VineImportItem.batch_id == batch_b.id, VineImportItem.asin == "B0ROWIMPORT1").one()
+    assert service._is_duplicate_vine_item(item_b)
+    result_b = service.create_listing_drafts(db_session, batch=batch_b, item_ids=[item_b.id], fetch_media_first=False, allow_drafts_without_media=True)
+    db_session.refresh(item_b)
+    assert result_b["created"] == 0 and item_b.listing_id == listing_a_id
+
+    different = "Portable Work Light Pro,B0ROWIMPORT2,01/01/2025,ROW-ORDER-2,Acme,Lighting,ordered,07/01/2025,https://www.amazon.com/dp/B0ROWIMPORT2,19.99\n"
+    different_payload = (header + filler * 1019 + different).encode()
+    batch_c = service.create_batch_from_upload(db_session, current_user=user, filename="different-asin-row-1021.csv", file_bytes=different_payload, reference_date=date(2026, 5, 5))
+    item_c = db_session.query(VineImportItem).filter(VineImportItem.batch_id == batch_c.id, VineImportItem.asin == "B0ROWIMPORT2").one()
+    assert not service._is_duplicate_vine_item(item_c)
+    result_c = service.create_listing_drafts(db_session, batch=batch_c, item_ids=[item_c.id], fetch_media_first=False, allow_drafts_without_media=True)
+    assert result_c["created"] == 1
+    listings = db_session.query(Listing).filter(Listing.user_id == user.id, Listing.source_type == "amazon_vine").all()
+    assert len(listings) == 2 and item_c.listing_id != listing_a_id
+    assert {item.batch_id for item in (item_a, item_b, item_c)} == {batch_a.id, batch_b.id, batch_c.id}
+
+
 def test_vine_fingerprint_ignores_spreadsheet_row_position_and_distinguishes_asin():
     service = VineImportService()
     base = {
@@ -1574,6 +1617,65 @@ def test_synthetic_new_vine_batch_is_quality_ready_on_first_pass(db_session, mon
     pool = next(listing for listing in listings if listing.title == "Portable Pool Pump")
     assert "Pool" in (pool.category_suggestion or "")
     assert len((pool.description or "").split()) >= 8
+
+
+def test_first_pass_uses_real_preflight_contract_and_persists_ebay_cache(db_session, monkeypatch):
+    user = User(email=f"vine-preflight-contract-{uuid4()}@example.com", role="owner", is_admin=True)
+    user.settings_json = {"ebay_marketplace_policy_settings": {"payment_policy_id": "p", "fulfillment_policy_id": "f", "return_policy_id": "r", "merchant_location_key": "loc", "package_weight_required": False, "package_dimensions_required": False}}
+    db_session.add(user); db_session.flush()
+    account = MarketplaceAccount(user_id=user.id, marketplace="ebay", external_account_id="contract-account", access_token="token", refresh_token="refresh")
+    db_session.add(account); db_session.commit()
+
+    async def fake_account(_user_id, _db): return account
+    async def fake_category(_listing, _account, marketplace_id="EBAY_US"): return {"categoryId": "30090", "categoryName": "Office Supplies"}
+    async def fake_aspects(_db, _account, category_id, marketplace_id="EBAY_US", force_refresh=False): return ({"aspects": []}, "live", True)
+    async def fake_policies(_token, marketplace_id="EBAY_US", create_if_missing=False): return {"paymentPolicyId": "p", "fulfillmentPolicyId": "f", "returnPolicyId": "r"}
+    monkeypatch.setattr("app.services.ebay_service.get_or_refresh_account", fake_account)
+    monkeypatch.setattr("app.services.ebay_service.suggest_ebay_category", fake_category)
+    monkeypatch.setattr("app.services.ebay_service._cached_category_aspects", fake_aspects)
+    monkeypatch.setattr("app.services.ebay_service.get_business_policy_ids", fake_policies)
+    monkeypatch.setattr("app.services.ebay_service._build_ebay_image_urls", lambda _listing: ["https://images.example/contract.jpg"])
+    monkeypatch.setattr(AmazonProductDiscoveryService, "discover_for_vine_item", lambda _self, *, asin=None, **kwargs: {"status": "fetched", "asin": asin, "title": "Contract item", "images": ["https://images.example/contract.jpg"], "product_facts": {"title": "Contract item", "brand": "Contract Co", "feature_bullets": ["Steel construction", "Compact design"], "current_price": 19.0}})
+    monkeypatch.setattr(VineImportService, "repair_vine_listing_images", lambda _self, _db, **kwargs: {"updated": 0, "listing_ids": kwargs.get("listing_ids") or []})
+    batch = VineImportBatch(user_id=user.id, filename="contract.csv", source_type="csv")
+    db_session.add(batch); db_session.flush()
+    item = VineImportItem(batch_id=batch.id, user_id=user.id, asin="B000CONTRACT", product_name="Contract item", order_number="CONTRACT-1", order_type="ORDER", eligibility_status="eligible", estimated_tax_value=19.0)
+    db_session.add(item); db_session.commit()
+
+    result = VineImportService().auto_build_batch_drafts(db_session, batch=batch, new_only=False, include_cancelled=True)
+    assert result["preflight_result"]["count"] == 1
+    listing_id = result["listing_ids"][0]
+    refreshed = db_session.get(Listing, listing_id)
+    fresh = result["preflight_result"]["results"][0]
+    assert fresh["status"] in {"ready", "ready_with_warnings", "blocked"}
+    cached = (refreshed.marketplace_data or {}).get("marketplace_preflight", {}).get("by_marketplace", {}).get("ebay")
+    assert cached is not None and cached["marketplace"] == "ebay"
+    is_blocked = bool(fresh["blockers"])
+    assert refreshed.processing_state == ("needs_attention" if is_blocked else "complete")
+    assert refreshed.needs_review is (not is_blocked)
+    assert bool(refreshed.processing_blocking_reason) is is_blocked
+
+
+def test_vine_update_preserves_durable_facts_when_discovery_is_empty(db_session, monkeypatch):
+    user = User(email=f"vine-durable-empty-{uuid4()}@example.com", role="owner", is_admin=True)
+    db_session.add(user); db_session.flush()
+    batch = VineImportBatch(user_id=user.id, filename="durable.csv", source_type="csv")
+    facts = {"title": "Durable Evidence Tool", "brand": "Evidence Co", "model": "DT-40", "current_price": 12.5, "product_type": "Workshop tool", "material": "Steel", "capacity": "40 lb", "included_components": ["mounting bracket", "hardware"], "feature_bullets": ["Steel construction", "40 lb rated capacity", "Includes mounting bracket and hardware"], "specifications": {"Material": "Steel", "Capacity": "40 lb", "Model": "DT-40"}}
+    listing = Listing(user_id=user.id, source_type="amazon_vine", title="Old title", description="Durable original description with evidence.", listing_price=12.5, suggested_price=12.5, source_metadata={"amazon_product_facts": facts}, marketplace_data={"pricing_analysis": {"listing_price": 12.5}})
+    db_session.add_all([batch, listing]); db_session.flush()
+    item = VineImportItem(batch_id=batch.id, user_id=user.id, asin="B000DURABLE", product_name="Durable Evidence Tool", estimated_tax_value=45, listing_id=listing.id, inventory_item_id=listing.id, eligibility_status="eligible")
+    db_session.add(item); db_session.commit()
+    monkeypatch.setattr(AmazonProductDiscoveryService, "discover_for_vine_item", lambda *args, **kwargs: {"status": "fetch_failed", "asin": "B000DURABLE", "product_facts": {}, "images": []})
+    VineImportService().create_listing_drafts(db_session, batch=batch, item_ids=[item.id], fetch_media_first=False, allow_drafts_without_media=True)
+    refreshed = db_session.get(Listing, listing.id)
+    assert refreshed.source_metadata["amazon_product_facts"]["brand"] == "Evidence Co"
+    assert refreshed.listing_price == 12.5
+    assert "Evidence Co" in (refreshed.description or "")
+    from app.services.marketplace_preflight import MarketplacePreflightService
+    service = MarketplacePreflightService()
+    fresh = service.preflight_listing(db_session, refreshed, "ebay")
+    assert fresh["marketplace"] == "ebay"
+    assert not any(issue.get("code") == "DESCRIPTION_INADEQUATE" for issue in fresh["blockers"])
 
 
 def test_vine_duplicate_import_rows_are_skipped_until_prior_listing_exists(db_session):
