@@ -427,3 +427,36 @@ requirements above. Credentials were not rotated or printed.
 - Authenticated operator interaction remains `OPERATOR_TEST_REQUIRED`; build,
   route, and data/media verification do not by themselves prove manual browser
   clicks.
+
+# 2026-09-12 - Host disk and Slate QR test stability
+
+- Root cause of the legacy QR test OOM was recursive variant expansion:
+  `_qr_variants()` included QR-anchor crops while `_qr_anchor_crops()` called
+  `_qr_variants()` again. Anchor discovery now requests only finite base
+  variants, and valid PosterPro payloads short-circuit further QR transforms.
+  The QR round-trip/regression tests passed in 9.9 seconds at 272 MiB peak RSS;
+  the full Head Slate suite completed at 276 MiB peak RSS rather than being
+  OOM-killed.
+- The async-client test fixture now disposes its temporary SQLite engine and
+  removes its database/sidecars on teardown. Before cleanup, 666 abandoned
+  fixture databases occupied 1,016,102,912 bytes of `/tmp` tmpfs; they were
+  closed/unreferenced test artifacts, removed, and no longer accumulate on
+  normal teardown.
+- Full Head Slate suite result with external pytest plugin autoload disabled:
+  `44 passed, 6 failed, 1 skipped, 0 errors`. Failures are individually
+  classified in the maintenance checkpoint: four obsolete mocks/API/parser
+  expectations, one draft expectation made before the photo batch closes, and
+  one SEO filename fixture whose natural filename order puts the label first.
+  These are not reported as green; the async route test is skipped because the
+  anyio plugin was disabled for the measured run. Recovery-candidate suite:
+  `7 passed, 0 failed, 0 skipped, 0 errors`.
+- The 30,511,151,530-byte active `/home/deploy/.pm2/pm2.log` was retained as a
+  gzip archive (778,717,143 bytes); the live file was truncated only after the
+  archive passed `gzip -t`. A logrotate size/retention policy now bounds future
+  growth. System journal retention is capped at 3 GiB/14 days; vacuuming
+  preserved recent OOM evidence and reclaimed 986.1 MiB.
+- Only regenerated package caches were purged (pip and npm). Application
+  storage, Google Photos originals, listing images, databases, current builds,
+  backups, and Timeline snapshots were preserved. Timeline ordering, group
+  identities, Slate positions/classifications, and media rows were not changed
+  in this stability pass.

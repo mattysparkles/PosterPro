@@ -4622,31 +4622,55 @@ class IntakeSlateService:
     def _decode_qr_values(self, image: np.ndarray) -> list[str]:
         detector = cv2.QRCodeDetector()
         seen: list[str] = []
+        # The generated Slate is already a clean QR image.  Try it before
+        # constructing the expensive photographed-image variant set, and stop
+        # as soon as the decoded QR is a valid PosterPro payload.
+        for decoded in self._decode_qr_variant(detector, image):
+            value = str(decoded or "").strip()
+            if not value:
+                continue
+            if self._coerce_slate_json(value):
+                return [value]
+            if value not in seen:
+                seen.append(value)
         for variant in self._qr_variants(image):
             for decoded in self._decode_qr_variant(detector, variant):
                 value = str(decoded or "").strip()
-                if value and value not in seen:
+                if not value:
+                    continue
+                if self._coerce_slate_json(value):
+                    return [value]
+                if value not in seen:
                     seen.append(value)
         return seen
 
     def _decode_qr_variant(self, detector: cv2.QRCodeDetector, image: np.ndarray) -> list[str]:
         values: list[str] = []
+
+        def record(value: str | None) -> bool:
+            normalized = str(value or "").strip()
+            if normalized and normalized not in values:
+                values.append(normalized)
+            return bool(normalized and self._coerce_slate_json(normalized))
+
         try:
             value, _, _ = detector.detectAndDecode(image)
-            if value:
-                values.append(value)
+            if record(value):
+                return values
         except Exception:
             pass
         try:
             ok, decoded_info, _, _ = detector.detectAndDecodeMulti(image)
             if ok and decoded_info is not None:
-                values.extend([str(item) for item in decoded_info if str(item or "").strip()])
+                for item in decoded_info:
+                    if record(str(item)):
+                        return values
         except Exception:
             pass
         try:
             value, _, _ = detector.detectAndDecodeCurved(image)
-            if value:
-                values.append(value)
+            if record(value):
+                return values
         except Exception:
             pass
         return values
@@ -4659,7 +4683,7 @@ class IntakeSlateService:
                     return payload
         return None
 
-    def _qr_variants(self, image: np.ndarray) -> list[np.ndarray]:
+    def _qr_variants(self, image: np.ndarray, *, include_anchor_crops: bool = True) -> list[np.ndarray]:
         variants: list[np.ndarray] = []
 
         def add(frame: np.ndarray | None) -> None:
@@ -4701,15 +4725,20 @@ class IntakeSlateService:
                 add(cv2.adaptiveThreshold(crop_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 9))
             except Exception:
                 continue
-        for crop in self._qr_anchor_crops(image):
-            add(crop)
-            try:
-                crop_gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                add(cv2.resize(crop_gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC))
-                add(cv2.threshold(crop_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1])
-                add(cv2.adaptiveThreshold(crop_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 9))
-            except Exception:
-                continue
+        # Anchor crops are derived from QR detections in base variants.  The
+        # anchor-crop detector must not ask for anchor crops itself: doing so
+        # recursively expands image variants until the worker/test process is
+        # OOM-killed.  The outer decoder still gets these additional variants.
+        if include_anchor_crops:
+            for crop in self._qr_anchor_crops(image):
+                add(crop)
+                try:
+                    crop_gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                    add(cv2.resize(crop_gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC))
+                    add(cv2.threshold(crop_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1])
+                    add(cv2.adaptiveThreshold(crop_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 9))
+                except Exception:
+                    continue
 
         return variants
 
@@ -5011,7 +5040,9 @@ class IntakeSlateService:
     def _qr_anchor_crops(self, image: np.ndarray) -> list[np.ndarray]:
         crops: list[np.ndarray] = []
         detector = cv2.QRCodeDetector()
-        for variant in self._qr_variants(image):
+        # Anchor crops are derived from QR detections in base variants; do not
+        # recursively request another anchor-crop expansion here.
+        for variant in self._qr_variants(image, include_anchor_crops=False):
             try:
                 ok, points = detector.detect(variant)
             except Exception:

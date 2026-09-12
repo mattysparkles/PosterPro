@@ -3,6 +3,7 @@ import tempfile
 import functools
 import os
 import faulthandler
+from pathlib import Path
 
 import anyio.to_thread
 import httpx
@@ -66,8 +67,11 @@ async def async_client():
 
     original_engine = database_module.engine
     original_session_local = database_module.SessionLocal
+    test_engine = None
+    test_db_path = None
     try:
         tmp = tempfile.NamedTemporaryFile(prefix="posterpro-test-", suffix=".db", dir="/tmp", delete=False)
+        test_db_path = tmp.name
         tmp.close()
 
         test_engine = create_engine(
@@ -92,3 +96,12 @@ async def async_client():
         database_module.SessionLocal = original_session_local
         fastapi.routing.run_in_threadpool = original_fastapi_run_in_threadpool  # type: ignore[assignment]
         starlette.concurrency.run_in_threadpool = original_starlette_run_in_threadpool  # type: ignore[assignment]
+        if test_engine is not None:
+            test_engine.dispose()
+        if test_db_path:
+            for suffix in ("", "-wal", "-shm", "-journal"):
+                try:
+                    Path(f"{test_db_path}{suffix}").unlink(missing_ok=True)
+                except OSError:
+                    # Teardown cleanup must not hide the original test result.
+                    pass

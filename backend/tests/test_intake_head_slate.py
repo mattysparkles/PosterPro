@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
+import numpy as np
 import pytest
 from PIL import Image, ImageDraw, ImageFilter
 from sqlalchemy import select
@@ -101,6 +102,21 @@ def test_head_slate_qr_payload_round_trip(db_session):
     assert decoded['session_id'] == '2026-07-05-STORAGE-A'
     assert decoded['title'] == 'Ryobi 40V charger'
     assert qr_payload['created_at']
+
+
+def test_qr_anchor_crop_search_uses_finite_base_variants(monkeypatch):
+    service = IntakeSlateService()
+    calls = []
+
+    def base_variants(_image, *, include_anchor_crops=True):
+        calls.append(include_anchor_crops)
+        assert include_anchor_crops is False
+        return []
+
+    monkeypatch.setattr(service, '_qr_variants', base_variants)
+
+    assert service._qr_anchor_crops(np.zeros((32, 32, 3), dtype=np.uint8)) == []
+    assert calls == [False]
 
 
 def test_head_slate_qr_payload_round_trip_from_photographed_style_image(db_session):
