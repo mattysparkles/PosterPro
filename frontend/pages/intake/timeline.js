@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import AppShell from "../../components/layout/AppShell";
 import PageHeader from "../../components/ui/page-header";
 import SectionPanel from "../../components/ui/section-panel";
@@ -13,6 +13,8 @@ import {
   setTimelinePrimary,
   toThumbnailImageUrl,
 } from "../../lib/api";
+import { loadTimelineWindow } from "../../lib/timelinePagination.mjs";
+import { slatePreviewDataUrl } from "../../lib/timelinePreview.mjs";
 
 const WIDTHS = [48, 64, 88, 120, 160];
 const PAGE_SIZE = 500;
@@ -63,14 +65,48 @@ export default function IntakeTimeline() {
   const [filter, setFilter] = useState("ALL");
   const [counts, setCounts] = useState({ total: 0, photo_count: 0, slate_count: 0 });
   const scrollRef = useRef(null);
+  const itemsRef = useRef([]);
+  const selectedRef = useRef(null);
+  const pendingViewRestoreRef = useRef(null);
 
-  const refresh = useCallback(async () => {
-    const result = await fetchIntakeTimeline({ limit: PAGE_SIZE, offset: 0 });
-    setItems(result?.items || []);
+  useEffect(() => { itemsRef.current = items; }, [items]);
+  useEffect(() => { selectedRef.current = selected; }, [selected]);
+
+  useLayoutEffect(() => {
+    if (!pendingViewRestoreRef.current) return;
+    const view = pendingViewRestoreRef.current;
+    pendingViewRestoreRef.current = null;
+    if (scrollRef.current) {
+      scrollRef.current.scrollLeft = view.scrollLeft;
+      scrollRef.current.scrollTop = view.scrollTop;
+    }
+    if (typeof window !== "undefined" && Number.isFinite(view.windowScrollY)) {
+      window.scrollTo(0, view.windowScrollY);
+    }
+  }, [items]);
+
+  const refresh = useCallback(async ({ loadedCount } = {}) => {
+    const targetCount = Math.max(PAGE_SIZE, Number(loadedCount ?? itemsRef.current.length) || 0);
+    const selectedId = selectedRef.current?.photo?.id;
+    pendingViewRestoreRef.current = {
+      scrollLeft: scrollRef.current?.scrollLeft || 0,
+      scrollTop: scrollRef.current?.scrollTop || 0,
+      windowScrollY: typeof window !== "undefined" ? window.scrollY : 0,
+    };
+    const result = await loadTimelineWindow(fetchIntakeTimeline, targetCount, PAGE_SIZE);
+    itemsRef.current = result.items;
+    setItems(result.items);
+    const visibleAssetIds = new Set(result.items.map((entry) => String(entry.photo?.id)));
+    setSelectedIds((current) => current.filter((id) => visibleAssetIds.has(String(id))));
+    if (selectedId != null) {
+      const selectedEntry = result.items.find((entry) => String(entry.photo?.id) === String(selectedId));
+      setSelected(selectedEntry || null);
+      selectedRef.current = selectedEntry || null;
+    }
     setCounts({
-      total: Number(result?.total || 0),
-      photo_count: Number(result?.photo_count || 0),
-      slate_count: Number(result?.slate_count || 0),
+      total: result.total,
+      photo_count: result.photo_count,
+      slate_count: result.slate_count,
     });
   }, []);
 
@@ -93,11 +129,12 @@ export default function IntakeTimeline() {
   };
 
   const mutate = async (operation, successMessage) => {
+    const loadedCount = itemsRef.current.length;
     setBusy(true);
     setFeedback("");
     try {
       await operation();
-      await refresh();
+      await refresh({ loadedCount });
       setFeedback(successMessage);
     } catch (error) {
       setFeedback(error?.message || "Timeline update failed.");
@@ -107,6 +144,7 @@ export default function IntakeTimeline() {
   };
 
   const addSlate = async (after, before) => {
+    const loadedCount = itemsRef.current.length;
     setBusy(true);
     try {
       await createRetroactiveSlate({
@@ -115,7 +153,7 @@ export default function IntakeTimeline() {
         before_photo_id: before?.photo?.id ?? null,
         title: "",
       });
-      await refresh();
+      await refresh({ loadedCount });
       setFeedback("Slate added at the selected timeline boundary.");
     } catch (error) {
       setFeedback(error?.message || "Could not add Slate.");
@@ -149,7 +187,11 @@ export default function IntakeTimeline() {
     setLoadingMore(true);
     try {
       const result = await fetchIntakeTimeline({ limit: PAGE_SIZE, offset: items.length });
-      setItems((current) => [...current, ...(result?.items || [])]);
+      setItems((current) => {
+        const merged = [...current, ...(result?.items || [])];
+        itemsRef.current = merged;
+        return merged;
+      });
       setCounts({ total: Number(result?.total || 0), photo_count: Number(result?.photo_count || 0), slate_count: Number(result?.slate_count || 0) });
     } catch (error) {
       setFeedback(error?.message || "Could not load more timeline items.");
@@ -172,7 +214,7 @@ export default function IntakeTimeline() {
       photo.thumbnail_url || photo.display_url || photo.downloaded_url || photo.local_path,
       width,
       width,
-    );
+    ) || (state.slate ? slatePreviewDataUrl(photo) : null);
     const slateId = photo.slate_id || photo.slate?.id || (String(photo.id || "").startsWith("slate-") ? String(photo.id).slice(6) : null);
     const hasNext = entryIndex < groupEntries.length - 1 || groupIndex < groups.length - 1;
     const nextEntry = entryIndex < groupEntries.length - 1
@@ -191,8 +233,16 @@ export default function IntakeTimeline() {
           <button
             type="button"
             onClick={() => setSelected(entry)}
-            style={{ width }}
-            className={`rounded-xl border-2 p-1 text-left shadow-sm ${state.role === "TAIL" ? "border-fuchsia-300 bg-fuchsia-500 text-white" : state.slate ? "border-lime-400 bg-lime-300 text-slate-950" : "border-transparent bg-transparent text-inherit"} ${selected?.photo?.id === photo.id ? "ring-2 ring-blue-500" : ""}`}
+            data-timeline-role={state.role}
+            style={{
+              width,
+              ...(state.role === "TAIL"
+                ? { backgroundColor: "#ff00d4", borderColor: "#ff00d4", color: "#170015" }
+                : state.slate
+                  ? { backgroundColor: "#39ff14", borderColor: "#00c853", color: "#071500" }
+                  : {}),
+            }}
+            className={`rounded-xl border-2 p-1 text-left shadow-sm ${state.slate ? "font-semibold" : "border-transparent bg-transparent text-inherit"} ${selected?.photo?.id === photo.id ? "ring-2 ring-blue-500" : ""}`}
           >
             <div className="relative aspect-square overflow-hidden rounded-lg bg-slate-100">
               {thumbnail ? (
@@ -265,8 +315,12 @@ export default function IntakeTimeline() {
               <div className="flex min-w-max items-stretch gap-3">
                 {filter === "ALL" && items[0] && <button type="button" disabled={busy} onClick={() => void addSlate(null, items[0])} className="my-auto shrink-0 rounded-full border border-dashed border-blue-300 bg-white/80 px-3 py-2 text-xs text-blue-700">+ Add Slate at start</button>}
                 {groups.map((group, groupIndex) => {
-                  const background = group.index === 0 ? "bg-slate-100 text-slate-900" : group.index % 2 ? "bg-slate-800 text-white" : "bg-slate-200 text-slate-950";
-                  return <section key={group.id} data-image-group-id={group.id} data-image-group-index={group.index} className={`flex shrink-0 flex-col rounded-2xl border border-slate-400/50 p-3 ${background}`}>
+              const background = group.index === 0
+                ? { backgroundColor: "#f3f4f6", color: "#111827" }
+                : group.index % 2
+                  ? { backgroundColor: "#292929", color: "#ffffff" }
+                  : { backgroundColor: "#e5e7eb", color: "#111827" };
+              return <section key={group.id} data-image-group-id={group.id} data-image-group-index={group.index} style={background} className="flex shrink-0 flex-col rounded-2xl border border-slate-400/50 p-3">
                     <div className="mb-2 flex items-center justify-between gap-3 text-[10px] font-semibold uppercase tracking-wide opacity-80"><span>{group.index ? `Image Group ${group.index}` : "Unassigned Slate"}</span><span>{group.entries.filter((entry) => !classify(entry.photo || {}).slate).length} photos</span></div>
                     <div className="flex min-w-min items-start gap-2">{group.entries.map((entry, index) => renderEntry(entry, index, group.entries, groupIndex))}</div>
                   </section>;

@@ -26,6 +26,7 @@ from app.api.schemas import (
     IntakeTimelineReconcileRequest,
     IntakeUnassignedAssignmentRequest,
 )
+from app.core.config import settings
 from app.core.auth import get_current_user
 from app.core.database import get_db
 from app.models.models import IntakePhoto, IntakePhotoBatch, IntakeSession, IntakeSlate, IntakeReconciliationEvent, Listing, User
@@ -45,6 +46,32 @@ from app.workers.tasks import drain_intake_provider_media_task
 
 router = APIRouter(prefix="/intake", tags=["intake"])
 service = IntakeSlateService()
+
+
+def _timeline_media_exists(path: str | None) -> bool:
+    """Check a persisted local media URL without treating `/media` as OS root."""
+    value = str(path or "").strip()
+    if not value:
+        return False
+    if value.startswith(("https://", "http://", "data:")):
+        return True
+    if value.startswith("/media/"):
+        value = str(Path(settings.storage_root) / value.removeprefix("/media/"))
+    try:
+        return Path(value).is_file()
+    except OSError:
+        return False
+
+
+def _timeline_marker_media_path(rendered_path: str | None, linked_photo: IntakePhoto | None) -> str | None:
+    if _timeline_media_exists(rendered_path):
+        return str(rendered_path)
+    if linked_photo is not None:
+        source_photo = _serialize_photo(linked_photo)
+        candidate = source_photo.get("thumbnail_url") or source_photo.get("display_url")
+        if _timeline_media_exists(candidate):
+            return str(candidate)
+    return None
 
 
 def _iso(value: Any) -> str | None:
@@ -1250,13 +1277,17 @@ def intake_timeline(
         slate_role = "TAIL" if role_value == "tail" or role_value.startswith("tail") else "HEAD"
         rendered = metadata.get("rendered_slate") if isinstance(metadata.get("rendered_slate"), dict) else {}
         marker_id = f"slate-{slate.id}"
+        rendered_path = _timeline_marker_media_path(
+            rendered.get("storage_path") or metadata.get("rendered_slate_url"),
+            linked_photo,
+        )
         marker = {
             "id": marker_id,
             "user_id": current_user.id,
             "original_filename": f"Slate {slate.item_id or slate.id}",
-            "local_path": rendered.get("storage_path") or metadata.get("rendered_slate_url"),
-            "thumbnail_url": rendered.get("storage_path") or metadata.get("rendered_slate_url"),
-            "display_url": rendered.get("storage_path") or metadata.get("rendered_slate_url"),
+            "local_path": rendered_path,
+            "thumbnail_url": rendered_path,
+            "display_url": rendered_path,
             "captured_at": _iso(linked_photo.captured_at) if linked_photo else None,
             "image_type": "slate",
             "is_slate": True,
@@ -1264,12 +1295,14 @@ def intake_timeline(
             "item_id": slate.item_id,
             "source_photo_id": linked_photo.source_photo_id if linked_photo else None,
             "slate_id": slate.id,
-            "classification": slate_role,
+            # Compatibility alias retained for older Timeline clients. The
+            # directional meaning is always carried by timeline_role.
+            "classification": "SLATE",
             "classification_source": "MODERN_SLATE",
             "timeline_role": slate_role,
             "canonical_group_id": slate.item_id,
             "metadata_json": {
-                "classification": slate_role,
+                "classification": "SLATE",
                 "classification_source": "MODERN_SLATE",
                 "timeline_role": slate_role,
                 "official_slate_id": slate.id,

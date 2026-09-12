@@ -43,6 +43,36 @@ def _make_image_file(name: str, color: str = 'white') -> str:
     return handle.name
 
 
+def test_modern_slate_missing_render_uses_its_exact_legacy_source_thumbnail(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "storage_root", str(tmp_path))
+    source = tmp_path / "legacy-slate.jpg"
+    Image.new("RGB", (32, 32), color="white").save(source, format="JPEG")
+    photo = IntakePhoto(
+        user_id=2,
+        source_provider="google_photos",
+        source_photo_id="legacy-source-1",
+        local_path=str(source),
+        metadata_json={},
+    )
+
+    resolved = intake_api._timeline_marker_media_path("/media/missing-render.png", photo)
+
+    assert resolved == "/media/legacy-slate.jpg"
+
+
+def test_modern_slate_missing_render_and_source_has_no_broken_media_url(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "storage_root", str(tmp_path))
+    photo = IntakePhoto(
+        user_id=2,
+        source_provider="google_photos",
+        source_photo_id="missing-source-1",
+        local_path=str(tmp_path / "missing-source.jpg"),
+        metadata_json={},
+    )
+
+    assert intake_api._timeline_marker_media_path("/media/missing-render.png", photo) is None
+
+
 def _make_detail_image(name: str, *, blur: float = 0.0) -> str:
     handle = tempfile.NamedTemporaryFile(prefix=name, suffix='.png', delete=False)
     handle.close()

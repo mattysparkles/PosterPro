@@ -141,6 +141,7 @@ async def test_retroactive_slate_is_visible_as_modern_timeline_marker(async_clie
     marker = next(row for row in markers if row["photo"]["slate_id"] == slate_id)
     assert marker["photo"]["classification"] == "SLATE"
     assert marker["photo"]["classification_source"] == "MODERN_SLATE"
+    assert marker["photo"]["timeline_role"] == "HEAD"
     assert marker["photo"]["slate"]["item_id"] == "ITEM-TEST"
 
 

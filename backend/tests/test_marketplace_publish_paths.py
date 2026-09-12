@@ -75,3 +75,28 @@ def test_mercari_payload_trims_description_to_word_limit(db_session):
     assert payload["marketplace"] == "mercari"
     assert payload["description"] is not None
     assert len(str(payload["description"]).split()) == 1000
+
+
+def test_non_ebay_payload_does_not_reuse_ebay_category_id(db_session):
+    user = User(email="marketplace-category-map@example.com")
+    db_session.add(user)
+    db_session.flush()
+
+    listing = Listing(
+        user_id=user.id,
+        status=ListingStatus.PROCESSED,
+        title="Wool sweater",
+        description="Warm wool sweater.",
+        listing_price=40.0,
+        quantity=1,
+        category_id="57988",
+        category_suggestion="Clothing, Shoes & Accessories > Sweaters",
+        item_specifics={"Type": "Sweater"},
+    )
+
+    mercari = build_marketplace_payload(listing, "mercari")
+    ebay = build_marketplace_payload(listing, "ebay")
+
+    assert mercari["category_hint"] == "Clothing, Shoes & Accessories > Sweaters"
+    assert mercari["category_hint"] != listing.category_id
+    assert ebay["category_id"] == "57988"

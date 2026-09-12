@@ -84,6 +84,12 @@ class JobStateRequest(BaseModel):
     result: dict | None = None
 
 
+class OperatorCompletionRequest(BaseModel):
+    confirmed: bool
+    external_listing_id: str | None = Field(default=None, max_length=255)
+    external_url: str | None = Field(default=None, max_length=2000)
+
+
 def _version_tuple(value: str | None) -> tuple[int, ...]:
     try:
         return tuple(int(part) for part in str(value or "0").split(".") if part.isdigit())
@@ -317,6 +323,113 @@ def get_assisted_job(job_id: int, db: Session = Depends(get_db), current_user: U
     return _job_payload(job)
 
 
+@router.post("/assisted-marketplace-jobs/{job_id}/confirm-result")
+def confirm_assisted_job_result(
+    job_id: int,
+    payload: OperatorCompletionRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Record a human-confirmed marketplace action from PosterPro Jobs."""
+    job = db.execute(select(MarketplaceExtensionJob).where(
+        MarketplaceExtensionJob.id == job_id,
+        MarketplaceExtensionJob.user_id == current_user.id,
+    ).with_for_update()).scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Assisted marketplace job not found")
+    if job.status != "AWAITING_OPERATOR_REVIEW":
+        raise HTTPException(status_code=409, detail=f"Job is not awaiting operator review ({job.status})")
+    if not payload.confirmed:
+        raise HTTPException(status_code=422, detail="Explicit confirmation is required")
+    external_id = str(payload.external_listing_id or "").strip() or None
+    external_url = str(payload.external_url or "").strip() or None
+    if external_url and not _marketplace_url_matches(job.marketplace, external_url):
+        raise HTTPException(status_code=422, detail="Result URL does not match the job marketplace")
+    old_id = job.external_listing_id or (job.payload_snapshot or {}).get("external_listing_id")
+    old_url = job.external_url or (job.payload_snapshot or {}).get("external_url")
+    if job.action in {"UPDATE", "END"}:
+        if not old_id and not old_url:
+            raise HTTPException(status_code=409, detail="Existing marketplace identity is required for update/end")
+        if external_id and external_id != old_id:
+            raise HTTPException(status_code=409, detail="Update/end cannot replace the confirmed external listing ID")
+        if external_url and external_url != old_url:
+            raise HTTPException(status_code=409, detail="Update/end cannot replace the confirmed external listing URL")
+        external_id, external_url = old_id, old_url
+    elif job.action == "CREATE" and not (external_id or external_url):
+        raise HTTPException(status_code=422, detail="A confirmed external listing ID or URL is required")
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    job.status = "COMPLETED"
+    job.completed_at = now
+    job.last_state_at = now
+    job.lease_expires_at = None
+    job.external_listing_id = external_id
+    job.external_url = external_url
+    job.result = {
+        **(job.result or {}),
+        "operator_confirmed": True,
+        "completion_source": "posterpro_jobs",
+        "confirmed_at": _iso(now),
+    }
+    row = db.execute(select(MarketplaceListing).where(
+        MarketplaceListing.listing_id == job.listing_id,
+        MarketplaceListing.marketplace == MarketplaceName(job.marketplace),
+    ).order_by(MarketplaceListing.updated_at.desc(), MarketplaceListing.id.desc())).scalars().first()
+    if row is None and job.action == "CREATE":
+        row = MarketplaceListing(listing_id=job.listing_id, marketplace=MarketplaceName(job.marketplace))
+    if row is not None:
+        row.marketplace_listing_id = external_id or row.marketplace_listing_id
+        row.status = {
+            "CREATE": MarketplaceListingStatus.PUBLISHED,
+            "UPDATE": MarketplaceListingStatus.UPDATED,
+            "END": MarketplaceListingStatus.DELETED,
+        }[job.action]
+        row.raw_response = {
+            **(row.raw_response or {}),
+            "external_url": external_url,
+            "extension_job_id": job.id,
+            "result": job.result,
+        }
+        db.add(row)
+    if job.crosspost_job_id:
+        parent = db.get(MarketplaceCrosspostJob, job.crosspost_job_id)
+        if parent and parent.user_id == current_user.id:
+            children = db.execute(select(MarketplaceExtensionJob).where(
+                MarketplaceExtensionJob.crosspost_job_id == parent.id,
+            )).scalars().all()
+            statuses = {str(child.status).upper() for child in children}
+            parent.status = "completed" if children and statuses.issubset({"COMPLETED", "CANCELLED"}) else "awaiting_operator_review"
+            parent.result_summary = {
+                **(parent.result_summary or {}),
+                "extension_jobs": [
+                    {"id": child.id, "marketplace": child.marketplace, "action": child.action, "status": child.status, "error_code": child.error_code}
+                    for child in children
+                ],
+            }
+            db.add(parent)
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    return _job_payload(job)
+
+
+@router.get("/browser-extension/jobs/{job_id}/status")
+def get_extension_job_status(
+    job_id: int,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    device = _require_device(authorization, db)
+    job = db.execute(select(MarketplaceExtensionJob).where(
+        MarketplaceExtensionJob.id == job_id,
+        MarketplaceExtensionJob.user_id == device.user_id,
+        MarketplaceExtensionJob.device_id == device.id,
+    )).scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Claimed assisted job not found")
+    return {"job_id": job.id, "status": job.status, "completed_at": _iso(job.completed_at)}
+
+
 @router.post("/browser-extension/jobs/claim")
 def claim_extension_job(
     authorization: str | None = Header(default=None),
@@ -364,6 +477,32 @@ def claim_extension_job(
     db.commit()
     db.refresh(candidate)
     return {"job": _job_payload(candidate)}
+
+
+@router.post("/browser-extension/jobs/{job_id}/lease")
+def renew_extension_job_lease(
+    job_id: int,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """Keep an actively executing job leased without exposing claim controls."""
+    device = _require_device(authorization, db)
+    job = db.execute(select(MarketplaceExtensionJob).where(
+        MarketplaceExtensionJob.id == job_id,
+        MarketplaceExtensionJob.user_id == device.user_id,
+        MarketplaceExtensionJob.device_id == device.id,
+    ).with_for_update()).scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Claimed assisted job not found")
+    if job.status not in {"CLAIMED", "NAVIGATING", "FORM_FILLING", "SUBMITTING", "SUBMITTED"}:
+        raise HTTPException(status_code=409, detail=f"Job lease cannot be renewed while {job.status}")
+    now = datetime.now(UTC).replace(tzinfo=None)
+    if job.lease_expires_at is None or job.lease_expires_at <= now:
+        raise HTTPException(status_code=409, detail="Job lease has expired; claim recovery belongs to the queue")
+    job.lease_expires_at = now + timedelta(minutes=5)
+    device.last_seen_at = now
+    db.commit()
+    return {"ok": True, "job_id": job.id, "lease_expires_at": _iso(job.lease_expires_at)}
 
 
 @router.post("/browser-extension/jobs/{job_id}/state")

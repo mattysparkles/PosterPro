@@ -164,10 +164,35 @@ async function pollMarketplaceQueue() {
   if (queuePollActive) return;
   queuePollActive = true;
   try {
-    const { token, activeJob } = await getAgentSettings();
+    let { token, activeJob } = await getAgentSettings();
     if (!token) return;
-    await deviceRequest("/browser-extension/heartbeat", { method: "POST", body: JSON.stringify({ browser: "Chrome", extension_version: EXTENSION_VERSION }) });
-    if (activeJob?.id) return;
+    const heartbeat = await deviceRequest("/browser-extension/heartbeat", { method: "POST", body: JSON.stringify({ browser: "Chrome", extension_version: EXTENSION_VERSION }) });
+    if (heartbeat?.device) await chrome.storage.local.set({ posterproDevice: heartbeat.device });
+    if (activeJob?.id) {
+      if (["CLAIMED", "NAVIGATING", "FORM_FILLING", "SUBMITTING", "SUBMITTED"].includes(String(activeJob.status || "").toUpperCase())) {
+        try {
+          await deviceRequest(`/browser-extension/jobs/${encodeURIComponent(activeJob.id)}/lease`, { method: "POST", body: JSON.stringify({}) });
+        } catch (error) {
+          if (!String(error?.message || error).includes("Claimed assisted job not found")) throw error;
+          await chrome.storage.local.set({ posterproActiveJob: null });
+          activeJob = null;
+        }
+      } else if (String(activeJob.status || "").toUpperCase() === "AWAITING_OPERATOR_REVIEW") {
+        let remote = null;
+        try {
+          remote = await deviceRequest(`/browser-extension/jobs/${encodeURIComponent(activeJob.id)}/status`);
+        } catch (error) {
+          if (!String(error?.message || error).includes("Claimed assisted job not found")) throw error;
+        }
+        if (!remote || ["COMPLETED", "FAILED", "CANCELLED"].includes(String(remote.status || "").toUpperCase())) {
+          await chrome.storage.local.set({ posterproActiveJob: null });
+          activeJob = null;
+        }
+      }
+      if (activeJob?.id) return;
+    }
+    const localState = await chrome.storage.local.get(["posterproAutomationPaused"]);
+    if (localState.posterproAutomationPaused) return;
     const response = await deviceRequest("/browser-extension/jobs/claim", { method: "POST", body: JSON.stringify({}) });
     if (!response?.job) return;
     await chrome.storage.local.set({ posterproLastJob: response.job });
@@ -350,7 +375,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (action === "get_state") {
     Promise.all([
       chrome.storage.sync.get(DEFAULT_SETTINGS),
-      chrome.storage.local.get(["posterproLastSessionSnapshot", "posterproLastImportResponse", "posterproLastImportAt", "posterproDevice", "posterproDeviceToken", "posterproActiveJob", "posterproLastJob", "posterproAgentError", "posterproAgentErrorAt"]),
+      chrome.storage.local.get(["posterproLastSessionSnapshot", "posterproLastImportResponse", "posterproLastImportAt", "posterproDevice", "posterproDeviceToken", "posterproActiveJob", "posterproLastJob", "posterproAgentError", "posterproAgentErrorAt", "posterproAutomationPaused"]),
     ]).then(([settings, local]) => {
       sendResponse({ ok: true, settings, local });
     });
@@ -367,6 +392,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (action === "poll_queue") {
     pollMarketplaceQueue()
       .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
+
+  if (action === "set_automation_paused") {
+    chrome.storage.local.set({ posterproAutomationPaused: Boolean(message.paused) })
+      .then(() => sendResponse({ ok: true, paused: Boolean(message.paused) }))
       .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
     return true;
   }

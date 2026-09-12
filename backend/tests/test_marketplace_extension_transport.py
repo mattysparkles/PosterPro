@@ -132,13 +132,26 @@ async def test_extension_job_pair_claim_review_complete_and_update_identity(asyn
         assert db.query(MarketplaceExtensionJob).filter_by(listing_id=listing_id).count() == 1
     finally:
         db.close()
-
     update = await async_client.post(
         f"/listings/{listing_id}/assisted-marketplace-jobs",
         json={"marketplace": "facebook", "action": "UPDATE"},
     )
-    assert update.status_code == 400
-    assert update.json()["detail"]["code"] == "UNSUPPORTED_ACTION"
+    assert update.status_code == 200
+    update_id = update.json()["id"]
+    assert update.json()["action"] == "UPDATE"
+    assert update.json()["payload"]["marketplace_payload"]["start_url"] == "https://www.facebook.com/marketplace/item/12345"
+    assert update.json()["external_listing_id"] == "FB-12345"
+    assert (await async_client.post("/browser-extension/jobs/claim", headers={"Authorization": f"Bearer {token}"})).json()["job"]["id"] == update_id
+    for state, extra in (("NAVIGATING", {}), ("FORM_FILLING", {}), ("AWAITING_OPERATOR_REVIEW", {}), ("SUBMITTING", {}), ("SUBMITTED", {"external_listing_id": "FB-12345", "external_url": "https://www.facebook.com/marketplace/item/12345"}), ("COMPLETED", {"external_listing_id": "FB-12345", "external_url": "https://www.facebook.com/marketplace/item/12345"})):
+        response = await async_client.post(f"/browser-extension/jobs/{update_id}/state", headers={"Authorization": f"Bearer {token}"}, json={"status": state, **extra})
+        assert response.status_code == 200
+    db = database_module.SessionLocal()
+    try:
+        marketplace_row = db.query(MarketplaceListing).filter_by(listing_id=listing_id, marketplace=MarketplaceName.facebook).one()
+        assert marketplace_row.marketplace_listing_id == "FB-12345"
+        assert marketplace_row.status == MarketplaceListingStatus.UPDATED
+    finally:
+        db.close()
 
     duplicate_create = await async_client.post(
         f"/listings/{listing_id}/assisted-marketplace-jobs",
@@ -185,6 +198,37 @@ async def test_extension_job_pair_claim_review_complete_and_update_identity(asyn
         marketplace_row = db.query(MarketplaceListing).filter_by(listing_id=listing_id, marketplace=MarketplaceName.facebook).one()
         assert marketplace_row.marketplace_listing_id == "FB-12345"
         assert marketplace_row.status == MarketplaceListingStatus.DELETED
+    finally:
+        db.close()
+
+
+@pytest.mark.anyio
+async def test_operator_confirms_assisted_marketplace_result_from_posterpro_jobs(async_client):
+    owner = await _register(async_client, "JobsReview")
+    listing_id = _seed_marketplace_listing(owner["user"]["id"])
+    token, _device_id = await _pair(async_client, "Review Chrome")
+    queued = await async_client.post(
+        f"/listings/{listing_id}/assisted-marketplace-jobs",
+        json={"marketplace": "mercari", "action": "CREATE"},
+    )
+    job_id = queued.json()["id"]
+    headers = {"Authorization": f"Bearer {token}"}
+    assert (await async_client.post("/browser-extension/jobs/claim", headers=headers)).json()["job"]["id"] == job_id
+    for status in ("NAVIGATING", "FORM_FILLING", "AWAITING_OPERATOR_REVIEW"):
+        response = await async_client.post(f"/browser-extension/jobs/{job_id}/state", headers=headers, json={"status": status, "result": {"page_url": "https://www.mercari.com/sell/"}})
+        assert response.status_code == 200
+    confirmed = await async_client.post(
+        f"/assisted-marketplace-jobs/{job_id}/confirm-result",
+        json={"confirmed": True, "external_listing_id": "MRC-913", "external_url": "https://www.mercari.com/item/m913/"},
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["status"] == "COMPLETED"
+    assert confirmed.json()["result"]["completion_source"] == "posterpro_jobs"
+    db = database_module.SessionLocal()
+    try:
+        marketplace_row = db.query(MarketplaceListing).filter_by(listing_id=listing_id, marketplace=MarketplaceName.mercari).one()
+        assert marketplace_row.marketplace_listing_id == "MRC-913"
+        assert marketplace_row.status == MarketplaceListingStatus.PUBLISHED
     finally:
         db.close()
 
@@ -322,6 +366,12 @@ async def test_extension_claim_is_exclusive_and_expired_lease_recovers(async_cli
         headers=first_headers,
         json={"status": "NAVIGATING"},
     )).status_code == 200
+    renewed = await async_client.post(f"/browser-extension/jobs/{job_id}/lease", headers=first_headers, json={})
+    assert renewed.status_code == 200
+    assert datetime.fromisoformat(renewed.json()["lease_expires_at"]) > datetime.now(UTC) + timedelta(minutes=4)
+    assert (await async_client.post(f"/browser-extension/jobs/{job_id}/lease", headers=second_headers, json={})).status_code == 404
+    status = await async_client.get(f"/browser-extension/jobs/{job_id}/status", headers=first_headers)
+    assert status.status_code == 200 and status.json()["status"] == "NAVIGATING"
     db = database_module.SessionLocal()
     try:
         job = db.get(MarketplaceExtensionJob, job_id)
@@ -329,9 +379,11 @@ async def test_extension_claim_is_exclusive_and_expired_lease_recovers(async_cli
         db.commit()
     finally:
         db.close()
+    assert (await async_client.post(f"/browser-extension/jobs/{job_id}/lease", headers=first_headers, json={})).status_code == 409
     recovered = (await async_client.post("/browser-extension/jobs/claim", headers=second_headers)).json()["job"]
     assert recovered["id"] == job_id
     assert recovered["attempt_count"] == 2
+    assert (await async_client.get(f"/browser-extension/jobs/{job_id}/status", headers=first_headers)).status_code == 404
     db = database_module.SessionLocal()
     try:
         job = db.get(MarketplaceExtensionJob, job_id)

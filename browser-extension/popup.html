@@ -3,66 +3,44 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>PosterPro Marketplace Assistant</title>
+    <title>PosterPro Browser Connection</title>
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
     <main class="shell">
       <header class="hero">
         <p class="eyebrow">PosterPro</p>
-        <h1>Marketplace Assistant</h1>
-        <p class="lede">Pair a tenant-scoped device, fill assisted marketplace jobs, and pause for your review. Marketplace cookies and storage credentials are never uploaded.</p>
+        <h1>Browser connection</h1>
+        <p class="lede">Queue monitoring and form assistance run automatically in this browser. Marketplace credentials stay in your browser profile.</p>
       </header>
 
-      <section class="card">
-        <label>
-          PosterPro base URL
-          <input id="posterproBaseUrl" type="url" placeholder="https://posterpro.sparkleserver.site" />
-        </label>
-        <label>
-          Default marketplace
-          <select id="defaultMarketplace">
-            <option value="facebook">Facebook</option>
-            <option value="mercari">Mercari</option>
-            <option value="poshmark">Poshmark</option>
-            <option value="etsy">Etsy</option>
-            <option value="depop">Depop</option>
-            <option value="whatnot">Whatnot</option>
-            <option value="vinted">Vinted</option>
-            <option value="offerup">OfferUp</option>
-          </select>
-        </label>
+      <section class="card" aria-live="polite">
+        <div class="row"><strong>Status</strong><span id="connectionStatus">Checking…</span></div>
+        <div class="row"><strong>Browser</strong><span id="deviceLabel">—</span></div>
+        <div class="row"><strong>Version</strong><span id="versionLabel">—</span></div>
+        <div class="row"><strong>Last heartbeat</strong><span id="heartbeatLabel">—</span></div>
+        <div class="row"><strong>Current task</strong><span id="activeJobLabel">None</span></div>
+        <p id="jobSummary" class="lede"></p>
+        <p id="agentError" class="error"></p>
+        <button id="openJobButton" class="primary" hidden>Review job in PosterPro</button>
         <div class="grid">
-          <button id="captureButton" class="primary">Inspect connection</button>
-          <button id="sendButton" class="secondary">Send safe metadata</button>
+          <button id="pauseButton" class="secondary" hidden>Pause automation</button>
+          <button id="openPosterProButton" class="tertiary">Open PosterPro</button>
         </div>
-        <button id="copyButton" class="tertiary">Copy session JSON</button>
       </section>
 
-      <section class="card">
-        <div class="row"><strong>Extension connection</strong><span id="deviceLabel">Not paired</span></div>
+      <section id="pairingSection" class="card" hidden>
+        <strong>Connect this browser once</strong>
+        <p class="lede">In PosterPro Settings → Browser Automation, create a one-time code and enter it here. You will not need to claim or manage jobs from this popup.</p>
         <label>One-time pairing code<input id="pairingCode" type="text" autocomplete="one-time-code" placeholder="Paste code from PosterPro Settings" /></label>
-        <button id="pairButton" class="primary">Pair this browser</button>
-        <button id="pollButton" class="secondary">Check for assisted jobs</button>
-        <div class="row"><strong>Active job</strong><span id="activeJobLabel">None</span></div>
-        <p id="jobFields" class="lede"></p>
-        <label>Marketplace listing ID<input id="externalListingId" type="text" placeholder="Enter after you submit" /></label>
-        <label>Marketplace listing URL<input id="externalUrl" type="url" placeholder="https://…" /></label>
-        <button id="completeButton" class="secondary">I submitted it — record result</button>
-        <p id="agentError" class="lede"></p>
+        <button id="pairButton" class="primary">Authorize this browser</button>
       </section>
 
-      <section class="card">
-        <div class="row">
-          <strong>Current site</strong>
-          <span id="siteLabel">Not captured</span>
-        </div>
-        <div class="row">
-          <strong>Last import</strong>
-          <span id="importLabel">None</span>
-        </div>
-        <pre id="status" class="status">Ready.</pre>
-      </section>
+      <details class="card">
+        <summary>Diagnostics</summary>
+        <p id="diagnostics" class="lede">No diagnostic events.</p>
+        <button id="retryButton" class="tertiary">Reconnect now</button>
+      </details>
     </main>
     <script src="popup.js"></script>
   </body>

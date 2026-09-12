@@ -583,6 +583,14 @@ export async function fetchAssistedMarketplaceJob(jobId) {
   return jsonFetch(`${API_BASE}/assisted-marketplace-jobs/${jobId}`);
 }
 
+export async function confirmAssistedMarketplaceJobResult(jobId, result) {
+  return jsonFetch(`${API_BASE}/assisted-marketplace-jobs/${jobId}/confirm-result`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(result || {}),
+  });
+}
+
 export async function fetchMarketplaceImportJob(jobId) {
   return jsonFetch(`${API_BASE}/marketplace-import-jobs/${jobId}`);
 }

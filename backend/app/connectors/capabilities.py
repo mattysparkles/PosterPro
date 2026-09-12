@@ -27,6 +27,9 @@ DIRECT_EBAY = MarketplaceCapabilities(
 
 ASSISTED_MARKETPLACE = MarketplaceCapabilities(
     supports_extension_create=True,
+    # UPDATE is safe to queue only against a confirmed per-marketplace identity;
+    # the queue service requires both external ID and URL before it can run.
+    supports_extension_update=True,
     # END opens the confirmed external listing and pauses for the operator to
     # end it in the marketplace UI; it never submits or deletes automatically.
     supports_extension_end=True,

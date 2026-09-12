@@ -77,7 +77,10 @@ def _shared_payload(listing: Listing) -> dict[str, Any]:
         "price": _price(listing),
         "condition": listing.condition,
         "quantity": listing.quantity,
-        "category": listing.category_id or listing.category_suggestion,
+        # A canonical eBay category ID is not a valid taxonomy value on other
+        # marketplaces. Their adapters receive a semantic classification hint
+        # only and must resolve their own destination category.
+        "category": listing.category_suggestion or (listing.item_specifics or {}).get("Type"),
         "item_specifics": listing.item_specifics or {},
         "tags": listing.tags or [],
         "image_urls": _canonical_marketplace_images(listing),

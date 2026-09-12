@@ -28,6 +28,7 @@ import {
   fetchCrosspostJob,
   fetchAssistedMarketplaceJobs,
   fetchAssistedMarketplaceJob,
+  confirmAssistedMarketplaceJobResult,
   fetchMarketplaceImportJob,
   fetchProcessingHealth,
   retryCrosspostJob,
@@ -213,6 +214,9 @@ export default function JobsPage() {
   const [retrying, setRetrying] = useState({});
   const [canceling, setCanceling] = useState({});
   const [activeJob, setActiveJob] = useState(null);
+  const [assistedExternalId, setAssistedExternalId] = useState("");
+  const [assistedExternalUrl, setAssistedExternalUrl] = useState("");
+  const [confirmingAssisted, setConfirmingAssisted] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
   const [autoRefresh, setAutoRefresh] = useState(true);
@@ -350,6 +354,12 @@ export default function JobsPage() {
   }, [activeJob?.job?.id, activeJob?.type]);
 
   useEffect(() => {
+    if (activeJob?.type !== "assisted") return;
+    setAssistedExternalId(activeJob.job.external_listing_id || activeJob.job.payload?.external_listing_id || "");
+    setAssistedExternalUrl(activeJob.job.external_url || activeJob.job.payload?.external_url || "");
+  }, [activeJob?.type, activeJob?.job?.id, activeJob?.job?.external_listing_id, activeJob?.job?.external_url]);
+
+  useEffect(() => {
     if (!autoRefresh) return undefined;
     const interval = setInterval(load, 10000);
     return () => clearInterval(interval);
@@ -426,6 +436,30 @@ export default function JobsPage() {
     setDetailError("");
     setDetailLoading(false);
     await updateRouteState({ tab: activeTab });
+  };
+
+  const confirmAssistedResult = async (job) => {
+    const action = String(job.action || "CREATE").toUpperCase();
+    const prompt = action === "END"
+      ? "Confirm that you ended the exact external listing shown in this job. PosterPro will record the end; it will not alter the marketplace page."
+      : "Confirm that you already submitted the exact listing on the marketplace. PosterPro will record the result; it will not submit anything for you.";
+    if (!window.confirm(prompt)) return;
+    setConfirmingAssisted(true);
+    try {
+      await confirmAssistedMarketplaceJobResult(job.id, {
+        confirmed: true,
+        external_listing_id: assistedExternalId || null,
+        external_url: assistedExternalUrl || null,
+      });
+      toast.success("Marketplace result recorded in PosterPro.");
+      await load();
+      const refreshed = await fetchAssistedMarketplaceJob(job.id);
+      setActiveJob({ type: "assisted", job: refreshed });
+    } catch (error) {
+      toast.error(error?.message || "Could not record the marketplace result.");
+    } finally {
+      setConfirmingAssisted(false);
+    }
   };
 
   const retryImport = async (jobId) => {
@@ -908,6 +942,18 @@ export default function JobsPage() {
                 <p className="mt-1 text-xs text-[#667085]">Claimed {formatExactTime(activeJob.job.claimed_at)} · Started {formatExactTime(activeJob.job.started_at)} · Completed {formatExactTime(activeJob.job.completed_at)}</p>
                 {activeJob.job.external_listing_id ? <p className="mt-2 break-all text-sm">External ID: {activeJob.job.external_listing_id}</p> : null}
                 {activeJob.job.external_url ? <a href={activeJob.job.external_url} target="_blank" rel="noreferrer" className="mt-1 inline-block break-all text-sm text-[#175cd3] hover:underline">Open external listing</a> : null}
+                {String(activeJob.job.status || "").toUpperCase() === "AWAITING_OPERATOR_REVIEW" ? (
+                  <div className="mt-4 space-y-3 rounded-lg border border-amber-300 bg-amber-50 p-3">
+                    <p className="text-sm font-semibold text-amber-950">Operator review required</p>
+                    <p className="text-xs text-amber-900">The extension has filled the marketplace form and stopped. Review and submit or end the listing on the marketplace; then record the confirmed result here. PosterPro does not auto-submit this action.</p>
+                    {(activeJob.job.result?.page_url || activeJob.job.payload?.marketplace_payload?.start_url) ? <a href={activeJob.job.result?.page_url || activeJob.job.payload?.marketplace_payload?.start_url} target="_blank" rel="noreferrer" className="inline-flex text-sm font-semibold text-[#175cd3] underline">Open marketplace review page</a> : null}
+                    {String(activeJob.job.action || "").toUpperCase() !== "END" ? <div className="grid gap-2 md:grid-cols-2">
+                      <label className="text-xs font-medium text-[#344054]">Marketplace listing ID<input value={assistedExternalId} onChange={(event) => setAssistedExternalId(event.target.value)} className="mt-1 w-full rounded border px-2 py-1.5 text-sm" placeholder="Required for a new listing" /></label>
+                      <label className="text-xs font-medium text-[#344054]">Marketplace listing URL<input value={assistedExternalUrl} onChange={(event) => setAssistedExternalUrl(event.target.value)} className="mt-1 w-full rounded border px-2 py-1.5 text-sm" placeholder="https://marketplace.example/…" /></label>
+                    </div> : null}
+                    <Button size="sm" disabled={confirmingAssisted} onClick={() => void confirmAssistedResult(activeJob.job)}>{confirmingAssisted ? "Recording…" : String(activeJob.job.action || "").toUpperCase() === "END" ? "Confirm listing ended" : "Confirm marketplace submission"}</Button>
+                  </div>
+                ) : null}
                 {activeJob.job.error_code || activeJob.job.error_detail ? <p role="alert" className="mt-2 rounded bg-red-50 p-2 text-sm text-[#912018]">{activeJob.job.error_code ? `${activeJob.job.error_code}: ` : ""}{activeJob.job.error_detail || "No additional failure detail."}</p> : null}
                 <p className="mt-3 text-xs font-medium text-[#475467]">Payload snapshot</p>
                 <pre className="mt-1 max-h-72 overflow-auto whitespace-pre-wrap rounded bg-white p-3 text-xs">{JSON.stringify(activeJob.job.payload || {}, null, 2)}</pre>
