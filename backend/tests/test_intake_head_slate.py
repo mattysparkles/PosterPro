@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 from PIL import Image, ImageDraw, ImageFilter
+from sqlalchemy import select
 
 from app.models.enums import ListingStatus
 from app.models.models import (
@@ -26,6 +27,9 @@ from app.models.models import (
     User,
 )
 from app.core.config import settings
+from app.api import intake as intake_api
+from app.api.intake import _assign_timeline_image_groups, classify_timeline_assets, delete_timeline_asset, set_timeline_primary
+from app.services.ebay_service import _build_ebay_image_urls
 from app.services.alert_service import AlertService
 from app.services.google_photos import GooglePhotoEnumeration, GooglePhotosService
 from app.services.intake_slate import IntakeSlateService
@@ -424,6 +428,188 @@ def test_tail_slate_recovers_preceding_unassigned_photos_into_the_same_batch(db_
     assert batch.metadata_json['tail_boundary_used'] is True
 
 
+def test_timeline_canonical_grouping_supports_head_tail_and_deleted_duplicate_markers():
+    def marker(asset_id, item_id, role):
+        return {"photo": {"id": asset_id, "is_slate": True, "item_id": item_id, "timeline_role": role}, "is_slate_marker": True}
+
+    def photo(asset_id):
+        return {"photo": {"id": asset_id, "is_slate": False}}
+
+    head_stream = [marker("head-a", "A", "HEAD"), photo("a1"), photo("a2"), photo("a3"), marker("head-b", "B", "HEAD"), photo("b1"), photo("b2")]
+    _assign_timeline_image_groups(head_stream)
+    head_groups = {entry["photo"]["id"]: entry["image_group_id"] for entry in head_stream}
+    assert {head_groups[item] for item in ("a1", "a2", "a3", "head-a")} == {"item:A"}
+    assert {head_groups[item] for item in ("b1", "b2", "head-b")} == {"item:B"}
+
+    tail_stream = [photo("a1"), photo("a2"), photo("a3"), marker("tail-a", "A", "TAIL"), marker("head-b", "B", "HEAD"), photo("b1"), photo("b2")]
+    _assign_timeline_image_groups(tail_stream)
+    tail_groups = {entry["photo"]["id"]: entry["image_group_id"] for entry in tail_stream}
+    assert {tail_groups[item] for item in ("a1", "a2", "a3", "tail-a")} == {"item:A"}
+    assert {tail_groups[item] for item in ("b1", "b2", "head-b")} == {"item:B"}
+
+    closed_stream = [marker("head-a", "A", "HEAD"), photo("a1"), photo("a2"), photo("a3"), marker("tail-a", "A", "TAIL")]
+    _assign_timeline_image_groups(closed_stream)
+    assert {entry["image_group_id"] for entry in closed_stream} == {"item:A"}
+
+    # The duplicate marker is soft-deleted and therefore absent from the
+    # canonical stream; remaining photos stay in A and no empty group appears.
+    deleted_duplicate_stream = [marker("head-a", "A", "HEAD"), photo("a1"), photo("a2")]
+    _assign_timeline_image_groups(deleted_duplicate_stream)
+    assert {entry["image_group_id"] for entry in deleted_duplicate_stream} == {"item:A"}
+
+
+def test_timeline_primary_is_scoped_by_canonical_item_and_clears_to_auto(db_session):
+    from app.models.models import IntakePhotoBatch
+
+    user = _create_user(db_session, email="timeline-primary-groups@example.com")
+    batch = IntakePhotoBatch(user_id=user.id, item_id="UPLOAD-CONTAINER", status="collecting")
+    db_session.add(batch)
+    db_session.flush()
+    start = datetime.now(UTC)
+    rows = [
+        IntakePhoto(user_id=user.id, source_provider="google_photos", source_photo_id="head-A", local_path=_make_detail_image("primary-head-a"), item_id="A", batch_id=batch.id, is_slate=True, is_internal_only=True, is_public_listing_candidate=False, metadata_json={"timeline_role": "HEAD", "classification": "HEAD", "classification_source": "MANUAL_OPERATOR"}, captured_at=start),
+        IntakePhoto(user_id=user.id, source_provider="google_photos", source_photo_id="a1", local_path=_make_detail_image("primary-a1"), item_id="A", batch_id=batch.id, is_public_listing_candidate=True, captured_at=start + timedelta(seconds=1)),
+        IntakePhoto(user_id=user.id, source_provider="google_photos", source_photo_id="a2", local_path=_make_detail_image("primary-a2"), item_id="A", batch_id=batch.id, is_public_listing_candidate=True, captured_at=start + timedelta(seconds=2)),
+        IntakePhoto(user_id=user.id, source_provider="google_photos", source_photo_id="head-B", local_path=_make_detail_image("primary-head-b"), item_id="B", batch_id=batch.id, is_slate=True, is_internal_only=True, is_public_listing_candidate=False, metadata_json={"timeline_role": "HEAD", "classification": "HEAD", "classification_source": "MANUAL_OPERATOR"}, captured_at=start + timedelta(seconds=3)),
+        IntakePhoto(user_id=user.id, source_provider="google_photos", source_photo_id="b1", local_path=_make_detail_image("primary-b1"), item_id="B", batch_id=batch.id, is_public_listing_candidate=True, captured_at=start + timedelta(seconds=4)),
+        IntakePhoto(user_id=user.id, source_provider="google_photos", source_photo_id="b2", local_path=_make_detail_image("primary-b2"), item_id="B", batch_id=batch.id, is_public_listing_candidate=True, captured_at=start + timedelta(seconds=5)),
+    ]
+    db_session.add_all(rows)
+    db_session.commit()
+    by_source = {row.source_photo_id: row for row in rows}
+
+    set_timeline_primary({"photo_id": by_source["a2"].id}, db_session, user)
+    set_timeline_primary({"photo_id": by_source["b2"].id}, db_session, user)
+    db_session.expire_all()
+    assert db_session.get(IntakePhoto, by_source["a2"].id).metadata_json["timeline_primary"] is True
+    assert db_session.get(IntakePhoto, by_source["b2"].id).metadata_json["timeline_primary"] is True
+    assert db_session.get(IntakePhoto, by_source["b2"].id).metadata_json["timeline_primary_source"] == "MANUAL_OPERATOR"
+
+    service = IntakeSlateService()
+    _urls, listing_images = service._materialize_listing_images(item_id="A", title="Group A", photos=[by_source["a1"], by_source["a2"]])
+    assert listing_images[0]["metadata"]["intake_photo_id"] == by_source["a2"].id
+    assert listing_images[1]["metadata"]["intake_photo_id"] == by_source["a1"].id
+    listing = Listing(
+        title="Group A",
+        image_urls=_urls,
+        listing_images=listing_images,
+    )
+    ebay_urls = _build_ebay_image_urls(listing)
+    assert ebay_urls
+    assert ebay_urls[0].endswith(Path(listing_images[0]["storage_path"]).name)
+
+    set_timeline_primary({"photo_id": by_source["a2"].id, "clear": True}, db_session, user)
+    db_session.expire_all()
+    assert "timeline_primary" not in db_session.get(IntakePhoto, by_source["a2"].id).metadata_json
+    assert db_session.get(IntakePhoto, by_source["b2"].id).metadata_json["timeline_primary"] is True
+
+
+def test_timeline_delete_soft_deletes_only_authoritative_slate_pair_and_excludes_media(db_session, monkeypatch):
+    user = _create_user(db_session, email="timeline-delete-pair@example.com")
+    service = IntakeSlateService()
+    now = datetime.now(UTC)
+    slate = IntakeSlate(user_id=user.id, item_id="DELETE-PAIR", title="Delete pair", metadata_json={})
+    db_session.add(slate)
+    db_session.flush()
+    photos = [
+        IntakePhoto(user_id=user.id, source_provider="google_photos", source_photo_id="left", local_path=_make_detail_image("delete-left"), item_id="DELETE-PAIR", is_public_listing_candidate=True, captured_at=now),
+        IntakePhoto(user_id=user.id, source_provider="google_photos", source_photo_id="marker", local_path=_make_detail_image("delete-marker"), item_id="DELETE-PAIR", is_slate=True, is_internal_only=True, is_public_listing_candidate=False, metadata_json={"official_slate_id": slate.id, "timeline_role": "HEAD"}, captured_at=now + timedelta(seconds=1)),
+        IntakePhoto(user_id=user.id, source_provider="google_photos", source_photo_id="inherited", local_path=_make_detail_image("delete-inherited"), item_id="DELETE-PAIR", is_public_listing_candidate=True, metadata_json={"official_slate_id": slate.id}, captured_at=now + timedelta(seconds=2)),
+        IntakePhoto(user_id=user.id, source_provider="google_photos", source_photo_id="right", local_path=_make_detail_image("delete-right"), item_id="DELETE-PAIR", is_public_listing_candidate=True, captured_at=now + timedelta(seconds=3)),
+    ]
+    db_session.add_all(photos)
+    db_session.flush()
+    slate.slate_image_id = photos[1].id
+    original_order = [(photo.id, photo.captured_at) for photo in photos]
+    db_session.commit()
+    monkeypatch.setattr(intake_api.service, "rebuild_batches_for_user", lambda *_args, **_kwargs: {})
+
+    # An inherited official_slate_id alone is not authority to delete the Slate.
+    first = delete_timeline_asset(str(photos[2].id), db_session, user)
+    assert first["slate_id"] is None
+    db_session.expire_all()
+    assert "timeline_deleted" not in db_session.get(IntakeSlate, slate.id).metadata_json
+
+    result = delete_timeline_asset(str(photos[1].id), db_session, user)
+    assert result["deleted"] is True
+    db_session.expire_all()
+    deleted_photo = db_session.get(IntakePhoto, photos[1].id)
+    assert deleted_photo.metadata_json["timeline_deleted"] is True
+    assert db_session.get(IntakeSlate, slate.id).metadata_json["timeline_deleted"] is True
+    assert [(photo.id, photo.captured_at.replace(tzinfo=None)) for photo in photos] == [
+        (photo_id, captured_at.replace(tzinfo=None)) for photo_id, captured_at in original_order
+    ]
+    deleted_at = db_session.get(IntakePhoto, photos[1].id).metadata_json["timeline_deleted_at"]
+    delete_timeline_asset(str(photos[1].id), db_session, user)
+    db_session.expire_all()
+    assert db_session.get(IntakePhoto, photos[1].id).metadata_json["timeline_deleted_at"] == deleted_at
+    remaining = [photo for photo in db_session.execute(select(IntakePhoto).where(IntakePhoto.user_id == user.id)).scalars().all() if not service._timeline_photo_deleted(photo)]
+    queue = service.queue_items(db_session, user_id=user.id)
+    queue_photo_ids = {photo.id for photo in queue["unassigned_photos"]}
+    assert photos[1].id not in {photo.id for photo in remaining}
+    assert photos[1].id not in queue_photo_ids
+    grouped = [{"photo": {"id": photo.id, "item_id": photo.item_id, "is_slate": photo.is_slate, "metadata_json": photo.metadata_json}} for photo in remaining]
+    _assign_timeline_image_groups(grouped)
+    assert len({entry["image_group_id"] for entry in grouped if not entry["photo"]["is_slate"]}) == 1
+    _urls, listing_images = service._materialize_listing_images(item_id="DELETE-PAIR", title="Delete pair", photos=photos)
+    media_ids = [image["metadata"]["intake_photo_id"] for image in listing_images]
+    assert photos[1].id not in media_ids
+    assert photos[0].id in media_ids and photos[3].id in media_ids
+
+
+def test_timeline_classification_accepts_synthetic_slate_marker_and_removes_exact_source(monkeypatch, db_session):
+    user = _create_user(db_session, email="timeline-synthetic-slate-classify@example.com")
+    slate = IntakeSlate(user_id=user.id, item_id="SYNTH-SLATE", title="Synthetic", metadata_json={})
+    db_session.add(slate)
+    db_session.flush()
+    photo = IntakePhoto(
+        user_id=user.id,
+        source_provider="google_photos",
+        source_photo_id="synthetic-source",
+        local_path=_make_detail_image("synthetic-source"),
+        item_id=slate.item_id,
+        is_slate=True,
+        is_internal_only=True,
+        is_public_listing_candidate=False,
+        metadata_json={"official_slate_id": slate.id, "qr_payload": {"item_id": slate.item_id}},
+    )
+    slate.slate_image_id = None
+    db_session.add(photo)
+    db_session.commit()
+    slate.slate_image_id = photo.id
+    db_session.commit()
+    monkeypatch.setattr(intake_api.service, "rebuild_batches_for_user", lambda *_args, **_kwargs: {})
+
+    result = classify_timeline_assets({"photo_ids": [f"slate-{slate.id}"], "classification": "PHOTO"}, db_session, user)
+    assert result["updated"] == 1
+    db_session.expire_all()
+    assert db_session.get(IntakePhoto, photo.id).is_slate is False
+    assert "qr_payload" not in db_session.get(IntakePhoto, photo.id).metadata_json
+    assert db_session.get(IntakeSlate, slate.id).metadata_json["timeline_deleted"] is True
+
+
+def test_manual_tail_classification_assigns_preceding_unclaimed_photos(db_session):
+    user = _create_user(db_session, email="manual-tail-grouping@example.com")
+    start = datetime.now(UTC)
+    before = [
+        IntakePhoto(user_id=user.id, source_provider="google_photos", source_photo_id=f"manual-tail-{index}", local_path=_make_detail_image(f"manual-tail-{index}"), captured_at=start + timedelta(seconds=index), is_public_listing_candidate=True)
+        for index in (1, 2, 3)
+    ]
+    tail = IntakePhoto(user_id=user.id, source_provider="google_photos", source_photo_id="manual-tail-marker", local_path=_make_detail_image("manual-tail-marker"), captured_at=start + timedelta(seconds=4), is_public_listing_candidate=True)
+    db_session.add_all([*before, tail])
+    db_session.commit()
+
+    result = classify_timeline_assets({"photo_ids": [tail.id], "classification": "TAIL"}, db_session, user)
+    assert result["updated"] == 1
+    db_session.expire_all()
+    tail = db_session.get(IntakePhoto, tail.id)
+    assert tail.is_slate is True
+    assert tail.metadata_json["timeline_role"] == "TAIL"
+    assert tail.metadata_json["qr_payload"]["boundary_position"] == "tail"
+    assert all(db_session.get(IntakePhoto, photo.id).item_id == tail.item_id for photo in before)
+    assert len({db_session.get(IntakePhoto, photo.id).batch_id for photo in before}) == 1
+
+
 def test_recover_existing_slates_promotes_previously_unassigned_qr_photo(db_session):
     user = _create_user(db_session, email='recover-existing-slate@example.com')
     service = IntakeSlateService()
@@ -740,6 +926,14 @@ def test_create_draft_from_batch_uses_item_id_as_inventory_and_excludes_slate_im
     })
     monkeypatch.setattr(service.ebay, 'enrich_price', lambda *_args, **_kwargs: {'comparables': []})
     monkeypatch.setattr(service.pricing, 'recommend_price', lambda *_args, **_kwargs: {'suggested_price': 39.99})
+
+    # This test asserts the draft-materialization contract, so make the intake
+    # stream explicitly closed instead of relying on the production quiet-period
+    # delay for an open provisional group.
+    batch = db_session.query(IntakePhotoBatch).filter(IntakePhotoBatch.item_id == slate.item_id).one()
+    batch.metadata_json = {**(batch.metadata_json or {}), 'stream_closed': True}
+    db_session.add(batch)
+    db_session.commit()
 
     created = service.create_drafts_for_ready_batches(db_session, user_id=user.id)
 

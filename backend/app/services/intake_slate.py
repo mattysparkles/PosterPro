@@ -1070,6 +1070,16 @@ class IntakeSlateService:
             ).scalar_one_or_none()
             if existing:
                 if self._source_fingerprint(entry) == self._stored_source_fingerprint(existing):
+                    if not self._verify_image_file(existing.local_path):
+                        self._update_existing_provider_photo(
+                            db,
+                            photo=existing,
+                            entry=entry,
+                            source_url=source_url,
+                            user_id=user.id,
+                        )
+                        changed += 1
+                        affected_media.append((existing.id, "stale_local_path_repaired"))
                     duplicates += 1
                     provider_media.processing_status = "processed"
                     provider_media.intake_photo_id = existing.id
@@ -1369,9 +1379,187 @@ class IntakeSlateService:
     def _ordered_photos(self, db: Session, *, user_id: int) -> list[IntakePhoto]:
         rows = db.execute(select(IntakePhoto).where(IntakePhoto.user_id == user_id)).scalars().all()
         return sorted(
-            [row for row in rows if not bool((row.metadata_json or {}).get("timeline_deleted"))],
+            [row for row in rows if not self._timeline_photo_deleted(row)],
             key=self._timeline_sort_key,
         )
+
+    @staticmethod
+    def _timeline_photo_deleted(photo: IntakePhoto) -> bool:
+        return bool((photo.metadata_json or {}).get("timeline_deleted"))
+
+    @staticmethod
+    def _verify_image_file(path: str | Path) -> bool:
+        try:
+            with Image.open(path) as image:
+                image.verify()
+            with Image.open(path) as image:
+                image.load()
+            return True
+        except Exception:
+            return False
+
+    def repair_google_timeline_media(
+        self,
+        db: Session,
+        *,
+        user: User,
+        limit: int = 250,
+        force_provider_refresh: bool = True,
+    ) -> dict[str, Any]:
+        """Durably restore missing Google Timeline files without altering chronology."""
+        rows = db.execute(
+            select(IntakePhoto).where(
+                IntakePhoto.user_id == user.id,
+                IntakePhoto.source_provider == "google_photos",
+            ).order_by(IntakePhoto.id.asc())
+        ).scalars().all()
+        active = [row for row in rows if not self._timeline_photo_deleted(row)]
+        provider_rows = db.execute(
+            select(IntakeProviderMedia).where(
+                IntakeProviderMedia.user_id == user.id,
+                IntakeProviderMedia.provider == "google_photos",
+            )
+        ).scalars().all()
+        provider_by_id = {str(row.provider_media_id): row for row in provider_rows}
+        report: dict[str, Any] = {
+            "total_google_timeline_photos": len(active),
+            "valid_local_before": 0,
+            "repaired_local": 0,
+            "provider_fallback_temporarily_used": 0,
+            "stale_local_path_provider_available": 0,
+            "stale_local_path_provider_failed": 0,
+            "missing_both": 0,
+            "invalid_image": 0,
+            "failed_photo_ids": [],
+        }
+        repair_rows: list[IntakePhoto] = []
+        for photo in active:
+            path = Path(photo.local_path or "")
+            if path.is_file():
+                if self._verify_image_file(path):
+                    report["valid_local_before"] += 1
+                    continue
+                report["invalid_image"] += 1
+            repair_rows.append(photo)
+
+        source_settings = self.settings_for_user(user)
+        album_url = str(source_settings.get("album_url") or "").strip()
+        entries_by_id: dict[str, dict[str, Any]] = {}
+        provider_refreshed = False
+
+        def current_urls(photo: IntakePhoto) -> list[str]:
+            provider_row = provider_by_id.get(str(photo.source_photo_id))
+            values = [
+                (provider_row.provider_url if provider_row else None),
+                (provider_row.preview_url if provider_row else None),
+                photo.downloaded_url,
+            ]
+            seen: set[str] = set()
+            result = []
+            for value in values:
+                url = str(value or "").strip()
+                if url and url not in seen:
+                    seen.add(url)
+                    result.append(url)
+            return result
+
+        def refresh_provider_entries() -> None:
+            nonlocal provider_refreshed, entries_by_id
+            if provider_refreshed or not force_provider_refresh or not album_url:
+                return
+            provider_refreshed = True
+            try:
+                enumeration = self.google_photos.enumerate_photo_entries(
+                    album_url,
+                    overall_timeout_seconds=int(source_settings.get("provider_overall_timeout_seconds") or 180),
+                )
+                entries_by_id = {
+                    str(entry.get("source_photo_id") or ""): entry
+                    for entry in (enumeration.entries or [])
+                    if entry.get("source_photo_id") and entry.get("url")
+                }
+                report["provider_enumerated"] = len(entries_by_id)
+                report["provider_enumeration_complete"] = bool(enumeration.enumeration_complete)
+            except Exception as exc:
+                report["provider_enumeration_error"] = str(exc)[:300]
+
+        refreshed_count = 0
+        for photo in repair_rows[: max(1, int(limit))]:
+            provider_row = provider_by_id.get(str(photo.source_photo_id))
+            urls = current_urls(photo)
+            fresh_entry = entries_by_id.get(str(photo.source_photo_id))
+            if fresh_entry and fresh_entry.get("url"):
+                urls.insert(0, str(fresh_entry["url"]))
+            success_path = None
+            success_url = None
+            for url in dict.fromkeys(urls):
+                try:
+                    candidate = self.storage.save_from_url(
+                        url,
+                        prefix="intake-google-photos",
+                        suggested_basename=str(photo.source_photo_id or photo.id),
+                    )
+                    if self._verify_image_file(candidate):
+                        success_path, success_url = candidate, url
+                        break
+                    report["invalid_image"] += 1
+                except Exception:
+                    continue
+            if success_path is None and not provider_refreshed:
+                refresh_provider_entries()
+                fresh_entry = entries_by_id.get(str(photo.source_photo_id))
+                fresh_url = str((fresh_entry or {}).get("url") or "").strip()
+                if fresh_url and fresh_url not in urls:
+                    try:
+                        candidate = self.storage.save_from_url(
+                            fresh_url,
+                            prefix="intake-google-photos",
+                            suggested_basename=str(photo.source_photo_id or photo.id),
+                        )
+                        if self._verify_image_file(candidate):
+                            success_path, success_url = candidate, fresh_url
+                        else:
+                            report["invalid_image"] += 1
+                    except Exception:
+                        pass
+            if success_path:
+                metadata = dict(photo.metadata_json or {})
+                metadata["timeline_media_repair"] = {
+                    "status": "repaired",
+                    "repaired_at": datetime.now(UTC).isoformat(),
+                    "storage_root_current": True,
+                    "source_provider": "google_photos",
+                    "provider_media_id": photo.source_photo_id,
+                }
+                photo.local_path = success_path
+                photo.downloaded_url = success_url or photo.downloaded_url
+                photo.content_hash = self._hash_file(success_path)
+                photo.metadata_json = metadata
+                db.add(photo)
+                report["repaired_local"] += 1
+                refreshed_count += 1
+                continue
+            provider_values = current_urls(photo)
+            if not provider_values and photo.source_photo_id not in entries_by_id:
+                report["missing_both"] += 1
+            else:
+                report["stale_local_path_provider_failed"] += 1
+                report["failed_photo_ids"].append(photo.id)
+            if provider_values:
+                report["stale_local_path_provider_available"] += 1
+                report["provider_fallback_temporarily_used"] += 1
+            metadata = dict(photo.metadata_json or {})
+            metadata["timeline_media_repair"] = {
+                "status": "unavailable",
+                "checked_at": datetime.now(UTC).isoformat(),
+                "provider_url_present": bool(provider_values or photo.source_photo_id in entries_by_id),
+            }
+            photo.metadata_json = metadata
+            db.add(photo)
+        db.commit()
+        report["processed_for_repair"] = min(len(repair_rows), max(1, int(limit)))
+        report["remaining_unprocessed"] = max(0, len(repair_rows) - report["processed_for_repair"])
+        return report
 
     def _source_state_for(self, db: Session, *, user_id: int, provider: str, source_key: str) -> IntakeSourceState:
         state = db.execute(
@@ -1590,7 +1778,7 @@ class IntakeSlateService:
         previous_metadata = dict(photo.metadata_json or {})
         prior_url = str(photo.downloaded_url or "")
         next_url = str(entry.get("url") or "").strip()
-        if next_url and next_url != prior_url:
+        if next_url and (next_url != prior_url or not self._verify_image_file(photo.local_path)):
             try:
                 local_path = self.storage.save_from_url(
                     next_url,
@@ -1923,9 +2111,9 @@ class IntakeSlateService:
 
         all_batches = db.execute(select(IntakePhotoBatch).where(IntakePhotoBatch.user_id == user_id)).scalars().all()
         for batch in all_batches:
-            batch_photos = [photo for photo in photos if photo.batch_id == batch.id]
+            batch_photos = [photo for photo in photos if photo.batch_id == batch.id and not self._timeline_photo_deleted(photo)]
             batch.photo_count = len(batch_photos)
-            batch.public_photo_count = len([photo for photo in batch_photos if photo.is_public_listing_candidate])
+            batch.public_photo_count = len([photo for photo in batch_photos if photo.is_public_listing_candidate and not photo.is_slate])
             batch.internal_photo_count = len([photo for photo in batch_photos if photo.is_internal_only or photo.is_slate])
             batch.first_photo_id = batch_photos[0].id if batch_photos else None
             batch.last_photo_id = batch_photos[-1].id if batch_photos else None
@@ -2087,7 +2275,7 @@ class IntakeSlateService:
                 db.execute(select(IntakePhoto).where(IntakePhoto.batch_id == batch.id)).scalars().all(),
                 key=self._timeline_sort_key,
             )
-            public_photos = [photo for photo in photos if photo.is_public_listing_candidate and not photo.is_slate]
+            public_photos = [photo for photo in photos if photo.is_public_listing_candidate and not photo.is_slate and not self._timeline_photo_deleted(photo)]
             if not public_photos:
                 continue
             listing = db.get(Listing, batch.draft_listing_id)
@@ -2435,7 +2623,7 @@ class IntakeSlateService:
         batch = db.execute(select(IntakePhotoBatch).where(IntakePhotoBatch.user_id == user_id, IntakePhotoBatch.item_id == normalized_item_id)).scalar_one()
         if mark_ready_for_draft and not batch.draft_listing_id and self._batch_is_closed(batch):
             photos = sorted(db.execute(select(IntakePhoto).where(IntakePhoto.batch_id == batch.id)).scalars().all(), key=self._timeline_sort_key)
-            public_photos = [photo for photo in photos if photo.is_public_listing_candidate and not photo.is_slate]
+            public_photos = [photo for photo in photos if photo.is_public_listing_candidate and not photo.is_slate and not self._timeline_photo_deleted(photo)]
             if public_photos:
                 self._create_or_update_listing_from_batch(db, slate=slate, batch=batch, photos=public_photos, force_regenerate=True)
                 db.commit()
@@ -2578,7 +2766,7 @@ class IntakeSlateService:
             if slate is None:
                 continue
             photos = sorted(db.execute(select(IntakePhoto).where(IntakePhoto.batch_id == batch.id)).scalars().all(), key=self._timeline_sort_key)
-            public_photos = [photo for photo in photos if photo.is_public_listing_candidate and not photo.is_slate]
+            public_photos = [photo for photo in photos if photo.is_public_listing_candidate and not photo.is_slate and not self._timeline_photo_deleted(photo)]
             if not self._batch_is_draftable(batch=batch, photos=public_photos, intake_settings=intake_settings):
                 continue
             batch.metadata_json = self._batch_state_snapshot(
@@ -2626,7 +2814,10 @@ class IntakeSlateService:
             listing.id: listing
             for listing in db.execute(select(Listing).where(Listing.user_id == user_id)).scalars().all()
         }
-        photos = db.execute(select(IntakePhoto).where(IntakePhoto.user_id == user_id)).scalars().all()
+        photos = [
+            photo for photo in db.execute(select(IntakePhoto).where(IntakePhoto.user_id == user_id)).scalars().all()
+            if not self._timeline_photo_deleted(photo)
+        ]
         photos_by_batch: dict[int, list[IntakePhoto]] = {}
         for photo in photos:
             if photo.batch_id:
@@ -2771,7 +2962,7 @@ class IntakeSlateService:
                 return listing
         slate = db.execute(select(IntakeSlate).where(IntakeSlate.user_id == user_id, IntakeSlate.item_id == batch.item_id)).scalar_one_or_none()
         photos = sorted(db.execute(select(IntakePhoto).where(IntakePhoto.batch_id == batch.id)).scalars().all(), key=self._timeline_sort_key)
-        public_photos = [photo for photo in photos if photo.is_public_listing_candidate and not photo.is_slate]
+        public_photos = [photo for photo in photos if photo.is_public_listing_candidate and not photo.is_slate and not self._timeline_photo_deleted(photo)]
         listing = self._create_or_update_listing_from_batch(db, slate=slate, batch=batch, photos=public_photos, force_regenerate=force)
         db.commit()
         return listing
@@ -3004,7 +3195,7 @@ class IntakeSlateService:
             if slate is None:
                 continue
             photos = sorted(db.execute(select(IntakePhoto).where(IntakePhoto.batch_id == batch.id)).scalars().all(), key=self._timeline_sort_key)
-            public_photos = [photo for photo in photos if photo.is_public_listing_candidate and not photo.is_slate]
+            public_photos = [photo for photo in photos if photo.is_public_listing_candidate and not photo.is_slate and not self._timeline_photo_deleted(photo)]
             if not public_photos:
                 continue
             listing = self._create_or_update_listing_from_batch(
@@ -3021,6 +3212,10 @@ class IntakeSlateService:
 
     def _create_or_update_listing_from_batch(self, db: Session, *, slate: IntakeSlate | None, batch: IntakePhotoBatch, photos: list[IntakePhoto], force_regenerate: bool = False) -> Listing | None:
         if not photos:
+            return None
+        user = db.get(User, batch.user_id)
+        if user is None:
+            logger.warning("intake_draft_owner_missing", extra={"batch_id": batch.id, "item_id": batch.item_id})
             return None
         listing = db.get(Listing, batch.draft_listing_id) if batch.draft_listing_id else None
         if listing is None and slate and slate.listing_id:
@@ -3352,6 +3547,7 @@ class IntakeSlateService:
         destination_dir.mkdir(parents=True, exist_ok=True)
         # An operator-selected primary photo wins; otherwise chronology is the
         # deterministic fallback used by marketplace payload generation.
+        photos = [photo for photo in photos if not photo.is_slate and not self._timeline_photo_deleted(photo)]
         photos = sorted(photos, key=lambda photo: (0 if (photo.metadata_json or {}).get("timeline_primary") else 1, self._timeline_sort_key(photo)))
         total = len(photos)
         for index, photo in enumerate(photos, start=1):
@@ -3445,7 +3641,7 @@ class IntakeSlateService:
                 )
             ).scalar_one_or_none()
             photos = sorted(db.execute(select(IntakePhoto).where(IntakePhoto.batch_id == batch.id)).scalars().all(), key=self._timeline_sort_key)
-            public_photos = [photo for photo in photos if photo.is_public_listing_candidate and not photo.is_slate]
+            public_photos = [photo for photo in photos if photo.is_public_listing_candidate and not photo.is_slate and not self._timeline_photo_deleted(photo)]
             if not public_photos:
                 continue
             listing = db.get(Listing, batch.draft_listing_id)
@@ -5087,6 +5283,7 @@ class IntakeSlateService:
         return batch
 
     def _batch_status(self, batch: IntakePhotoBatch, batch_photos: list[IntakePhoto]) -> str:
+        batch_photos = [photo for photo in batch_photos if not self._timeline_photo_deleted(photo)]
         if not batch_photos:
             return "empty"
         if batch.draft_listing_id:
@@ -5114,6 +5311,7 @@ class IntakeSlateService:
     ) -> dict[str, Any]:
         metadata = dict(batch.metadata_json or {})
         now = datetime.now(UTC).isoformat()
+        batch_photos = [photo for photo in batch_photos if not self._timeline_photo_deleted(photo)]
         photo_ids = [int(photo.id) for photo in batch_photos if photo.id is not None]
         public_photo_ids = [int(photo.id) for photo in batch_photos if photo.id is not None and photo.is_public_listing_candidate and not photo.is_slate]
         previous_photo_ids = [int(value) for value in (metadata.get("observed_photo_ids") or []) if str(value).strip().isdigit()]

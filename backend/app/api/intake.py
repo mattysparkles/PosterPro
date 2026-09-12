@@ -30,6 +30,7 @@ from app.core.auth import get_current_user
 from app.core.database import get_db
 from app.models.models import IntakePhoto, IntakePhotoBatch, IntakeSession, IntakeSlate, IntakeReconciliationEvent, Listing, User
 from app.services.intake_slate import IntakeSlateService
+from app.services.listing_review import normalize_listing_images
 from app.services.google_photos_oauth import (
     GooglePhotosOAuthError,
     build_auth_url,
@@ -105,10 +106,13 @@ def _serialize_photo(row: IntakePhoto, *, compact: bool = False) -> dict[str, An
     if isinstance(row, dict):
         return row
     metadata = row.metadata_json or {}
+    qr_payload = metadata.get("qr_payload") if isinstance(metadata.get("qr_payload"), dict) else {}
+    role_value = str(metadata.get("timeline_role") or metadata.get("classification") or qr_payload.get("boundary_position") or row.image_type or "").strip().lower()
+    timeline_role = "TAIL" if role_value in {"tail", "tail_slate"} else "HEAD" if row.is_slate or role_value in {"head", "head_slate", "slate", "start"} else "PHOTO"
     if compact:
         metadata = {
             key: metadata.get(key)
-            for key in ("classification", "classification_source", "official_slate_id", "slate_provenance", "timeline_primary", "timeline_deleted", "title", "notes", "box_id", "location")
+            for key in ("classification", "classification_source", "official_slate_id", "slate_provenance", "timeline_primary", "timeline_primary_source", "timeline_primary_group_id", "timeline_role", "timeline_deleted", "title", "notes", "box_id", "location")
             if metadata.get(key) is not None
         }
     local_path = str(row.local_path or "")
@@ -136,15 +140,168 @@ def _serialize_photo(row: IntakePhoto, *, compact: bool = False) -> dict[str, An
         "is_internal_only": bool(row.is_internal_only),
         "item_id": row.item_id,
         "batch_id": row.batch_id,
-        "slate_id": (row.metadata_json or {}).get("official_slate_id"),
+        "slate_id": (row.metadata_json or {}).get("official_slate_id") or (row.metadata_json or {}).get("timeline_slate_id"),
         "thumbnail_url": service.public_media_url(display_path),
         "display_url": service.public_media_url(display_path),
         "metadata_json": metadata,
         "classification": metadata.get("classification") or row.image_type,
         "classification_source": metadata.get("classification_source"),
+        "timeline_role": timeline_role,
         "created_at": _iso(row.created_at),
         "updated_at": _iso(row.updated_at),
     }
+
+
+def _timeline_role(photo: dict[str, Any]) -> str:
+    metadata = photo.get("metadata_json") if isinstance(photo.get("metadata_json"), dict) else {}
+    slate = photo.get("slate") if isinstance(photo.get("slate"), dict) else {}
+    role = str(
+        photo.get("timeline_role")
+        or metadata.get("timeline_role")
+        or metadata.get("classification")
+        or photo.get("classification")
+        or photo.get("image_type")
+        or (metadata.get("qr_payload", {}).get("boundary_position") if isinstance(metadata.get("qr_payload"), dict) else None)
+        or slate.get("boundary_position")
+        or ""
+    ).strip().upper()
+    if role in {"TAIL", "TAIL_SLATE"}:
+        return "TAIL"
+    return "HEAD" if photo.get("is_slate") or role in {"SLATE", "HEAD", "HEAD_SLATE"} else "PHOTO"
+
+
+def _assign_timeline_image_groups(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach stable canonical image-group identity without using upload-batch IDs.
+
+    A Head Slate starts a group after itself. A Tail Slate closes the preceding
+    group and, when preceding photos were unassigned, assigns that run to the
+    Tail Slate's canonical item identity. Existing item IDs and explicit group
+    identities remain authoritative.
+    """
+    active_group: str | None = None
+    pending: list[dict[str, Any]] = []
+    staged: list[tuple[dict[str, Any], str | None, str]] = []
+
+    def identity(entry: dict[str, Any]) -> str | None:
+        photo = entry.get("photo") if isinstance(entry.get("photo"), dict) else {}
+        slate = photo.get("slate") if isinstance(photo.get("slate"), dict) else {}
+        value = (
+            photo.get("image_group_id")
+            or photo.get("item_id")
+            or photo.get("canonical_group_id")
+            or slate.get("item_id")
+        )
+        if value:
+            return f"item:{str(value).strip()}"
+        slate_id = photo.get("slate_id") or slate.get("id")
+        if slate_id:
+            return f"slate:{slate_id}"
+        return None
+
+    def flush_pending(fallback: str | None = None) -> None:
+        nonlocal pending
+        if not pending:
+            return
+        run_id = fallback or f"photo-run:{(pending[0].get('photo') or {}).get('id', 'unknown')}"
+        for pending_entry in pending:
+            pending_entry["_assigned_group_id"] = identity(pending_entry) or run_id
+        pending = []
+
+    for entry in items:
+        photo = entry.get("photo") if isinstance(entry.get("photo"), dict) else {}
+        role = _timeline_role(photo)
+        photo["timeline_role"] = role
+        own_identity = identity(entry)
+        if role == "TAIL":
+            tail_group = active_group or own_identity
+            if tail_group is None and pending:
+                tail_group = identity(pending[0])
+            if tail_group is None:
+                tail_group = f"tail:{photo.get('slate_id') or photo.get('id', 'unknown')}"
+            if pending:
+                flush_pending(tail_group)
+            photo["_assigned_group_id"] = tail_group
+            staged.append((entry, tail_group, role))
+            active_group = None
+            continue
+        if role == "HEAD":
+            flush_pending()
+            active_group = own_identity or f"slate:{photo.get('slate_id') or photo.get('id', 'unknown')}"
+            photo["_assigned_group_id"] = active_group
+            staged.append((entry, active_group, role))
+            continue
+        if active_group is not None:
+            photo["_assigned_group_id"] = active_group
+            staged.append((entry, active_group, role))
+        elif own_identity:
+            photo["_assigned_group_id"] = own_identity
+            staged.append((entry, own_identity, role))
+        else:
+            pending.append(entry)
+            staged.append((entry, None, role))
+    flush_pending()
+
+    for entry, group_id, role in staged:
+        photo = entry.get("photo") if isinstance(entry.get("photo"), dict) else {}
+        if not group_id:
+            group_id = entry.pop("_assigned_group_id", None) or identity(entry) or f"photo:{photo.get('id', 'unknown')}"
+        else:
+            entry.pop("_assigned_group_id", None)
+        entry["image_group_id"] = group_id
+        entry["group_role"] = role
+        photo["image_group_id"] = group_id
+
+    groups_with_photos = {
+        entry.get("image_group_id")
+        for entry in items
+        if entry.get("image_group_id") and not bool((entry.get("photo") or {}).get("is_slate"))
+    }
+    first_seen: dict[str, int] = {}
+    for entry in items:
+        group_id = entry.get("image_group_id")
+        if group_id in groups_with_photos and group_id not in first_seen:
+            first_seen[group_id] = len(first_seen) + 1
+        entry["image_group_index"] = first_seen.get(group_id, 0)
+        photo = entry.get("photo") if isinstance(entry.get("photo"), dict) else {}
+        photo["group_id"] = group_id
+        photo["image_group_index"] = entry["image_group_index"]
+        if entry.get("is_slate_marker"):
+            photo["slate_number"] = photo.get("slate_number")
+        else:
+            photo["group_role"] = entry.get("group_role")
+    return items
+
+
+def _refresh_existing_timeline_draft_media(db: Session, *, user_id: int, item_ids: set[str]) -> int:
+    """Refresh only already-existing, non-live drafts for affected canonical groups."""
+    updated = 0
+    for item_id in {str(value).strip() for value in item_ids if str(value).strip()}:
+        batches = db.execute(
+            select(IntakePhotoBatch).where(IntakePhotoBatch.user_id == user_id, IntakePhotoBatch.item_id == item_id)
+        ).scalars().all()
+        for batch in batches:
+            listing = db.get(Listing, batch.draft_listing_id) if batch.draft_listing_id else None
+            if listing is None or service._listing_is_externally_active(db, listing):
+                continue
+            photos = db.execute(
+                select(IntakePhoto).where(
+                    IntakePhoto.user_id == user_id,
+                    IntakePhoto.item_id == item_id,
+                    IntakePhoto.is_public_listing_candidate.is_(True),
+                    IntakePhoto.is_slate.is_(False),
+                )
+            ).scalars().all()
+            photos = [photo for photo in photos if not service._timeline_photo_deleted(photo)]
+            urls, listing_images = service._materialize_listing_images(
+                item_id=item_id,
+                title=listing.title or item_id,
+                photos=photos,
+            )
+            listing.image_urls = urls
+            listing.listing_images = normalize_listing_images(listing_images=listing_images, approved=True)
+            db.add(listing)
+            updated += 1
+    return updated
 
 
 def _serialize_listing(row: Listing | None) -> dict[str, Any] | None:
@@ -476,7 +633,7 @@ def create_retroactive_intake_slate(
         boundary = (marker_slate.metadata_json or {}).get("retroactive_boundary") if marker_slate else None
         # A marker represents the boundary itself; use its preceding photo for
         # an ``after`` edge and following photo for a ``before`` edge below.
-        return (boundary or {}).get(f"{edge}_photo_id") or (boundary or {}).get("after_photo_id") or (boundary or {}).get("before_photo_id")
+        return (boundary or {}).get(f"{edge}_photo_id") or (boundary or {}).get("after_photo_id") or (boundary or {}).get("before_photo_id") or (marker_slate.slate_image_id if marker_slate else None)
 
     after_photo_id = resolve_marker(payload.after_photo_id, "after")
     before_photo_id = resolve_marker(payload.before_photo_id, "before")
@@ -1010,7 +1167,7 @@ def intake_timeline(
     migrated = False
     for photo in legacy:
         meta = dict(photo.metadata_json or {})
-        if meta.get("official_slate_id"):
+        if meta.get("timeline_deleted") or meta.get("official_slate_id"):
             continue
         batch = db.get(IntakePhotoBatch, photo.batch_id) if photo.batch_id else None
         slate = db.get(IntakeSlate, batch.slate_id) if batch and batch.slate_id else None
@@ -1043,6 +1200,11 @@ def intake_timeline(
     # grouping. Markers must replace/insert against the complete ordered stream
     # and only then be sliced for transport.
     timeline = service.timeline_items(db, user_id=current_user.id, limit=None, offset=0)
+    batch_ids = {row["photo"].batch_id for row in timeline if row["photo"].batch_id}
+    batches_by_id = {
+        batch.id: batch
+        for batch in db.execute(select(IntakePhotoBatch).where(IntakePhotoBatch.id.in_(batch_ids))).scalars().all()
+    } if batch_ids else {}
     items = [
             {
                 "photo": _serialize_photo(row["photo"], compact=True),
@@ -1051,22 +1213,29 @@ def intake_timeline(
             }
             for row in timeline
         ]
+    for item in items:
+        photo = item["photo"]
+        batch = batches_by_id.get(photo.get("batch_id"))
+        if batch and batch.item_id:
+            photo["canonical_group_id"] = batch.item_id
     # Render retroactive/system Slates as first-class timeline markers at the
     # requested boundary. They are not marketplace photos, but remain visible
     # with the same edit/voice-note links as any official Slate.
     slates = db.execute(select(IntakeSlate).where(IntakeSlate.user_id == current_user.id)).scalars().all()
     slates = [slate for slate in slates if not bool((slate.metadata_json or {}).get("timeline_deleted"))]
     linked_photo_by_slate = {
-        (row["photo"].metadata_json or {}).get("official_slate_id"): row["photo"]
-        for row in timeline
-        if (row["photo"].metadata_json or {}).get("official_slate_id") is not None
+        slate.id: db.get(IntakePhoto, slate.slate_image_id)
+        for slate in slates
+        if slate.slate_image_id
     }
     # Replace legacy image-based Slate rows in-place so their chronological
     # position is preserved exactly.
     for slate in slates:
         boundary = (slate.metadata_json or {}).get("retroactive_boundary") if isinstance(slate.metadata_json, dict) else None
         before_id = boundary.get("before_photo_id") if isinstance(boundary, dict) else None
-        linked_photo = linked_photo_by_slate.get(slate.id) or linked_photo_by_slate.get(str(slate.id))
+        linked_photo = linked_photo_by_slate.get(slate.id)
+        if linked_photo and (linked_photo.user_id != current_user.id or (linked_photo.metadata_json or {}).get("timeline_deleted")):
+            linked_photo = None
         linked_photo_id = linked_photo.id if linked_photo else None
         position = next((index for index, item in enumerate(items) if str(item["photo"].get("id")) == str(before_id)), None)
         linked_position = next((index for index, item in enumerate(items) if str(item["photo"].get("id")) == str(linked_photo_id)), None) if linked_photo_id is not None else None
@@ -1075,6 +1244,10 @@ def intake_timeline(
         if position is None:
             position = len(items)
         metadata = slate.metadata_json if isinstance(slate.metadata_json, dict) else {}
+        qr = slate.qr_payload_json if isinstance(slate.qr_payload_json, dict) else {}
+        legacy_metadata = metadata.get("legacy_metadata") if isinstance(metadata.get("legacy_metadata"), dict) else {}
+        role_value = str(metadata.get("timeline_role") or legacy_metadata.get("timeline_role") or legacy_metadata.get("classification") or qr.get("boundary_position") or "head").strip().lower()
+        slate_role = "TAIL" if role_value == "tail" or role_value.startswith("tail") else "HEAD"
         rendered = metadata.get("rendered_slate") if isinstance(metadata.get("rendered_slate"), dict) else {}
         marker_id = f"slate-{slate.id}"
         marker = {
@@ -1091,11 +1264,14 @@ def intake_timeline(
             "item_id": slate.item_id,
             "source_photo_id": linked_photo.source_photo_id if linked_photo else None,
             "slate_id": slate.id,
-            "classification": "SLATE",
+            "classification": slate_role,
             "classification_source": "MODERN_SLATE",
+            "timeline_role": slate_role,
+            "canonical_group_id": slate.item_id,
             "metadata_json": {
-                "classification": "SLATE",
+                "classification": slate_role,
                 "classification_source": "MODERN_SLATE",
+                "timeline_role": slate_role,
                 "official_slate_id": slate.id,
                 "legacy_photo_id": (metadata.get("legacy_photo_id") or linked_photo_id),
                 "legacy_metadata": metadata.get("legacy_metadata") or {},
@@ -1105,90 +1281,240 @@ def intake_timeline(
             },
             # Keep timeline markers compact; full QR/label payloads are loaded
             # only by the Slate editor/detail route.
-            "slate": {"id": slate.id, "item_id": slate.item_id, "box_id": slate.box_id, "location": slate.location, "title": slate.title, "notes": slate.notes, "voice_notes": (metadata.get("legacy_metadata") or {}).get("voice_notes")},
+            "slate": {"id": slate.id, "item_id": slate.item_id, "box_id": slate.box_id, "location": slate.location, "title": slate.title, "notes": slate.notes, "voice_notes": (metadata.get("legacy_metadata") or {}).get("voice_notes") or (metadata.get("voice") or {}).get("notes"), "boundary_position": "tail" if slate_role == "TAIL" else "head"},
         }
         marker_row = {"photo": marker, "timeline_key": (items[linked_position]["timeline_key"] if linked_position is not None else [str((boundary or {}).get("effective_boundary_at") or ""), "slate", str(slate.id)]), "late_arrival": False, "is_slate_marker": True}
         if linked_position is not None:
             items[linked_position] = marker_row
         else:
             items.insert(position, marker_row)
+    _assign_timeline_image_groups(items)
     # Attach stable operator-facing numbering without changing the underlying
     # photo count when a legacy image is replaced by a modern Slate marker.
-    # Slate numbers and photo numbers are independent; group letters restart
-    # after each Slate while the global photo number keeps increasing.
+    # Slate numbers, image-group IDs and global photo numbers remain distinct.
     slate_number = 0
     photo_number = 0
     group_photo_number = 0
-    current_group = None
     for entry in items:
         photo = entry.get("photo") or {}
-        if entry.get("is_slate_marker"):
+        if entry.get("is_slate_marker") or photo.get("is_slate"):
             slate_number += 1
             group_photo_number = 0
-            current_group = photo.get("slate", {}).get("item_id") or photo.get("item_id") or f"ITEM-{slate_number}"
             photo["slate_number"] = slate_number
-            photo["group_id"] = current_group
             photo.setdefault("metadata_json", {})["slate_number"] = slate_number
             continue
         photo_number += 1
         group_photo_number += 1
         group_letter = chr(64 + group_photo_number) if group_photo_number <= 26 else f"{group_photo_number}"
         photo["photo_number"] = photo_number
-        photo["group_id"] = current_group
         photo["group_photo_number"] = group_photo_number
         photo["group_photo_label"] = f"{photo_number}-{group_letter}"
     rendered_items = items[offset: offset + limit]
     return {
         "items": rendered_items,
         "total": len(items),
-        "photo_count": sum(1 for row in items if not row.get("is_slate_marker")),
-        "slate_count": sum(1 for row in items if row.get("is_slate_marker")),
+        "photo_count": sum(1 for row in items if not row.get("is_slate_marker") and not bool((row.get("photo") or {}).get("is_slate"))),
+        "slate_count": sum(1 for row in items if row.get("is_slate_marker") or bool((row.get("photo") or {}).get("is_slate"))),
         "offset": offset,
         "limit": limit,
     }
 
 @router.post("/timeline/classify")
 def classify_timeline_assets(payload: dict, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    ids = [int(v) for v in (payload.get("photo_ids") or [])]
+    raw_ids = payload.get("photo_ids") or []
+    photo_ids: set[int] = set()
+    slate_ids: set[int] = set()
+    selected_slates: list[IntakeSlate] = []
+    for value in raw_ids:
+        token = str(value)
+        if token.startswith("slate-"):
+            try:
+                slate_ids.add(int(token.removeprefix("slate-")))
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="Invalid Timeline Slate ID") from exc
+        else:
+            try:
+                photo_ids.add(int(value))
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail="Invalid Timeline photo ID") from exc
+    if slate_ids:
+        selected_slates = db.execute(select(IntakeSlate).where(IntakeSlate.user_id == current_user.id, IntakeSlate.id.in_(slate_ids))).scalars().all()
+        if len(selected_slates) != len(slate_ids):
+            raise HTTPException(status_code=404, detail="Timeline Slate not found")
+        photo_ids.update(int(slate.slate_image_id) for slate in selected_slates if slate.slate_image_id)
+    ids = sorted(photo_ids)
     classification = str(payload.get("classification") or "PHOTO").upper()
     if classification not in {"PHOTO", "SLATE", "HEAD", "TAIL", "UNKNOWN"}:
         raise HTTPException(status_code=400, detail="Unsupported timeline classification")
     rows = db.execute(select(IntakePhoto).where(IntakePhoto.user_id == current_user.id, IntakePhoto.id.in_(ids))).scalars().all()
     before = []
     for row in rows:
-        meta = dict(row.metadata_json or {}); before.append({"id": row.id, "metadata_json": meta, "is_slate": row.is_slate, "image_type": row.image_type, "is_internal_only": row.is_internal_only}); meta["classification_source"] = "MANUAL_OPERATOR"; meta["classification"] = classification; row.metadata_json = meta
-        row.is_slate = classification != "PHOTO"; row.image_type = classification.lower(); row.is_internal_only = row.is_slate; db.add(row)
-        if row.is_slate and not (meta.get("official_slate_id") or (row.batch_id and db.get(IntakePhotoBatch, row.batch_id) and db.get(IntakePhotoBatch, row.batch_id).slate_id)):
-            batch = db.get(IntakePhotoBatch, row.batch_id) if row.batch_id else None
-            slate_payload = {"retroactive": True, "item_id": str(row.item_id or (batch.item_id if batch else "") or f"SLATE-{row.id}"), "title": meta.get("title") or row.original_filename or "", "notes": meta.get("notes") or "", "location": meta.get("location") or (batch.metadata_json or {}).get("location", "") if batch else "", "box_id": meta.get("box_id") or ((batch.metadata_json or {}).get("box_id") if batch else None), "source_photo_id": row.id}
-            official_slate, _, _ = service.create_slate(db, user=current_user, payload=slate_payload)
-            meta["official_slate_id"] = official_slate.id; row.metadata_json = meta; db.add(row)
+        meta = dict(row.metadata_json or {})
+        before.append({"id": row.id, "metadata_json": meta, "is_slate": row.is_slate, "image_type": row.image_type, "is_internal_only": row.is_internal_only, "is_public_listing_candidate": row.is_public_listing_candidate, "item_id": row.item_id, "batch_id": row.batch_id})
+        if classification == "PHOTO":
+            official_slate_id = meta.get("official_slate_id")
+            if official_slate_id:
+                official_slate = db.execute(select(IntakeSlate).where(IntakeSlate.id == int(official_slate_id), IntakeSlate.user_id == current_user.id)).scalar_one_or_none()
+                # Only retire a modern Slate when this exact photo is its
+                # authoritative replacement/source. Inherited IDs on ordinary
+                # photos are provenance and must not delete another marker.
+                if official_slate and official_slate.slate_image_id == row.id:
+                    slate_meta = dict(official_slate.metadata_json or {})
+                    slate_meta.update({"timeline_deleted": True, "timeline_deleted_at": slate_meta.get("timeline_deleted_at") or datetime.now(UTC).isoformat(), "timeline_deleted_by": current_user.id})
+                    official_slate.metadata_json = slate_meta
+                    db.add(official_slate)
+                meta.pop("official_slate_id", None)
+            meta["classification_source"] = "MANUAL_OPERATOR"
+            meta["classification"] = "PHOTO"
+            meta.pop("timeline_role", None)
+            meta.pop("qr_payload", None)
+            meta.pop("timeline_slate_qr_payload", None)
+            row.is_slate = False
+            row.image_type = "photo"
+            row.is_internal_only = False
+            row.is_public_listing_candidate = not bool(meta.get("timeline_deleted"))
+            row.metadata_json = meta
+            db.add(row)
+            continue
+
+        role = "TAIL" if classification == "TAIL" else "HEAD"
+        meta.update({"classification_source": "MANUAL_OPERATOR", "classification": role, "timeline_role": role})
+        row.is_slate = True
+        row.image_type = role.lower()
+        row.is_internal_only = True
+        row.is_public_listing_candidate = False
+        batch = db.get(IntakePhotoBatch, row.batch_id) if row.batch_id else None
+
+        # A Tail Slate closes the preceding photo group. Reuse that group's
+        # canonical item identity when it exists; otherwise create a new
+        # tail-positioned canonical Slate so preceding unassigned photos can be
+        # recovered by the existing batch rebuild routine.
+        group_item_id = str(row.item_id or (batch.item_id if batch else "") or "").strip()
+        if role == "TAIL" and not group_item_id:
+            ordered_rows = service._ordered_photos(db, user_id=current_user.id)
+            row_index = next((i for i, candidate in enumerate(ordered_rows) if candidate.id == row.id), -1)
+            previous = ordered_rows[row_index - 1] if row_index > 0 else None
+            previous_batch = db.get(IntakePhotoBatch, previous.batch_id) if previous and previous.batch_id else None
+            group_item_id = str((previous.item_id if previous else None) or (previous_batch.item_id if previous_batch else "") or "").strip()
+        if role == "TAIL" and group_item_id:
+            row.item_id = group_item_id
+            existing_batch = db.execute(select(IntakePhotoBatch).where(IntakePhotoBatch.user_id == current_user.id, IntakePhotoBatch.item_id == group_item_id)).scalar_one_or_none()
+            if existing_batch:
+                row.batch_id = existing_batch.id
+            existing_slate = db.execute(select(IntakeSlate).where(IntakeSlate.user_id == current_user.id, IntakeSlate.item_id == group_item_id)).scalar_one_or_none()
+            if existing_slate:
+                slate_id = existing_slate.id
+                meta["timeline_slate_id"] = existing_slate.id
+                qr_payload = dict(existing_slate.qr_payload_json or {})
+                qr_payload.update({"item_id": group_item_id, "boundary_position": "tail"})
+                meta["qr_payload"] = qr_payload
+            else:
+                slate_payload = {"retroactive": True, "boundary_position": "tail", "item_id": group_item_id, "title": meta.get("title") or row.original_filename or "", "notes": meta.get("notes") or "", "source_photo_id": row.id}
+                official_slate, qr_payload, _ = service.create_slate(db, user=current_user, payload=slate_payload)
+                slate_id = official_slate.id
+                row.item_id = official_slate.item_id
+                row.batch_id = existing_batch.id if existing_batch else row.batch_id
+                meta["official_slate_id"] = official_slate.id
+                meta["qr_payload"] = qr_payload
+                official_slate.slate_image_id = row.id
+                db.add(official_slate)
+        else:
+            slate_payload = {
+                "retroactive": True,
+                "boundary_position": "tail" if role == "TAIL" else "head",
+                "item_id": group_item_id or None,
+                "title": meta.get("title") or row.original_filename or "",
+                "notes": meta.get("notes") or "",
+                "location": meta.get("location") or (batch.metadata_json or {}).get("location", "") if batch else "",
+                "box_id": meta.get("box_id") or ((batch.metadata_json or {}).get("box_id") if batch else None),
+                "source_photo_id": row.id,
+            }
+            official_slate, qr_payload, _ = service.create_slate(db, user=current_user, payload=slate_payload)
+            slate_id = official_slate.id
+            row.item_id = official_slate.item_id
+            row.batch_id = batch.id if batch else row.batch_id
+            meta["official_slate_id"] = official_slate.id
+            meta["qr_payload"] = qr_payload
+            official_slate.slate_image_id = row.id
+            db.add(official_slate)
+        row.metadata_json = meta
+        db.add(row)
+        if role == "TAIL" and group_item_id and not slate_id:
+            raise HTTPException(status_code=409, detail="Tail Slate could not be attached to its canonical item group")
+
+    # Some operator-created boundary markers have no source photo. Keep their
+    # authoritative Slate metadata and QR payload aligned with classification.
+    for selected_slate in selected_slates:
+        if classification == "PHOTO":
+            if not selected_slate.slate_image_id:
+                slate_meta = dict(selected_slate.metadata_json or {})
+                slate_meta.update({"timeline_deleted": True, "timeline_deleted_at": slate_meta.get("timeline_deleted_at") or datetime.now(UTC).isoformat(), "timeline_deleted_by": current_user.id})
+                selected_slate.metadata_json = slate_meta
+                db.add(selected_slate)
+            continue
+        role = "TAIL" if classification == "TAIL" else "HEAD"
+        slate_meta = dict(selected_slate.metadata_json or {})
+        slate_meta["timeline_role"] = role
+        selected_slate.metadata_json = slate_meta
+        qr = dict(selected_slate.qr_payload_json or {})
+        qr["boundary_position"] = "tail" if role == "TAIL" else "start"
+        selected_slate.qr_payload_json = qr
+        db.add(selected_slate)
+
+    if rows:
+        service.rebuild_batches_for_user(db, user_id=current_user.id)
     db.add(IntakeReconciliationEvent(user_id=current_user.id, event_type="timeline_classification_change", status="completed", details_json={"before": before, "after": {"classification": classification, "photo_ids": ids}, "scope": "selected"}))
     db.commit()
     return {"updated": len(rows), "classification": classification, "official_slate_ids": [(row.metadata_json or {}).get("official_slate_id") for row in rows if (row.metadata_json or {}).get("official_slate_id")]}
 
 
-@router.delete("/timeline/assets/{photo_id}")
-def delete_timeline_asset(photo_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    photo = db.execute(select(IntakePhoto).where(IntakePhoto.id == photo_id, IntakePhoto.user_id == current_user.id)).scalar_one_or_none()
-    if photo is None:
-        raise HTTPException(status_code=404, detail="Timeline image not found")
-    metadata = dict(photo.metadata_json or {})
-    metadata["timeline_deleted"] = True
-    metadata["timeline_deleted_at"] = datetime.now(UTC).isoformat()
-    metadata["timeline_deleted_by"] = current_user.id
-    photo.metadata_json = metadata
-    photo.is_public_listing_candidate = False
-    photo.is_internal_only = True
-    db.add(photo)
-    slate_id = metadata.get("official_slate_id") or (db.get(IntakePhotoBatch, photo.batch_id).slate_id if photo.batch_id and db.get(IntakePhotoBatch, photo.batch_id) else None)
-    if slate_id:
-        slate = db.get(IntakeSlate, int(slate_id))
-        if slate:
-            slate_meta = dict(slate.metadata_json or {}); slate_meta["timeline_deleted"] = True; slate.metadata_json = slate_meta; db.add(slate)
-    db.add(IntakeReconciliationEvent(user_id=current_user.id, event_type="timeline_asset_deleted", status="completed", details_json={"photo_id": photo.id, "slate_id": slate_id}))
+@router.delete("/timeline/assets/{asset_id}")
+def delete_timeline_asset(asset_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    slate = None
+    photo = None
+    if str(asset_id).startswith("slate-"):
+        try:
+            slate_id = int(str(asset_id).removeprefix("slate-"))
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="Timeline Slate not found") from exc
+        slate = db.execute(select(IntakeSlate).where(IntakeSlate.id == slate_id, IntakeSlate.user_id == current_user.id)).scalar_one_or_none()
+        if slate is None:
+            raise HTTPException(status_code=404, detail="Timeline Slate not found")
+        photo = db.execute(select(IntakePhoto).where(IntakePhoto.id == slate.slate_image_id, IntakePhoto.user_id == current_user.id)).scalar_one_or_none() if slate.slate_image_id else None
+    else:
+        try:
+            photo_id = int(asset_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="Timeline image not found") from exc
+        photo = db.execute(select(IntakePhoto).where(IntakePhoto.id == photo_id, IntakePhoto.user_id == current_user.id)).scalar_one_or_none()
+        if photo is None:
+            raise HTTPException(status_code=404, detail="Timeline image not found")
+        linked_id = (photo.metadata_json or {}).get("official_slate_id")
+        if linked_id and photo.id == db.execute(select(IntakeSlate.slate_image_id).where(IntakeSlate.id == int(linked_id), IntakeSlate.user_id == current_user.id)).scalar_one_or_none():
+            slate = db.execute(select(IntakeSlate).where(IntakeSlate.id == int(linked_id), IntakeSlate.user_id == current_user.id)).scalar_one_or_none()
+
+    deleted_photo_ids = []
+    if photo is not None:
+        metadata = dict(photo.metadata_json or {})
+        if not metadata.get("timeline_deleted"):
+            metadata.update({"timeline_deleted": True, "timeline_deleted_at": datetime.now(UTC).isoformat(), "timeline_deleted_by": current_user.id})
+            photo.metadata_json = metadata
+            photo.is_public_listing_candidate = False
+            photo.is_internal_only = True
+            db.add(photo)
+        deleted_photo_ids.append(photo.id)
+    if slate is not None:
+        slate_metadata = dict(slate.metadata_json or {})
+        slate_metadata.update({"timeline_deleted": True, "timeline_deleted_at": slate_metadata.get("timeline_deleted_at") or datetime.now(UTC).isoformat(), "timeline_deleted_by": current_user.id})
+        slate.metadata_json = slate_metadata
+        db.add(slate)
+    item_ids = {str(value).strip() for value in [photo.item_id if photo else None, slate.item_id if slate else None] if str(value or "").strip()}
+    db.add(IntakeReconciliationEvent(user_id=current_user.id, event_type="timeline_asset_deleted", status="completed", details_json={"asset_id": asset_id, "photo_ids": deleted_photo_ids, "slate_id": slate.id if slate else None, "item_ids": sorted(item_ids)}))
+    db.flush()
+    service.rebuild_batches_for_user(db, user_id=current_user.id)
+    _refresh_existing_timeline_draft_media(db, user_id=current_user.id, item_ids=item_ids)
     db.commit()
-    return {"deleted": True, "photo_id": photo.id, "slate_id": slate_id}
+    return {"deleted": True, "asset_id": asset_id, "photo_ids": deleted_photo_ids, "slate_id": slate.id if slate else None}
 
 
 @router.post("/timeline/primary")
@@ -1197,14 +1523,47 @@ def set_timeline_primary(payload: dict, db: Session = Depends(get_db), current_u
     photo = db.execute(select(IntakePhoto).where(IntakePhoto.id == photo_id, IntakePhoto.user_id == current_user.id)).scalar_one_or_none()
     if photo is None or photo.is_slate:
         raise HTTPException(status_code=400, detail="Select a product photo")
-    batch_id = photo.batch_id
-    peers = db.execute(select(IntakePhoto).where(IntakePhoto.user_id == current_user.id, IntakePhoto.batch_id == batch_id, IntakePhoto.is_slate.is_(False))).scalars().all()
-    for peer in peers:
-        meta = dict(peer.metadata_json or {}); meta.pop("timeline_primary", None); peer.metadata_json = meta; db.add(peer)
-    meta = dict(photo.metadata_json or {}); meta["timeline_primary"] = True; meta["timeline_primary_source"] = "MANUAL_OPERATOR"; photo.metadata_json = meta; db.add(photo)
-    db.add(IntakeReconciliationEvent(user_id=current_user.id, event_type="timeline_primary_photo_set", status="completed", details_json={"photo_id": photo_id, "batch_id": batch_id}))
+    ordered = service.timeline_items(db, user_id=current_user.id, limit=None, offset=0)
+    batches = db.execute(select(IntakePhotoBatch).where(IntakePhotoBatch.user_id == current_user.id)).scalars().all()
+    batches_by_id = {batch.id: batch for batch in batches}
+    group_items = []
+    for row in ordered:
+        current = row["photo"]
+        serialized = _serialize_photo(current, compact=False)
+        batch = batches_by_id.get(current.batch_id)
+        if batch and batch.item_id:
+            serialized["canonical_group_id"] = batch.item_id
+        current_meta = current.metadata_json if isinstance(current.metadata_json, dict) else {}
+        qr_payload = current_meta.get("qr_payload") if isinstance(current_meta.get("qr_payload"), dict) else {}
+        serialized["timeline_role"] = str(current_meta.get("timeline_role") or current_meta.get("classification") or qr_payload.get("boundary_position") or ("HEAD" if current.is_slate else "PHOTO")).upper()
+        group_items.append({"photo": serialized})
+    _assign_timeline_image_groups(group_items)
+    selected_item = next((entry for entry in group_items if int(entry["photo"].get("id") or 0) == photo_id), None)
+    group_id = selected_item.get("image_group_id") if selected_item else None
+    if not group_id:
+        raise HTTPException(status_code=409, detail="Photo is not assigned to a canonical image group yet")
+    peers = [row["photo"] for row in group_items if row.get("image_group_id") == group_id and not row["photo"].get("is_slate") and row["photo"].get("id")]
+    peer_ids = [int(peer["id"]) for peer in peers]
+    if not peer_ids:
+        raise HTTPException(status_code=409, detail="Image group has no product photos")
+    peer_rows = db.execute(select(IntakePhoto).where(IntakePhoto.user_id == current_user.id, IntakePhoto.id.in_(peer_ids))).scalars().all()
+    clear = bool((payload or {}).get("clear"))
+    for peer in peer_rows:
+        meta = dict(peer.metadata_json or {})
+        meta.pop("timeline_primary", None)
+        meta.pop("timeline_primary_source", None)
+        meta.pop("timeline_primary_group_id", None)
+        if not clear and peer.id == photo_id:
+            meta.update({"timeline_primary": True, "timeline_primary_source": "MANUAL_OPERATOR", "timeline_primary_group_id": group_id})
+        peer.metadata_json = meta
+        db.add(peer)
+    db.add(IntakeReconciliationEvent(user_id=current_user.id, event_type="timeline_primary_photo_cleared" if clear else "timeline_primary_photo_set", status="completed", details_json={"photo_id": photo_id, "image_group_id": group_id, "cleared": clear}))
+    db.flush()
+    group_item_id = str(group_id).removeprefix("item:") if str(group_id).startswith("item:") else None
+    if group_item_id:
+        _refresh_existing_timeline_draft_media(db, user_id=current_user.id, item_ids={group_item_id})
     db.commit()
-    return {"photo_id": photo_id, "batch_id": batch_id, "primary": True}
+    return {"photo_id": photo_id, "image_group_id": group_id, "primary": not clear, "selection_source": "AUTOMATIC" if clear else "MANUAL_OPERATOR"}
 
 @router.post("/timeline/reset-classifications")
 def reset_timeline_classifications(payload: dict, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):

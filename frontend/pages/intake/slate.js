@@ -1393,6 +1393,7 @@ export default function IntakeSlatePage() {
         </div>
 
         <div className="grid gap-6 xl:grid-cols-[minmax(320px,0.92fr)_minmax(0,1.16fr)_minmax(320px,0.92fr)]">
+          <div id="voice" className="scroll-mt-6">
           <SectionPanel title="Voice-first intake" description="Record the item in your own words. PosterPro keeps the audio, the transcript, and the AI interpretation attached to the item.">
             <div className="grid gap-4">
               <div className="flex flex-wrap gap-2">
@@ -1473,6 +1474,7 @@ export default function IntakeSlatePage() {
               {offlineMode ? <StatusPill status="warning" label="Offline slate mode active" /> : null}
             </div>
           </SectionPanel>
+          </div>
 
           <SectionPanel
             title="Live slate and label"

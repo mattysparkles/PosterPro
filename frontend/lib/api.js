@@ -488,7 +488,7 @@ export async function browseEbayCategories(parentCategoryId = "") {
 }
 export async function classifyTimelineAssets(photoIds, classification) { return jsonFetch(`${API_BASE}/intake/timeline/classify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ photo_ids: photoIds, classification }) }); }
 export async function deleteTimelineAsset(photoId) { return jsonFetch(`${API_BASE}/intake/timeline/assets/${encodeURIComponent(photoId)}`, { method: 'DELETE' }); }
-export async function setTimelinePrimary(photoId) { return jsonFetch(`${API_BASE}/intake/timeline/primary`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ photo_id: photoId }) }); }
+export async function setTimelinePrimary(photoId, options = {}) { return jsonFetch(`${API_BASE}/intake/timeline/primary`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ photo_id: photoId, clear: Boolean(options.clear) }) }); }
 export async function resetTimelineClassifications(options = {}) { return jsonFetch(`${API_BASE}/intake/timeline/reset-classifications`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(options) }); }
 export async function reprioritizeCorrectionJob(jobId, priority) { return jsonFetch(`${API_BASE}/marketplace-jobs/correction-jobs/${jobId}/priority`, { method: 'PATCH', body: JSON.stringify({ priority }) }); }
 

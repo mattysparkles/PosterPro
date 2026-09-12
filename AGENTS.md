@@ -153,15 +153,16 @@ Status values: `NOT_AUDITED`, `BROKEN`, `REGRESSION_FOUND`, `PARTIAL`,
 | PP-POSH-001 | Poshmark market-specific handoff/lifecycle | Adapter partial | bridge/jobs | Not tested | Not live verified | NOT_AUDITED | Audit and verify |
 | PP-VINTED-001 | Vinted market-specific handoff/lifecycle | Adapter partial | bridge/jobs | Not tested | Not live verified | NOT_AUDITED | Audit and verify |
 | PP-EXT-001 | Installable, paired browser extension with secure sessions | Assets/bridge exist; prior install path exposed an unusable repository filesystem path | browser-extension, bridge, browser_extension API, Settings UI | Added deterministic `/browser-extension/download` ZIP response and clear Chrome/Edge manual-install instructions; package includes manifest, popup, options, and background assets | Production GET returned `200` with attachment headers and valid ZIP contents. Chromium load/pair/heartbeat not exercised in this environment | PARTIAL | Operator Chromium install/pairing and heartbeat verification remain |
-| PP-SLATE-TIMELINE-001 | Relevant album/archive timeline loads | No dedicated timeline page existed | intake timeline API/page | Added `/intake/timeline` page consuming authoritative capture-time timeline API | Source implemented; authenticated operator view not yet exercised | IMPLEMENTED_UNVERIFIED | Verify live timeline loading and asset coverage |
-| PP-SLATE-TIMELINE-002 | Compact chronological filmstrip/group visualization | Queue showed cards but no filmstrip | intake/timeline.js | Added horizontally scrollable thumbnail filmstrip with timestamps, Slate/photo badges, selected preview, and grouping metadata | Build pending due frontend build timeout | IMPLEMENTED_UNVERIFIED | Complete build and live visual verification |
-| PP-SLATE-TIMELINE-003 | Add Slate between arbitrary photos | No insertion controls on timeline | timeline UI, retroactive Slate API | Added explicit `+ Add Slate` insertion controls; backend now returns concrete affected photo/group preview | Modal/apply runtime still pending | PARTIAL | Replace prompt stub and verify apply |
+| PP-SLATE-TIMELINE-001 | Relevant album/archive timeline loads | No dedicated timeline page existed | intake timeline API/page | Timeline API and active page preserve capture-time order; live Google media corpus audited | 2,487 active Google Timeline images are locally decodable and all 2,487 served media paths returned successful image responses; authenticated operator interaction remains unverified | OPERATOR_TEST_REQUIRED | Exercise Timeline while authenticated |
+| PP-SLATE-TIMELINE-002 | Compact chronological filmstrip/group visualization | Queue showed cards but no filmstrip | intake/timeline.js | Production build passes; contiguous containers now alternate from canonical image-group index, independent of Slate number | Live route is served; visual browser interaction not available from this verification | OPERATOR_TEST_REQUIRED | Confirm group shading and zoom in operator browser |
+| PP-SLATE-TIMELINE-003 | Add Slate between arbitrary photos | No insertion controls on timeline | timeline UI, retroactive Slate API | Explicit `+ Add Slate` controls remain; retroactive marker references resolve to exact persisted boundaries | Source/build verified; authenticated insertion not exercised in this pass | OPERATOR_TEST_REQUIRED | Exercise head/middle/end insertion in operator UI |
 | PP-SLATE-TIMELINE-004 | Retroactive Slate reuses existing voice/text Slate creation | No backend route | intake API, Slate service | Production route now validates ownership/order, derives boundary, and returns concrete regroup preview; `/timeline/regroup/apply` applies associated photos transactionally | Backend compile/health verified; render/upload/undo/operator proof pending | AUTOMATED_TESTED | Complete undo/render/upload and public verification |
 | PP-SALES-001 | Aggregate sales facts across marketplaces | Canonical reconciliation engine exists | sales/reconciliation services | Operator reports recent eBay sale was not detected | Live event ingestion and notification proof missing | REGRESSION_FOUND | Trace eBay poll/scheduler and reconcile missed sale |
 | PP-SALES-002 | Sale decrements once and delists unrelated channels safely | Engine supports this | reconciliation worker | Operator sale was missed; downstream delist/ship flow therefore unproven | Requires live/synthetic event proof after ingestion repair | REGRESSION_FOUND | Verify sale lifecycle and cross-market fanout |
-| PP-SLATE-TIMELINE-011 | Timeline zoom/density control | Filmstrip fixed-size thumbnails | timeline UI | Added bounded zoom control and persisted preference hook | Public density/navigation verification pending | IMPLEMENTED_UNVERIFIED | Verify zoom across long sessions |
-| PP-SLATE-TIMELINE-012 | Historical classification cleanup and manual Slate designation | False legacy Slate labels | intake timeline/API | Authoritative classification display, per-asset/bulk controls, scoped reset options, and filters/counts implemented | Operator confirmation and scoped reset preview/undo runtime test pending | IMPLEMENTED_UNVERIFIED | Verify reset does not alter groups and manual provenance persists |
+| PP-SLATE-TIMELINE-011 | Timeline zoom/density control | Filmstrip fixed-size thumbnails | timeline UI | Bounded zoom persists per browser and retains horizontal scroll position | Production build passed; authenticated operator confirmation remains pending | OPERATOR_TEST_REQUIRED | Verify zoom across long sessions |
+| PP-SLATE-TIMELINE-012 | Historical classification cleanup and manual Slate designation | False legacy Slate labels | intake timeline/API | Head/Tail and photo classification controls use explicit roles; synthetic Slate IDs are accepted; reset, filters, counts, and selection remain | Backend integration tests pass; authenticated operator interaction/reset undo remains pending | OPERATOR_TEST_REQUIRED | Verify reset does not alter saved group positions and manual provenance persists |
 | PP-SLATE-TIMELINE-013 | Classification history/undo and grouping-safe correction | previous_classification metadata only | intake timeline/API | IntakeReconciliationEvent snapshots plus authenticated undo endpoint implemented | Production apply/undo and regroup interaction not live verified | PARTIAL | Complete true regroup transaction and operator test |
+| PP-SLATE-TIMELINE-014 | Group-scoped primary, Head/Tail semantics, safe delete, Google media integrity | Batch-wide primary clearing, decorative Tail role, and stale Google local paths | intake API/service, listing media materializer, Timeline UI | Canonical item grouping now scopes manual primary; Head/Tail assigns following/preceding captures; exact authoritative Slate/photo pairs soft-delete; deleted media is excluded from grouping/materialization; all current active Google Timeline files were decoded and served successfully | Eight focused Timeline/intake integration cases pass; 2,487 active Google photos pass local and thumbnail decode/HTTP checks; live authenticated button interaction remains operator-required | OPERATOR_TEST_REQUIRED | Exercise Set/Clear Primary, Tail, Delete, and group backgrounds with operator |
 | PP-CORRECTION-001 | Need a Correction creates prioritized executable remediation work | Request only moved listing to Draft | listing editor/routes | Priority field (default 0), selected fields, free-text instructions, provenance and queued state persist in source metadata | Worker execution/order and before/after material delta remain unverified | IMPLEMENTED_UNVERIFIED | Add durable correction worker and Jobs history |
 | PP-CORRECTION-002 | Manual correction precedence, convergence, and audit history | No durable correction audit | listing editor, revisions, jobs | Requests retain priority/requester/timestamp and revision history context | No-op prevention, superseding, reprioritization, and same-ID external update verification remain open | PARTIAL | Implement bounded worker convergence |
 | PP-DATA-001 | Canonical generic identity gate and blocker repair | Generic gate/API defense exists | listing_processing, routes | Existing tests | Not re-smoked | AUTOMATED_TESTED | Semantic cohort audit |
@@ -387,3 +388,42 @@ requirements above. Credentials were not rotated or printed.
   review promotion, and exact missing-image attention routing. Full relevant
   Vine/marketplace suites pass (`110 passed`); live marketplace publication was
   not invoked.
+
+# 2026-09-12 - Timeline grouping, primary-photo, deletion, and media closure
+
+- Timeline grouping now derives stable product groups from canonical item IDs
+  and explicit Head/Tail roles, never from Slate-number parity or upload batch
+  identity. Head Slates begin the following group; Tail Slates close the
+  preceding photo group. Group background alternation uses canonical image
+  group sequence and renders contiguous group containers.
+- Manual primary-photo selection is scoped to one canonical image group and
+  records `MANUAL_OPERATOR`; clearing it restores deterministic automatic
+  ordering. Materialized `listing_images` place the selected image first, and
+  the eBay image URL builder consumes that canonical order.
+- Timeline deletion is soft and idempotent. Only the exact authoritative
+  Slate/source-photo pair is retired; inherited `official_slate_id` metadata
+  alone cannot delete a Slate. Deleted assets are excluded from Timeline
+  grouping, intake queues, counts, automatic selection, and listing media.
+- A bounded Timeline-specific repair recovered 181 stale Google Photos files
+  into the current storage root without changing capture/import timestamps.
+  The active set is 2,487 photos: all 2,487 local files decode and all 2,487
+  media URLs return successful image responses with nonempty content. The
+  earlier provider-drain task ended in `WorkerLostError`/SIGKILL; its work was
+  not counted as successful.
+- Read-only live Timeline assembly returned 2,510 ordered items (2,151 product
+  photos and 359 Slate markers: 358 Head, one Tail), with 314 populated
+  canonical image groups and 44 empty Slate groups. Those empty groups were
+  intentionally left untouched; operators can now remove redundant markers
+  without the system silently changing historical chronology.
+- Regression coverage exercises Head/Tail grouping, manual Tail assignment,
+  independent primary selection/clear-to-auto, listing/eBay image ordering,
+  synthetic marker classification, and exact soft-delete behavior. The merge
+  audit found the remote Timeline change only replaced Slate-number parity
+  with global item-index parity; the new canonical group-index rendering
+  preserves the intended visual alternation without conflating numbering.
+- The listing-materialization integration test exposed an undefined `user`
+  reference in intake draft shipping-policy derivation. Draft materialization
+  now resolves the owning user from the batch, and the regression test passes.
+- Authenticated operator interaction remains `OPERATOR_TEST_REQUIRED`; build,
+  route, and data/media verification do not by themselves prove manual browser
+  clicks.
