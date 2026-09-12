@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 from app.connectors.base import BaseMarketplaceConnector
+from app.connectors.capabilities import ASSISTED_MARKETPLACE
 from app.models.models import Listing
 from app.services.marketplace_field_mapper import build_marketplace_payload
 
 
 class ProxyAutomationConnector(BaseMarketplaceConnector):
-    """Connector template for marketplaces with limited/no official public listing APIs.
+    """Destination mapper for channels whose execution is browser-assisted.
 
-    Uses a placeholder API2Cart/browser-automation strategy.
+    Publishing is intentionally *not* faked here. Durable extension jobs are
+    created by the authenticated marketplace-job API.
     """
 
-    proxy_provider = "api2cart"
+    capabilities = ASSISTED_MARKETPLACE
 
     async def authenticate(self, user_id: int) -> dict:
         return {
@@ -22,35 +24,27 @@ class ProxyAutomationConnector(BaseMarketplaceConnector):
         }
 
     async def refresh_tokens(self, user_id: int) -> dict:
-        return {"status": "noop", "provider": self.proxy_provider, "user_id": user_id}
+        return {"status": "AUTH_REQUIRED", "marketplace": self.name, "user_id": user_id}
 
     async def publish(self, listing: Listing) -> dict:
-        payload = self.to_marketplace_payload(listing)
         return {
-            "status": "QUEUED_AUTOMATION",
-            "external_listing_id": f"{self.name.upper()}-{listing.id}",
-            "submitted_payload": payload,
+            "status": "EXTENSION_JOB_REQUIRED",
+            "marketplace": self.name,
+            "listing_id": listing.id,
+            "capabilities": self.get_capabilities(),
         }
 
     async def update(self, listing: Listing) -> dict:
-        return {"status": "QUEUED_AUTOMATION", "listing_id": listing.id}
+        return {"status": "EXTENSION_JOB_REQUIRED", "action": "UPDATE", "marketplace": self.name, "listing_id": listing.id}
 
     async def delete(self, listing: Listing) -> dict:
-        return {"status": "QUEUED_AUTOMATION", "listing_id": listing.id}
+        return {"status": "EXTENSION_JOB_REQUIRED", "action": "END", "marketplace": self.name, "listing_id": listing.id}
 
     async def fetch_status(self, listing: Listing) -> dict:
-        return {"status": "PENDING_PROVIDER_SYNC", "listing_id": listing.id}
+        return {"status": "UNSUPPORTED_EXTERNAL_STATUS", "marketplace": self.name, "listing_id": listing.id}
 
     async def poll_sales(self, user_id: int, since: str | None = None) -> list[dict]:
-        return [
-            {
-                "marketplace": self.name,
-                "status": "stub",
-                "message": f"{self.name} sale polling stubbed pending official integration",
-                "user_id": user_id,
-                "since": since,
-            }
-        ]
+        return []
 
     def to_marketplace_payload(self, listing: Listing) -> dict:
         return build_marketplace_payload(listing, self.name)

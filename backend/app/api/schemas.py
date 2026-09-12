@@ -1240,6 +1240,7 @@ class CrosspostJobResponse(BaseModel):
     submitted_count: int = 0
     failed_target_count: int = 0
     target_outcomes: list[dict] = Field(default_factory=list)
+    assisted_jobs: list[dict] = Field(default_factory=list)
     ui_state_tone: str = "default"
     ui_primary_action: str | None = None
     ui_secondary_actions: list[str] = Field(default_factory=list)

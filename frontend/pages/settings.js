@@ -41,6 +41,9 @@ import {
   fetchMarketplaceImportJob,
   fetchAccountSetupSummary,
   fetchBridgeAccounts,
+  fetchMarketplaceExtensionDevices,
+  createMarketplaceExtensionPairingCode,
+  revokeMarketplaceExtensionDevice,
   fetchEbayAccountReadiness,
   fetchEbayPolicies,
   fetchSaleDetectionSettings,
@@ -104,6 +107,9 @@ export default function SettingsPage() {
   const [testingBridge, setTestingBridge] = useState(false);
   const [bridgeSmokeResult, setBridgeSmokeResult] = useState(null);
   const [bridgeAccounts, setBridgeAccounts] = useState([]);
+  const [marketplaceExtensionState, setMarketplaceExtensionState] = useState({ devices: [], pending_jobs: 0, active_jobs: [], recent_failures: [] });
+  const [marketplaceExtensionPairingCode, setMarketplaceExtensionPairingCode] = useState(null);
+  const [loadingExtensionPairing, setLoadingExtensionPairing] = useState(false);
   const [ebayAccountReadiness, setEbayAccountReadiness] = useState(null);
   const [bridgeAccountForm, setBridgeAccountForm] = useState({
     marketplace: 'facebook',
@@ -302,11 +308,12 @@ export default function SettingsPage() {
     if (!user?.id) return;
     setLoading(true);
     try {
-      const [summary, salesConfig, panels, bridgeAccountData] = await Promise.all([
+      const [summary, salesConfig, panels, bridgeAccountData, extensionState] = await Promise.all([
         fetchAccountSetupSummary(user.id),
         fetchSaleDetectionSettings(user.id),
         fetchSettingsPanels(),
         fetchBridgeAccounts().catch(() => ({ accounts: [] })),
+        fetchMarketplaceExtensionDevices().catch(() => ({ devices: [], pending_jobs: 0, active_jobs: [], recent_failures: [] })),
       ]);
       const [ebayReadiness, ebayPolicies] = await Promise.all([
         fetchEbayAccountReadiness().catch(() => null),
@@ -316,6 +323,7 @@ export default function SettingsPage() {
       setSalePlatforms(salesConfig.marketplaces || []);
       setSettingsPanels(panels);
       setBridgeAccounts(bridgeAccountData?.accounts || []);
+      setMarketplaceExtensionState(extensionState || { devices: [], pending_jobs: 0, active_jobs: [], recent_failures: [] });
       setEbayAccountReadiness(ebayReadiness);
       setEbayPolicyCatalog(ebayPolicies);
       setProfileName(panels?.profile?.full_name || '');
@@ -417,6 +425,23 @@ export default function SettingsPage() {
   }, [user?.id]);
 
   useEffect(() => {
+    if (!user?.id || activeTab !== 'marketplaces') return undefined;
+    let cancelled = false;
+    const refreshExtensionState = async () => {
+      try {
+        const result = await fetchMarketplaceExtensionDevices();
+        if (!cancelled) setMarketplaceExtensionState(result || { devices: [], pending_jobs: 0, active_jobs: [], recent_failures: [] });
+      } catch {
+        // Keep the last known state visible; the connection panel reports the
+        // previous heartbeat instead of replacing it with a misleading reset.
+      }
+    };
+    void refreshExtensionState();
+    const timer = window.setInterval(refreshExtensionState, 15000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [activeTab, user?.id]);
+
+  useEffect(() => {
     const handleStorage = (event) => {
       if (!String(event.key || '').startsWith('posterpro-marketplace-connect-complete:') || !event.newValue) return;
       let payload = null;
@@ -464,6 +489,10 @@ export default function SettingsPage() {
     () => (setupSummary?.marketplace_connections || []).find((item) => item.marketplace === selectedMarketplace) || null,
     [selectedMarketplace, setupSummary],
   );
+  const extensionDevices = marketplaceExtensionState.devices || [];
+  const activeExtensionDevices = extensionDevices.filter((device) => !device.revoked);
+  const extensionOnline = activeExtensionDevices.some((device) => device.last_seen_at && Date.now() - new Date(device.last_seen_at).getTime() < 120000);
+  const extensionUpdateRequired = activeExtensionDevices.some((device) => device.update_required);
   const activeHostedTheme = useMemo(
     () => (settingsPanels?.hosted_pages?.themes || []).find((theme) => theme.id === hostedPagesForm.active_theme_id) || null,
     [hostedPagesForm.active_theme_id, settingsPanels?.hosted_pages?.themes],
@@ -904,6 +933,29 @@ export default function SettingsPage() {
       throw new Error('Clipboard access is unavailable in this browser.');
     } catch (error) {
       toast.error(error.message || `Unable to copy ${label}.`);
+    }
+  };
+
+  const issueMarketplaceExtensionPairingCode = async () => {
+    setLoadingExtensionPairing(true);
+    try {
+      const result = await createMarketplaceExtensionPairingCode('PosterPro browser');
+      setMarketplaceExtensionPairingCode(result);
+      toast.success('One-time pairing code created. Enter it in the installed PosterPro extension within five minutes.');
+    } catch (error) {
+      toast.error(error.message || 'Could not create an extension pairing code.');
+    } finally {
+      setLoadingExtensionPairing(false);
+    }
+  };
+
+  const unpairMarketplaceExtension = async (deviceId) => {
+    try {
+      await revokeMarketplaceExtensionDevice(deviceId);
+      await reload();
+      toast.success('Browser extension device revoked.');
+    } catch (error) {
+      toast.error(error.message || 'Could not revoke this browser extension.');
     }
   };
 
@@ -2652,6 +2704,39 @@ export default function SettingsPage() {
                       <StatusPill status={(setupSummary?.marketplace_connections || []).some((marketplace) => marketplace.connected) ? 'success' : 'default'} label={`${(setupSummary?.marketplace_connections || []).filter((marketplace) => marketplace.connected).length} connected`} />
                       <StatusPill status={eligibleMarketplaceBulkImports.length ? 'success' : 'default'} label={`${eligibleMarketplaceBulkImports.length} import-ready`} />
                     </div>
+                    <div className="mt-5 rounded-[14px] border border-[#e4e7ec] bg-white p-4">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-semibold text-[#101828]">PosterPro Browser Extension</p>
+                          <p className="mt-1 text-xs text-[#667085]">Tenant-scoped queue agent for assisted marketplace work.</p>
+                        </div>
+                        <StatusPill
+                          status={extensionUpdateRequired ? 'danger' : extensionOnline ? 'success' : 'warning'}
+                          label={extensionUpdateRequired ? 'Update required' : extensionOnline ? 'Online' : activeExtensionDevices.length ? 'Offline' : 'Never paired'}
+                        />
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <a className="inline-flex items-center rounded-[10px] bg-[#2563eb] px-3 py-2 text-sm font-semibold text-white hover:bg-[#1d4ed8]" href="/api/browser-extension/download" download>Download Extension</a>
+                        <Button type="button" variant="outline" onClick={issueMarketplaceExtensionPairingCode} disabled={loadingExtensionPairing}>{loadingExtensionPairing ? 'Creating code…' : 'Pair / Reconnect'}</Button>
+                        <Button type="button" variant="outline" onClick={() => reload()}>Test / Refresh Connection</Button>
+                        <Button type="button" variant="outline" href="/jobs?tab=assisted">View Assisted Jobs</Button>
+                      </div>
+                      <p className="mt-2 text-xs text-[#667085]">Install: download the ZIP, unpack it locally, open your browser’s extension manager, enable developer mode, then load the unpacked extension. Pairing is scoped to this PosterPro account; marketplace submission remains a human action.</p>
+                      {marketplaceExtensionPairingCode?.pairing_code ? <div className="mt-3 rounded-lg bg-[#f2f4f7] p-3" role="status">
+                        <p className="text-xs font-semibold text-[#344054]">One-time pairing code · expires {formatDateTimeValue(marketplaceExtensionPairingCode.expires_at)}</p>
+                        <p className="mt-1 select-all font-mono text-lg tracking-widest text-[#101828]">{marketplaceExtensionPairingCode.pairing_code}</p>
+                        <p className="mt-1 text-xs text-[#667085]">Enter this code in the extension popup. It binds the device to your signed-in PosterPro account.</p>
+                      </div> : null}
+                      <div className="mt-3 space-y-2">
+                        {activeExtensionDevices.map((device) => <div key={device.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#eaecf0] px-3 py-2 text-xs">
+                          <span className="text-[#344054]">{device.name} · device #{device.id} · {device.browser || 'browser unknown'} · v{device.extension_version || 'unknown'}{device.update_required ? ' · UPDATE REQUIRED' : ''} · account #{device.user_id} · heartbeat {formatDateTimeValue(device.last_seen_at)} · last claim {formatDateTimeValue(device.last_claim_at)}</span>
+                          <Button type="button" size="sm" variant="ghost" onClick={() => unpairMarketplaceExtension(device.id)}>Unpair</Button>
+                        </div>)}
+                        <p className="text-xs text-[#667085]">{marketplaceExtensionState.pending_jobs || 0} pending · {(marketplaceExtensionState.active_jobs || []).length} active/review · {(marketplaceExtensionState.recent_failures || []).length} recent failures</p>
+                        {(marketplaceExtensionState.active_jobs || []).slice(0, 2).map((job) => <p key={job.id} className="text-xs text-[#475467]">Job #{job.id} · {job.marketplace} · {job.action} · {job.status}</p>)}
+                        {(marketplaceExtensionState.recent_failures || []).slice(0, 2).map((job) => <p key={job.id} className="text-xs text-[#b42318]">Job #{job.id} · {job.marketplace}: {job.error_detail || job.error_code || 'failed'}</p>)}
+                      </div>
+                    </div>
                   </div>
 
                   <div className="grid gap-4 md:grid-cols-3 xl:grid-cols-1">
@@ -3888,18 +3973,18 @@ export default function SettingsPage() {
         open={browserExtensionInstallOpen}
         onClose={() => setBrowserExtensionInstallOpen(false)}
         title={`Install browser extension for ${MARKETPLACE_LABELS[browserExtensionInstallMarketplace] || browserExtensionInstallMarketplace}`}
-        description="Load the PosterPro Marketplace Assistant so the browser session can be captured and handed back into PosterPro."
+        description="Install and pair the PosterPro queue agent. Marketplace login stays in your browser; PosterPro does not receive your cookies or passwords."
         widthClassName="xl:w-[560px]"
       >
         <div className="space-y-4">
           <div className="rounded-[14px] border border-[#dbe7ff] bg-[#f7faff] p-4">
             <p className="text-sm font-semibold text-[#101828]">Install steps</p>
             <ol className="mt-3 space-y-2 text-sm text-[#475467]">
-              <li>1. Open Chrome on the machine where you will log into {MARKETPLACE_LABELS[browserExtensionInstallMarketplace] || browserExtensionInstallMarketplace}.</li>
-              <li>2. Download the ZIP below, extract it, open <span className="font-mono text-xs text-[#101828]">chrome://extensions</span>, enable Developer Mode, and choose Load unpacked.</li>
-              <li>3. Sign in to {MARKETPLACE_LABELS[browserExtensionInstallMarketplace] || browserExtensionInstallMarketplace} in that browser.</li>
-              <li>4. Return to PosterPro and click Connect now on the marketplace card.</li>
-              <li>5. Save the captured browser session so assisted posting can continue without another login.</li>
+              <li>1. Download the ZIP below, extract it, open <span className="font-mono text-xs text-[#101828]">chrome://extensions</span>, enable Developer Mode, and choose Load unpacked.</li>
+              <li>2. In PosterPro Settings, choose Pair / Reconnect and copy the short-lived one-time code.</li>
+              <li>3. Open the extension popup, enter the code, and choose Pair this browser. Confirm that Settings reports the device online.</li>
+              <li>4. Sign in to {MARKETPLACE_LABELS[browserExtensionInstallMarketplace] || browserExtensionInstallMarketplace} in that same browser. The extension opens assisted forms, fills supported fields, and stops for your review.</li>
+              <li>5. Review and submit on the marketplace yourself. Passwords, cookies, and browser storage credentials are never sent to PosterPro.</li>
             </ol>
           </div>
           <div className="rounded-[14px] border border-[#e5e7eb] bg-white p-4">

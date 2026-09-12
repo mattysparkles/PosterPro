@@ -11,7 +11,7 @@
       <header class="hero">
         <p class="eyebrow">PosterPro</p>
         <h1>Marketplace Assistant</h1>
-        <p class="lede">Capture the current marketplace session and hand it to PosterPro for assisted publishing.</p>
+        <p class="lede">Pair a tenant-scoped device, fill assisted marketplace jobs, and pause for your review. Marketplace cookies and storage credentials are never uploaded.</p>
       </header>
 
       <section class="card">
@@ -29,13 +29,27 @@
             <option value="depop">Depop</option>
             <option value="whatnot">Whatnot</option>
             <option value="vinted">Vinted</option>
+            <option value="offerup">OfferUp</option>
           </select>
         </label>
         <div class="grid">
-          <button id="captureButton" class="primary">Capture session</button>
-          <button id="sendButton" class="secondary">Send to PosterPro</button>
+          <button id="captureButton" class="primary">Inspect connection</button>
+          <button id="sendButton" class="secondary">Send safe metadata</button>
         </div>
         <button id="copyButton" class="tertiary">Copy session JSON</button>
+      </section>
+
+      <section class="card">
+        <div class="row"><strong>Extension connection</strong><span id="deviceLabel">Not paired</span></div>
+        <label>One-time pairing code<input id="pairingCode" type="text" autocomplete="one-time-code" placeholder="Paste code from PosterPro Settings" /></label>
+        <button id="pairButton" class="primary">Pair this browser</button>
+        <button id="pollButton" class="secondary">Check for assisted jobs</button>
+        <div class="row"><strong>Active job</strong><span id="activeJobLabel">None</span></div>
+        <p id="jobFields" class="lede"></p>
+        <label>Marketplace listing ID<input id="externalListingId" type="text" placeholder="Enter after you submit" /></label>
+        <label>Marketplace listing URL<input id="externalUrl" type="url" placeholder="https://…" /></label>
+        <button id="completeButton" class="secondary">I submitted it — record result</button>
+        <p id="agentError" class="lede"></p>
       </section>
 
       <section class="card">

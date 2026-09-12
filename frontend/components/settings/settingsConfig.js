@@ -28,10 +28,11 @@ export const MARKETPLACE_LABELS = {
   depop: 'Depop',
   whatnot: 'Whatnot',
   vinted: 'Vinted',
+  offerup: 'OfferUp',
 };
 
-export const BRIDGE_MARKETPLACE_OPTIONS = ['facebook', 'etsy', 'mercari', 'poshmark', 'depop', 'whatnot', 'vinted'];
-export const BROWSER_CONNECT_MARKETPLACES = ['facebook', 'mercari', 'poshmark', 'etsy', 'depop', 'whatnot', 'vinted'];
+export const BRIDGE_MARKETPLACE_OPTIONS = ['facebook', 'etsy', 'mercari', 'poshmark', 'vinted', 'offerup', 'depop', 'whatnot'];
+export const BROWSER_CONNECT_MARKETPLACES = ['facebook', 'mercari', 'poshmark', 'etsy', 'vinted', 'offerup', 'depop', 'whatnot'];
 export const BROWSER_IMPORT_MARKETPLACES = ['facebook'];
 
 export const RESELLER_PRIORITY_MARKETPLACES = ['mercari', 'poshmark', 'whatnot'];

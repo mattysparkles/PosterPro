@@ -16,6 +16,7 @@ MANUAL_MARKETPLACES = {
     MarketplaceName.depop.value,
     MarketplaceName.whatnot.value,
     MarketplaceName.vinted.value,
+    MarketplaceName.offerup.value,
 }
 
 MANUAL_WORKFLOW_READY = "ready"
@@ -105,6 +106,15 @@ MARKETPLACE_SETUP_PROFILES: dict[str, dict[str, Any]] = {
         "default_publish_mode": "provider_assist",
         "default_shipping_scope": "shipping_only",
     },
+    MarketplaceName.offerup.value: {
+        "status_label": "seller profile",
+        "draft_note": "Add OfferUp seller location and delivery choices before enabling this assisted channel.",
+        "saved_note": "OfferUp setup details are saved, but the channel is not marked ready yet.",
+        "ready_note": "OfferUp browser-assisted workflow is saved for this marketplace.",
+        "default_import_mode": "manual",
+        "default_publish_mode": "browser_assist",
+        "default_shipping_scope": "local_or_shipping",
+    },
 }
 
 MARKETPLACE_UI_PRIORITY = {
@@ -116,6 +126,7 @@ MARKETPLACE_UI_PRIORITY = {
     MarketplaceName.etsy.value: 6,
     MarketplaceName.depop.value: 7,
     MarketplaceName.vinted.value: 8,
+    MarketplaceName.offerup.value: 9,
 }
 
 

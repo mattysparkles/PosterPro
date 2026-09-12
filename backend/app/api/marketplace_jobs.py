@@ -27,7 +27,7 @@ from app.api.schemas import (
 from app.core.auth import ensure_user_owns_resource, get_current_user
 from app.core.database import get_db
 from app.models.enums import EbayPublishStatus, ListingStatus, MarketplaceListingStatus, MarketplaceName
-from app.models.models import IntakeNotification, IntakePhotoBatch, IntakeProviderMedia, Listing, ListingCorrectionJob, MarketplaceCrosspostJob, MarketplaceImportJob, MarketplaceListing, User
+from app.models.models import IntakeNotification, IntakePhotoBatch, IntakeProviderMedia, Listing, ListingCorrectionJob, MarketplaceCrosspostJob, MarketplaceExtensionJob, MarketplaceImportJob, MarketplaceListing, User
 from app.services.marketplace_execution import resolve_execution_mode
 from app.services.marketplace_field_mapper import build_marketplace_payload
 from app.services.customer_description import customer_description_is_safe
@@ -785,7 +785,35 @@ def get_crosspost_job(
     if not job:
         raise HTTPException(status_code=404, detail="Crosspost job not found")
     ensure_user_owns_resource(current_user, job.user_id)
-    return _serialize_crosspost_job(job)
+    result = _serialize_crosspost_job(job)
+    assisted_jobs = db.execute(
+        select(MarketplaceExtensionJob)
+        .where(
+            MarketplaceExtensionJob.crosspost_job_id == job.id,
+            MarketplaceExtensionJob.user_id == current_user.id,
+        )
+        .order_by(MarketplaceExtensionJob.created_at.asc(), MarketplaceExtensionJob.id.asc())
+    ).scalars().all()
+    result["assisted_jobs"] = [
+        {
+            "id": assisted.id,
+            "marketplace": assisted.marketplace,
+            "action": assisted.action,
+            "status": assisted.status,
+            "device_id": assisted.device_id,
+            "attempt_count": assisted.attempt_count,
+            "claimed_at": assisted.claimed_at,
+            "started_at": assisted.started_at,
+            "completed_at": assisted.completed_at,
+            "external_listing_id": assisted.external_listing_id,
+            "external_url": assisted.external_url,
+            "error_code": assisted.error_code,
+            "error_detail": assisted.error_detail,
+            "payload": assisted.payload_snapshot,
+        }
+        for assisted in assisted_jobs
+    ]
+    return result
 
 
 @router.post("/marketplace-crosspost-jobs/{job_id}/cancel", response_model=CrosspostJobResponse)

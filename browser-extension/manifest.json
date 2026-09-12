@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "PosterPro Marketplace Assistant",
-  "version": "0.1.0",
-  "description": "Capture and hand off marketplace browser sessions to PosterPro for assisted publishing.",
+  "version": "0.2.0",
+  "description": "Pair a browser with PosterPro, process assisted marketplace jobs, and pause for operator review.",
   "action": {
     "default_title": "PosterPro Marketplace Assistant",
     "default_popup": "popup.html"
@@ -13,6 +13,7 @@
   "options_page": "options.html",
   "permissions": [
     "activeTab",
+    "alarms",
     "clipboardWrite",
     "cookies",
     "scripting",
@@ -30,6 +31,8 @@
     "https://www.depop.com/*",
     "https://www.whatnot.com/*",
     "https://seller.whatnot.com/*",
-    "https://www.vinted.com/*"
+    "https://www.vinted.com/*",
+    "https://offerup.com/*",
+    "https://www.offerup.com/*"
   ]
 }

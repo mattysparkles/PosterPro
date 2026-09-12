@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, UTC
 
 from app.connectors.base import BaseMarketplaceConnector
+from app.connectors.capabilities import DIRECT_EBAY
 from app.core.config import settings
 from app.models.models import Listing
 from app.services.ebay_service import authenticate_user_ebay, get_fulfillment_orders, get_or_refresh_account, publish_listing_to_ebay
@@ -11,6 +12,7 @@ from app.services.ebay_service import authenticate_user_ebay, get_fulfillment_or
 class EbayConnector(BaseMarketplaceConnector):
     name = "ebay"
     supports_oauth = True
+    capabilities = DIRECT_EBAY
 
     async def authenticate(self, user_id: int) -> dict:
         callback = settings.ebay_runame or settings.ebay_redirect_uri or "http://localhost:8000/marketplaces/ebay/callback"

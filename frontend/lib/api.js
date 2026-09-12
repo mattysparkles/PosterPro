@@ -575,6 +575,14 @@ export async function fetchCrosspostJob(jobId) {
   return jsonFetch(`${API_BASE}/marketplace-crosspost-jobs/${jobId}`);
 }
 
+export async function fetchAssistedMarketplaceJobs() {
+  return jsonFetch(`${API_BASE}/assisted-marketplace-jobs`);
+}
+
+export async function fetchAssistedMarketplaceJob(jobId) {
+  return jsonFetch(`${API_BASE}/assisted-marketplace-jobs/${jobId}`);
+}
+
 export async function fetchMarketplaceImportJob(jobId) {
   return jsonFetch(`${API_BASE}/marketplace-import-jobs/${jobId}`);
 }
@@ -619,6 +627,22 @@ export async function fetchBridgeAccounts(marketplace) {
     url.searchParams.set("marketplace", marketplace);
   }
   return jsonFetch(url.toString());
+}
+
+export async function fetchMarketplaceExtensionDevices() {
+  return jsonFetch(`${API_BASE}/browser-extension/devices`);
+}
+
+export async function createMarketplaceExtensionPairingCode(deviceName = 'PosterPro browser') {
+  return jsonFetch(`${API_BASE}/browser-extension/pairing-codes`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ device_name: deviceName }),
+  });
+}
+
+export async function revokeMarketplaceExtensionDevice(deviceId) {
+  return jsonFetch(`${API_BASE}/browser-extension/devices/${encodeURIComponent(deviceId)}`, { method: 'DELETE' });
 }
 
 export async function upsertBridgeAccount(marketplace, accountKey, body) {

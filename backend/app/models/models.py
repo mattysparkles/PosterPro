@@ -710,6 +710,61 @@ class MarketplaceMetadataCache(Base, TimestampMixin):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
 
 
+class MarketplaceExtensionDevice(Base, TimestampMixin):
+    """A tenant-scoped browser extension installation; token material is never stored."""
+    __tablename__ = "marketplace_extension_devices"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    device_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(120), default="PosterPro browser")
+    browser: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    extension_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    last_claim_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+
+
+class MarketplaceExtensionPairingCode(Base, TimestampMixin):
+    """Short-lived, single-use code created by an authenticated PosterPro user."""
+    __tablename__ = "marketplace_extension_pairing_codes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+
+
+class MarketplaceExtensionJob(Base, TimestampMixin):
+    """Durable per-marketplace assisted action claimed by exactly one paired device."""
+    __tablename__ = "marketplace_extension_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    listing_id: Mapped[int] = mapped_column(ForeignKey("listings.id"), index=True)
+    crosspost_job_id: Mapped[int | None] = mapped_column(ForeignKey("marketplace_crosspost_jobs.id"), nullable=True, index=True)
+    marketplace: Mapped[str] = mapped_column(String(32), index=True)
+    action: Mapped[str] = mapped_column(String(16), default="CREATE", index=True)
+    status: Mapped[str] = mapped_column(String(40), default="QUEUED", index=True)
+    priority: Mapped[int] = mapped_column(Integer, default=1, index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    payload_version: Mapped[int] = mapped_column(Integer, default=1)
+    payload_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    device_id: Mapped[int | None] = mapped_column(ForeignKey("marketplace_extension_devices.id"), nullable=True, index=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_state_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    external_listing_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    external_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
 class MarketplaceImportJob(Base, TimestampMixin):
     __tablename__ = "marketplace_import_jobs"
 

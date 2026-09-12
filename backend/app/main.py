@@ -26,6 +26,7 @@ from app.api.intelligence import router as intelligence_router
 from app.api.intake import router as intake_router
 from app.api.media import router as media_router
 from app.api.browser_extension import router as browser_extension_router
+from app.api.marketplace_extension import router as marketplace_extension_router
 from app.api.processing import router as processing_router
 from app.api.notifications import router as notifications_router
 from app.api.marketplaces import router as marketplaces_router
@@ -403,6 +404,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(ebay_router)
 app.include_router(browser_extension_router)
+app.include_router(marketplace_extension_router)
 app.include_router(processing_router)
 app.include_router(notifications_router)
 app.include_router(marketplaces_router)

@@ -33,7 +33,7 @@ def download_browser_extension():
         raise HTTPException(status_code=404, detail="Extension artifact is unavailable")
     payload = BytesIO()
     with ZipFile(payload, "w", ZIP_DEFLATED) as archive:
-        excluded = {".git", "__pycache__", ".pytest_cache", "node_modules"}
+        excluded = {".git", "__pycache__", ".pytest_cache", "node_modules", "tests"}
         for path in sorted(root.rglob("*")):
             if not path.is_file() or any(part in excluded for part in path.parts):
                 continue
@@ -51,6 +51,7 @@ SUPPORTED_EXTENSION_MARKETPLACES = {
     MarketplaceName.depop.value,
     MarketplaceName.whatnot.value,
     MarketplaceName.vinted.value,
+    MarketplaceName.offerup.value,
 }
 
 

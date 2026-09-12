@@ -37,6 +37,7 @@ const CHANNEL_LABELS = {
   depop: "Depop",
   whatnot: "Whatnot",
   vinted: "Vinted",
+  offerup: "OfferUp",
 };
 
 const MARKETPLACE_PREVIEW_STYLES = {
@@ -48,6 +49,7 @@ const MARKETPLACE_PREVIEW_STYLES = {
   depop: { brand: 'Depop', accent: 'bg-[#111827]', shell: 'border-[#d0d5dd]', price: 'text-[#111827]' },
   whatnot: { brand: 'Whatnot', accent: 'bg-[#6d28d9]', shell: 'border-[#e5dcff]', price: 'text-[#5b21b6]' },
   vinted: { brand: 'Vinted', accent: 'bg-[#007782]', shell: 'border-[#c6eef0]', price: 'text-[#00626c]' },
+  offerup: { brand: 'OfferUp', accent: 'bg-[#00a36c]', shell: 'border-[#b8f0d8]', price: 'text-[#007a50]' },
 };
 
 function MarketplaceVisualPreview({ entry, imageUrls, formatMoney }) {
@@ -142,6 +144,7 @@ function defaultMarketplaceData() {
       depop: { enabled: false, publish_mode: "manual_or_provider", status: "draft", fulfillment: "shipping", shipping_available: true },
       whatnot: { enabled: false, publish_mode: "manual_or_provider", status: "draft", fulfillment: "live_sale", shipping_available: true },
       vinted: { enabled: false, publish_mode: "manual_or_provider", status: "draft", fulfillment: "shipping", shipping_available: true },
+      offerup: { enabled: false, publish_mode: "manual_or_provider", status: "draft", fulfillment: "local_or_shipping", shipping_available: true },
     },
   };
 }

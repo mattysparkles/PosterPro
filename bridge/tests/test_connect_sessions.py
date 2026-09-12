@@ -115,3 +115,22 @@ def test_connect_session_desktop_actions_validate_payload(monkeypatch):
             assert expected_message in str(exc.detail).lower()
         else:
             raise AssertionError(f"Expected desktop action validation failure for {expected_message}")
+
+
+def test_bridge_never_fabricates_external_identity_for_direct_api_action(tmp_path: Path):
+    store = bridge_main.JobStore(tmp_path, default_delay_seconds=0, max_workers=1)
+    try:
+        job = {
+            "job_id": "direct-api-test",
+            "job_type": "crosspost",
+            "execution_mode": "direct_api",
+            "payload": {"marketplace": "ebay", "listing_id": 123, "payload": {"title": "No publish"}},
+        }
+        try:
+            store._run_crosspost_job(job)
+        except RuntimeError as exc:
+            assert "must be executed by PosterPro" in str(exc)
+        else:
+            raise AssertionError("Bridge must not report a synthetic direct-API publication")
+    finally:
+        store.executor.shutdown(wait=False, cancel_futures=True)

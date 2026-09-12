@@ -1,6 +1,7 @@
 import asyncio
 
 from app.connectors.registry import MARKETPLACE_REGISTRY
+from app.connectors import ebay_connector
 
 
 REQUIRED_METHODS = ["authenticate", "refresh_tokens", "publish", "update", "delete", "fetch_status"]
@@ -14,7 +15,9 @@ class DummyListing:
     suggested_price = 10
 
 
-def test_connector_interface_compliance():
+def test_connector_interface_compliance(monkeypatch):
+    # This contract test must not execute a real eBay service/database workflow.
+    monkeypatch.setattr(ebay_connector, "publish_listing_to_ebay", lambda *_args, **_kwargs: asyncio.sleep(0, result={"status": "adapter_called"}))
     listing = DummyListing()
     for name, connector in MARKETPLACE_REGISTRY.items():
         for method in REQUIRED_METHODS:

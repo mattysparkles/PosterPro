@@ -26,6 +26,8 @@ import {
   cancelMarketplaceImportJob,
   fetchMarketplaceJobsOverview,
   fetchCrosspostJob,
+  fetchAssistedMarketplaceJobs,
+  fetchAssistedMarketplaceJob,
   fetchMarketplaceImportJob,
   fetchProcessingHealth,
   retryCrosspostJob,
@@ -38,6 +40,7 @@ import {
 
 const JOB_TABS = [
   { value: "crosspost", label: "Cross-post Jobs" },
+  { value: "assisted", label: "Assisted Marketplace Jobs" },
   { value: "imports", label: "Import Jobs" },
   { value: "corrections", label: "Correction Jobs" },
 ];
@@ -206,6 +209,7 @@ export default function JobsPage() {
       return { import_jobs: [], crosspost_jobs: [] };
     }
   });
+  const [assistedJobs, setAssistedJobs] = useState([]);
   const [retrying, setRetrying] = useState({});
   const [canceling, setCanceling] = useState({});
   const [activeJob, setActiveJob] = useState(null);
@@ -300,6 +304,8 @@ export default function JobsPage() {
       }
       const nextOverview = jobsData.value || { import_jobs: [], crosspost_jobs: [] };
       setJobsOverview(nextOverview);
+      const assistedData = await fetchAssistedMarketplaceJobs().catch(() => []);
+      setAssistedJobs(Array.isArray(assistedData) ? assistedData : []);
       try { window.sessionStorage.setItem("posterpro.jobs.overview", JSON.stringify(nextOverview)); } catch { /* cache is optional */ }
       if (healthData.status === "fulfilled") {
         setProcessingHealth(healthData.value || null);
@@ -327,7 +333,11 @@ export default function JobsPage() {
     setDetailError("");
     const hydrate = async () => {
       try {
-        const detail = activeJob.type === "crosspost" ? await fetchCrosspostJob(activeJob.job.id) : await fetchMarketplaceImportJob(activeJob.job.id);
+        const detail = activeJob.type === "crosspost"
+          ? await fetchCrosspostJob(activeJob.job.id)
+          : activeJob.type === "assisted"
+            ? await fetchAssistedMarketplaceJob(activeJob.job.id)
+            : await fetchMarketplaceImportJob(activeJob.job.id);
         if (!cancelled && detail) setActiveJob((current) => current && current.job.id === activeJob.job.id ? { ...current, job: detail } : current);
       } catch (error) {
         if (!cancelled) { setDetailError(error?.message || "The job details request failed."); toast.error(`Unable to load job details: ${error.message}`); }
@@ -363,6 +373,11 @@ export default function JobsPage() {
   const matchesStatus = (job) => statusFilter === "active" ? ["queued", "running"].includes(String(job.status || "").toLowerCase()) : String(job.status || "").toLowerCase() === statusFilter;
   const visibleCrosspostJobs = statusFilter ? crosspostJobs.filter(matchesStatus) : crosspostJobs;
   const visibleImportJobs = statusFilter ? importJobs.filter(matchesStatus) : importJobs;
+  const visibleAssistedJobs = statusFilter
+    ? assistedJobs.filter((job) => statusFilter === "active"
+      ? ["queued", "claimed", "navigating", "form_filling", "awaiting_operator_review", "submitting", "submitted", "retryable"].includes(String(job.status || "").toLowerCase())
+      : String(job.status || "").toLowerCase() === statusFilter)
+    : assistedJobs;
   const systemStatus = jobsOverview.system_status || {};
   const metricValue = (value) => (loading && !jobsOverview.system_status ? "—" : (value ?? "—"));
 
@@ -379,7 +394,7 @@ export default function JobsPage() {
     const queryJobId = Number(router.query.jobId);
     if (!queryType || !Number.isFinite(queryJobId)) return;
 
-    const rows = queryType === "import" ? importJobs : crosspostJobs;
+    const rows = queryType === "import" ? importJobs : queryType === "assisted" ? assistedJobs : crosspostJobs;
     const match = rows.find((row) => Number(row.id) === queryJobId);
     if (match) {
       setActiveJob((current) => {
@@ -389,7 +404,7 @@ export default function JobsPage() {
         return { type: queryType, job: match };
       });
     }
-  }, [router.isReady, router.query.type, router.query.jobId, importJobs, crosspostJobs]);
+  }, [router.isReady, router.query.type, router.query.jobId, importJobs, crosspostJobs, assistedJobs]);
 
   const updateRouteState = async ({ tab, type, jobId }) => {
     const nextQuery = {};
@@ -403,7 +418,7 @@ export default function JobsPage() {
     setDetailError("");
     setDetailLoading(true);
     setActiveJob({ type, job });
-    await updateRouteState({ tab: type === "import" ? "imports" : "crosspost", type, jobId: job.id });
+    await updateRouteState({ tab: type === "import" ? "imports" : type === "assisted" ? "assisted" : "crosspost", type, jobId: job.id });
   };
 
   const closeJobDetails = async () => {
@@ -542,6 +557,16 @@ export default function JobsPage() {
         </div>
       ),
     },
+  ];
+
+  const assistedColumns = [
+    { key: "id", label: "Job", render: (row) => `#${row.id}` },
+    { key: "listing_id", label: "Listing", render: (row) => <Link href={`/listings/${row.listing_id}`} className="font-medium text-[#2563eb]">#{row.listing_id}</Link> },
+    { key: "marketplace", label: "Marketplace", render: (row) => startCase(row.marketplace) },
+    { key: "action", label: "Action", render: (row) => row.action },
+    { key: "status", label: "State", render: (row) => <div><StatusPill status={row.status} label={startCase(row.status)} />{row.error_code ? <p className="mt-1 text-xs text-red-700">{row.error_code}</p> : null}</div> },
+    { key: "attempt_count", label: "Attempts", render: (row) => row.attempt_count || 0 },
+    { key: "device_id", label: "Device", render: (row) => row.device_id ? `#${row.device_id}` : "Unclaimed" },
   ];
 
   const importColumns = [
@@ -750,6 +775,7 @@ export default function JobsPage() {
       <Tabs
         items={[
           { value: "crosspost", label: "Cross-post Jobs", count: crosspostJobs.length },
+          { value: "assisted", label: "Assisted Marketplace Jobs", count: assistedJobs.length },
           { value: "imports", label: "Import Jobs", count: importJobs.length },
           { value: "corrections", label: "Correction Jobs", count: correctionJobs.length },
         ]}
@@ -772,6 +798,14 @@ export default function JobsPage() {
           onRowClick={(row) => void openJobDetails("crosspost", row)}
           emptyState={<EmptyState title="No cross-post jobs yet" description="Queue a cross-post job from a listing workspace to start using the execution layer." className="border-0 p-0 py-6" />}
         />
+      ) : activeTab === "assisted" ? (
+        <DataTable
+          columns={assistedColumns}
+          rows={visibleAssistedJobs}
+          rowKey={(row) => row.id}
+          onRowClick={(row) => void openJobDetails("assisted", row)}
+          emptyState={<EmptyState title="No assisted marketplace jobs" description="Assisted create/end actions appear here after PosterPro queues them for a paired browser extension." className="border-0 p-0 py-6" />}
+        />
       ) : (
         <DataTable
           columns={importColumns}
@@ -785,7 +819,7 @@ export default function JobsPage() {
       <Drawer
         open={!!activeJob}
         onClose={() => void closeJobDetails()}
-        title={activeJob ? `${activeJob.type === "crosspost" ? "Cross-post" : "Import"} job #${activeJob.job.id}` : "Job details"}
+        title={activeJob ? `${activeJob.type === "crosspost" ? "Cross-post" : activeJob.type === "assisted" ? "Assisted marketplace" : "Import"} job #${activeJob.job.id}` : "Job details"}
         description="Inspect execution plans, bridge submissions, errors, and listing references without leaving the jobs console."
         widthClassName="max-w-[760px]"
       >
@@ -867,6 +901,18 @@ export default function JobsPage() {
                 </Link>
               </div>
             ) : null}
+            {activeJob.type === "assisted" ? (
+              <div className="rounded-[12px] border border-[#c7d7fe] bg-[#eff4ff] p-4">
+                <p className="text-sm font-semibold text-[#101828]">{startCase(activeJob.job.marketplace)} · {activeJob.job.action}</p>
+                <p className="mt-2 text-sm text-[#344054]">State: {startCase(activeJob.job.status)} · Attempts: {activeJob.job.attempt_count || 0} · Device: {activeJob.job.device_id ? `#${activeJob.job.device_id}` : "not claimed"}</p>
+                <p className="mt-1 text-xs text-[#667085]">Claimed {formatExactTime(activeJob.job.claimed_at)} · Started {formatExactTime(activeJob.job.started_at)} · Completed {formatExactTime(activeJob.job.completed_at)}</p>
+                {activeJob.job.external_listing_id ? <p className="mt-2 break-all text-sm">External ID: {activeJob.job.external_listing_id}</p> : null}
+                {activeJob.job.external_url ? <a href={activeJob.job.external_url} target="_blank" rel="noreferrer" className="mt-1 inline-block break-all text-sm text-[#175cd3] hover:underline">Open external listing</a> : null}
+                {activeJob.job.error_code || activeJob.job.error_detail ? <p role="alert" className="mt-2 rounded bg-red-50 p-2 text-sm text-[#912018]">{activeJob.job.error_code ? `${activeJob.job.error_code}: ` : ""}{activeJob.job.error_detail || "No additional failure detail."}</p> : null}
+                <p className="mt-3 text-xs font-medium text-[#475467]">Payload snapshot</p>
+                <pre className="mt-1 max-h-72 overflow-auto whitespace-pre-wrap rounded bg-white p-3 text-xs">{JSON.stringify(activeJob.job.payload || {}, null, 2)}</pre>
+              </div>
+            ) : null}
             {activeJob.type === "import" && activeJob.job.created_listing_id ? (
               <div className="rounded-[12px] border border-[#c7d7fe] bg-[#eff4ff] p-4">
                 <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Created listing</p>
@@ -911,6 +957,25 @@ export default function JobsPage() {
                   <p className="text-sm font-semibold text-[#101828]">Targets</p>
                   <p className="mt-2 text-sm text-[#667085]">{(activeJob.job.target_marketplaces || []).join(", ") || "None"}</p>
                 </div>
+                {(activeJob.job.assisted_jobs || []).length ? (
+                  <div className="rounded-[12px] border border-[#c7d7fe] bg-[#f8faff] p-4">
+                    <p className="text-sm font-semibold text-[#101828]">Browser-assisted marketplace jobs</p>
+                    <div className="mt-3 space-y-3">
+                      {activeJob.job.assisted_jobs.map((job) => (
+                        <div key={job.id} className="rounded-[10px] border border-[#dbe7ff] bg-white p-3">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="text-sm font-semibold text-[#101828]">{startCase(job.marketplace)} · {job.action} · job #{job.id}</p>
+                            <StatusPill status={job.status} label={startCase(job.status)} />
+                          </div>
+                          <p className="mt-1 text-xs text-[#667085]">Device #{job.device_id || "not claimed"} · attempts {job.attempt_count || 0} · claimed {formatExactTime(job.claimed_at)} · finished {formatExactTime(job.completed_at)}</p>
+                          {job.external_listing_id ? <p className="mt-1 break-all text-xs text-[#344054]">External listing: {job.external_listing_id}</p> : null}
+                          {job.external_url ? <a className="mt-1 inline-block break-all text-xs text-[#175cd3] hover:underline" href={job.external_url} target="_blank" rel="noreferrer">Open marketplace listing</a> : null}
+                          {job.error_code || job.error_detail ? <p role="alert" className="mt-2 rounded-md bg-red-50 p-2 text-xs text-[#912018]">{job.error_code ? `${job.error_code}: ` : ""}{job.error_detail || "Marketplace action failed."}</p> : null}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
                 <div className="grid gap-3 md:grid-cols-3">
                   <div className="rounded-[12px] border border-[#e5e7eb] bg-white p-4">
                     <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Submitted</p>

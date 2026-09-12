@@ -7,6 +7,7 @@ from app.connectors.mercari_connector import MercariConnector
 from app.connectors.poshmark_connector import PoshmarkConnector
 from app.connectors.vinted_connector import VintedConnector
 from app.connectors.whatnot_connector import WhatnotConnector
+from app.connectors.offerup_connector import OfferUpConnector
 
 MARKETPLACE_REGISTRY: dict[str, BaseMarketplaceConnector] = {
     EbayConnector.name: EbayConnector(),
@@ -17,6 +18,7 @@ MARKETPLACE_REGISTRY: dict[str, BaseMarketplaceConnector] = {
     DepopConnector.name: DepopConnector(),
     WhatnotConnector.name: WhatnotConnector(),
     VintedConnector.name: VintedConnector(),
+    OfferUpConnector.name: OfferUpConnector(),
 }
 
 

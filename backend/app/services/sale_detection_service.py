@@ -14,6 +14,7 @@ from app.models.enums import MarketplaceListingStatus, MarketplaceName
 from app.models.enums import ListingStatus
 from app.models.models import Listing, MarketplaceListing, Sale, User
 from app.services.media_lifecycle import purge_listing_media
+from app.services.marketplace_extension_jobs import MarketplaceExtensionJobError, queue_extension_marketplace_action
 from app.services.profit_service import ProfitService
 from app.services.rate_limiter import rate_limiter
 from app.services.process_notifications import create_process_notification
@@ -175,7 +176,7 @@ class SaleDetectionService:
                 action = "sold_on_marketplace" if sold_out else "quantity_adjust"
                 response = {"status": "DRY_RUN", "action": action, "quantity": new_quantity} if dry_run else {"status": "RECORDED_SOLD_SOURCE" if sold_out else "UPDATED_SOURCE", "action": action, "quantity": new_quantity}
                 if not dry_run:
-                    row.status = MarketplaceListingStatus.DELETED if sold_out else MarketplaceListingStatus.UPDATED
+                    row.status = MarketplaceListingStatus.SOLD if sold_out else MarketplaceListingStatus.UPDATED
                     row.raw_response = {
                         **(row.raw_response or {}),
                         "sale_detection": {
@@ -190,6 +191,10 @@ class SaleDetectionService:
                 outcomes[market] = {"action": action, "response": response}
                 continue
 
+            if row.status in {MarketplaceListingStatus.SOLD, MarketplaceListingStatus.DELETED, MarketplaceListingStatus.CLOSED}:
+                outcomes[market] = {"action": "already_inactive", "response": {"status": row.status.value}}
+                continue
+
             action = "delist" if sold_out and prefs["sold_out_delist_everywhere"] else "quantity_adjust"
             if dry_run:
                 response = {"status": "DRY_RUN", "action": action, "quantity": new_quantity}
@@ -197,11 +202,31 @@ class SaleDetectionService:
                 connector = get_connector(market)
                 rate_limiter.acquire(market)
                 if action == "delist":
-                    row.status = MarketplaceListingStatus.DELETED
-                    response = await connector.delete(listing)
+                    capabilities = connector.get_capabilities()
+                    if capabilities.get("supports_extension_end"):
+                        try:
+                            extension_job, created = queue_extension_marketplace_action(
+                                db,
+                                user_id=int(listing.user_id),
+                                listing=listing,
+                                marketplace=market,
+                                action="END",
+                                priority=0,
+                            )
+                            response = {
+                                "status": "QUEUED_FOR_OPERATOR_REVIEW",
+                                "action": "END",
+                                "extension_job_id": extension_job.id,
+                                "deduplicated": not created,
+                                "external_listing_id": extension_job.external_listing_id,
+                                "external_url": extension_job.external_url,
+                            }
+                        except MarketplaceExtensionJobError as exc:
+                            response = {"status": "NOT_ENQUEUED", "error_code": exc.code, "error": str(exc)}
+                    else:
+                        response = {"status": "UNSUPPORTED_ACTION", "action": "END", "marketplace": market}
                 else:
-                    row.status = MarketplaceListingStatus.UPDATED
-                    response = await connector.update(listing)
+                    response = {"status": "UNSUPPORTED_ACTION", "action": "UPDATE_QUANTITY", "marketplace": market}
                 row.raw_response = {
                     **(row.raw_response or {}),
                     "sale_detection": {
@@ -255,12 +280,18 @@ class SaleDetectionService:
 
     def poll_user_sales(self, db: Session, user: User, *, dry_run: bool = True, lookback_minutes: int = 30) -> dict:
         since = (datetime.now(UTC) - timedelta(minutes=lookback_minutes)).isoformat()
-        enabled = self.get_enabled_marketplaces(user)
-        logger.info("Starting sale polling", extra={"user_id": user.id, "marketplaces": enabled, "dry_run": dry_run})
+        requested = self.get_enabled_marketplaces(user)
+        connectors = {marketplace: get_connector(marketplace) for marketplace in requested}
+        enabled = [
+            marketplace for marketplace in requested
+            if connectors[marketplace].get_capabilities().get("supports_sale_polling", False)
+        ]
+        skipped = [marketplace for marketplace in requested if marketplace not in enabled]
+        logger.info("Starting sale polling", extra={"user_id": user.id, "marketplaces": enabled, "skipped": skipped, "dry_run": dry_run})
 
         events: list[dict] = []
         for marketplace in enabled:
-            connector = get_connector(marketplace)
+            connector = connectors[marketplace]
             try:
                 rate_limiter.acquire(marketplace)
                 polled = asyncio.run(connector.poll_sales(user.id, since=since))
@@ -347,7 +378,9 @@ class SaleDetectionService:
         return {
             "user_id": user.id,
             "dry_run": dry_run,
+            "marketplaces_requested": requested,
             "marketplaces_polled": enabled,
+            "marketplaces_skipped": skipped,
             "events_seen": len(events),
             "sales_detected": detected,
             "adjustments_triggered": adjusted,

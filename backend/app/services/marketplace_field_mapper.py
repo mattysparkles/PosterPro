@@ -20,6 +20,45 @@ def _price(listing: Listing) -> float | None:
     return listing.listing_price or listing.suggested_price or listing.buy_it_now_price or listing.estimated_value
 
 
+def _canonical_marketplace_images(listing: Listing) -> list[str]:
+    """Resolve normalized canonical media in its persisted order, then legacy URLs.
+
+    The Timeline primary-photo selection is materialized as display_order zero.
+    Rejected, reference-only, deleted, and Slate assets are never sent to a
+    marketplace adapter.
+    """
+    from app.services.ebay_service import _to_public_image_url
+
+    result: list[str] = []
+    rows = list(getattr(listing, "listing_images", None) or [])
+    rows.sort(key=lambda row: (int(row.get("display_order") or 0), str(row.get("storage_path") or row.get("url") or "")) if isinstance(row, dict) else (10**9, ""))
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        role = str(row.get("timeline_role") or metadata.get("timeline_role") or "").upper()
+        if (
+            row.get("is_reference")
+            or row.get("timeline_deleted")
+            or row.get("is_slate")
+            or metadata.get("timeline_deleted")
+            or metadata.get("is_slate")
+            or role in {"HEAD", "TAIL", "SLATE"}
+            or str(row.get("operator_state") or "").lower() == "rejected"
+        ):
+            continue
+        candidate = str(row.get("storage_path") or row.get("url") or row.get("local_path") or "").strip()
+        resolved = _to_public_image_url(candidate) if candidate else ""
+        if resolved and resolved not in result:
+            result.append(resolved)
+    if not result:
+        for candidate in listing.image_urls or []:
+            resolved = _to_public_image_url(str(candidate or "").strip())
+            if resolved and resolved not in result:
+                result.append(resolved)
+    return result
+
+
 def _shared_payload(listing: Listing) -> dict[str, Any]:
     marketplace_shipping = ((listing.marketplace_data or {}).get("shipping") or {}) if isinstance(listing.marketplace_data, dict) else {}
     shipping_profile = listing.shipping_profile if isinstance(listing.shipping_profile, dict) else {}
@@ -41,7 +80,7 @@ def _shared_payload(listing: Listing) -> dict[str, Any]:
         "category": listing.category_id or listing.category_suggestion,
         "item_specifics": listing.item_specifics or {},
         "tags": listing.tags or [],
-        "image_urls": listing.image_urls or [],
+        "image_urls": _canonical_marketplace_images(listing),
         "shipping": {
             "mode": shipping.get("mode"),
             "domestic_service": shipping.get("domestic_service"),
@@ -199,6 +238,22 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
                 "domestic_service": shipping.get("domestic_service"),
                 "international_enabled": shipping.get("international_enabled"),
             },
+        }
+
+    if market == "offerup":
+        return {
+            "marketplace": market,
+            "title": shared["title"],
+            "description": shared["description"],
+            "price": shared["price"],
+            "condition": shared["condition"],
+            "category_hint": shared["category"],
+            "location": shipping.get("location") or shipping.get("postal_code"),
+            "shipping": {
+                "enabled": bool(shipping.get("free_shipping") or shipping.get("mode")),
+                "local_pickup_enabled": shipping.get("local_pickup_enabled"),
+            },
+            "image_urls": shared["image_urls"],
         }
 
     return {

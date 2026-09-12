@@ -39,6 +39,7 @@ from app.services.listing_processing import ListingProcessingService
 from app.services.marketplace_execution import resolve_execution_mode
 from app.services.marketplace_field_mapper import build_marketplace_payload, normalize_import_payload
 from app.services.marketplace_preflight import MarketplacePreflightService
+from app.services.marketplace_extension_jobs import MarketplaceExtensionJobError, queue_extension_marketplace_action
 from app.services.automation_bridge import submit_bridge_job, wait_for_bridge_job, get_bridge_asset, AutomationBridgeError
 from app.services.secondary_marketplace_execution import execute_secondary_marketplace_path
 from app.services.inventory_service import InventorySafetyError, InventoryService
@@ -1052,6 +1053,54 @@ def publish_listing_to_marketplace_task(self, listing_id: int, marketplace: str)
                     "response": result.response,
                 }
 
+            if execution_mode in {"browser_assist", "provider_assist"}:
+                preflight = _json_safe(MarketplacePreflightService().preflight_listing(db, listing, marketplace))
+                if preflight.get("blockers"):
+                    response = {"status": "BLOCKED", "error_code": "PREFLIGHT_BLOCKED", "preflight": preflight}
+                    upsert_marketplace_listing(
+                        db,
+                        listing_id=listing_id,
+                        marketplace=marketplace,
+                        status=MarketplaceListingStatus.FAILED,
+                        response=response,
+                    )
+                    db.commit()
+                    return {"marketplace": marketplace, "execution_mode": "browser_extension", **response}
+                try:
+                    extension_job, created = queue_extension_marketplace_action(
+                        db,
+                        user_id=int(user.id),
+                        listing=listing,
+                        marketplace=marketplace,
+                        action="CREATE",
+                    )
+                except MarketplaceExtensionJobError as exc:
+                    response = {"status": "FAILED", "error_code": exc.code, "error": str(exc), "execution_mode": "browser_extension"}
+                    upsert_marketplace_listing(
+                        db,
+                        listing_id=listing_id,
+                        marketplace=marketplace,
+                        status=MarketplaceListingStatus.FAILED,
+                        response=response,
+                    )
+                    db.commit()
+                    return {"marketplace": marketplace, **response}
+                response = {
+                    "status": extension_job.status,
+                    "execution_mode": "browser_extension",
+                    "extension_job_id": extension_job.id,
+                    "deduplicated": not created,
+                }
+                upsert_marketplace_listing(
+                    db,
+                    listing_id=listing_id,
+                    marketplace=marketplace,
+                    status=MarketplaceListingStatus.PENDING,
+                    response=response,
+                )
+                db.commit()
+                return {"marketplace": marketplace, **response}
+
             response = execute_secondary_marketplace_path(
                 listing=listing,
                 marketplace=marketplace,
@@ -1120,6 +1169,7 @@ def process_marketplace_crosspost_job_task(self, job_id: int) -> dict:
 
         results: list[dict] = []
         failed_markets: list[str] = []
+        assisted_jobs_pending = False
         targets = job.target_marketplaces or []
         for market in targets:
             db.expire_all()
@@ -1134,12 +1184,29 @@ def process_marketplace_crosspost_job_task(self, job_id: int) -> dict:
                     failed_markets.append(market)
                     results.append({"marketplace": market, "execution_mode": "direct_api", "operation": "UPDATE", "status": "failed", "error": str(exc)})
                 continue
-            if operation == "update":
-                # Assisted marketplaces do not yet expose a safe revise
-                # contract. Never fall through to CREATE for a manual update;
-                # preserve the canonical save and surface an actionable retry.
-                failed_markets.append(market)
-                results.append({"marketplace": market, "execution_mode": "unsupported_update", "operation": "UPDATE", "status": "failed", "error": "UPDATE_NOT_SUPPORTED_FOR_MARKETPLACE"})
+            if operation == "update" and str(market).lower() != MarketplaceName.ebay.value:
+                try:
+                    extension_job, created = queue_extension_marketplace_action(
+                        db,
+                        user_id=job.user_id,
+                        listing=listing,
+                        marketplace=market,
+                        action="UPDATE",
+                        priority=int(job.priority or 1),
+                        crosspost_job=job,
+                    )
+                    assisted_jobs_pending = assisted_jobs_pending or extension_job.status not in {"COMPLETED", "FAILED", "CANCELLED"}
+                    results.append({
+                        "marketplace": market,
+                        "execution_mode": "browser_extension",
+                        "operation": "UPDATE",
+                        "status": extension_job.status.lower(),
+                        "extension_job_id": extension_job.id,
+                        "deduplicated": not created,
+                    })
+                except MarketplaceExtensionJobError as exc:
+                    failed_markets.append(market)
+                    results.append({"marketplace": market, "execution_mode": "browser_extension", "operation": "UPDATE", "status": "failed", "error_code": exc.code, "error": str(exc)})
                 continue
             if _is_already_published_to_marketplace(db, listing, market):
                 results.append(
@@ -1190,6 +1257,44 @@ def process_marketplace_crosspost_job_task(self, job_id: int) -> dict:
                         "response": result.response,
                     }
                 )
+            elif execution_mode in {"browser_assist", "provider_assist"}:
+                try:
+                    extension_job, created = queue_extension_marketplace_action(
+                        db,
+                        user_id=job.user_id,
+                        listing=listing,
+                        marketplace=market,
+                        action="CREATE",
+                        priority=int(job.priority or 1),
+                        crosspost_job=job,
+                    )
+                    assisted_jobs_pending = assisted_jobs_pending or extension_job.status not in {"COMPLETED", "FAILED", "CANCELLED"}
+                    response = {
+                        "status": extension_job.status,
+                        "execution_mode": "browser_extension",
+                        "extension_job_id": extension_job.id,
+                        "deduplicated": not created,
+                    }
+                    upsert_marketplace_listing(
+                        db,
+                        listing_id=listing.id,
+                        marketplace=market,
+                        status=MarketplaceListingStatus.PENDING,
+                        response=response,
+                    )
+                    results.append({
+                        "marketplace": market,
+                        "execution_mode": "browser_extension",
+                        "operation": "CREATE",
+                        "status": str(extension_job.status).lower(),
+                        "extension_job_id": extension_job.id,
+                        "deduplicated": not created,
+                    })
+                except MarketplaceExtensionJobError as exc:
+                    failed_markets.append(market)
+                    response = {"error_code": exc.code, "error": str(exc), "execution_mode": "browser_extension"}
+                    upsert_marketplace_listing(db, listing_id=listing.id, marketplace=market, status=MarketplaceListingStatus.FAILED, response=response)
+                    results.append({"marketplace": market, "execution_mode": "browser_extension", "operation": "CREATE", "status": "failed", **response})
             else:
                 response = execute_secondary_marketplace_path(
                     listing=listing,
@@ -1324,7 +1429,7 @@ def process_marketplace_crosspost_job_task(self, job_id: int) -> dict:
         db.expire_all()
         if _crosspost_job_canceled(db, job_id):
             return {"job_id": job_id, "status": "canceled", "results": results}
-        job.status = "failed" if failed_markets else "completed"
+        job.status = "failed" if failed_markets and not assisted_jobs_pending else "running" if assisted_jobs_pending else "completed"
         job.last_error = f"Cross-post execution failed for: {', '.join(failed_markets)}" if failed_markets else None
         job.attempt_count = int(job.attempt_count or 0) + 1
         if failed_markets:

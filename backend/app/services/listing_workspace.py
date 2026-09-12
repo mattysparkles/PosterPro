@@ -63,6 +63,13 @@ _DEFAULT_CHANNEL_SETTINGS = {
         "fulfillment": "shipping",
         "shipping_available": True,
     },
+    MarketplaceName.offerup.value: {
+        "enabled": False,
+        "publish_mode": "manual_or_provider",
+        "status": "draft",
+        "fulfillment": "local_or_shipping",
+        "shipping_available": True,
+    },
 }
 
 

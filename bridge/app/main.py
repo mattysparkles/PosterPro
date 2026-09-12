@@ -413,16 +413,10 @@ class JobStore:
                 "bridge_runner": settings.runner_mode,
             }
         if execution_mode == "direct_api":
-            return {
-                "job_id": job["job_id"],
-                "job_type": "crosspost",
-                "execution_mode": execution_mode,
-                "status": "published",
-                "bridge_runner": settings.runner_mode,
-                "marketplace": marketplace,
-                "external_listing_id": f"{marketplace.upper()}-{listing_id}-{job['job_id'][:8]}",
-                "submitted_payload": base_payload,
-            }
+            raise RuntimeError(
+                "Direct API actions must be executed by PosterPro's marketplace adapter; "
+                "the browser bridge cannot report a synthetic marketplace listing ID."
+            )
 
         if execution_mode == "provider_assist":
             return {
