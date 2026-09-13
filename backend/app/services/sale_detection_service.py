@@ -5,7 +5,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 import re
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.connectors.registry import get_connector
@@ -52,14 +52,25 @@ class SaleDetectionService:
             return datetime.now(UTC).replace(tzinfo=None)
 
     def _already_processed(self, db: Session, user_id: int, marketplace: str, order_id: str | None, listing_id: str | None) -> bool:
-        if not order_id and not listing_id:
+        # An order is the stable identity of a sale event. A marketplace
+        # listing can be relisted and sold again under the same external ID,
+        # so do not let that ID suppress a later, distinct order. Listing ID
+        # is only a fallback for providers that omit order IDs entirely.
+        identity = str(order_id or listing_id or "").strip()
+        if not identity:
             return False
-        filters = [Sale.user_id == user_id, Sale.platform == MarketplaceName(marketplace)]
-        if order_id:
-            filters.append(Sale.marketplace_order_id == order_id)
-        if listing_id:
-            filters.append(Sale.marketplace_listing_id == listing_id)
-        existing = db.execute(select(Sale.id).where(and_(*filters))).first()
+        identity_filter = (
+            Sale.marketplace_order_id == identity
+            if order_id
+            else Sale.marketplace_listing_id == identity
+        )
+        existing = db.execute(
+            select(Sale.id).where(
+                Sale.user_id == user_id,
+                Sale.platform == MarketplaceName(marketplace),
+                identity_filter,
+            )
+        ).first()
         return existing is not None
 
     def _find_listing(self, db: Session, user_id: int, event: dict) -> Listing | None:

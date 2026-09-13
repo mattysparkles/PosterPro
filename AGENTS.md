@@ -1,5 +1,38 @@
 # PosterPro Deployment Log
 
+## 2026-09-12 - Cross-market payload and sale identity hardening
+
+### Fixed
+- Marketplace payload translation now carries explicit canonical brand, size,
+  color, material, dimensions, weight, inventory identity, and shipping/parcel
+  evidence into the destinations that consume those fields. Destination
+  category IDs remain destination-specific; non-eBay payloads do not receive
+  the eBay taxonomy ID.
+- Removed default Etsy `who_made=i_did` and `when_made=made_to_order` values.
+  Resale listings now leave those fields unset unless explicit marketplace-
+  specific evidence exists; Etsy authorization/taxonomy remains incomplete.
+- Extension adapters now fill supplied brand/size/color/material/location only
+  when a semantic free-text control is found; unavailable fields are reported
+  for operator entry. Category, condition, controlled selectors, and final
+  submit remain operator review rather than guessed automation.
+- Sale idempotency now uses marketplace order ID as the primary sale-event
+  identity. A later order against a relisted external listing is no longer
+  suppressed by the reused marketplace listing ID; listing ID is fallback only
+  for providers that omit order identity.
+- Hosted-browser-assisted Facebook outcomes now require a visible external
+  listing identity before job summaries count the target as submitted. Hosted
+  bridge polling is explicitly covered separately from extension transport.
+- Fixed import-job serialization to scope included review listings by the
+  durable job owner rather than an undefined request-global user variable.
+
+### Validation
+- Marketplace publish/preflight/API/extension/eBay/job and sale suites:
+  `81 passed` across the combined invocation.
+- Browser extension fixtures: `8 passed`.
+- These are automated tests only; no live marketplace publish or account E2E
+  was performed. Facebook/Mercari/Poshmark/Vinted/OfferUp/Etsy destination
+  taxonomy and controlled-field completion remain partial/operator-assisted.
+
 ## 2026-09-11 - Vine quality lifecycle reconciliation
 
 ### Current truth

@@ -29,7 +29,7 @@ def _ready_preflight(_self, _db, listing, marketplace):
     }
 
 
-def test_crosspost_job_waits_for_bridge_completion_and_exposes_review_summary(db_session, monkeypatch):
+def test_hosted_crosspost_job_waits_for_bridge_completion_and_exposes_review_summary(db_session, monkeypatch):
     user = User(
         email="crosspost-review@example.com",
         settings_json={
@@ -77,6 +77,7 @@ def test_crosspost_job_waits_for_bridge_completion_and_exposes_review_summary(db
     db_session.commit()
 
     monkeypatch.setattr(MarketplacePreflightService, "preflight_listing", _ready_preflight)
+    monkeypatch.setattr(tasks, "resolve_execution_mode", lambda **_kwargs: "hosted_browser_assist")
     monkeypatch.setattr(
         tasks,
         "execute_secondary_marketplace_path",
@@ -124,7 +125,7 @@ def test_crosspost_job_waits_for_bridge_completion_and_exposes_review_summary(db
     assert marketplace_listing.raw_response["bridge_completion"]["result"]["status"] == "draft_form_filled"
 
 
-def test_facebook_browser_assist_requires_visible_listing_before_marking_published(db_session, monkeypatch):
+def test_hosted_facebook_assist_requires_visible_listing_before_marking_published(db_session, monkeypatch):
     user = User(
         email="facebook-visibility@example.com",
         settings_json={
@@ -172,6 +173,7 @@ def test_facebook_browser_assist_requires_visible_listing_before_marking_publish
     db_session.commit()
 
     monkeypatch.setattr(MarketplacePreflightService, "preflight_listing", _ready_preflight)
+    monkeypatch.setattr(tasks, "resolve_execution_mode", lambda **_kwargs: "hosted_browser_assist")
     monkeypatch.setattr(
         tasks,
         "execute_secondary_marketplace_path",
@@ -216,7 +218,7 @@ def test_facebook_browser_assist_requires_visible_listing_before_marking_publish
     assert marketplace_listing.raw_response["bridge_confirmation_status"] == "submitted_without_visible_listing"
 
 
-def test_facebook_browser_assist_marks_published_only_with_visible_listing(db_session, monkeypatch):
+def test_hosted_facebook_assist_marks_published_only_with_visible_listing(db_session, monkeypatch):
     user = User(
         email="facebook-published@example.com",
         settings_json={
@@ -264,6 +266,7 @@ def test_facebook_browser_assist_marks_published_only_with_visible_listing(db_se
     db_session.commit()
 
     monkeypatch.setattr(MarketplacePreflightService, "preflight_listing", _ready_preflight)
+    monkeypatch.setattr(tasks, "resolve_execution_mode", lambda **_kwargs: "hosted_browser_assist")
     monkeypatch.setattr(
         tasks,
         "execute_secondary_marketplace_path",
@@ -352,7 +355,7 @@ def test_import_job_serialization_includes_review_items(db_session):
     assert serialized["ui_state_tone"] == "warning"
 
 
-def test_crosspost_job_marks_failed_target_when_bridge_completion_fails(db_session, monkeypatch):
+def test_hosted_crosspost_job_marks_failed_target_when_bridge_completion_fails(db_session, monkeypatch):
     user = User(
         email="crosspost-failure@example.com",
         settings_json={
@@ -400,6 +403,7 @@ def test_crosspost_job_marks_failed_target_when_bridge_completion_fails(db_sessi
     db_session.commit()
 
     monkeypatch.setattr(MarketplacePreflightService, "preflight_listing", _ready_preflight)
+    monkeypatch.setattr(tasks, "resolve_execution_mode", lambda **_kwargs: "hosted_browser_assist")
     monkeypatch.setattr(
         tasks,
         "execute_secondary_marketplace_path",
@@ -448,7 +452,7 @@ def test_crosspost_job_marks_failed_target_when_bridge_completion_fails(db_sessi
     assert "blocked the draft submission" in marketplace_listing.raw_response["error"]
 
 
-def test_crosspost_job_keeps_browser_assist_pending_when_bridge_fetch_times_out(db_session, monkeypatch):
+def test_hosted_crosspost_job_keeps_browser_assist_pending_when_bridge_fetch_times_out(db_session, monkeypatch):
     user = User(
         email="crosspost-timeout@example.com",
         settings_json={
@@ -500,6 +504,7 @@ def test_crosspost_job_keeps_browser_assist_pending_when_bridge_fetch_times_out(
     db_session.commit()
 
     monkeypatch.setattr(MarketplacePreflightService, "preflight_listing", _ready_preflight)
+    monkeypatch.setattr(tasks, "resolve_execution_mode", lambda **_kwargs: "hosted_browser_assist")
     monkeypatch.setattr(
         tasks,
         "execute_secondary_marketplace_path",

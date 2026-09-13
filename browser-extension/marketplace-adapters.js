@@ -4,6 +4,11 @@ globalThis.POSTERPRO_MARKETPLACE_ADAPTERS = Object.freeze({
     title: ['input[aria-label*="Title" i]', 'input[placeholder*="Title" i]'],
     price: ['input[aria-label*="Price" i]', 'input[placeholder*="Price" i]', 'input[inputmode="numeric"]'],
     description: ['textarea[aria-label*="Description" i]', 'textarea[placeholder*="Description" i]'],
+    brand: ['input[aria-label*="Brand" i]', 'input[placeholder*="Brand" i]'],
+    size: ['input[aria-label*="Size" i]', 'input[placeholder*="Size" i]'],
+    color: ['input[aria-label*="Color" i]', 'input[placeholder*="Color" i]'],
+    material: ['input[aria-label*="Material" i]', 'input[placeholder*="Material" i]'],
+    location: ['input[aria-label*="Location" i]', 'input[placeholder*="Location" i]', 'input[aria-label*="ZIP" i]'],
     photos: 'input[type="file"]',
   },
   mercari: {
@@ -11,6 +16,9 @@ globalThis.POSTERPRO_MARKETPLACE_ADAPTERS = Object.freeze({
     title: ['input[name*="title" i]', 'input[placeholder*="Title" i]', 'input[maxlength="80"]'],
     price: ['input[name*="price" i]', 'input[placeholder*="Price" i]', 'input[inputmode="numeric"]'],
     description: ['textarea[name*="description" i]', 'textarea[placeholder*="Describe" i]'],
+    brand: ['input[name*="brand" i]', 'input[placeholder*="Brand" i]'],
+    size: ['input[name*="size" i]', 'input[placeholder*="Size" i]'],
+    color: ['input[name*="color" i]', 'input[placeholder*="Color" i]'],
     photos: 'input[type="file"]',
   },
   poshmark: {
@@ -18,6 +26,9 @@ globalThis.POSTERPRO_MARKETPLACE_ADAPTERS = Object.freeze({
     title: ['input[name*="title" i]', 'input[placeholder*="Title" i]', 'input[maxlength="50"]'],
     price: ['input[name*="price" i]', 'input[placeholder*="List price" i]', 'input[inputmode="numeric"]'],
     description: ['textarea[name*="description" i]', 'textarea[placeholder*="Describe" i]'],
+    brand: ['input[name*="brand" i]', 'input[placeholder*="Brand" i]'],
+    size: ['input[name*="size" i]', 'input[placeholder*="Size" i]'],
+    color: ['input[name*="color" i]', 'input[placeholder*="Color" i]'],
     photos: 'input[type="file"]',
   },
   vinted: {
@@ -25,6 +36,9 @@ globalThis.POSTERPRO_MARKETPLACE_ADAPTERS = Object.freeze({
     title: ['input[name*="title" i]', 'input[placeholder*="Title" i]'],
     price: ['input[name*="price" i]', 'input[placeholder*="Price" i]', 'input[inputmode="decimal"]'],
     description: ['textarea[name*="description" i]', 'textarea[placeholder*="Description" i]'],
+    brand: ['input[name*="brand" i]', 'input[placeholder*="Brand" i]'],
+    size: ['input[name*="size" i]', 'input[placeholder*="Size" i]'],
+    color: ['input[name*="color" i]', 'input[placeholder*="Color" i]'],
     photos: 'input[type="file"]',
   },
   etsy: {
@@ -32,6 +46,9 @@ globalThis.POSTERPRO_MARKETPLACE_ADAPTERS = Object.freeze({
     title: ['input[name*="title" i]', 'input[placeholder*="Title" i]', 'input[maxlength="140"]'],
     price: ['input[name*="price" i]', 'input[placeholder*="Price" i]', 'input[inputmode="decimal"]'],
     description: ['textarea[name*="description" i]', 'textarea[placeholder*="Describe" i]'],
+    brand: ['input[name*="brand" i]', 'input[placeholder*="Brand" i]'],
+    size: ['input[name*="size" i]', 'input[placeholder*="Size" i]'],
+    color: ['input[name*="color" i]', 'input[placeholder*="Color" i]'],
     photos: 'input[type="file"]',
   },
   offerup: {
@@ -39,6 +56,9 @@ globalThis.POSTERPRO_MARKETPLACE_ADAPTERS = Object.freeze({
     title: ['input[name*="title" i]', 'input[placeholder*="Title" i]'],
     price: ['input[name*="price" i]', 'input[placeholder*="Price" i]', 'input[inputmode="decimal"]'],
     description: ['textarea[name*="description" i]', 'textarea[placeholder*="Description" i]'],
+    brand: ['input[name*="brand" i]', 'input[placeholder*="Brand" i]'],
+    size: ['input[name*="size" i]', 'input[placeholder*="Size" i]'],
+    color: ['input[name*="color" i]', 'input[placeholder*="Color" i]'],
     photos: 'input[type="file"]',
   },
 });

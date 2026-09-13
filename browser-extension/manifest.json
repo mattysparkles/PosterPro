@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PosterPro Marketplace Assistant",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Pair a browser with PosterPro, process assisted marketplace jobs, and pause for operator review.",
   "action": {
     "default_title": "PosterPro Marketplace Assistant",

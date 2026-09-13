@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = "0.2.1";
+  const VERSION = "0.2.2";
   const PAGE_SOURCE = "posterpro-settings";
   const EXTENSION_SOURCE = "posterpro-extension";
   let lastTrustedAuthorizationClick = 0;

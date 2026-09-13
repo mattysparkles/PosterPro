@@ -20,6 +20,16 @@ def _price(listing: Listing) -> float | None:
     return listing.listing_price or listing.suggested_price or listing.buy_it_now_price or listing.estimated_value
 
 
+def _specific(item_specifics: dict[str, Any], *names: str) -> Any:
+    """Read known canonical specifics without inventing destination values."""
+    normalized = {str(key).strip().casefold().replace("_", " "): value for key, value in item_specifics.items()}
+    for name in names:
+        value = normalized.get(name.casefold().replace("_", " "))
+        if value not in (None, "", []):
+            return value
+    return None
+
+
 def _canonical_marketplace_images(listing: Listing) -> list[str]:
     """Resolve normalized canonical media in its persisted order, then legacy URLs.
 
@@ -70,6 +80,8 @@ def _shared_payload(listing: Listing) -> dict[str, Any]:
         **marketplace_shipping,
     }
     customer_description, removed_internal = sanitize_customer_description(listing.description)
+    specifics = listing.item_specifics if isinstance(listing.item_specifics, dict) else {}
+    source_metadata = listing.source_metadata if isinstance(listing.source_metadata, dict) else {}
     return {
         "title": listing.title,
         "description": customer_description,
@@ -81,7 +93,19 @@ def _shared_payload(listing: Listing) -> dict[str, Any]:
         # marketplaces. Their adapters receive a semantic classification hint
         # only and must resolve their own destination category.
         "category": listing.category_suggestion or (listing.item_specifics or {}).get("Type"),
-        "item_specifics": listing.item_specifics or {},
+        "item_specifics": specifics,
+        "brand": _specific(specifics, "Brand"),
+        "size": _specific(specifics, "Size", "Apparel Size"),
+        "color": _specific(specifics, "Color", "Colour"),
+        "material": _specific(specifics, "Material", "Materials"),
+        "dimensions": {
+            key: _specific(specifics, key)
+            for key in ("Dimensions", "Item Length", "Item Width", "Item Height")
+            if _specific(specifics, key) not in (None, "", [])
+        },
+        "weight": _specific(specifics, "Item Weight", "Weight", "Shipping Weight"),
+        "sku": source_metadata.get("sku") or (listing.marketplace_data or {}).get("sku"),
+        "inventory_id": source_metadata.get("inventory_id") or str(listing.id),
         "tags": listing.tags or [],
         "image_urls": _canonical_marketplace_images(listing),
         "shipping": {
@@ -91,6 +115,12 @@ def _shared_payload(listing: Listing) -> dict[str, Any]:
             "free_shipping": shipping.get("free_shipping"),
             "international_enabled": shipping.get("international_enabled"),
             "local_pickup_enabled": shipping.get("local_pickup_enabled"),
+            "location": shipping.get("location"),
+            "postal_code": shipping.get("postal_code"),
+            "parcel_size": shipping.get("parcel_size"),
+            "parcel_weight": shipping.get("parcel_weight"),
+            "shipping_payer": shipping.get("shipping_payer"),
+            "shipping_method": shipping.get("shipping_method"),
         },
     }
 
@@ -120,6 +150,14 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
             "quantity": shared["quantity"],
             "category_id": listing.category_id,
             "item_specifics": shared["item_specifics"],
+            "brand": shared["brand"],
+            "size": shared["size"],
+            "color": shared["color"],
+            "material": shared["material"],
+            "dimensions": shared["dimensions"],
+            "weight": shared["weight"],
+            "sku": shared["sku"],
+            "inventory_id": shared["inventory_id"],
             "item_specifics_provenance": marketplace_data.get("ebay_item_specifics_provenance") or {},
             "item_specifics_approximate": marketplace_data.get("ebay_item_specifics_approximate") or [],
             "image_urls": shared["image_urls"],
@@ -148,6 +186,13 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
             "meetup_notes": meetup_notes,
             "image_urls": _facebook_image_urls(shared["image_urls"]),
             "category_hint": shared["category"],
+            "brand": shared["brand"],
+            "size": shared["size"],
+            "color": shared["color"],
+            "material": shared["material"],
+            "dimensions": shared["dimensions"],
+            "weight": shared["weight"],
+            "location": shipping.get("location") or shipping.get("postal_code"),
         }
 
     if market == "etsy":
@@ -159,6 +204,11 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
             "quantity": shared["quantity"],
             "category_hint": shared["category"],
             "item_specifics": shared["item_specifics"],
+            "brand": shared["brand"],
+            "size": shared["size"],
+            "color": shared["color"],
+            "dimensions": shared["dimensions"],
+            "weight": shared["weight"],
             "image_urls": shared["image_urls"],
             "shipping_profile": {
                 "mode": shipping.get("mode") or "flat",
@@ -167,8 +217,11 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
                 "free_shipping": shipping.get("free_shipping"),
             },
             "materials": shared["tags"][:10],
-            "who_made": "i_did",
-            "when_made": "made_to_order",
+            # Etsy's required maker/age classifications are not inferred from
+            # a resale listing. Leave them absent until truthful marketplace-
+            # specific values have been supplied.
+            "who_made": _specific(shared["item_specifics"], "Who Made"),
+            "when_made": _specific(shared["item_specifics"], "When Made"),
         }
 
     if market == "mercari":
@@ -179,11 +232,22 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
             "price": shared["price"],
             "condition": shared["condition"],
             "category_hint": shared["category"],
-            "brand": (shared["item_specifics"] or {}).get("Brand"),
+            "brand": shared["brand"],
+            "size": shared["size"],
+            "color": shared["color"],
+            "material": shared["material"],
+            "dimensions": shared["dimensions"],
+            "weight": shared["weight"],
+            "quantity": shared["quantity"],
+            "inventory_id": shared["inventory_id"],
             "image_urls": shared["image_urls"],
             "shipping": {
                 "prepaid": shipping.get("free_shipping"),
                 "local_pickup_enabled": shipping.get("local_pickup_enabled"),
+                "shipping_payer": shipping.get("shipping_payer"),
+                "shipping_method": shipping.get("shipping_method"),
+                "parcel_size": shipping.get("parcel_size"),
+                "parcel_weight": shipping.get("parcel_weight") or shared["weight"],
             },
         }
 
@@ -193,8 +257,20 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
             "title": shared["title"],
             "description": shared["description"],
             "listing_price": shared["price"],
-            "size": (shared["item_specifics"] or {}).get("Size"),
-            "brand": (shared["item_specifics"] or {}).get("Brand"),
+            "size": shared["size"],
+            "brand": shared["brand"],
+            "color": shared["color"],
+            "material": shared["material"],
+            "dimensions": shared["dimensions"],
+            "weight": shared["weight"],
+            "shipping": {
+                "parcel_weight": shared["weight"],
+                "parcel_size": shipping.get("parcel_size"),
+                "shipping_payer": shipping.get("shipping_payer"),
+            },
+            "quantity": shared["quantity"],
+            "original_price": (shared["item_specifics"] or {}).get("Original Price"),
+            "subcategory_hint": _specific(shared["item_specifics"], "Subcategory", "Department"),
             "category_hint": shared["category"],
             "condition": shared["condition"],
             "image_urls": shared["image_urls"],
@@ -206,7 +282,11 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
             "title": shared["title"],
             "description": shared["description"],
             "price": shared["price"],
-            "brand": (shared["item_specifics"] or {}).get("Brand"),
+            "brand": shared["brand"],
+            "size": shared["size"],
+            "color": shared["color"],
+            "material": shared["material"],
+            "dimensions": shared["dimensions"],
             "category_hint": shared["category"],
             "condition": shared["condition"],
             "image_urls": shared["image_urls"],
@@ -232,14 +312,20 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
             "title": shared["title"],
             "description": shared["description"],
             "price": shared["price"],
-            "brand": (shared["item_specifics"] or {}).get("Brand"),
-            "size": (shared["item_specifics"] or {}).get("Size"),
+            "brand": shared["brand"],
+            "size": shared["size"],
+            "color": shared["color"],
+            "material": shared["material"],
+            "dimensions": shared["dimensions"],
+            "weight": shared["weight"],
             "condition": shared["condition"],
             "category_hint": shared["category"],
             "image_urls": shared["image_urls"],
             "shipping": {
                 "domestic_service": shipping.get("domestic_service"),
                 "international_enabled": shipping.get("international_enabled"),
+                "parcel_size": shipping.get("parcel_size"),
+                "parcel_weight": shipping.get("parcel_weight") or shared["weight"],
             },
         }
 
@@ -252,9 +338,18 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
             "condition": shared["condition"],
             "category_hint": shared["category"],
             "location": shipping.get("location") or shipping.get("postal_code"),
+            "brand": shared["brand"],
+            "size": shared["size"],
+            "color": shared["color"],
+            "material": shared["material"],
+            "dimensions": shared["dimensions"],
+            "weight": shared["weight"],
             "shipping": {
                 "enabled": bool(shipping.get("free_shipping") or shipping.get("mode")),
                 "local_pickup_enabled": shipping.get("local_pickup_enabled"),
+                "shipping_payer": shipping.get("shipping_payer"),
+                "parcel_size": shipping.get("parcel_size"),
+                "parcel_weight": shipping.get("parcel_weight") or shared["weight"],
             },
             "image_urls": shared["image_urls"],
         }

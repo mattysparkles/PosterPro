@@ -100,3 +100,53 @@ def test_non_ebay_payload_does_not_reuse_ebay_category_id(db_session):
     assert mercari["category_hint"] == "Clothing, Shoes & Accessories > Sweaters"
     assert mercari["category_hint"] != listing.category_id
     assert ebay["category_id"] == "57988"
+
+
+def test_assisted_marketplace_payloads_keep_canonical_evidence_without_fabricating_etsy_fields(db_session):
+    user = User(email="marketplace-fields@example.com")
+    db_session.add(user)
+    db_session.flush()
+    listing = Listing(
+        user_id=user.id,
+        title="Vintage wool coat",
+        description="A lined wool coat in very good condition.",
+        listing_price=68.0,
+        quantity=1,
+        category_id="12345",
+        category_suggestion="Clothing > Coats",
+        condition="Used - Very Good",
+        item_specifics={
+            "brand": "Northwind",
+            "Apparel Size": "M",
+            "Colour": "Navy",
+            "Materials": "Wool",
+            "Item Weight": "1.2 kg",
+            "Item Length": "32 in",
+        },
+        shipping_profile={
+            "shipping_charge_mode": "flat",
+            "parcel_size": "medium",
+            "parcel_weight": "1.2 kg",
+            "shipping_payer": "buyer",
+        },
+    )
+
+    facebook = build_marketplace_payload(listing, "facebook")
+    mercari = build_marketplace_payload(listing, "mercari")
+    poshmark = build_marketplace_payload(listing, "poshmark")
+    vinted = build_marketplace_payload(listing, "vinted")
+    etsy = build_marketplace_payload(listing, "etsy")
+    offerup = build_marketplace_payload(listing, "offerup")
+
+    for payload in (facebook, mercari, poshmark, vinted, etsy, offerup):
+        assert payload["category_hint"] == "Clothing > Coats"
+        assert payload.get("brand") == "Northwind"
+        assert payload.get("size") == "M"
+        assert payload.get("color") == "Navy"
+        assert payload.get("weight") == "1.2 kg"
+        assert "category_id" not in payload
+    assert mercari["shipping"]["parcel_size"] == "medium"
+    assert vinted["shipping"]["parcel_weight"] == "1.2 kg"
+    assert offerup["shipping"]["shipping_payer"] == "buyer"
+    assert etsy["who_made"] is None
+    assert etsy["when_made"] is None

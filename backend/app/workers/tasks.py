@@ -1334,7 +1334,7 @@ def process_marketplace_crosspost_job_task(self, job_id: int) -> dict:
                                 listing_urls = []
                             marketplace_listing_id = str(bridge_result.get("marketplace_listing_id") or "").strip() or None
                             submission_visible = bool(marketplace_listing_id or listing_urls)
-                            facebook_needs_visibility = market == "facebook" and execution_mode == "browser_assist"
+                            facebook_needs_visibility = market == "facebook" and execution_mode in {"browser_assist", "hosted_browser_assist"}
                             if submitted_to_marketplace and (submission_visible or not facebook_needs_visibility):
                                 listing_status = MarketplaceListingStatus.PUBLISHED
                                 response = {
@@ -1357,7 +1357,7 @@ def process_marketplace_crosspost_job_task(self, job_id: int) -> dict:
                                 }
                     except Exception as exc:
                         bridge_error = str(exc)
-                        if execution_mode == "browser_assist" and (
+                        if execution_mode in {"browser_assist", "hosted_browser_assist"} and (
                             "bridge job fetch failed" in bridge_error.lower()
                             or "did not finish within" in bridge_error.lower()
                         ):

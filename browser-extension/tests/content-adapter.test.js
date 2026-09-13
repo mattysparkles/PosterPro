@@ -30,6 +30,11 @@ function loadContentFixture(hostname = "www.facebook.com") {
     title: new FakeInput(),
     price: new FakeInput(),
     description: new FakeTextArea(),
+    brand: new FakeInput(),
+    size: new FakeInput(),
+    color: new FakeInput(),
+    material: new FakeInput(),
+    location: new FakeInput(),
     photos: new FakeFileInput(),
   };
   const document = {
@@ -37,6 +42,11 @@ function loadContentFixture(hostname = "www.facebook.com") {
       if (/Title/i.test(selector)) return fields.title;
       if (/Price/i.test(selector) || selector.includes("inputmode")) return fields.price;
       if (/Description/i.test(selector)) return fields.description;
+      if (/Brand/i.test(selector)) return fields.brand;
+      if (/Size/i.test(selector)) return fields.size;
+      if (/Color/i.test(selector)) return fields.color;
+      if (/Material/i.test(selector)) return fields.material;
+      if (/Location|ZIP/i.test(selector)) return fields.location;
       if (selector === 'input[type="file"]') return fields.photos;
       return null;
     },
@@ -88,4 +98,22 @@ test("adapter refuses to fill a marketplace form on the wrong domain", async () 
   });
   assert.equal(response.ok, false);
   assert.equal(response.error_code, "UNEXPECTED_MARKETPLACE_DOMAIN");
+});
+
+test("Facebook adapter transfers source-backed optional attributes when the form exposes them", async () => {
+  const { fields, listener } = loadContentFixture();
+  const response = await new Promise((resolve) => {
+    listener({
+      action: "posterpro_fill_listing",
+      marketplace: "facebook",
+      payload: { brand: "Northwind", size: "M", color: "Navy", location: "02139" },
+      images: [],
+    }, {}, resolve);
+  });
+  assert.equal(fields.brand.value, "Northwind");
+  assert.equal(fields.size.value, "M");
+  assert.equal(fields.color.value, "Navy");
+  assert.equal(fields.location.value, "02139");
+  assert.deepEqual(Array.from(response.populated_fields), ["brand", "size", "color", "location"]);
+  assert.equal(response.submission_performed, false);
 });

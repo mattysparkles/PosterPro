@@ -14,7 +14,7 @@ const MARKETPLACE_HOST_HINTS = [
   { marketplace: "offerup", match: "offerup.com" },
 ];
 
-const EXTENSION_VERSION = "0.2.1";
+const EXTENSION_VERSION = "0.2.2";
 let queuePollActive = false;
 
 function apiRoot(baseUrl) {

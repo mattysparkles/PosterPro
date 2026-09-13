@@ -230,9 +230,9 @@ def _build_crosspost_target_outcomes(job: MarketplaceCrosspostJob) -> list[dict]
         response = item.get("response") if isinstance(item.get("response"), dict) else {}
         listing_confirmed = bool(response.get("marketplace_listing_id") or (response.get("listing_urls") or []))
         submitted = result_status in {"submitted_to_marketplace", "published"}
-        if marketplace == "facebook" and execution_mode == "browser_assist":
+        if marketplace == "facebook" and execution_mode in {"browser_assist", "hosted_browser_assist"}:
             submitted = submitted and listing_confirmed
-        bridge_fetch_pending = bool(response.get("bridge_fetch_status") == "pending") and execution_mode == "browser_assist"
+        bridge_fetch_pending = bool(response.get("bridge_fetch_status") == "pending") and execution_mode in {"browser_assist", "hosted_browser_assist"}
         requires_review = result_status in {
             "manual_handoff_ready",
             "provider_packet_ready",
@@ -283,7 +283,7 @@ def _build_crosspost_target_outcomes(job: MarketplaceCrosspostJob) -> list[dict]
                 "result_status": "queued" if str(job.status or "").lower() in {"queued", "running"} else None,
                 "failed": False,
                 "submitted": False,
-                "requires_review": execution_mode in {"manual_only", "provider_assist", "browser_assist"},
+                "requires_review": execution_mode in {"manual_only", "provider_assist", "browser_assist", "hosted_browser_assist"},
                 "operator_note": "This target is queued for assisted cross-post execution." if str(job.status or "").lower() in {"queued", "running"} else None,
             }
         )
@@ -404,7 +404,10 @@ def _serialize_import_job(job: MarketplaceImportJob, *, db: Session, compact: bo
 
     review_items: list[dict] = []
     if review_listing_ids and not compact:
-        listings = db.execute(select(Listing).where(Listing.user_id == current_user.id, Listing.id.in_(review_listing_ids))).scalars().all()
+        # Import-job serialization is also used by worker/admin views without
+        # a request-scoped current_user. The durable job's owner is the trusted
+        # tenant boundary here; never rely on a client-supplied user id.
+        listings = db.execute(select(Listing).where(Listing.user_id == job.user_id, Listing.id.in_(review_listing_ids))).scalars().all()
         listing_by_id = {listing.id: listing for listing in listings}
         for listing_id in review_listing_ids:
             listing = listing_by_id.get(listing_id)

@@ -63,6 +63,17 @@ async function ppFillListing({ marketplace, payload, images }) {
     else missing_required_fields.push(name);
   }
 
+  // Fill only explicit, source-backed free-text attributes for which the
+  // destination form exposes a semantic field. Taxonomy and controlled
+  // selects are intentionally left to operator review; an eBay/category label
+  // is never guessed into another marketplace's taxonomy.
+  for (const name of ["brand", "size", "color", "material", "location"]) {
+    if (payload[name] == null || payload[name] === "") continue;
+    const node = ppFindField(adapter[name], [name]);
+    if (ppSetValue(node, payload[name])) populated_fields.push(name);
+    else missing_required_fields.push(`${name}_operator_entry_required`);
+  }
+
   let uploaded_image_count = 0;
   if (images?.length) {
     const input = document.querySelector(adapter.photos);
