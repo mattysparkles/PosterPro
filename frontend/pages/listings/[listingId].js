@@ -653,6 +653,17 @@ export default function ListingWorkspacePage() {
     );
   }
 
+  const marketplaceNames = [
+    ['ebay', 'eBay'], ['facebook', 'Facebook'], ['mercari', 'Mercari'],
+    ['poshmark', 'Poshmark'], ['vinted', 'Vinted'], ['etsy', 'Etsy'], ['offerup', 'OfferUp'],
+  ];
+  const durableMarketplaceRows = Array.isArray(listing?.marketplace_statuses) ? listing.marketplace_statuses : [];
+  const activeMarketplaceTargets = new Set([
+    ...((listing?.marketplace_data?.targets || []).map((value) => String(value || '').toLowerCase())),
+    ...durableMarketplaceRows.map((row) => String(row.marketplace || '').toLowerCase()),
+    ...(listing?.ebay_listing_id ? ['ebay'] : []),
+  ]);
+
   return (
     <AppShell
       active="/listings"
@@ -709,6 +720,31 @@ export default function ListingWorkspacePage() {
           <div className="mt-4 grid gap-3 sm:grid-cols-3"><div><p className="text-xs font-bold uppercase tracking-wide text-[#667085]">Brand</p><p className="mt-1 font-semibold text-[#101828]">{listing?.brand || "Pending"}</p></div><div><p className="text-xs font-bold uppercase tracking-wide text-[#667085]">Condition</p><p className="mt-1 font-semibold text-[#101828]">{form.condition || "Pending"}</p></div><div><p className="text-xs font-bold uppercase tracking-wide text-[#667085]">Price</p><p className="mt-1 font-semibold text-[#101828]">{form.listing_price ? `$${Number(form.listing_price).toFixed(2)}` : "Pending"}</p></div></div>
         </div>
       </section>
+
+      <SectionPanel title="Marketplace status" description="Statuses reflect persisted marketplace records and external identities, not UI assumptions.">
+        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+          {marketplaceNames.map(([marketplace, label]) => {
+            const row = durableMarketplaceRows.find((item) => String(item.marketplace || '').toLowerCase() === marketplace);
+            const rawStatus = String(row?.status || (marketplace === 'ebay' ? listing?.ebay_publish_status : '') || '').toUpperCase();
+            const displayStatus = rawStatus === 'PUBLISHED' || rawStatus === 'UPDATED' ? 'LIVE'
+              : rawStatus === 'PENDING' ? 'QUEUED'
+                : rawStatus === 'FAILED' ? 'FAILED'
+                  : rawStatus || (activeMarketplaceTargets.has(marketplace) ? 'TARGETED' : 'NOT LISTED');
+            const response = row?.raw_response && typeof row.raw_response === 'object' ? row.raw_response : {};
+            const externalUrl = response.external_url || response.url || response.listing_urls?.[0] || response.bridge_completion?.result?.listing_urls?.[0];
+            return (
+              <article key={marketplace} className="rounded-lg border border-slate-200 bg-white p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-sm font-semibold text-slate-900">{label}</span>
+                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${displayStatus === 'LIVE' ? 'bg-emerald-100 text-emerald-900' : displayStatus === 'FAILED' ? 'bg-red-100 text-red-900' : displayStatus === 'QUEUED' || displayStatus === 'TARGETED' ? 'bg-amber-100 text-amber-900' : 'bg-slate-100 text-slate-700'}`}>{displayStatus}</span>
+                </div>
+                {row?.marketplace_listing_id && <p className="mt-1 break-all text-[11px] text-slate-600">External ID: {row.marketplace_listing_id}</p>}
+                {externalUrl && <a className="mt-1 inline-block text-xs font-medium text-blue-700 underline" href={externalUrl} target="_blank" rel="noreferrer">Open marketplace listing</a>}
+              </article>
+            );
+          })}
+        </div>
+      </SectionPanel>
 
       {(listing?.readiness_summary?.blockers?.length || listing?.marketplace_preflight_summary) ? (
         <section className="mb-5 rounded-[16px] border border-amber-200 bg-amber-50 p-4">

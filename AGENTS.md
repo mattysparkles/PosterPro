@@ -9,17 +9,20 @@
 - Cross-post requests with no explicit destination selection now use the
   authenticated user's routing rules when configured and record the matched
   rule IDs/destinations in the durable cross-post job plan. Existing listing
-  targets and eBay fallback remain when no rules are configured.
+  targets remain when no rules are configured; unrouted items are not silently
+  defaulted to eBay.
 - Added `POST /marketplace-jobs/bulk-crosspost` for up to 500 selected listing
   IDs. It owner-scopes records, accepts only ready/posted unsold inventory,
   applies explicit destination overrides or routing rules, writes independent
   per-listing jobs before broker dispatch, and gates eBay live queueing behind
   the existing explicit confirmation phrase. A one-minute recovery task
   dispatches committed queued jobs whose broker task ID is still absent.
-- Added read/write rules and per-listing route preview API surfaces. No
-  Settings rule-builder UI is implemented yet; the bulk backend API is not
-  yet wired to a Listings selection UI. Do not describe those surfaces as
-  complete.
+- Added read/write rules and per-listing route preview API surfaces. The
+  Listings catalog now exposes bounded bulk destination selection and queues
+  durable crosspost jobs; Settings has a tenant-user-scoped rule editor with
+  filters, priorities, include/exclude destinations, enable/disable, and
+  delete controls. These are automated/build-verified UI surfaces, not proof
+  of authenticated live marketplace form completion.
 
 ### Validation
 - Routing matcher, manual override, validation, durable routing, owner-scoped
@@ -582,14 +585,14 @@ requirements above. Credentials were not rotated or printed.
   user-scoped, idempotent artwork repair regenerates a modern PNG and QR from
   canonical Slate/QR data without changing item identity, legacy linkage, or
   capture/order fields.
-- Current production read-only audit for operator user 2 found 370 Slates,
-  including 336 legacy-linked and 34 manual/unlinked records. A safe repair
-  generated 344 missing modern assets; the other 26 were already decodable.
-  Independent verification found 370/370 modern assets decodable, 336/336
-  linked source photos still decodable, QR item/box identity matching for
-  370/370, zero duplicate item IDs, and zero legacy source images used as the
-  active artwork path. The checkpoint's earlier 360/336/24 count has grown by
-  ten manual/unlinked records since that audit; none were deleted.
+- The later production read-only audit supersedes the earlier 360- and
+  370-record snapshots: 372 Slate records total, 344 active and 28
+  soft-deleted, comprising 336 legacy-linked and 36 manual/unlinked records.
+  All 372 current modern artwork files and all 336 linked legacy source images
+  decode; stored QR item/box identity matches for 372/372; there are zero
+  duplicate legacy-source links or duplicate active item IDs. Two missing
+  modern assets were repaired from canonical persisted data. No chronology or
+  legacy-source records were changed by that repair.
 - Timeline refresh/window preservation remains intact. Group appearance is
   driven by canonical image-group index; dark-group text/control colors use
   explicit high contrast; Head/Tail accents remain neon green/fuchsia. JS
@@ -604,6 +607,27 @@ requirements above. Credentials were not rotated or printed.
   `/health` reports `database_ready=true`, and local/public Timeline routes
   return HTTP 200. No marketplace listing was published. No non-PosterPro
   project or shared host resource was modified during this closure pass.
+
+## 2026-09-12 - Routing and marketplace status UI follow-up
+
+- Added `/settings/routing` as the authenticated routing-rule editor and linked
+  it from Marketplace Settings. Added API client methods for existing
+  current-user-scoped routing endpoints.
+- Added a listing-detail marketplace status matrix backed by persisted
+  `marketplace_statuses` serialization (MarketplaceListing records), plus
+  configured targets and eBay identity. It displays external IDs/URLs when
+  present; selecting a destination is not represented as a live listing.
+- Validation: frontend production build passed and emitted both
+  `/settings/routing` and `/listings/[listingId]`. A serial rerun of the full
+  Head Slate and recovery suites passed `62/62`. One earlier run concurrent
+  with Next.js compilation had an intermittent QR round-trip failure
+  (`decode_slate_payload` returned `None`); the focused test passed alone and
+  in the serial suite. Monitor this as a concurrency-sensitive test flake,
+  not a deterministic payload regression. No authenticated browser session was
+  available for visual verification. Marketplace form adapters, Etsy
+  authorization, broad team/tenant SaaS, subscription/payment, and direct
+  checkout remain incomplete or externally blocked; no live marketplace
+  listing was submitted.
 
 ## 2026-09-12 - One-click extension authorization hardening
 

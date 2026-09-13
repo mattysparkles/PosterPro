@@ -583,6 +583,18 @@ export async function bulkQueueMarketplaceCrossposts(body) {
   });
 }
 
+export async function fetchMarketplaceRoutingRules() {
+  return jsonFetch(`${API_BASE}/marketplace-routing/rules`);
+}
+
+export async function saveMarketplaceRoutingRules(rules) {
+  return jsonFetch(`${API_BASE}/marketplace-routing/rules`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ rules: Array.isArray(rules) ? rules : [] }),
+  });
+}
+
 export async function fetchAssistedMarketplaceJobs() {
   return jsonFetch(`${API_BASE}/assisted-marketplace-jobs`);
 }

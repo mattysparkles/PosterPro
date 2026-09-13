@@ -2729,6 +2729,9 @@ export default function SettingsPage() {
                       <Button type="button" variant="outline" href="/settings?tab=marketplaces&marketplace=facebook">
                         Open Facebook setup
                       </Button>
+                      <Button type="button" variant="outline" href="/settings/routing">
+                        Configure routing rules
+                      </Button>
                     </div>
                     <div className="mt-4 flex flex-wrap gap-2">
                       <StatusPill status={browserConnectInProgress ? 'warning' : 'info'} label={browserConnectInProgress ? 'Bridge connect active' : 'Bridge connect ready'} />
