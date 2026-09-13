@@ -4364,6 +4364,7 @@ export default function SettingsPage() {
                   <option value="draft_only">Draft only</option>
                   <option value="provider_assist">Provider assist</option>
                   <option value="browser_assist">Browser assist</option>
+                  <option value="hosted_browser_assist">Hosted browser fallback only</option>
                 </select>
               </div>
               <div className="space-y-2">

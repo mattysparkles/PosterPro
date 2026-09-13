@@ -719,7 +719,7 @@ def queue_bulk_crosspost_jobs(
         elif routing_rules:
             resolution = MarketplaceRoutingService().resolve(listing, routing_rules)
         else:
-            resolution = {"marketplaces": MarketplaceRoutingService.normalize_markets((listing.marketplace_data or {}).get("targets") or [MarketplaceName.ebay.value]), "source": "LISTING_DEFAULT", "matched_rule_ids": []}
+            resolution = {"marketplaces": MarketplaceRoutingService.normalize_markets((listing.marketplace_data or {}).get("targets") or []), "source": "LISTING_DEFAULT", "matched_rule_ids": []}
         targets = resolution["marketplaces"]
         if not targets:
             outcomes.append({"listing_id": listing.id, "status": "NO_DESTINATIONS", "routing": resolution})

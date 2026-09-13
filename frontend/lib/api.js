@@ -575,6 +575,14 @@ export async function fetchCrosspostJob(jobId) {
   return jsonFetch(`${API_BASE}/marketplace-crosspost-jobs/${jobId}`);
 }
 
+export async function bulkQueueMarketplaceCrossposts(body) {
+  return jsonFetch(`${API_BASE}/marketplace-jobs/bulk-crosspost`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+}
+
 export async function fetchAssistedMarketplaceJobs() {
   return jsonFetch(`${API_BASE}/assisted-marketplace-jobs`);
 }

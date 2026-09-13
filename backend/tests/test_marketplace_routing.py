@@ -168,6 +168,34 @@ def test_bulk_crosspost_creates_owner_scoped_durable_jobs_only_for_ready_items(d
     assert job.task_id == "task-bulk-test"
 
 
+def test_bulk_crosspost_never_defaults_to_live_ebay_without_destination_evidence(db_session, monkeypatch):
+    owner = User(email=f"routing-no-default-{uuid4()}@example.com", password_hash="x")
+    db_session.add(owner)
+    db_session.flush()
+    listing = Listing(
+        user_id=owner.id,
+        status=ListingStatus.ready,
+        title="Unrouted lamp",
+        description="A tested lamp with clean condition and working switch.",
+        listing_price=20,
+        quantity=1,
+        marketplace_data={},
+    )
+    db_session.add(listing)
+    db_session.flush()
+    monkeypatch.setattr(marketplace_jobs, "_enqueue_priority", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not dispatch an implicit live target")))
+
+    result = marketplace_jobs.queue_bulk_crosspost_jobs(
+        BulkCrosspostQueueRequest(listing_ids=[listing.id]),
+        db_session,
+        owner,
+    )
+
+    assert result["queued"] == 0
+    assert result["results"] == [{"listing_id": listing.id, "status": "NO_DESTINATIONS", "routing": {"marketplaces": [], "source": "LISTING_DEFAULT", "matched_rule_ids": []}}]
+    assert db_session.query(marketplace_jobs.MarketplaceCrosspostJob).filter_by(listing_id=listing.id).count() == 0
+
+
 def test_dispatch_worker_recovers_durable_queued_job_without_broker_task_id(db_session, monkeypatch):
     owner = User(email=f"routing-recovery-{uuid4()}@example.com", password_hash="x")
     db_session.add(owner)

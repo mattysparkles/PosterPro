@@ -36,7 +36,7 @@ from app.services.listing_ai import ListingAIService
 from app.services.category_rules import suggest_category_from_text
 from app.services.listing_review import derive_condition_data, derive_shipping_profile, normalize_listing_images
 from app.services.listing_processing import ListingProcessingService
-from app.services.marketplace_execution import resolve_execution_mode
+from app.services.marketplace_execution import has_online_compatible_extension, resolve_execution_mode
 from app.services.marketplace_field_mapper import build_marketplace_payload, normalize_import_payload
 from app.services.marketplace_preflight import MarketplacePreflightService
 from app.services.marketplace_extension_jobs import MarketplaceExtensionJobError, queue_extension_marketplace_action
@@ -1036,6 +1036,11 @@ def publish_listing_to_marketplace_task(self, listing_id: int, marketplace: str)
         try:
             rate_limiter.acquire(marketplace)
             execution_mode = resolve_execution_mode(listing=listing, user=user, marketplace=marketplace)
+            if execution_mode == "browser_assist" and not has_online_compatible_extension(db, user.id):
+                # Keep the extension as the primary transport, but make the
+                # existing hosted browser bridge an actual fallback for the
+                # single-listing publish entry point as well as bulk jobs.
+                execution_mode = "hosted_browser_assist"
             if execution_mode == "direct_api":
                 result = multi_platform_publisher.publish(db, listing, marketplace)
                 upsert_marketplace_listing(
@@ -1219,6 +1224,12 @@ def process_marketplace_crosspost_job_task(self, job_id: int) -> dict:
                 )
                 continue
             execution_mode = resolve_execution_mode(listing=listing, user=user, marketplace=market)
+            if execution_mode == "browser_assist" and not has_online_compatible_extension(db, user.id):
+                # Extension is primary when the tenant has a fresh, compatible
+                # heartbeat. Otherwise use the hosted browser bridge as the
+                # fallback transport; the canonical mapper/job/result handling
+                # remains unchanged.
+                execution_mode = "hosted_browser_assist"
             preflight = _json_safe(MarketplacePreflightService().preflight_listing(db, listing, market))
             if preflight.get("blockers"):
                 failed_markets.append(market)

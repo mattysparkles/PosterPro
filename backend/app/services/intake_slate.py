@@ -3117,7 +3117,9 @@ class IntakeSlateService:
         return buffer.getvalue()
 
     def build_qr_data_url(self, payload: dict[str, Any]) -> str:
-        qr = qrcode.QRCode(border=2, box_size=8)
+        # Keep a standards-sized quiet zone and enough module pixels for phone
+        # cameras/OpenCV to decode longer canonical inventory payloads.
+        qr = qrcode.QRCode(border=4, box_size=10, error_correction=qrcode.constants.ERROR_CORRECT_M)
         qr.add_data(json.dumps(payload, separators=(",", ":"), sort_keys=True))
         qr.make(fit=True)
         image = qr.make_image(fill_color="black", back_color="white")
@@ -3133,7 +3135,7 @@ class IntakeSlateService:
         accent2 = (67, 212, 255) if head_mode else (255, 154, 38)
         canvas = Image.new("RGB", (1600, 1000), background)
         draw = ImageDraw.Draw(canvas)
-        qr = qrcode.QRCode(border=2, box_size=8)
+        qr = qrcode.QRCode(border=4, box_size=10, error_correction=qrcode.constants.ERROR_CORRECT_M)
         qr.add_data(json.dumps(payload, separators=(",", ":"), sort_keys=True))
         qr.make(fit=True)
         qr_image = qr.make_image(fill_color="black", back_color="white").convert("RGB")

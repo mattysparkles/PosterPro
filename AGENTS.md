@@ -632,3 +632,59 @@ requirements above. Credentials were not rotated or printed.
   expanded tenant/team isolation, subscription entitlements, premium payments,
   crypto, and direct checkout remain incomplete/unverified. Do not report
   source or fixture coverage as live marketplace verification.
+
+## 2026-09-12 - Continuation: fallback routing, Timeline contrast, and test isolation
+
+- Hosted browser assist is now reachable from both the single-listing worker
+  and bulk crosspost worker when `browser_assist` is configured but the user
+  has no compatible extension heartbeat within the last two minutes. A fresh,
+  unrevoked compatible extension remains primary. Users can explicitly choose
+  `hosted_browser_assist`; the hosted bridge remains the same marketplace-job
+  transport and does not report a publication without external identity proof.
+- Dark Timeline image groups retain dark/light alternation. Dark-group action
+  controls now override the outline button's white hover fill, keep light text,
+  retain visible white focus indication, and avoid disabled-state opacity
+  loss. Head/Tail and canonical group ordering are unchanged.
+- Read-only all-tenant Slate audit: 372 records (344 active, 28 soft-deleted);
+  336 linked legacy sources and 36 manually unlinked Slates; 370 modern artworks were valid and two manual
+  Slates for user 1 lacked artwork. Regenerated those two assets from their
+  persisted item/QR data only; no Slate row identity, source link, or timeline
+  position was changed. Follow-up: all 372 modern artwork files decode, all
+  336 legacy source images decode and remain linked to the right tenant, the
+  336 linked legacy source images decode, all 372 stored QR item/box identities
+  match, and both newly repaired modern QR payloads decode and match their
+  canonical item/box identities. There are zero duplicate source links and
+  zero duplicate active item IDs. Authenticated
+  browser-rendered contrast remains `OPERATOR_TEST_REQUIRED` because no
+  installed browser session is available.
+- Corrected the pytest `db_session` fixture: it now binds an isolated temporary
+  SQLite database and patches the application/worker session aliases before
+  schema reset. The previous fixture had called `drop_all` on the configured
+  engine; the active database still has substantial production data in a
+  read-only count check, but future tests are now explicitly isolated.
+- Historical seven Head Slate failures mapped to stale contracts, not
+  chronology behavior: `test_build_voice_intelligence_returns_structured_listing_json`
+  expected a one-argument AI mock although the service also passes provider
+  options; three Google Photos upload tests expected the retired hosted-bridge
+  queue (`SUBMITTED_TO_BRIDGE`) instead of direct API upload (`UPLOADED`);
+  `test_google_photos_parser_merges_playwright_continuation_when_visible_count_exceeds_html`
+  mocked the obsolete list-only parser method; the manual-assignment test
+  expected a draft before an open stream snapshot closed; and the SEO filename
+  test omitted capture timestamps while asserting chronology-dependent ordering.
+  All were stale test contracts, not Timeline chronology regressions. After
+  updating those contracts in the earlier Slate repair, the current isolated
+  full run is `62 passed, 0 failed` across Head Slate and recovery-candidate
+  suites. Marketplace/eBay/routing/extension regressions are `90 passed,
+  0 failed`.
+- Added tests for automatic hosted fallback eligibility and retained the
+  no-live-publication boundary. Broader marketplace adapters, destination
+  taxonomy/condition/shipping, routing/bulk UI, tenant/team controls,
+  subscription/payment/storefront/affiliate features, and non-eBay sale
+  detection remain incomplete or unverified.
+- Bulk crosspost is now reachable from the Listings selection workspace; it
+  queues durable per-listing jobs, displays rejected/unrouted rows, uses the
+  tenant's routing/listing targets when no manual marketplaces are selected,
+  and requires the exact existing live-queue confirmation phrase for eBay.
+  An unrouted listing no longer silently defaults to eBay. Frontend build and
+  Frontend build passed. Deployment/runtime verification is pending this
+  checkpoint.

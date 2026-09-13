@@ -64,6 +64,7 @@ import {
   approveListingPhotos,
   publishListingsBulk,
   publishMarketplaceReadyBulk,
+  bulkQueueMarketplaceCrossposts,
   rejectListingPhotos,
   runLaunchDrillDryRun,
   setPrimaryListingPhoto,
@@ -106,6 +107,16 @@ const SOURCE_OPTIONS = [
   { value: 'media_inventory_recovery', label: 'Google Photos / Recovery' },
   { value: 'ebay_history_reconciliation', label: 'eBay History Recovery' },
   { value: 'manual', label: 'Manual' },
+];
+
+const CROSSPOST_DESTINATIONS = [
+  ['ebay', 'eBay'],
+  ['facebook', 'Facebook'],
+  ['mercari', 'Mercari'],
+  ['poshmark', 'Poshmark'],
+  ['vinted', 'Vinted'],
+  ['etsy', 'Etsy'],
+  ['offerup', 'OfferUp'],
 ];
 
 const READINESS_FILTER_OPTIONS = [
@@ -505,6 +516,9 @@ export default function ListingsPage() {
     listingSortDir: sortDir,
   });
   const [selectedIds, setSelectedIds] = useState([]);
+  const [crosspostDestinations, setCrosspostDestinations] = useState([]);
+  const [bulkCrosspostBusy, setBulkCrosspostBusy] = useState(false);
+  const [bulkCrosspostReport, setBulkCrosspostReport] = useState(null);
   const [bulkSendTarget, setBulkSendTarget] = useState('drafts');
   const [selectedListingId, setSelectedListingId] = useState(null);
   const [viewMode, setViewMode] = useState('table');
@@ -1347,6 +1361,41 @@ export default function ListingsPage() {
     }
   };
 
+  const queueSelectedCrossposts = async () => {
+    const listingIds = selectedIds.slice();
+    if (!listingIds.length) {
+      toast.error('Select one or more listings first.');
+      return;
+    }
+    if (listingIds.length > 500) {
+      toast.error('Bulk crosspost is limited to 500 listings per durable queue request.');
+      return;
+    }
+    const includesEbay = crosspostDestinations.includes('ebay');
+    let confirmationPhrase;
+    if (includesEbay) {
+      confirmationPhrase = window.prompt('This queues live eBay publishing for eligible selected listings. Type QUEUE LIVE EBAY READY LISTINGS to continue.');
+      if (confirmationPhrase !== 'QUEUE LIVE EBAY READY LISTINGS') return;
+    }
+    setBulkCrosspostBusy(true);
+    try {
+      const result = await bulkQueueMarketplaceCrossposts({
+        listing_ids: listingIds,
+        marketplaces: crosspostDestinations,
+        requested_mode: 'bulk_operator_queue',
+        confirm_live_ebay: includesEbay,
+        confirmation_phrase: confirmationPhrase,
+      });
+      setBulkCrosspostReport(result);
+      const queued = Number(result?.queued || 0);
+      toast.success(`${queued} durable crosspost job${queued === 1 ? '' : 's'} queued. Check Jobs for per-marketplace results.`);
+    } catch (error) {
+      toast.error(error?.message || 'Could not queue crosspost jobs.');
+    } finally {
+      setBulkCrosspostBusy(false);
+    }
+  };
+
   const unarchiveSelected = async () => {
     const targetRows = listings.filter((listing) => selectedIds.includes(listing.id) && isArchivedListing(listing));
     if (!targetRows.length) {
@@ -1927,6 +1976,32 @@ export default function ListingsPage() {
               title={`${selectedIds.length} listing${selectedIds.length === 1 ? '' : 's'} selected`}
               description="Approval changes only the selected local draft records. Publishing always asks for a separate explicit confirmation and remains subject to marketplace preflight and duplicate safeguards."
             >
+              <div className="mb-3 rounded-lg border border-[#d0d5dd] bg-[#f9fafb] p-3">
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-semibold text-[#101828]">Bulk crosspost</p>
+                    <p className="text-xs text-[#667085]">Choose destinations, or leave all unchecked to use this tenant&apos;s routing rules/listing targets. Assisted destinations create durable jobs and stop for operator review.</p>
+                  </div>
+                  <Button variant="outline" size="sm" disabled={bulkCrosspostBusy || selectedIds.length > 500} onClick={queueSelectedCrossposts}>
+                    {bulkCrosspostBusy ? 'Queueing…' : `Queue ${selectedIds.length} crosspost${selectedIds.length === 1 ? '' : 's'}`}
+                  </Button>
+                </div>
+                <div className="flex flex-wrap gap-x-4 gap-y-2">
+                  {CROSSPOST_DESTINATIONS.map(([value, label]) => (
+                    <label key={value} className="inline-flex items-center gap-1.5 text-xs text-[#344054]">
+                      <input
+                        type="checkbox"
+                        checked={crosspostDestinations.includes(value)}
+                        onChange={(event) => setCrosspostDestinations((current) => event.target.checked
+                          ? [...current, value]
+                          : current.filter((item) => item !== value))}
+                      />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+                {selectedIds.length > 500 && <p className="mt-2 text-xs font-medium text-amber-800">Select 500 or fewer listings for one request.</p>}
+              </div>
               <div className="flex flex-wrap items-center gap-2">
                 {workflowPreferences.bulk_approval_enabled && selectedReviewRows.length ? <Button variant="outline" size="sm" onClick={approveSelected}>Approve selected</Button> : null}
                 <Button variant="outline" size="sm" onClick={approveAndPublishSelected}>{selectedReviewRows.length ? 'Approve & queue publish' : 'Queue selected for publishing'}</Button>
@@ -1958,6 +2033,18 @@ export default function ListingsPage() {
                 )}
                 <Button variant="outline" size="sm" onClick={() => setSelectedIds([])}>Clear selection</Button>
               </div>
+            </SectionPanel>
+          ) : null}
+          {bulkCrosspostReport ? (
+            <SectionPanel title="Latest bulk crosspost queue" description={`${bulkCrosspostReport.queued || 0} of ${bulkCrosspostReport.requested || 0} selected listings created durable crosspost jobs. The Jobs page has per-listing progress and failures.`}>
+              <div className="flex flex-wrap items-center gap-3 text-sm">
+                <Link className="font-semibold text-blue-700 underline" href="/jobs">Open Jobs</Link>
+                <span>Queued: {bulkCrosspostReport.queued || 0}</span>
+                <span>Not queued: {(bulkCrosspostReport.results || []).filter((row) => row.status !== 'QUEUED').length}</span>
+              </div>
+              <ul className="mt-3 grid gap-1 text-xs text-[#475467] sm:grid-cols-2 lg:grid-cols-3">
+                {(bulkCrosspostReport.results || []).map((row) => <li key={`${row.listing_id}-${row.job_id || row.status}`}>#{row.listing_id}: {row.status}{row.reason ? ` — ${row.reason}` : ''}{row.dispatch_error ? ` — dispatch pending: ${row.dispatch_error}` : ''}</li>)}
+              </ul>
             </SectionPanel>
           ) : null}
           {pendingBulkPublish ? (

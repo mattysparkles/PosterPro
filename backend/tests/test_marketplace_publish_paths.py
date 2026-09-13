@@ -1,6 +1,8 @@
 from app.models.enums import ListingStatus, MarketplaceListingStatus
 from app.models.models import Listing, MarketplaceListing, User
+from app.services.marketplace_preflight import MarketplacePreflightService
 from app.services.marketplace_field_mapper import build_marketplace_payload
+from app.workers import tasks
 from app.workers.tasks import publish_listing_to_marketplace_task
 
 
@@ -51,6 +53,34 @@ def test_legacy_non_ebay_publish_task_uses_assisted_handoff(db_session):
     )
     assert marketplace_listing.status == MarketplaceListingStatus.PENDING
     assert marketplace_listing.raw_response["status"] == "MANUAL_HANDOFF_READY"
+
+
+def test_single_listing_publish_uses_hosted_fallback_when_extension_is_offline(db_session, monkeypatch):
+    user = User(
+        email="hosted-fallback@example.com",
+        settings_json={"marketplace_connections": {"facebook": {"publish_mode": "browser_assist"}}},
+    )
+    db_session.add(user)
+    db_session.flush()
+    listing = Listing(
+        user_id=user.id,
+        status=ListingStatus.PROCESSED,
+        title="Small side table",
+        description="Wood side table in clean condition.",
+        listing_price=30.0,
+        quantity=1,
+        marketplace_data={"targets": ["facebook"]},
+    )
+    db_session.add(listing)
+    db_session.commit()
+    execution_modes = []
+    monkeypatch.setattr(tasks, "execute_secondary_marketplace_path", lambda **kwargs: execution_modes.append(kwargs["execution_mode"]) or {"status": "BROWSER_AUTOMATION_READY"})
+    monkeypatch.setattr(MarketplacePreflightService, "preflight_listing", lambda _self, _db, row, market: {"listing_id": row.id, "marketplace": market, "status": "ready", "blockers": [], "warnings": []})
+
+    result = publish_listing_to_marketplace_task.run(listing.id, "facebook")
+
+    assert result["execution_mode"] == "hosted_browser_assist"
+    assert execution_modes == ["hosted_browser_assist"]
 
 
 def test_mercari_payload_trims_description_to_word_limit(db_session):

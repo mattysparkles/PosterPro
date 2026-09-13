@@ -216,6 +216,9 @@ export default function IntakeTimeline() {
       backgroundColor: controlPalette.controlBackground,
       borderColor: controlPalette.controlBorder,
     };
+    const groupContrastClass = darkGroup
+      ? "hover:!bg-[#454545] hover:!text-white focus-visible:!ring-white disabled:!opacity-100"
+      : "";
     const thumbnail = toThumbnailImageUrl(
       photo.thumbnail_url || photo.display_url || photo.downloaded_url || photo.local_path,
       width,
@@ -274,17 +277,17 @@ export default function IntakeTimeline() {
           <div className="mt-1 flex max-w-[190px] flex-wrap justify-center gap-1">
             {!state.slate && (state.primary ? (
               <>
-                <Button type="button" variant="outline" disabled style={darkGroupControlStyle} className="px-1 py-0 text-[9px]">PRIMARY</Button>
-                <Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => setTimelinePrimary(photo.id, { clear: true }), "Automatic best-photo selection restored for this group.")} className="px-1 py-0 text-[9px]">CLEAR PRIMARY / USE AUTO</Button>
+                <Button type="button" variant="outline" disabled style={darkGroupControlStyle} className={`px-1 py-0 text-[9px] ${groupContrastClass}`}>PRIMARY</Button>
+                <Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => setTimelinePrimary(photo.id, { clear: true }), "Automatic best-photo selection restored for this group.")} className={`px-1 py-0 text-[9px] ${groupContrastClass}`}>CLEAR PRIMARY / USE AUTO</Button>
               </>
             ) : (
-              <Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => setTimelinePrimary(photo.id), "Manual primary selected and listing media reordered.")} className="px-1 py-0 text-[9px]">SET PRIMARY</Button>
+              <Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => setTimelinePrimary(photo.id), "Manual primary selected and listing media reordered.")} className={`px-1 py-0 text-[9px] ${groupContrastClass}`}>SET PRIMARY</Button>
             ))}
-            {state.slate && <Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => classifyTimelineAssets([photo.id], state.role === "TAIL" ? "HEAD" : "TAIL"), `Slate marked ${state.role === "TAIL" ? "HEAD" : "TAIL"}.`)} className="px-1 py-0 text-[9px]">{state.role === "TAIL" ? "HEAD SLATE" : "TAIL SLATE"}</Button>}
-            {state.slate && <Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => classifyTimelineAssets([photo.id], "PHOTO"), "Slate classification removed.")} className="px-1 py-0 text-[9px]">REMOVE SLATE</Button>}
-            <Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => remove(entry)} className="px-1 py-0 text-[9px]">DELETE</Button>
+            {state.slate && <Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => classifyTimelineAssets([photo.id], state.role === "TAIL" ? "HEAD" : "TAIL"), `Slate marked ${state.role === "TAIL" ? "HEAD" : "TAIL"}.`)} className={`px-1 py-0 text-[9px] ${groupContrastClass}`}>{state.role === "TAIL" ? "HEAD SLATE" : "TAIL SLATE"}</Button>}
+            {state.slate && <Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => classifyTimelineAssets([photo.id], "PHOTO"), "Slate classification removed.")} className={`px-1 py-0 text-[9px] ${groupContrastClass}`}>REMOVE SLATE</Button>}
+            <Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => remove(entry)} className={`px-1 py-0 text-[9px] ${groupContrastClass}`}>DELETE</Button>
           </div>
-          {!state.slate && <div className="mt-1 flex gap-1"><Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => classifyTimelineAssets([photo.id], "HEAD"), "Marked Head Slate.")} className="px-1 py-0 text-[9px]">HEAD SLATE</Button><Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => classifyTimelineAssets([photo.id], "TAIL"), "Marked Tail Slate; preceding photos stay in this item group.")} className="px-1 py-0 text-[9px]">TAIL SLATE</Button></div>}
+          {!state.slate && <div className="mt-1 flex gap-1"><Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => classifyTimelineAssets([photo.id], "HEAD"), "Marked Head Slate.")} className={`px-1 py-0 text-[9px] ${groupContrastClass}`}>HEAD SLATE</Button><Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => classifyTimelineAssets([photo.id], "TAIL"), "Marked Tail Slate; preceding photos stay in this item group.")} className={`px-1 py-0 text-[9px] ${groupContrastClass}`}>TAIL SLATE</Button></div>}
         </div>
         {hasNext && nextEntry && <button type="button" disabled={busy} onClick={() => void addSlate(entry, nextEntry)} className="mt-16 shrink-0 rounded-full border border-dashed border-blue-300 bg-white/80 px-2 py-1 text-xs text-blue-700">+ Add Slate</button>}
       </div>

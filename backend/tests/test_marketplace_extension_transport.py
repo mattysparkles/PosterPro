@@ -9,7 +9,7 @@ import pytest
 from app.core import database as database_module
 from app.models.enums import MarketplaceName
 from app.models.enums import MarketplaceListingStatus
-from app.models.models import Listing, MarketplaceCrosspostJob, MarketplaceExtensionJob, MarketplaceListing, User
+from app.models.models import Listing, MarketplaceCrosspostJob, MarketplaceExtensionDevice, MarketplaceExtensionJob, MarketplaceListing, User
 from app.workers import tasks
 from app.services.sale_detection_service import SaleDetectionService
 
@@ -398,6 +398,7 @@ async def test_extension_claim_is_exclusive_and_expired_lease_recovers(async_cli
 @pytest.mark.parametrize("publish_mode", ["browser_assist", "provider_assist"])
 async def test_normal_crosspost_worker_creates_durable_assisted_job_and_stays_running(async_client, monkeypatch, publish_mode):
     owner = await _register(async_client, "CrosspostWorker")
+    await _pair(async_client, "Online crosspost agent")
     listing_id = _seed_marketplace_listing(owner["user"]["id"])
     db = database_module.SessionLocal()
     try:
@@ -493,6 +494,14 @@ def test_standard_publish_worker_queues_browser_assist_in_durable_transport(monk
     try:
         db.add(owner)
         db.flush()
+        now = datetime.now(UTC).replace(tzinfo=None)
+        db.add(MarketplaceExtensionDevice(
+            user_id=owner.id,
+            device_key=f"standard-device-{uuid4()}",
+            token_hash=f"standard-token-{uuid4()}",
+            extension_version="0.2.2",
+            last_seen_at=now,
+        ))
         listing = Listing(
             user_id=owner.id,
             title="Standard worker listing",

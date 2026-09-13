@@ -77,17 +77,22 @@ def test_hosted_crosspost_job_waits_for_bridge_completion_and_exposes_review_sum
     db_session.commit()
 
     monkeypatch.setattr(MarketplacePreflightService, "preflight_listing", _ready_preflight)
-    monkeypatch.setattr(tasks, "resolve_execution_mode", lambda **_kwargs: "hosted_browser_assist")
+    monkeypatch.setattr(tasks, "resolve_execution_mode", lambda **_kwargs: "browser_assist")
+    monkeypatch.setattr(tasks, "has_online_compatible_extension", lambda *_args, **_kwargs: False)
+    bridge_modes = []
     monkeypatch.setattr(
         tasks,
         "execute_secondary_marketplace_path",
-        lambda **_kwargs: {
-            "status": "BROWSER_AUTOMATION_READY",
-            "bridge_submission": {
-                "status": "SUBMITTED_TO_BRIDGE",
-                "bridge_response": {"job_id": "bridge-crosspost-1"},
-            },
-        },
+        lambda **kwargs: (
+            bridge_modes.append(kwargs["execution_mode"])
+            or {
+                "status": "BROWSER_AUTOMATION_READY",
+                "bridge_submission": {
+                    "status": "SUBMITTED_TO_BRIDGE",
+                    "bridge_response": {"job_id": "bridge-crosspost-1"},
+                },
+            }
+        ),
     )
     monkeypatch.setattr(
         tasks,
@@ -102,6 +107,7 @@ def test_hosted_crosspost_job_waits_for_bridge_completion_and_exposes_review_sum
 
     assert result["status"] == "completed"
     assert result["results"][0]["status"] == "draft_form_filled"
+    assert bridge_modes == ["hosted_browser_assist"]
 
     db_session.refresh(job)
     serialized = _serialize_crosspost_job(job)

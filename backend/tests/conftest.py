@@ -17,6 +17,7 @@ from app import main as main_module
 from app.core import database as database_module
 from app.core.database import Base
 from app.main import app
+from app.workers import tasks as tasks_module
 
 
 async def _anyio_run_sync_compat(func, *args, abandon_on_cancel=False, cancellable=None, limiter=None):  # noqa: ARG001
@@ -37,12 +38,42 @@ def _reset_database(test_engine) -> None:
 
 @pytest.fixture
 def db_session():
-    _reset_database(database_module.engine)
-    db = database_module.SessionLocal()
+    """Use an isolated per-test DB; never let a test reset configured app data."""
+    original_engine = database_module.engine
+    original_session_local = database_module.SessionLocal
+    original_main_engine = main_module.engine
+    original_main_session_local = main_module.SessionLocal
+    original_task_session_local = tasks_module.SessionLocal
+    tmp = tempfile.NamedTemporaryFile(prefix="posterpro-test-", suffix=".db", dir="/tmp", delete=False)
+    test_db_path = tmp.name
+    tmp.close()
+    test_engine = create_engine(
+        f"sqlite:///{test_db_path}",
+        pool_pre_ping=True,
+        connect_args={"check_same_thread": False, "timeout": 3},
+    )
+    test_session_local = sessionmaker(bind=test_engine, autoflush=False, autocommit=False)
+    database_module.engine = test_engine
+    database_module.SessionLocal = test_session_local
+    main_module.engine = test_engine
+    main_module.SessionLocal = test_session_local
+    tasks_module.SessionLocal = test_session_local
+    db = None
     try:
+        _reset_database(test_engine)
+        db = test_session_local()
         yield db
     finally:
-        db.close()
+        if db is not None:
+            db.close()
+        main_module.engine = original_main_engine
+        main_module.SessionLocal = original_main_session_local
+        tasks_module.SessionLocal = original_task_session_local
+        database_module.engine = original_engine
+        database_module.SessionLocal = original_session_local
+        test_engine.dispose()
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            Path(f"{test_db_path}{suffix}").unlink(missing_ok=True)
 
 
 @pytest.fixture
@@ -67,6 +98,9 @@ async def async_client():
 
     original_engine = database_module.engine
     original_session_local = database_module.SessionLocal
+    original_main_engine = main_module.engine
+    original_main_session_local = main_module.SessionLocal
+    original_task_session_local = tasks_module.SessionLocal
     test_engine = None
     test_db_path = None
     try:
@@ -82,6 +116,8 @@ async def async_client():
         database_module.engine = test_engine
         database_module.SessionLocal = sessionmaker(bind=test_engine, autoflush=False, autocommit=False)
         main_module.engine = test_engine
+        main_module.SessionLocal = database_module.SessionLocal
+        tasks_module.SessionLocal = database_module.SessionLocal
 
         await asyncio.wait_for(app.router.startup(), timeout=10)
         _reset_database(test_engine)
@@ -91,7 +127,9 @@ async def async_client():
             yield client
         await asyncio.wait_for(app.router.shutdown(), timeout=10)
     finally:
-        main_module.engine = original_engine
+        main_module.engine = original_main_engine
+        main_module.SessionLocal = original_main_session_local
+        tasks_module.SessionLocal = original_task_session_local
         database_module.engine = original_engine
         database_module.SessionLocal = original_session_local
         fastapi.routing.run_in_threadpool = original_fastapi_run_in_threadpool  # type: ignore[assignment]

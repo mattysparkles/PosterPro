@@ -24,6 +24,7 @@ MANUAL_WORKFLOW_READY = "ready"
 PUBLISH_SUPPORT_LABELS = {
     "direct_api": "Direct API publish",
     "browser_assist": "Browser-assisted publish",
+    "hosted_browser_assist": "Hosted browser fallback",
     "provider_assist": "Provider-assisted publish",
     "manual_review": "Manual review publish",
     "draft_only": "Draft-only assisted publish",
@@ -146,12 +147,18 @@ def _publish_support_contract(*, marketplace: str, publish_mode: str) -> tuple[s
             "PosterPro can publish directly to eBay through the native API path for connected operator accounts.",
         )
 
-    normalized_mode = publish_mode if publish_mode in {"browser_assist", "provider_assist", "draft_only", "manual_review"} else "manual_review"
+    normalized_mode = publish_mode if publish_mode in {"browser_assist", "hosted_browser_assist", "provider_assist", "draft_only", "manual_review"} else "manual_review"
     if normalized_mode == "browser_assist":
         return (
             "browser_assist",
             PUBLISH_SUPPORT_LABELS["browser_assist"],
             "PosterPro prepares and runs an assisted browser workflow for this marketplace. Final submission may still require operator review depending on the bridge policy and live marketplace flow.",
+        )
+    if normalized_mode == "hosted_browser_assist":
+        return (
+            "hosted_browser_assist",
+            PUBLISH_SUPPORT_LABELS["hosted_browser_assist"],
+            "PosterPro uses its hosted browser bridge when the tenant has no recently active compatible extension. Marketplace login and site-policy blocks remain visible and may require the extension.",
         )
     if normalized_mode == "provider_assist":
         return (
@@ -267,7 +274,7 @@ def save_manual_marketplace_settings(user: User, marketplace: str, payload: Mapp
         workflow_state = "draft"
     if import_mode not in {"manual", "csv_assist", "provider_assist", "browser_assist"}:
         import_mode = "manual"
-    if publish_mode not in {"manual_review", "draft_only", "provider_assist", "browser_assist"}:
+    if publish_mode not in {"manual_review", "draft_only", "provider_assist", "browser_assist", "hosted_browser_assist"}:
         publish_mode = "manual_review"
     if shipping_scope not in {"local_only", "shipping_only", "local_and_shipping"}:
         shipping_scope = "local_only"
