@@ -1,5 +1,24 @@
 # PosterPro Deployment Log
 
+## 2026-09-12 - Tenant routing rules foundation
+
+### Added
+- Added tenant-user-scoped marketplace routing rule storage and validation,
+  deterministic category/brand/condition/source/price matching, include/exclude
+  destinations, rule ordering, and explicit manual-destination precedence.
+- Cross-post requests with no explicit destination selection now use the
+  authenticated user's routing rules when configured and record the matched
+  rule IDs/destinations in the durable cross-post job plan. Existing listing
+  targets and eBay fallback remain when no rules are configured.
+- Added read/write rules and per-listing route preview API surfaces. No
+  Settings rule-builder UI or 500-item bulk route UI is implemented yet; do not
+  describe those as complete.
+
+### Validation
+- Routing matcher, manual override, validation, and durable cross-post routing
+  tests: `4 passed`.
+- This is automated backend behavior only; no live marketplace work is implied.
+
 ## 2026-09-12 - Cross-market payload and sale identity hardening
 
 ### Fixed

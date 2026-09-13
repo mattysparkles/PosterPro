@@ -30,6 +30,7 @@ from app.models.enums import EbayPublishStatus, ListingStatus, MarketplaceListin
 from app.models.models import IntakeNotification, IntakePhotoBatch, IntakeProviderMedia, Listing, ListingCorrectionJob, MarketplaceCrosspostJob, MarketplaceExtensionJob, MarketplaceImportJob, MarketplaceListing, User
 from app.services.marketplace_execution import resolve_execution_mode
 from app.services.marketplace_field_mapper import build_marketplace_payload
+from app.services.marketplace_routing import MarketplaceRoutingRule, MarketplaceRoutingService
 from app.services.customer_description import customer_description_is_safe
 from app.services.automation_bridge import (
     bridge_browser_submit_policy,
@@ -73,6 +74,35 @@ def _enqueue_priority(task, job_id: int, priority: int | None = None):
 class BulkRequeueRequest(BaseModel):
     statuses: list[str] = Field(default_factory=lambda: ["failed"], max_length=4)
     job_types: list[str] = Field(default_factory=lambda: ["crosspost", "import"], max_length=2)
+
+
+class MarketplaceRoutingRulesRequest(BaseModel):
+    rules: list[MarketplaceRoutingRule] = Field(default_factory=list, max_length=200)
+
+
+@router.get("/marketplace-routing/rules")
+def get_marketplace_routing_rules(current_user: User = Depends(get_current_user)):
+    settings_json = current_user.settings_json if isinstance(current_user.settings_json, dict) else {}
+    stored = settings_json.get("marketplace_routing") if isinstance(settings_json.get("marketplace_routing"), dict) else {}
+    return {"rules": stored.get("rules") or [], "scope": "TENANT_USER", "source": "TENANT_OVERRIDE" if stored.get("rules") else "NO_RULES"}
+
+
+@router.put("/marketplace-routing/rules")
+def put_marketplace_routing_rules(
+    payload: MarketplaceRoutingRulesRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    rules = [rule.model_dump(mode="json") for rule in payload.rules]
+    identifiers = [rule["id"] for rule in rules]
+    if len(set(identifiers)) != len(identifiers):
+        raise HTTPException(status_code=422, detail="Routing rule IDs must be unique")
+    settings_json = dict(current_user.settings_json or {})
+    settings_json["marketplace_routing"] = {"rules": rules, "updated_by": current_user.id, "updated_at": datetime.utcnow().isoformat()}
+    current_user.settings_json = settings_json
+    db.add(current_user)
+    db.commit()
+    return {"rules": rules, "scope": "TENANT_USER", "source": "TENANT_OVERRIDE"}
 
 
 def _build_job_status_summary(rows: list[tuple[str | None, int]]) -> dict:
@@ -522,6 +552,24 @@ def _build_preview_for_marketplace(*, listing: Listing, user: User, marketplace:
     )
 
 
+@router.get("/marketplace-routing/preview/{listing_id}")
+def preview_marketplace_routing(
+    listing_id: int,
+    marketplaces: str | None = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    listing = db.get(Listing, listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    ensure_user_owns_resource(current_user, listing.user_id)
+    manual = [value.strip().lower() for value in marketplaces.split(",") if value.strip()] if marketplaces is not None else None
+    settings_json = current_user.settings_json if isinstance(current_user.settings_json, dict) else {}
+    stored = settings_json.get("marketplace_routing") if isinstance(settings_json.get("marketplace_routing"), dict) else {}
+    result = MarketplaceRoutingService().resolve(listing, stored.get("rules") or [], manual_override=manual)
+    return {"listing_id": listing.id, **result}
+
+
 @router.get("/listings/{listing_id}/crosspost-preview", response_model=list[CrosspostPreviewEntry])
 def get_crosspost_preview(
     listing_id: int,
@@ -559,8 +607,16 @@ def queue_crosspost_job(
     ensure_user_owns_resource(current_user, listing.user_id)
 
     requested = [item.strip().lower() for item in (payload.marketplaces or []) if item.strip()]
+    routing_decision = None
     if not requested:
-        requested = list((listing.marketplace_data or {}).get("targets") or [MarketplaceName.ebay.value])
+        settings_json = current_user.settings_json if isinstance(current_user.settings_json, dict) else {}
+        routing_settings = settings_json.get("marketplace_routing") if isinstance(settings_json.get("marketplace_routing"), dict) else {}
+        routing_rules = routing_settings.get("rules") or []
+        if routing_rules:
+            routing_decision = MarketplaceRoutingService().resolve(listing, routing_rules)
+            requested = routing_decision["marketplaces"]
+        else:
+            requested = list((listing.marketplace_data or {}).get("targets") or [MarketplaceName.ebay.value])
     targets = [name for name in requested if name in MarketplaceName._value2member_map_]
     if not targets:
         raise HTTPException(status_code=400, detail="No supported target marketplaces were requested")
@@ -571,7 +627,8 @@ def queue_crosspost_job(
         "targets": [
             _build_preview_for_marketplace(listing=listing, user=current_user, marketplace=market).model_dump()
             for market in targets
-        ]
+        ],
+        **({"routing_decision": routing_decision} if routing_decision else {}),
     }
     job = MarketplaceCrosspostJob(
         user_id=current_user.id,
