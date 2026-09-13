@@ -61,6 +61,10 @@ celery_app.conf.update(
             "task": "process_intake_reconciliation_jobs",
             "schedule": crontab(minute="*"),
         },
+        "dispatch-durable-crosspost-jobs-every-minute": {
+            "task": "dispatch_queued_crosspost_jobs",
+            "schedule": crontab(minute="*"),
+        },
         "queue-due-intake-syncs-every-5m": {
             "task": "queue_due_intake_syncs",
             "schedule": crontab(minute="*/5"),

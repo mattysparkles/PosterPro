@@ -1451,6 +1451,40 @@ def process_marketplace_crosspost_job_task(self, job_id: int) -> dict:
         return {"job_id": job_id, "status": job.status, "results": results}
 
 
+@celery_app.task(name="dispatch_queued_crosspost_jobs")
+def dispatch_queued_crosspost_jobs_task(limit: int = 25) -> dict[str, Any]:
+    """Recover durable cross-post jobs committed before broker dispatch."""
+    dispatched: list[dict[str, Any]] = []
+    with SessionLocal() as db:
+        for _ in range(max(1, min(int(limit), 100))):
+            job = db.execute(
+                select(MarketplaceCrosspostJob)
+                .where(
+                    MarketplaceCrosspostJob.status == "queued",
+                    MarketplaceCrosspostJob.task_id.is_(None),
+                )
+                .order_by(MarketplaceCrosspostJob.priority.asc(), MarketplaceCrosspostJob.created_at.asc(), MarketplaceCrosspostJob.id.asc())
+                .with_for_update(skip_locked=True)
+                .limit(1)
+            ).scalars().first()
+            if not job:
+                break
+            try:
+                task = process_marketplace_crosspost_job_task.apply_async(
+                    args=[job.id],
+                    priority=max(0, 10 - int(job.priority or 1)),
+                )
+            except Exception as exc:
+                db.rollback()
+                logger.warning("crosspost_dispatch_deferred", extra={"job_id": job.id, "error": str(exc)[:500]})
+                break
+            job.task_id = task.id
+            db.add(job)
+            db.commit()
+            dispatched.append({"job_id": job.id, "task_id": task.id})
+    return {"dispatched": dispatched, "count": len(dispatched)}
+
+
 @celery_app.task(
     bind=True,
     autoretry_for=(Exception,),

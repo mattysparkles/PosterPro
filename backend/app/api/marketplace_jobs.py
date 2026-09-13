@@ -80,6 +80,15 @@ class MarketplaceRoutingRulesRequest(BaseModel):
     rules: list[MarketplaceRoutingRule] = Field(default_factory=list, max_length=200)
 
 
+class BulkCrosspostQueueRequest(BaseModel):
+    listing_ids: list[int] = Field(min_length=1, max_length=500)
+    marketplaces: list[str] = Field(default_factory=list, max_length=9)
+    requested_mode: str = "bulk_operator_queue"
+    priority: int = Field(default=1, ge=0, le=10)
+    confirm_live_ebay: bool = False
+    confirmation_phrase: str | None = None
+
+
 @router.get("/marketplace-routing/rules")
 def get_marketplace_routing_rules(current_user: User = Depends(get_current_user)):
     settings_json = current_user.settings_json if isinstance(current_user.settings_json, dict) else {}
@@ -673,6 +682,117 @@ def queue_crosspost_job(
     db.commit()
     db.refresh(job)
     return _serialize_crosspost_job(job, operator_email=current_user.email)
+
+
+@router.post("/marketplace-jobs/bulk-crosspost")
+def queue_bulk_crosspost_jobs(
+    payload: BulkCrosspostQueueRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Persist one independently retryable cross-post job per selected item."""
+    listing_ids = list(dict.fromkeys(int(value) for value in payload.listing_ids))
+    listings = db.execute(
+        select(Listing).where(Listing.user_id == current_user.id, Listing.id.in_(listing_ids))
+    ).scalars().all()
+    by_id = {listing.id: listing for listing in listings}
+    settings_json = current_user.settings_json if isinstance(current_user.settings_json, dict) else {}
+    routing_settings = settings_json.get("marketplace_routing") if isinstance(settings_json.get("marketplace_routing"), dict) else {}
+    routing_rules = routing_settings.get("rules") or []
+
+    outcomes: list[dict] = []
+    prepared: list[tuple[Listing, list[str], dict, MarketplaceCrosspostJob]] = []
+    for listing_id in listing_ids:
+        listing = by_id.get(listing_id)
+        if not listing:
+            outcomes.append({"listing_id": listing_id, "status": "NOT_FOUND"})
+            continue
+        if listing.status not in {ListingStatus.ready, ListingStatus.posted} or listing.sold_at or int(listing.quantity or 0) <= 0:
+            outcomes.append({"listing_id": listing.id, "status": "NOT_READY", "reason": "Listing must be ready, unsold, and have positive quantity."})
+            continue
+        if not customer_description_is_safe(listing.description):
+            outcomes.append({"listing_id": listing.id, "status": "BLOCKED", "reason": "Customer description contains internal review or marketplace guidance."})
+            continue
+
+        if payload.marketplaces:
+            resolution = MarketplaceRoutingService().resolve(listing, routing_rules, manual_override=payload.marketplaces)
+        elif routing_rules:
+            resolution = MarketplaceRoutingService().resolve(listing, routing_rules)
+        else:
+            resolution = {"marketplaces": MarketplaceRoutingService.normalize_markets((listing.marketplace_data or {}).get("targets") or [MarketplaceName.ebay.value]), "source": "LISTING_DEFAULT", "matched_rule_ids": []}
+        targets = resolution["marketplaces"]
+        if not targets:
+            outcomes.append({"listing_id": listing.id, "status": "NO_DESTINATIONS", "routing": resolution})
+            continue
+
+        existing_job = db.execute(
+            select(MarketplaceCrosspostJob)
+            .where(MarketplaceCrosspostJob.user_id == current_user.id, MarketplaceCrosspostJob.listing_id == listing.id, MarketplaceCrosspostJob.status.in_(["queued", "running"]))
+            .order_by(MarketplaceCrosspostJob.updated_at.desc(), MarketplaceCrosspostJob.id.desc())
+        ).scalars().first()
+        if existing_job:
+            outcomes.append({"listing_id": listing.id, "status": "ALREADY_QUEUED", "job_id": existing_job.id, "target_marketplaces": existing_job.target_marketplaces or []})
+            continue
+
+        plan = {
+            "targets": [_build_preview_for_marketplace(listing=listing, user=current_user, marketplace=market).model_dump() for market in targets],
+            "routing_decision": resolution,
+            "queued_from": "bulk_crosspost",
+        }
+        job = MarketplaceCrosspostJob(
+            user_id=current_user.id,
+            listing_id=listing.id,
+            source_marketplace=((listing.marketplace_data or {}).get("source_marketplace") if isinstance(listing.marketplace_data, dict) else None),
+            target_marketplaces=targets,
+            requested_mode=payload.requested_mode,
+            status="queued",
+            execution_plan=plan,
+            priority=payload.priority,
+            requested_by=current_user.id,
+        )
+        db.add(job)
+        prepared.append((listing, targets, resolution, job))
+
+    if any(MarketplaceName.ebay.value in targets for _, targets, _, _ in prepared):
+        if not payload.confirm_live_ebay or str(payload.confirmation_phrase or "").strip() != "QUEUE LIVE EBAY READY LISTINGS":
+            db.rollback()
+            raise HTTPException(status_code=400, detail="Bulk eBay queue requires explicit live-publish confirmation.")
+
+    for listing, targets, _resolution, job in prepared:
+        db.flush()
+        for market in targets:
+            existing_market_row = db.execute(
+                select(MarketplaceListing.id).where(
+                    MarketplaceListing.listing_id == listing.id,
+                    MarketplaceListing.marketplace == MarketplaceName(market),
+                ).limit(1)
+            ).first()
+            if not existing_market_row:
+                db.add(MarketplaceListing(
+                    listing_id=listing.id,
+                    marketplace=MarketplaceName(market),
+                    status=MarketplaceListingStatus.PENDING,
+                    raw_response={"queued_by_crosspost_job": job.id},
+                ))
+        outcomes.append({"listing_id": listing.id, "status": "QUEUED", "job_id": job.id, "target_marketplaces": targets})
+    db.commit()
+
+    # Dispatch only after every accepted job is durable. If the broker is
+    # temporarily unavailable, retain queued database rows and report the
+    # dispatch failure instead of losing the bulk request.
+    for outcome in outcomes:
+        if outcome.get("status") != "QUEUED":
+            continue
+        job = db.get(MarketplaceCrosspostJob, outcome["job_id"])
+        try:
+            task = _enqueue_priority(process_marketplace_crosspost_job_task, job.id, job.priority)
+            job.task_id = task.id
+            outcome["task_id"] = task.id
+        except Exception as exc:
+            outcome["dispatch_error"] = str(exc)[:500]
+        db.add(job)
+    db.commit()
+    return {"queued": sum(1 for row in outcomes if row.get("status") == "QUEUED"), "requested": len(listing_ids), "results": outcomes}
 
 
 @router.get("/listings/{listing_id}/crosspost-jobs", response_model=list[CrosspostJobResponse])

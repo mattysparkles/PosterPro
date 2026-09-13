@@ -10,13 +10,22 @@
   authenticated user's routing rules when configured and record the matched
   rule IDs/destinations in the durable cross-post job plan. Existing listing
   targets and eBay fallback remain when no rules are configured.
+- Added `POST /marketplace-jobs/bulk-crosspost` for up to 500 selected listing
+  IDs. It owner-scopes records, accepts only ready/posted unsold inventory,
+  applies explicit destination overrides or routing rules, writes independent
+  per-listing jobs before broker dispatch, and gates eBay live queueing behind
+  the existing explicit confirmation phrase. A one-minute recovery task
+  dispatches committed queued jobs whose broker task ID is still absent.
 - Added read/write rules and per-listing route preview API surfaces. No
-  Settings rule-builder UI or 500-item bulk route UI is implemented yet; do not
-  describe those as complete.
+  Settings rule-builder UI is implemented yet; the bulk backend API is not
+  yet wired to a Listings selection UI. Do not describe those surfaces as
+  complete.
 
 ### Validation
-- Routing matcher, manual override, validation, and durable cross-post routing
-  tests: `4 passed`.
+- Routing matcher, manual override, validation, durable routing, owner-scoped
+  bulk job creation, and queued-job recovery tests: `6 passed`.
+- Combined marketplace/eBay/preflight/extension/sale/routing regression set:
+  `87 passed`.
 - This is automated backend behavior only; no live marketplace work is implied.
 
 ## 2026-09-12 - Cross-market payload and sale identity hardening

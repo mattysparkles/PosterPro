@@ -3,10 +3,15 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.models.enums import ListingStatus
 from app.models.models import Listing, User
 from app.services.marketplace_routing import MarketplaceRoutingRule, MarketplaceRoutingService
 from app.api import marketplace_jobs
 from app.api.schemas import CrosspostQueueRequest
+from app.api.marketplace_jobs import BulkCrosspostQueueRequest
+from app.core import database as database_module
+from app.models.models import MarketplaceCrosspostJob
+from app.workers import tasks
 
 
 def test_marketplace_routing_applies_matching_includes_and_global_exclusions(db_session):
@@ -121,3 +126,69 @@ def test_crosspost_queue_uses_tenant_rules_when_destinations_are_not_manually_se
         "source": "RULES",
         "matched_rule_ids": ["home-goods"],
     }
+
+
+def test_bulk_crosspost_creates_owner_scoped_durable_jobs_only_for_ready_items(db_session, monkeypatch):
+    owner = User(email=f"routing-bulk-{uuid4()}@example.com", password_hash="x")
+    other = User(email=f"routing-bulk-other-{uuid4()}@example.com", password_hash="x")
+    db_session.add_all([owner, other])
+    db_session.flush()
+    ready = Listing(
+        user_id=owner.id,
+        status=ListingStatus.ready,
+        title="Desk lamp",
+        description="A tested desk lamp, clean and ready for another workspace.",
+        listing_price=25.0,
+        quantity=1,
+        category_suggestion="Home > Lighting",
+    )
+    draft = Listing(user_id=owner.id, status=ListingStatus.draft, title="Unfinished", description="Incomplete.")
+    foreign = Listing(user_id=other.id, status=ListingStatus.ready, title="Private item", description="Other tenant item.")
+    db_session.add_all([ready, draft, foreign])
+    db_session.flush()
+    monkeypatch.setattr(marketplace_jobs, "_enqueue_priority", lambda *_args, **_kwargs: SimpleNamespace(id="task-bulk-test"))
+
+    result = marketplace_jobs.queue_bulk_crosspost_jobs(
+        BulkCrosspostQueueRequest(listing_ids=[ready.id, draft.id, foreign.id, 999999], marketplaces=["facebook", "mercari"]),
+        db_session,
+        owner,
+    )
+
+    assert result["queued"] == 1
+    result_by_listing = {row["listing_id"]: row["status"] for row in result["results"]}
+    assert result_by_listing == {
+        ready.id: "QUEUED",
+        draft.id: "NOT_READY",
+        foreign.id: "NOT_FOUND",
+        999999: "NOT_FOUND",
+    }
+    job = db_session.query(marketplace_jobs.MarketplaceCrosspostJob).filter_by(listing_id=ready.id).one()
+    assert job.user_id == owner.id
+    assert job.target_marketplaces == ["facebook", "mercari"]
+    assert job.task_id == "task-bulk-test"
+
+
+def test_dispatch_worker_recovers_durable_queued_job_without_broker_task_id(db_session, monkeypatch):
+    owner = User(email=f"routing-recovery-{uuid4()}@example.com", password_hash="x")
+    db_session.add(owner)
+    db_session.flush()
+    listing = Listing(user_id=owner.id, title="Lamp", description="A useful lamp.")
+    db_session.add(listing)
+    db_session.flush()
+    job = MarketplaceCrosspostJob(
+        user_id=owner.id,
+        listing_id=listing.id,
+        target_marketplaces=["facebook"],
+        status="queued",
+        task_id=None,
+    )
+    db_session.add(job)
+    db_session.commit()
+    monkeypatch.setattr(tasks, "SessionLocal", database_module.SessionLocal)
+    monkeypatch.setattr(tasks.process_marketplace_crosspost_job_task, "apply_async", lambda **_kwargs: SimpleNamespace(id="recovered-task"))
+
+    result = tasks.dispatch_queued_crosspost_jobs_task.run(limit=5)
+
+    assert result["count"] == 1
+    db_session.refresh(job)
+    assert job.task_id == "recovered-task"
