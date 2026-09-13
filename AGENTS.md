@@ -628,10 +628,18 @@ requirements above. Credentials were not rotated or printed.
   authorization, broad team/tenant SaaS, subscription/payment, and direct
   checkout remain incomplete or externally blocked; no live marketplace
   listing was submitted.
+- Deployment follow-up: commit `62bc9ad` is the local and public frontend
+  identity. The frontend-only restart completed; all four PosterPro services
+  are active, `/health` reports `ok=true` and `database_ready=true`, and local
+  plus public routing/listing routes return HTTP 200. The public
+  `/api/browser-extension/download` ZIP was verified as v0.2.2. Authenticated
+  visual operator interaction remains unverified.
 
 ## 2026-09-12 - One-click extension authorization hardening
 
-- The extension is version `0.2.1`. When its PosterPro content script is
+- The one-click authorization change was first released as extension version
+  `0.2.1`; the current public download has since advanced to `0.2.2`. When its
+  PosterPro content script is
   present on the authenticated Settings page, the operator can authorize this
   browser with one click; the existing one-use, five-minute pairing code is
   sent directly to the extension background context. The scoped device token
