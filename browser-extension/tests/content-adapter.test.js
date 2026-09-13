@@ -91,6 +91,40 @@ test("Facebook create form fixture fills supported fields and stops for operator
   assert.equal(response.selector_strategy, "central_marketplace_map_then_semantic_labels");
 });
 
+test("assisted destination fixtures fill core fields and never submit", async (t) => {
+  const destinations = [
+    ["mercari", "www.mercari.com"],
+    ["poshmark", "poshmark.com"],
+    ["vinted", "www.vinted.com"],
+    ["etsy", "www.etsy.com"],
+    ["offerup", "www.offerup.com"],
+  ];
+  for (const [marketplace, hostname] of destinations) {
+    await t.test(marketplace, async () => {
+      const { fields, listener } = loadContentFixture(hostname);
+      const response = await new Promise((resolve) => {
+        listener({
+          action: "posterpro_fill_listing",
+          marketplace,
+          payload: { title: "Fixture item", price: 24.5, description: "Supported source-backed detail." },
+          images: [{ data_url: "data:image/png;base64,aGk=", file_name: "posterpro-1.png" }],
+        }, {}, resolve);
+      });
+      assert.equal(response.ok, true);
+      assert.equal(response.stage, "AWAITING_OPERATOR_REVIEW");
+      assert.equal(response.submission_performed, false);
+      assert.equal(fields.title.value, "Fixture item");
+      assert.equal(fields.price.value, "24.5");
+      assert.equal(fields.description.value, "Supported source-backed detail.");
+      assert.equal(response.uploaded_image_count, 1);
+      assert.deepEqual(Array.from(response.missing_required_fields), [
+        "category_operator_selection_required",
+        "condition_operator_selection_required",
+      ]);
+    });
+  }
+});
+
 test("adapter refuses to fill a marketplace form on the wrong domain", async () => {
   const { listener } = loadContentFixture("www.mercari.com");
   const response = await new Promise((resolve) => {

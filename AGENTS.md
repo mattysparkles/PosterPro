@@ -634,6 +634,12 @@ requirements above. Credentials were not rotated or printed.
   plus public routing/listing routes return HTTP 200. The public
   `/api/browser-extension/download` ZIP was verified as v0.2.2. Authenticated
   visual operator interaction remains unverified.
+- Added non-publishing extension DOM fixtures for Mercari, Poshmark, Vinted,
+  Etsy, and OfferUp. Each verifies core title/price/description/photo mapping,
+  an `AWAITING_OPERATOR_REVIEW` stop, and explicit category/condition review.
+  The complete extension Node suite reports 14 tests passed. These mocked
+  fixtures do not establish live marketplace selector compatibility or
+  authenticated end-to-end operation.
 
 ## 2026-09-12 - One-click extension authorization hardening
 
