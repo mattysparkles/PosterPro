@@ -109,6 +109,7 @@ export default function SettingsPage() {
   const [bridgeAccounts, setBridgeAccounts] = useState([]);
   const [marketplaceExtensionState, setMarketplaceExtensionState] = useState({ devices: [], pending_jobs: 0, active_jobs: [], recent_failures: [] });
   const [marketplaceExtensionPairingCode, setMarketplaceExtensionPairingCode] = useState(null);
+  const [browserExtensionAvailable, setBrowserExtensionAvailable] = useState(false);
   const [loadingExtensionPairing, setLoadingExtensionPairing] = useState(false);
   const [ebayAccountReadiness, setEbayAccountReadiness] = useState(null);
   const [bridgeAccountForm, setBridgeAccountForm] = useState({
@@ -440,6 +441,30 @@ export default function SettingsPage() {
     const timer = window.setInterval(refreshExtensionState, 15000);
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [activeTab, user?.id]);
+
+  useEffect(() => {
+    const receiveExtensionLink = (event) => {
+      if (event.source !== window || event.origin !== window.location.origin) return;
+      const message = event.data || {};
+      if (message.source !== 'posterpro-extension') return;
+      if (message.type === 'PRESENCE') setBrowserExtensionAvailable(true);
+      if (message.type === 'AUTHORIZED') {
+        setBrowserExtensionAvailable(true);
+        setMarketplaceExtensionPairingCode(null);
+        toast.success('This browser is authorized. Marketplace jobs will run automatically.');
+        window.setTimeout(async () => {
+          try {
+            const result = await fetchMarketplaceExtensionDevices();
+            setMarketplaceExtensionState(result || { devices: [], pending_jobs: 0, active_jobs: [], recent_failures: [] });
+          } catch { /* the device agent will reconnect and retry automatically */ }
+        }, 750);
+      }
+      if (message.type === 'AUTHORIZATION_FAILED') toast.error(message.error || 'Browser authorization failed. Use the one-time code fallback.');
+    };
+    window.addEventListener('message', receiveExtensionLink);
+    window.postMessage({ source: 'posterpro-settings', type: 'CHECK_EXTENSION' }, window.location.origin);
+    return () => window.removeEventListener('message', receiveExtensionLink);
+  }, []);
 
   useEffect(() => {
     const handleStorage = (event) => {
@@ -936,10 +961,16 @@ export default function SettingsPage() {
     }
   };
 
-  const issueMarketplaceExtensionPairingCode = async () => {
+  const issueMarketplaceExtensionPairingCode = async (authorizeThisBrowser = false) => {
     setLoadingExtensionPairing(true);
     try {
       const result = await createMarketplaceExtensionPairingCode('PosterPro browser');
+      if (authorizeThisBrowser && browserExtensionAvailable) {
+        window.postMessage({ source: 'posterpro-settings', type: 'PAIR_EXTENSION', pairing_code: result.pairing_code }, window.location.origin);
+        setMarketplaceExtensionPairingCode(null);
+        toast.success('Authorizing this browser…');
+        return;
+      }
       setMarketplaceExtensionPairingCode(result);
       toast.success('One-time pairing code created. Enter it in the installed PosterPro extension within five minutes.');
     } catch (error) {
@@ -2717,11 +2748,12 @@ export default function SettingsPage() {
                       </div>
                       <div className="mt-3 flex flex-wrap gap-2">
                         <a className="inline-flex items-center rounded-[10px] bg-[#2563eb] px-3 py-2 text-sm font-semibold text-white hover:bg-[#1d4ed8]" href="/api/browser-extension/download" download>Download Extension</a>
+                        {browserExtensionAvailable && <Button type="button" variant="outline" data-posterpro-extension-authorize="true" onClick={() => issueMarketplaceExtensionPairingCode(true)} disabled={loadingExtensionPairing}>Authorize this browser</Button>}
                         <Button type="button" variant="outline" onClick={issueMarketplaceExtensionPairingCode} disabled={loadingExtensionPairing}>{loadingExtensionPairing ? 'Creating code…' : 'Pair / Reconnect'}</Button>
                         <Button type="button" variant="outline" onClick={() => reload()}>Test / Refresh Connection</Button>
                         <Button type="button" variant="outline" href="/jobs?tab=assisted">View Assisted Jobs</Button>
                       </div>
-                      <p className="mt-2 text-xs text-[#667085]">Install: download the ZIP, unpack it locally, open your browser’s extension manager, enable developer mode, then load the unpacked extension. Pairing is scoped to this PosterPro account; marketplace submission remains a human action.</p>
+                        <p className="mt-2 text-xs text-[#667085]">Install once: download the ZIP, unpack it, and load it from your browser’s extension manager. After signing into PosterPro, {browserExtensionAvailable ? 'this browser is detected; authorize it once below.' : 'the extension will be detected here when this page is reopened.'} Pairing stays scoped to this account; marketplace login stays in this browser.</p>
                       {marketplaceExtensionPairingCode?.pairing_code ? <div className="mt-3 rounded-lg bg-[#f2f4f7] p-3" role="status">
                         <p className="text-xs font-semibold text-[#344054]">One-time pairing code · expires {formatDateTimeValue(marketplaceExtensionPairingCode.expires_at)}</p>
                         <p className="mt-1 select-all font-mono text-lg tracking-widest text-[#101828]">{marketplaceExtensionPairingCode.pairing_code}</p>

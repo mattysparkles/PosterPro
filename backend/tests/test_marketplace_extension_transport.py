@@ -67,6 +67,7 @@ async def test_extension_download_serves_current_installable_archive(async_clien
     assert "posterpro-extension/manifest.json" in names
     assert "posterpro-extension/background.js" in names
     assert "posterpro-extension/content.js" in names
+    assert "posterpro-extension/posterpro-link.js" in names
     assert "/opt/apps/" not in "\n".join(names)
 
 

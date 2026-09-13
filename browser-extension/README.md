@@ -1,23 +1,16 @@
-# PosterPro Marketplace Assistant
+# PosterPro Browser Extension
 
-This is a thin Manifest V3 browser-extension scaffold for browser-assisted marketplace workflows.
+The extension is a background transport for PosterPro-assisted marketplace jobs. After installation and one-time browser authorization, heartbeat, job polling, claiming, lease renewal, and safe form preparation run automatically. Routine work does not require opening the popup or manually claiming jobs.
 
-It can:
+## Install once
 
-- capture the current marketplace tab session
-- store the snapshot locally in the extension
-- send the session to PosterPro so the backend can save it into the existing bridge/session workflow
-- act as the browser-side helper for Mercari, Facebook, and other assisted channels
+1. Download the extension ZIP from PosterPro Settings → Marketplaces → Browser Automation.
+2. Unpack the ZIP and load the unpacked folder from Chrome or Edge's extension manager.
+3. Sign into PosterPro in the same browser profile and open Settings → Browser Automation.
+4. When PosterPro detects the extension, click **Authorize this browser** once. The short-lived pairing code is delivered directly to the extension; the device token never returns to the page.
 
-## Load unpacked
+The five-minute pairing-code entry in the extension popup remains available for recovery, unsupported browser contexts, and troubleshooting.
 
-1. Open Chrome or Edge.
-2. Go to the extensions page.
-3. Enable developer mode.
-4. Load this folder as an unpacked extension.
+Marketplace passwords, cookies, and session tokens stay in the browser profile. PosterPro receives only safe connection/job state and the scoped device credential is stored in extension-local storage. Jobs remain tenant-scoped and are protected by server-side leases.
 
-## Notes
-
-- PosterPro base URL defaults to `https://posterpro.sparkleserver.site`.
-- The popup can copy the captured session JSON for manual fallback.
-- The scaffold is intentionally thin; PosterPro still owns the workflow state and publish logic.
+The popup is limited to connection status, task summary, pause/resume, diagnostics, and a link back to PosterPro. Marketplace actions stop at PosterPro's operator-review boundary; the extension does not automatically submit arbitrary live listings.

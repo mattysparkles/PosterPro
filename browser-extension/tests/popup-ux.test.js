@@ -12,7 +12,7 @@ test("routine extension popup does not expose job claiming or submission control
   assert.match(script, /openPosterPro\(`/);
 });
 
-test("pairing code remains a one-time connection flow and pause/resume is local control", () => {
+test("pairing code remains a fallback and pause/resume is local control", () => {
   assert.match(html, /One-time pairing code/);
   assert.match(html, /Authorize this browser/);
   assert.match(script, /set_automation_paused/);

@@ -27,7 +27,7 @@ from app.models.models import (
 from app.services.marketplace_extension_jobs import MarketplaceExtensionJobError, queue_extension_marketplace_action
 
 router = APIRouter()
-CURRENT_EXTENSION_VERSION = "0.2.0"
+CURRENT_EXTENSION_VERSION = "0.2.1"
 MINIMUM_EXTENSION_VERSION = "0.2.0"
 
 ASSISTED_MARKETPLACES = {"facebook", "mercari", "poshmark", "vinted", "etsy", "offerup", "depop", "whatnot"}

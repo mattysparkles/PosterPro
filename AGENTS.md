@@ -543,3 +543,31 @@ requirements above. Credentials were not rotated or printed.
   `/health` reports `database_ready=true`, and local/public Timeline routes
   return HTTP 200. No marketplace listing was published. No non-PosterPro
   project or shared host resource was modified during this closure pass.
+
+## 2026-09-12 - One-click extension authorization hardening
+
+- The extension is version `0.2.1`. When its PosterPro content script is
+  present on the authenticated Settings page, the operator can authorize this
+  browser with one click; the existing one-use, five-minute pairing code is
+  sent directly to the extension background context. The scoped device token
+  is stored extension-locally and is never posted back into page JavaScript.
+  Manual popup code entry remains the recovery/fallback path.
+- The manifest no longer requests the browser `cookies` permission and the
+  background agent no longer calls `chrome.cookies` or reports cookie
+  presence. Marketplace passwords, cookies, and session credentials remain in
+  the user's browser profile. Heartbeat/poll/claim/lease renewal remain
+  automatic after pairing; routine popup interaction is still not required.
+- Automated validation: browser-extension fixtures `7 passed`; backend
+  extension transport/tenant/job tests `12 passed`; public ZIP was downloaded
+  in memory and verified as v0.2.1 with the PosterPro content script included;
+  Settings and extension bundle served successfully. No installed Chrome/Edge
+  session was available here, so actual button-to-device pairing and marketplace
+  tab execution remain `OPERATOR_TEST_REQUIRED`.
+- Assisted marketplace create/update/end remains partially implemented: the
+  worker/extension transport, durable identity, and no-duplicate safeguards
+  exist; destination category/condition/shipping fields require marketplace-
+  specific verified form mapping, authenticated marketplace sessions, and live
+  operator acceptance. Etsy OAuth, non-eBay sale polling, rule-based routing,
+  expanded tenant/team isolation, subscription entitlements, premium payments,
+  crypto, and direct checkout remain incomplete/unverified. Do not report
+  source or fixture coverage as live marketplace verification.

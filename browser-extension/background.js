@@ -14,7 +14,7 @@ const MARKETPLACE_HOST_HINTS = [
   { marketplace: "offerup", match: "offerup.com" },
 ];
 
-const EXTENSION_VERSION = "0.2.0";
+const EXTENSION_VERSION = "0.2.1";
 let queuePollActive = false;
 
 function apiRoot(baseUrl) {
@@ -273,7 +273,7 @@ async function captureActiveSession() {
   if (!tab || !tab.id || !tab.url) {
     throw new Error("No active marketplace tab was found.");
   }
-  const [pageSnapshot, cookies] = await Promise.all([
+  const [pageSnapshot] = await Promise.all([
     chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: () => ({
@@ -282,7 +282,6 @@ async function captureActiveSession() {
         hostname: window.location.hostname,
       }),
     }),
-    chrome.cookies.getAll({ url: tab.url }),
   ]);
 
   const snapshot = {
@@ -295,7 +294,6 @@ async function captureActiveSession() {
       url: `${new URL(tab.url).origin}${new URL(tab.url).pathname}`,
     },
     page: safeJson(pageSnapshot?.[0]?.result) || {},
-    cookies_present: Boolean((cookies || []).length),
   };
   if (snapshot.page && typeof snapshot.page === "object") {
     snapshot.page.url = snapshot.tab.url;

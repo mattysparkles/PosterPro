@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PosterPro Marketplace Assistant",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Pair a browser with PosterPro, process assisted marketplace jobs, and pause for operator review.",
   "action": {
     "default_title": "PosterPro Marketplace Assistant",
@@ -10,12 +10,21 @@
   "background": {
     "service_worker": "background.js"
   },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://posterpro.sparkleserver.site/*",
+        "http://127.0.0.1:3030/*"
+      ],
+      "js": ["posterpro-link.js"],
+      "run_at": "document_idle"
+    }
+  ],
   "options_page": "options.html",
   "permissions": [
     "activeTab",
     "alarms",
     "clipboardWrite",
-    "cookies",
     "scripting",
     "storage",
     "tabs"
