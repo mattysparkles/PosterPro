@@ -43,7 +43,7 @@ def _make_image_file(name: str, color: str = 'white') -> str:
     return handle.name
 
 
-def test_modern_slate_missing_render_uses_its_exact_legacy_source_thumbnail(tmp_path, monkeypatch):
+def test_modern_slate_missing_render_never_uses_legacy_source_as_active_thumbnail(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "storage_root", str(tmp_path))
     source = tmp_path / "legacy-slate.jpg"
     Image.new("RGB", (32, 32), color="white").save(source, format="JPEG")
@@ -57,7 +57,7 @@ def test_modern_slate_missing_render_uses_its_exact_legacy_source_thumbnail(tmp_
 
     resolved = intake_api._timeline_marker_media_path("/media/missing-render.png", photo)
 
-    assert resolved == "/media/legacy-slate.jpg"
+    assert resolved is None
 
 
 def test_modern_slate_missing_render_and_source_has_no_broken_media_url(tmp_path, monkeypatch):
@@ -258,7 +258,7 @@ def test_build_voice_intelligence_returns_structured_listing_json(db_session, mo
     user = _create_user(db_session, email='voice-intelligence@example.com')
     service = IntakeSlateService()
 
-    monkeypatch.setattr(service.ai, 'generate', lambda signals: {
+    monkeypatch.setattr(service.ai, 'generate', lambda signals, **_kwargs: {
         'title': 'Whirlpool Refrigerator Control Board',
         'description': 'Structured AI description.',
         'category_suggestion': 'Appliances > Parts & Accessories',
@@ -792,7 +792,72 @@ def test_render_slate_preview_asset_writes_backend_png(db_session):
     assert asset['data_url'].startswith('data:image/png;base64,')
 
 
-def test_retry_rendered_slate_upload_requeues_existing_slate(db_session, monkeypatch):
+def test_repair_modern_slate_artwork_preserves_canonical_and_legacy_identity(db_session, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, 'storage_root', str(tmp_path))
+    user = _create_user(db_session, email='modern-slate-repair@example.com')
+    service = IntakeSlateService()
+    slate, original_qr, _ = service.create_slate(
+        db_session,
+        user=user,
+        payload={'session_id': 'MODERN', 'item_id': 'SP-LEGACY-12', 'box_id': 'BX-0042', 'location': 'SHELF-9', 'title': 'Vintage receiver'},
+    )
+    legacy = IntakePhoto(
+        user_id=user.id,
+        source_provider='google_photos',
+        source_photo_id='legacy-slate-photo-12',
+        local_path=_make_image_file('legacy-modern-slate'),
+        metadata_json={'classification': 'SLATE'},
+    )
+    db_session.add(legacy)
+    db_session.flush()
+    original_created_at = slate.created_at
+    slate.slate_image_id = legacy.id
+    slate.metadata_json = {'legacy_photo_id': legacy.id, 'legacy_metadata': {'operator_note': 'Keep this evidence'}, 'timeline_role': 'TAIL'}
+    slate.qr_payload_json = {**original_qr, 'custom_inventory_code': 'INV-42', 'boundary_position': 'tail'}
+    db_session.add(slate)
+    db_session.commit()
+
+    result = service.repair_modern_slate_artwork(db_session, user_id=user.id)
+
+    db_session.refresh(slate)
+    rendered = slate.metadata_json['rendered_slate']
+    assert result == {'scanned': 1, 'already_valid': 0, 'repaired': 1, 'insufficient_data': 0, 'failed': 0}
+    assert Path(rendered['local_path']).is_file()
+    assert slate.slate_image_id == legacy.id
+    assert slate.created_at == original_created_at
+    assert slate.item_id == 'SP-LEGACY-12'
+    assert slate.box_id == 'BX-0042'
+    assert slate.location == 'SHELF-9'
+    assert slate.qr_payload_json['item_id'] == 'SP-LEGACY-12'
+    assert slate.qr_payload_json['box_id'] == 'BX-0042'
+    assert slate.qr_payload_json['custom_inventory_code'] == 'INV-42'
+    assert slate.qr_payload_json['legacy_source_image_id'] == legacy.id
+    assert slate.qr_payload_json['boundary_position'] == 'tail'
+    assert slate.metadata_json['legacy_metadata']['operator_note'] == 'Keep this evidence'
+    assert 'tail-slate' in rendered['local_path']
+    decoded = service.decode_slate_payload(rendered['local_path'])
+    assert decoded['item_id'] == slate.item_id
+    assert decoded['box_id'] == slate.box_id
+    assert decoded['legacy_source_image_id'] == legacy.id
+    assert decoded['boundary_position'] == 'tail'
+
+
+def test_modern_slate_artwork_repair_is_idempotent(db_session, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, 'storage_root', str(tmp_path))
+    user = _create_user(db_session, email='modern-slate-idempotent@example.com')
+    service = IntakeSlateService()
+    slate, _, _ = service.create_slate(db_session, user=user, payload={'session_id': 'IDEMPOTENT', 'title': 'Stable identity'})
+
+    first = service.repair_modern_slate_artwork(db_session, user_id=user.id)
+    generated_path = slate.metadata_json['rendered_slate']['local_path']
+    second = service.repair_modern_slate_artwork(db_session, user_id=user.id)
+
+    assert first['repaired'] == 1
+    assert second['already_valid'] == 1
+    assert slate.metadata_json['rendered_slate']['local_path'] == generated_path
+
+
+def test_retry_rendered_slate_upload_uses_google_photos_api(db_session, monkeypatch):
     user = _create_user(db_session, email='retry-rendered-slate@example.com')
     user.settings_json = {
         'intake_settings': {
@@ -806,15 +871,13 @@ def test_retry_rendered_slate_upload_requeues_existing_slate(db_session, monkeyp
     db_session.commit()
 
     service = IntakeSlateService()
-    bridge_calls = {}
+    upload_calls = {}
 
-    def _fake_submit_bridge_job(*, job_type, execution_mode, payload):
-        bridge_calls['job_type'] = job_type
-        bridge_calls['execution_mode'] = execution_mode
-        bridge_calls['payload'] = payload
-        return {'status': 'SUBMITTED_TO_BRIDGE', 'bridge_response': {'job_id': 'bridge-upload-1'}}
+    def _fake_upload_photo_to_album(**kwargs):
+        upload_calls.update(kwargs)
+        return {'album_id': 'album-1', 'media_id': 'media-1', 'album_product_url': 'https://photos.app.goo.gl/owned'}
 
-    monkeypatch.setattr('app.services.intake_slate.submit_bridge_job', _fake_submit_bridge_job)
+    monkeypatch.setattr('app.services.intake_slate.upload_photo_to_album', _fake_upload_photo_to_album)
 
     slate, _, _ = service.create_slate(
         db_session,
@@ -824,15 +887,15 @@ def test_retry_rendered_slate_upload_requeues_existing_slate(db_session, monkeyp
 
     upload = service.retry_rendered_slate_upload(db_session, user=user, slate_id=slate.id)
 
-    assert upload['status'] == 'SUBMITTED_TO_BRIDGE'
-    assert upload['job_type'] == 'google_photos_upload'
-    assert bridge_calls['payload']['item_id'] == slate.item_id
-    assert bridge_calls['payload']['rendered_asset']['storage_path'].endswith('.png')
-    assert bridge_calls['payload']['rendered_asset']['data_url'].startswith('data:image/png;base64,')
-    assert bridge_calls['payload']['operation'] == 'upload_rendered_slate'
+    assert upload['status'] == 'UPLOADED'
+    assert upload['execution_mode'] == 'google_photos_api'
+    assert upload['album_id'] == 'album-1'
+    assert upload_calls['filename'].endswith('.png')
+    assert upload_calls['image_bytes'].startswith(b'\x89PNG')
+    assert user.settings_json['intake_settings']['google_album_id'] == 'album-1'
 
 
-def test_create_slate_queues_rendered_asset_to_bridge_for_google_photos_upload(db_session, monkeypatch):
+def test_create_slate_uploads_rendered_asset_with_google_photos_api(db_session, monkeypatch):
     user = _create_user(db_session, email='bridge-upload@example.com')
     user.settings_json = {
         'intake_settings': {
@@ -847,15 +910,13 @@ def test_create_slate_queues_rendered_asset_to_bridge_for_google_photos_upload(d
     db_session.commit()
 
     service = IntakeSlateService()
-    bridge_calls = {}
+    upload_calls = {}
 
-    def _fake_submit_bridge_job(*, job_type, execution_mode, payload):
-        bridge_calls['job_type'] = job_type
-        bridge_calls['execution_mode'] = execution_mode
-        bridge_calls['payload'] = payload
-        return {'status': 'SUBMITTED_TO_BRIDGE', 'bridge_response': {'job_id': 'bridge-upload-1'}}
+    def _fake_upload_photo_to_album(**kwargs):
+        upload_calls.update(kwargs)
+        return {'album_id': 'album-2', 'media_id': 'media-2', 'album_product_url': 'https://photos.app.goo.gl/owned'}
 
-    monkeypatch.setattr('app.services.intake_slate.submit_bridge_job', _fake_submit_bridge_job)
+    monkeypatch.setattr('app.services.intake_slate.upload_photo_to_album', _fake_upload_photo_to_album)
 
     slate, qr_payload, _ = service.create_slate(
         db_session,
@@ -871,19 +932,17 @@ def test_create_slate_queues_rendered_asset_to_bridge_for_google_photos_upload(d
         rendered_asset=rendered_asset,
     )
 
-    notification = db_session.query(IntakeNotification).filter(IntakeNotification.user_id == user.id, IntakeNotification.notification_type == 'intake_slate_bridge_upload_queued').one()
+    notification = db_session.query(IntakeNotification).filter(IntakeNotification.user_id == user.id, IntakeNotification.notification_type == 'intake_slate_google_upload_succeeded').one()
 
-    assert upload['status'] == 'SUBMITTED_TO_BRIDGE'
-    assert upload['job_type'] == 'google_photos_upload'
+    assert upload['status'] == 'UPLOADED'
+    assert upload['execution_mode'] == 'google_photos_api'
     assert upload['target_album_url'] == 'https://photos.app.goo.gl/test-upload-album'
-    assert bridge_calls['job_type'] == 'google_photos_upload'
-    assert bridge_calls['execution_mode'] == 'browser_assist'
-    assert bridge_calls['payload']['operation'] == 'upload_rendered_slate'
-    assert bridge_calls['payload']['rendered_asset']['storage_path'] == rendered_asset['storage_path']
-    assert bridge_calls['payload']['rendered_asset']['data_url'].startswith('data:image/png;base64,')
-    assert bridge_calls['payload']['upload_label'] == f'{slate.item_id} PosterPro Slate'
+    assert upload['album_id'] == 'album-2'
+    assert upload_calls['filename'].endswith('.png')
+    assert upload_calls['image_bytes'].startswith(b'\x89PNG')
+    assert user.settings_json['intake_settings']['google_album_id'] == 'album-2'
     assert notification.metadata_json['item_id'] == slate.item_id
-    assert notification.metadata_json['target_album_url'] == 'https://photos.app.goo.gl/test-upload-album'
+    assert notification.metadata_json['google_media_id'] == 'media-2'
 
 
 
@@ -909,13 +968,11 @@ async def test_retry_rendered_slate_upload_route_requeues_existing_slate(async_c
 
     service_calls = {}
 
-    def _fake_submit_bridge_job(*, job_type, execution_mode, payload):
-        service_calls['job_type'] = job_type
-        service_calls['execution_mode'] = execution_mode
-        service_calls['payload'] = payload
-        return {'status': 'SUBMITTED_TO_BRIDGE', 'bridge_response': {'job_id': 'bridge-upload-2'}}
+    def _fake_upload_photo_to_album(**kwargs):
+        service_calls.update(kwargs)
+        return {'album_id': 'route-album', 'media_id': 'route-media', 'album_product_url': 'https://photos.app.goo.gl/owned'}
 
-    monkeypatch.setattr('app.services.intake_slate.submit_bridge_job', _fake_submit_bridge_job)
+    monkeypatch.setattr('app.services.intake_slate.upload_photo_to_album', _fake_upload_photo_to_album)
 
     created = await async_client.post(
         "/intake/slates",
@@ -927,9 +984,10 @@ async def test_retry_rendered_slate_upload_route_requeues_existing_slate(async_c
     retry = await async_client.post(f"/intake/slates/{slate_id}/bridge-upload")
     assert retry.status_code == 200
     payload = retry.json()
-    assert payload["bridge_upload"]["status"] == "SUBMITTED_TO_BRIDGE"
-    assert payload["bridge_upload"]["job_type"] == "google_photos_upload"
-    assert service_calls["payload"]["item_id"] == payload["slate"]["item_id"]
+    assert payload["bridge_upload"]["status"] == "UPLOADED"
+    assert payload["bridge_upload"]["execution_mode"] == "google_photos_api"
+    assert service_calls["filename"].endswith(".png")
+    assert service_calls["image_bytes"].startswith(b'\x89PNG')
 
 
 def test_create_draft_from_batch_uses_item_id_as_inventory_and_excludes_slate_images(db_session, monkeypatch):
@@ -1090,8 +1148,8 @@ def test_google_photos_parser_merges_playwright_continuation_when_visible_count_
     monkeypatch.setattr(httpx, 'Client', lambda *args, **kwargs: _FakeHttpxClient(html))
     monkeypatch.setattr(
         service,
-        'extract_photo_entries_via_playwright',
-        lambda _album_url: [
+        'extract_photo_entries_via_playwright_result',
+        lambda _album_url, **_kwargs: GooglePhotoEnumeration(entries=[
             {
                 'url': 'https://lh3.googleusercontent.com/pw/AP1GczExampleAlpha',
                 'source_photo_id': 'AF1QipAlpha123',
@@ -1119,7 +1177,7 @@ def test_google_photos_parser_merges_playwright_continuation_when_visible_count_
                 'captured_at': None,
                 'uploaded_at': None,
             },
-        ],
+        ], enumeration_complete=True, provider_item_count=3),
     )
 
     entries = service.extract_photo_entries('https://photos.app.goo.gl/example')
@@ -1330,6 +1388,10 @@ def test_manual_assignment_can_promote_unassigned_photos_into_a_real_batch_and_d
     batch = service.assign_unassigned_photos_to_item(db_session, user_id=user.id, item_id=slate.item_id)
 
     assert batch.item_id == slate.item_id
+    assert batch.draft_listing_id is None  # Open streams are not drafted until the snapshot closes.
+    service._close_final_batch_for_snapshot(db_session, user_id=user.id)
+    service.create_drafts_for_ready_batches(db_session, user_id=user.id)
+    db_session.refresh(batch)
     assert batch.draft_listing_id is not None
     listing = db_session.get(Listing, batch.draft_listing_id)
     assert listing is not None
@@ -1478,6 +1540,8 @@ def test_materialize_listing_images_uses_long_tail_seo_filenames(db_session):
         source_photo_id='photo-front',
         local_path=_make_image_file('photo-front', 'white'),
         original_filename='IMG_1234.JPG',
+        captured_at=datetime(2026, 7, 8, 12, 0, tzinfo=UTC),
+        imported_at=datetime(2026, 7, 8, 12, 0, tzinfo=UTC),
         metadata_json={},
         is_public_listing_candidate=True,
     )
@@ -1487,6 +1551,8 @@ def test_materialize_listing_images_uses_long_tail_seo_filenames(db_session):
         source_photo_id='photo-label',
         local_path=_make_image_file('photo-label', 'white'),
         original_filename='barcode-label.png',
+        captured_at=datetime(2026, 7, 8, 12, 0, 1, tzinfo=UTC),
+        imported_at=datetime(2026, 7, 8, 12, 0, 1, tzinfo=UTC),
         metadata_json={},
         is_public_listing_candidate=True,
     )

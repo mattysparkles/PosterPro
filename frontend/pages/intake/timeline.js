@@ -14,7 +14,7 @@ import {
   toThumbnailImageUrl,
 } from "../../lib/api";
 import { loadTimelineWindow } from "../../lib/timelinePagination.mjs";
-import { slatePreviewDataUrl } from "../../lib/timelinePreview.mjs";
+import { canonicalGroupTone, groupPalette, slatePalette } from "../../lib/timelineTheme.mjs";
 
 const WIDTHS = [48, 64, 88, 120, 160];
 const PAGE_SIZE = 500;
@@ -206,15 +206,22 @@ export default function IntakeTimeline() {
     void mutate(() => deleteTimelineAsset(photo.id), "Timeline asset removed; neighboring chronology was preserved.");
   };
 
-  const renderEntry = (entry, entryIndex, groupEntries, groupIndex) => {
+  const renderEntry = (entry, entryIndex, groupEntries, groupIndex, darkGroup) => {
     const photo = entry.photo || {};
     const state = classify(photo);
     const width = WIDTHS[zoom];
+    const controlPalette = groupPalette(darkGroup ? "dark" : "light");
+    const darkGroupControlStyle = {
+      color: controlPalette.controlColor,
+      backgroundColor: controlPalette.controlBackground,
+      borderColor: controlPalette.controlBorder,
+    };
     const thumbnail = toThumbnailImageUrl(
       photo.thumbnail_url || photo.display_url || photo.downloaded_url || photo.local_path,
       width,
       width,
-    ) || (state.slate ? slatePreviewDataUrl(photo) : null);
+    );
+    const slateMetadata = photo.metadata_json || {};
     const slateId = photo.slate_id || photo.slate?.id || (String(photo.id || "").startsWith("slate-") ? String(photo.id).slice(6) : null);
     const hasNext = entryIndex < groupEntries.length - 1 || groupIndex < groups.length - 1;
     const nextEntry = entryIndex < groupEntries.length - 1
@@ -236,11 +243,7 @@ export default function IntakeTimeline() {
             data-timeline-role={state.role}
             style={{
               width,
-              ...(state.role === "TAIL"
-                ? { backgroundColor: "#ff00d4", borderColor: "#ff00d4", color: "#170015" }
-                : state.slate
-                  ? { backgroundColor: "#39ff14", borderColor: "#00c853", color: "#071500" }
-                  : {}),
+              ...(state.slate ? slatePalette(state.role) : {}),
             }}
             className={`rounded-xl border-2 p-1 text-left shadow-sm ${state.slate ? "font-semibold" : "border-transparent bg-transparent text-inherit"} ${selected?.photo?.id === photo.id ? "ring-2 ring-blue-500" : ""}`}
           >
@@ -248,7 +251,9 @@ export default function IntakeTimeline() {
               {thumbnail ? (
                 <img src={thumbnail} alt={photo.original_filename || `Timeline asset ${photo.id}`} loading="lazy" decoding="async" className="h-full w-full object-cover" />
               ) : (
-                <span className="flex h-full items-center justify-center p-2 text-center text-[10px] text-slate-700">Image unavailable</span>
+                <span className="flex h-full flex-col items-center justify-center gap-1 p-2 text-center text-[10px] font-bold text-slate-800">
+                  {state.slate ? "MODERN SLATE NEEDS REPAIR" : "Image unavailable"}
+                </span>
               )}
               {state.slate && <span className="absolute left-1 top-1 rounded bg-black/75 px-1.5 py-0.5 text-[10px] font-black text-white">{state.role} SLATE</span>}
               {state.primary && <span className="absolute bottom-1 left-1 rounded bg-amber-300 px-1.5 py-0.5 text-[10px] font-black text-black">PRIMARY</span>}
@@ -263,22 +268,23 @@ export default function IntakeTimeline() {
             <div className="mt-1 flex gap-1">
               <a href={`/intake/slate?slate_id=${slateId}`} className="rounded border border-lime-700 bg-lime-100 px-1 text-[9px] font-semibold text-lime-900">EDIT SLATE</a>
               <a href={`/intake/slate?slate_id=${slateId}#voice`} className="rounded border border-lime-700 bg-lime-100 px-1 text-[9px] text-lime-900">VOICE NOTE</a>
+              {slateMetadata.legacy_source_image_url && <a href={slateMetadata.legacy_source_image_url} target="_blank" rel="noreferrer" className="rounded border border-slate-500 bg-white px-1 text-[9px] text-slate-800">VIEW LEGACY SOURCE</a>}
             </div>
           )}
           <div className="mt-1 flex max-w-[190px] flex-wrap justify-center gap-1">
             {!state.slate && (state.primary ? (
               <>
-                <Button type="button" variant="outline" disabled className="px-1 py-0 text-[9px]">PRIMARY</Button>
-                <Button type="button" variant="outline" disabled={busy} onClick={() => mutate(() => setTimelinePrimary(photo.id, { clear: true }), "Automatic best-photo selection restored for this group.")} className="px-1 py-0 text-[9px]">CLEAR PRIMARY / USE AUTO</Button>
+                <Button type="button" variant="outline" disabled style={darkGroupControlStyle} className="px-1 py-0 text-[9px]">PRIMARY</Button>
+                <Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => setTimelinePrimary(photo.id, { clear: true }), "Automatic best-photo selection restored for this group.")} className="px-1 py-0 text-[9px]">CLEAR PRIMARY / USE AUTO</Button>
               </>
             ) : (
-              <Button type="button" variant="outline" disabled={busy} onClick={() => mutate(() => setTimelinePrimary(photo.id), "Manual primary selected and listing media reordered.")} className="px-1 py-0 text-[9px]">SET PRIMARY</Button>
+              <Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => setTimelinePrimary(photo.id), "Manual primary selected and listing media reordered.")} className="px-1 py-0 text-[9px]">SET PRIMARY</Button>
             ))}
-            {state.slate && <Button type="button" variant="outline" disabled={busy} onClick={() => mutate(() => classifyTimelineAssets([photo.id], state.role === "TAIL" ? "HEAD" : "TAIL"), `Slate marked ${state.role === "TAIL" ? "HEAD" : "TAIL"}.`)} className="px-1 py-0 text-[9px]">{state.role === "TAIL" ? "HEAD SLATE" : "TAIL SLATE"}</Button>}
-            {state.slate && <Button type="button" variant="outline" disabled={busy} onClick={() => mutate(() => classifyTimelineAssets([photo.id], "PHOTO"), "Slate classification removed.")} className="px-1 py-0 text-[9px]">REMOVE SLATE</Button>}
-            <Button type="button" variant="outline" disabled={busy} onClick={() => remove(entry)} className="px-1 py-0 text-[9px]">DELETE</Button>
+            {state.slate && <Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => classifyTimelineAssets([photo.id], state.role === "TAIL" ? "HEAD" : "TAIL"), `Slate marked ${state.role === "TAIL" ? "HEAD" : "TAIL"}.`)} className="px-1 py-0 text-[9px]">{state.role === "TAIL" ? "HEAD SLATE" : "TAIL SLATE"}</Button>}
+            {state.slate && <Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => classifyTimelineAssets([photo.id], "PHOTO"), "Slate classification removed.")} className="px-1 py-0 text-[9px]">REMOVE SLATE</Button>}
+            <Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => remove(entry)} className="px-1 py-0 text-[9px]">DELETE</Button>
           </div>
-          {!state.slate && <div className="mt-1 flex gap-1"><Button type="button" variant="outline" disabled={busy} onClick={() => mutate(() => classifyTimelineAssets([photo.id], "HEAD"), "Marked Head Slate.")} className="px-1 py-0 text-[9px]">HEAD SLATE</Button><Button type="button" variant="outline" disabled={busy} onClick={() => mutate(() => classifyTimelineAssets([photo.id], "TAIL"), "Marked Tail Slate; preceding photos stay in this item group.")} className="px-1 py-0 text-[9px]">TAIL SLATE</Button></div>}
+          {!state.slate && <div className="mt-1 flex gap-1"><Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => classifyTimelineAssets([photo.id], "HEAD"), "Marked Head Slate.")} className="px-1 py-0 text-[9px]">HEAD SLATE</Button><Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => classifyTimelineAssets([photo.id], "TAIL"), "Marked Tail Slate; preceding photos stay in this item group.")} className="px-1 py-0 text-[9px]">TAIL SLATE</Button></div>}
         </div>
         {hasNext && nextEntry && <button type="button" disabled={busy} onClick={() => void addSlate(entry, nextEntry)} className="mt-16 shrink-0 rounded-full border border-dashed border-blue-300 bg-white/80 px-2 py-1 text-xs text-blue-700">+ Add Slate</button>}
       </div>
@@ -315,14 +321,13 @@ export default function IntakeTimeline() {
               <div className="flex min-w-max items-stretch gap-3">
                 {filter === "ALL" && items[0] && <button type="button" disabled={busy} onClick={() => void addSlate(null, items[0])} className="my-auto shrink-0 rounded-full border border-dashed border-blue-300 bg-white/80 px-3 py-2 text-xs text-blue-700">+ Add Slate at start</button>}
                 {groups.map((group, groupIndex) => {
-              const background = group.index === 0
-                ? { backgroundColor: "#f3f4f6", color: "#111827" }
-                : group.index % 2
-                  ? { backgroundColor: "#292929", color: "#ffffff" }
-                  : { backgroundColor: "#e5e7eb", color: "#111827" };
-              return <section key={group.id} data-image-group-id={group.id} data-image-group-index={group.index} style={background} className="flex shrink-0 flex-col rounded-2xl border border-slate-400/50 p-3">
+              const tone = canonicalGroupTone(group.index);
+              const palette = groupPalette(tone);
+              const background = { backgroundColor: palette.backgroundColor, color: palette.color };
+              const darkGroup = tone === "dark";
+              return <section key={group.id} data-image-group-id={group.id} data-image-group-index={group.index} data-image-group-tone={tone} style={background} className="flex shrink-0 flex-col rounded-2xl border border-slate-400/50 p-3">
                     <div className="mb-2 flex items-center justify-between gap-3 text-[10px] font-semibold uppercase tracking-wide opacity-80"><span>{group.index ? `Image Group ${group.index}` : "Unassigned Slate"}</span><span>{group.entries.filter((entry) => !classify(entry.photo || {}).slate).length} photos</span></div>
-                    <div className="flex min-w-min items-start gap-2">{group.entries.map((entry, index) => renderEntry(entry, index, group.entries, groupIndex))}</div>
+                    <div className="flex min-w-min items-start gap-2">{group.entries.map((entry, index) => renderEntry(entry, index, group.entries, groupIndex, darkGroup))}</div>
                   </section>;
                 })}
                 {filter === "ALL" && items.length === counts.total && items.length > 0 && <button type="button" disabled={busy} onClick={() => void addSlate(items[items.length - 1], null)} className="my-auto shrink-0 rounded-full border border-dashed border-blue-300 bg-white/80 px-3 py-2 text-xs text-blue-700">+ Add Slate at end</button>}

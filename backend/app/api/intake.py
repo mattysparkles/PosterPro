@@ -64,13 +64,11 @@ def _timeline_media_exists(path: str | None) -> bool:
 
 
 def _timeline_marker_media_path(rendered_path: str | None, linked_photo: IntakePhoto | None) -> str | None:
+    # The linked photographed Slate is retained as provenance/recovery evidence,
+    # never as the active Timeline representation. Active markers use generated
+    # modern artwork only; callers can expose the source separately as a legacy link.
     if _timeline_media_exists(rendered_path):
         return str(rendered_path)
-    if linked_photo is not None:
-        source_photo = _serialize_photo(linked_photo)
-        candidate = source_photo.get("thumbnail_url") or source_photo.get("display_url")
-        if _timeline_media_exists(candidate):
-            return str(candidate)
     return None
 
 
@@ -787,6 +785,16 @@ def update_intake_slate(
     return {"slate": _serialize_slate(slate)}
 
 
+@router.post("/slates/repair-modern-artwork")
+def repair_modern_slate_artwork(
+    limit: int = Query(default=500, ge=1, le=1000),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Repair generated canonical Slate artwork, scoped to the signed-in owner."""
+    return service.repair_modern_slate_artwork(db, user_id=current_user.id, limit=limit)
+
+
 @router.get("/slates/{slate_id}")
 def get_intake_slate(
     slate_id: int,
@@ -1281,6 +1289,7 @@ def intake_timeline(
             rendered.get("storage_path") or metadata.get("rendered_slate_url"),
             linked_photo,
         )
+        legacy_source = _serialize_photo(linked_photo) if linked_photo else None
         marker = {
             "id": marker_id,
             "user_id": current_user.id,
@@ -1311,10 +1320,28 @@ def intake_timeline(
                 "legacy_replaced_at": metadata.get("legacy_replaced_at"),
                 "legacy_captured_at": _iso(linked_photo.captured_at) if linked_photo else None,
                 "legacy_source_photo_id": linked_photo.source_photo_id if linked_photo else None,
+                "legacy_source_image_url": (legacy_source or {}).get("display_url"),
+                "modern_artwork_missing": rendered_path is None,
             },
             # Keep timeline markers compact; full QR/label payloads are loaded
             # only by the Slate editor/detail route.
-            "slate": {"id": slate.id, "item_id": slate.item_id, "box_id": slate.box_id, "location": slate.location, "title": slate.title, "notes": slate.notes, "voice_notes": (metadata.get("legacy_metadata") or {}).get("voice_notes") or (metadata.get("voice") or {}).get("notes"), "boundary_position": "tail" if slate_role == "TAIL" else "head"},
+            "slate": {
+                "id": slate.id,
+                "item_id": slate.item_id,
+                "box_id": slate.box_id,
+                "location": slate.location,
+                "title": slate.title,
+                "brand": slate.brand,
+                "model": slate.model,
+                "condition": slate.condition,
+                "quantity": qr.get("quantity"),
+                "dimensions": {"length": slate.length, "width": slate.width, "height": slate.height, "weight": slate.weight},
+                "notes": slate.notes,
+                "flaws": slate.flaws,
+                "voice_notes": (metadata.get("legacy_metadata") or {}).get("voice_notes") or (metadata.get("voice") or {}).get("notes"),
+                "transcript": (metadata.get("legacy_metadata") or {}).get("transcript") or (metadata.get("voice") or {}).get("transcript"),
+                "boundary_position": "tail" if slate_role == "TAIL" else "head",
+            },
         }
         marker_row = {"photo": marker, "timeline_key": (items[linked_position]["timeline_key"] if linked_position is not None else [str((boundary or {}).get("effective_boundary_at") or ""), "slate", str(slate.id)]), "late_arrival": False, "is_slate_marker": True}
         if linked_position is not None:

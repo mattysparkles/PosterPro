@@ -507,3 +507,39 @@ requirements above. Credentials were not rotated or printed.
   routes return HTTP 200, and the extension ZIP endpoint returns HTTP 200.
   No live marketplace listing was created or submitted. No non-PosterPro
   project or shared host resource was modified in this follow-up.
+
+## 2026-09-12 - Timeline / modern Slate closure corrections
+
+- The previous paragraph's full Head Slate result is superseded: the two full
+  suites now report `62 passed, 0 failed, 0 errors`. The seven prior failures
+  were stale test contracts/fixtures (AI mock kwargs, obsolete Google Photos
+  bridge-upload expectations, outdated parser seam, open-stream draft timing,
+  and unspecified photo chronology), not Timeline chronology regressions.
+- Modern Slate artwork no longer falls back to the photographed legacy source.
+  Missing active artwork now shows `MODERN SLATE NEEDS REPAIR`; the old source
+  remains linked separately as `VIEW LEGACY SOURCE`. An authenticated,
+  user-scoped, idempotent artwork repair regenerates a modern PNG and QR from
+  canonical Slate/QR data without changing item identity, legacy linkage, or
+  capture/order fields.
+- Current production read-only audit for operator user 2 found 370 Slates,
+  including 336 legacy-linked and 34 manual/unlinked records. A safe repair
+  generated 344 missing modern assets; the other 26 were already decodable.
+  Independent verification found 370/370 modern assets decodable, 336/336
+  linked source photos still decodable, QR item/box identity matching for
+  370/370, zero duplicate item IDs, and zero legacy source images used as the
+  active artwork path. The checkpoint's earlier 360/336/24 count has grown by
+  ten manual/unlinked records since that audit; none were deleted.
+- Timeline refresh/window preservation remains intact. Group appearance is
+  driven by canonical image-group index; dark-group text/control colors use
+  explicit high contrast; Head/Tail accents remain neon green/fuchsia. JS
+  palette/window tests pass. The actual public route and current Timeline JS
+  bundle were checked, but no browser executable is installed here, so visual
+  interaction/contrast remains `OPERATOR_TEST_REQUIRED` rather than claimed as
+  live-browser verified.
+- Validation after correction: `backend/tests/test_intake_head_slate.py`
+  plus `backend/tests/test_intake_slate_recovery_candidates.py` — `62 passed`;
+  Timeline helper tests — `5 passed`; frontend production build passed.
+  Backend and frontend were restarted; all four PosterPro services are active,
+  `/health` reports `database_ready=true`, and local/public Timeline routes
+  return HTTP 200. No marketplace listing was published. No non-PosterPro
+  project or shared host resource was modified during this closure pass.

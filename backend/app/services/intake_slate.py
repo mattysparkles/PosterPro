@@ -485,7 +485,8 @@ class IntakeSlateService:
         item_token = self._slug_token(item_id) or "item"
         destination_dir = Path(settings.storage_root) / "intake-slates" / session_token
         destination_dir.mkdir(parents=True, exist_ok=True)
-        destination = destination_dir / f"{item_token}-posterpro-head-slate.png"
+        boundary = "tail" if str(payload.get("boundary_position") or "head").lower() == "tail" else "head"
+        destination = destination_dir / f"{item_token}-posterpro-{boundary}-slate.png"
         preview.save(destination, format="PNG")
         output = io.BytesIO()
         preview.save(output, format="PNG")
@@ -494,6 +495,110 @@ class IntakeSlateService:
             "local_path": str(destination),
             "data_url": f"data:image/png;base64,{base64.b64encode(output.getvalue()).decode('ascii')}",
         }
+
+    def repair_modern_slate_artwork(self, db: Session, *, user_id: int, limit: int = 500) -> dict[str, int]:
+        """Regenerate missing/broken modern Slate assets from canonical persisted data.
+
+        Legacy photos remain linked as evidence; they are never used as the active
+        Slate image. This operation does not alter capture timestamps or ordering.
+        """
+        rows = db.execute(
+            select(IntakeSlate)
+            .where(IntakeSlate.user_id == user_id)
+            .order_by(IntakeSlate.id.asc())
+            .limit(max(1, min(int(limit or 500), 1000)))
+        ).scalars().all()
+        result = {"scanned": len(rows), "already_valid": 0, "repaired": 0, "insufficient_data": 0, "failed": 0}
+
+        def local_asset_path(value: str | None) -> Path | None:
+            raw = str(value or "").strip()
+            if not raw or raw.startswith(("https://", "http://", "data:")):
+                return None
+            if raw.startswith("/media/"):
+                raw = str(Path(settings.storage_root) / raw.removeprefix("/media/"))
+            return Path(raw)
+
+        def valid_image(value: str | None) -> bool:
+            path = local_asset_path(value)
+            if not path or not path.is_file():
+                return False
+            try:
+                with Image.open(path) as image:
+                    image.verify()
+                return True
+            except (OSError, ValueError):
+                return False
+
+        for slate in rows:
+            metadata = dict(slate.metadata_json) if isinstance(slate.metadata_json, dict) else {}
+            rendered = metadata.get("rendered_slate") if isinstance(metadata.get("rendered_slate"), dict) else {}
+            active_path = rendered.get("storage_path") or metadata.get("rendered_slate_url")
+            if valid_image(active_path):
+                result["already_valid"] += 1
+                continue
+
+            qr_payload = dict(slate.qr_payload_json) if isinstance(slate.qr_payload_json, dict) else {}
+            # Keep every extant QR/custom field, then overlay only non-empty
+            # authoritative values from the modern Slate columns.
+            payload = {**qr_payload}
+            canonical_fields = {
+                "type": SLATE_TYPE,
+                "version": SLATE_VERSION,
+                "session_id": slate.session_id,
+                "item_id": slate.item_id,
+                "box_id": slate.box_id,
+                "location": slate.location,
+                "title": slate.title,
+                "brand": slate.brand,
+                "model": slate.model,
+                "condition": slate.condition,
+                "notes": slate.notes,
+                "flaws": slate.flaws,
+                "weight": slate.weight,
+                "length": slate.length,
+                "width": slate.width,
+                "height": slate.height,
+                "packed": bool(slate.packed),
+            }
+            for key, value in canonical_fields.items():
+                if value is not None and value != "":
+                    payload[key] = value
+            role = str(metadata.get("timeline_role") or metadata.get("boundary_position") or payload.get("boundary_position") or "head").strip().lower()
+            payload["boundary_position"] = "tail" if role == "tail" or role.startswith("tail") else "head"
+            payload.setdefault("created_at", slate.created_at.isoformat() if slate.created_at else None)
+            legacy_id = slate.slate_image_id or metadata.get("legacy_photo_id")
+            if legacy_id:
+                payload["legacy_source_image_id"] = legacy_id
+                metadata.setdefault("legacy_photo_id", legacy_id)
+            metadata["timeline_role"] = payload["boundary_position"].upper()
+            metadata["modern_slate"] = True
+
+            # An item ID is the minimum stable identity needed for a generated
+            # canonical Slate/QR; do not fabricate one during repair.
+            if not str(payload.get("item_id") or "").strip():
+                result["insufficient_data"] += 1
+                continue
+            try:
+                asset = self.render_slate_preview_asset(payload, item_id=slate.item_id, session_id=slate.session_id)
+                if not valid_image(asset.get("local_path")):
+                    raise OSError("Generated modern Slate artwork is not decodable")
+                metadata["rendered_slate"] = {
+                    "storage_path": asset["storage_path"],
+                    "local_path": asset["local_path"],
+                    "generated_from": "canonical_intake_slate_and_qr",
+                    "generated_at": datetime.now(UTC).isoformat(),
+                }
+                metadata["rendered_slate_url"] = asset["storage_path"]
+                slate.qr_payload_json = payload
+                slate.metadata_json = metadata
+                db.add(slate)
+                result["repaired"] += 1
+            except Exception:
+                logging.getLogger(__name__).exception("Could not regenerate modern Slate artwork for slate_id=%s", slate.id)
+                result["failed"] += 1
+        if result["repaired"]:
+            db.commit()
+        return result
 
     def render_label_preview_asset(
         self,
