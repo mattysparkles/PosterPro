@@ -7,6 +7,8 @@ import toast from 'react-hot-toast';
 
 import AppShell from '../components/layout/AppShell';
 import GuidedSetupCard from '../components/onboarding/GuidedSetupCard';
+import ExtensionVersionStatus from '../components/marketplaces/ExtensionVersionStatus';
+import MarketplaceDiagnosticReport from '../components/marketplaces/MarketplaceDiagnosticReport';
 import CmsTemplateWorkspace from '../components/CmsTemplateWorkspace';
 import ThemeSelector from '../components/settings/ThemeSelector';
 import SettingsLayout from '../components/settings/SettingsLayout';
@@ -46,6 +48,7 @@ import {
   startMarketplaceDiagnostic,
   fetchMarketplaceDiagnostic,
   fetchLatestMarketplaceDiagnostic,
+  fetchMarketplaceDiagnosticHistory,
   createMarketplaceExtensionPairingCode,
   revokeMarketplaceExtensionDevice,
   fetchEbayAccountReadiness,
@@ -113,6 +116,7 @@ export default function SettingsPage() {
   const [bridgeAccounts, setBridgeAccounts] = useState([]);
   const [marketplaceExtensionState, setMarketplaceExtensionState] = useState({ devices: [], pending_jobs: 0, active_jobs: [], recent_failures: [] });
   const [marketplaceDiagnostic, setMarketplaceDiagnostic] = useState(null);
+  const [marketplaceDiagnosticHistory, setMarketplaceDiagnosticHistory] = useState([]);
   const [marketplaceDiagnosticTarget, setMarketplaceDiagnosticTarget] = useState('facebook');
   const [startingMarketplaceDiagnostic, setStartingMarketplaceDiagnostic] = useState(false);
   const [marketplaceExtensionPairingCode, setMarketplaceExtensionPairingCode] = useState(null);
@@ -433,8 +437,18 @@ export default function SettingsPage() {
     fetchLatestMarketplaceDiagnostic(marketplaceDiagnosticTarget)
       .then((value) => { if (active) setMarketplaceDiagnostic(value?.status === 'NOT_RUN' ? null : value); })
       .catch(() => {});
+    fetchMarketplaceDiagnosticHistory(marketplaceDiagnosticTarget, 5)
+      .then((value) => { if (active) setMarketplaceDiagnosticHistory(Array.isArray(value) ? value : []); })
+      .catch(() => { if (active) setMarketplaceDiagnosticHistory([]); });
     return () => { active = false; };
   }, [marketplaceDiagnosticTarget]);
+
+  useEffect(() => {
+    if (!marketplaceDiagnostic?.id || ['QUEUED', 'CLAIMED', 'NAVIGATING', 'FORM_DETECTED', 'TESTING_FIELDS'].includes(String(marketplaceDiagnostic.status).toUpperCase())) return;
+    fetchMarketplaceDiagnosticHistory(marketplaceDiagnostic.marketplace || marketplaceDiagnosticTarget, 5)
+      .then((value) => setMarketplaceDiagnosticHistory(Array.isArray(value) ? value : []))
+      .catch(() => {});
+  }, [marketplaceDiagnostic?.id, marketplaceDiagnostic?.status, marketplaceDiagnosticTarget]);
 
   useEffect(() => {
     if (!marketplaceDiagnostic?.id || !['QUEUED', 'CLAIMED', 'NAVIGATING', 'FORM_DETECTED', 'TESTING_FIELDS'].includes(String(marketplaceDiagnostic.status).toUpperCase())) return undefined;
@@ -2792,6 +2806,7 @@ export default function SettingsPage() {
                         <Button type="button" variant="outline" onClick={() => reload()}>Test / Refresh Connection</Button>
                         <Button type="button" variant="outline" href="/jobs?tab=assisted">View Assisted Jobs</Button>
                       </div>
+                      <div className="mt-3"><ExtensionVersionStatus state={marketplaceExtensionState} compact /></div>
                         <p className="mt-2 text-xs text-[#667085]">Install once: download the ZIP, unpack it, and load it from your browser’s extension manager. After signing into PosterPro, {browserExtensionAvailable ? 'this browser is detected; authorize it once below.' : 'the extension will be detected here when this page is reopened.'} Pairing stays scoped to this account; marketplace login stays in this browser.</p>
                       {marketplaceExtensionPairingCode?.pairing_code ? <div className="mt-3 rounded-lg bg-[#f2f4f7] p-3" role="status">
                         <p className="text-xs font-semibold text-[#344054]">One-time pairing code · expires {formatDateTimeValue(marketplaceExtensionPairingCode.expires_at)}</p>
@@ -2808,22 +2823,17 @@ export default function SettingsPage() {
                         {(marketplaceExtensionState.recent_failures || []).slice(0, 2).map((job) => <p key={job.id} className="text-xs text-[#b42318]">Job #{job.id} · {job.marketplace}: {job.error_detail || job.error_code || 'failed'}</p>)}
                       </div>
                       <div className="mt-4 rounded-xl border border-[#dbe7ff] bg-[#f8faff] p-4">
-                        <p className="text-sm font-semibold text-[#101828]">Real marketplace form test</p>
-                        <p className="mt-1 text-xs leading-5 text-[#475467]">This opens the marketplace in your paired browser, tests supported fields using a clearly marked sample, and never submits it.</p>
+                        <p className="text-sm font-semibold text-[#101828]">Start a real marketplace form test</p>
+                        <p className="mt-1 text-xs leading-5 text-[#475467]">Choose a destination and start its test. The extension opens that marketplace in this browser profile, uses clearly marked synthetic content, records only safe form structure/results, and never submits.</p>
                         <div className="mt-3 flex flex-wrap items-center gap-2">
                           <select aria-label="Marketplace to test" value={marketplaceDiagnosticTarget} onChange={(event) => setMarketplaceDiagnosticTarget(event.target.value)} className="rounded-lg border border-[#d0d5dd] bg-white px-3 py-2 text-sm">
                             {['facebook', 'mercari', 'poshmark', 'vinted', 'offerup'].map((market) => <option key={market} value={market}>{market[0].toUpperCase() + market.slice(1)}</option>)}
                           </select>
                           <Button type="button" disabled={startingMarketplaceDiagnostic || ['QUEUED', 'CLAIMED', 'NAVIGATING', 'FORM_DETECTED', 'TESTING_FIELDS'].includes(String(marketplaceDiagnostic?.status || '').toUpperCase())} onClick={() => startMarketplaceFormDiagnostic(marketplaceDiagnosticTarget)}>
-                            {startingMarketplaceDiagnostic ? 'Starting…' : `Start ${marketplaceDiagnosticTarget[0].toUpperCase() + marketplaceDiagnosticTarget.slice(1)} Real Form Test`}
+                            {startingMarketplaceDiagnostic ? 'Starting…' : `START ${marketplaceDiagnosticTarget.toUpperCase()} REAL FORM TEST`}
                           </Button>
                         </div>
-                        {marketplaceDiagnostic ? <div className="mt-3 rounded-lg border border-[#eaecf0] bg-white p-3" role="status">
-                          <p className="text-sm font-semibold text-[#101828]">Test {String(marketplaceDiagnostic.status || '').replaceAll('_', ' ').toLowerCase()} · {marketplaceDiagnostic.result?.login_state || 'login state unverified'}</p>
-                          {marketplaceDiagnostic.error_detail ? <p className="mt-1 text-xs text-[#b54708]">{marketplaceDiagnostic.error_detail}</p> : null}
-                          {marketplaceDiagnostic.result?.field_results?.length ? <ul className="mt-2 grid gap-1 sm:grid-cols-2">{marketplaceDiagnostic.result.field_results.map((field) => <li key={field.field} className={`text-xs ${field.required && !field.filled ? 'text-[#b42318]' : 'text-[#027a48]'}`}>{field.filled ? '✓' : field.required ? '✗' : '·'} {field.field.replaceAll('_', ' ')}{field.error_code ? ` — ${field.error_code}` : ''}</li>)}</ul> : null}
-                          {marketplaceDiagnostic.result ? <p className="mt-2 text-[11px] text-[#667085]">{marketplaceDiagnostic.result.submission_performed ? 'Submission occurred' : 'No listing was submitted.'} · Capability ready: {marketplaceDiagnostic.result.capability_ready ? 'yes' : 'no'}</p> : null}
-                        </div> : null}
+                        <MarketplaceDiagnosticReport marketplace={marketplaceDiagnosticTarget} diagnostic={marketplaceDiagnostic} history={marketplaceDiagnosticHistory} running={startingMarketplaceDiagnostic} onRun={() => startMarketplaceFormDiagnostic(marketplaceDiagnosticTarget)} />
                       </div>
                     </div>
                   </div>

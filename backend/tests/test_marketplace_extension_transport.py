@@ -50,7 +50,7 @@ async def _pair(client, device_name: str) -> tuple[str, int]:
     assert code_response.status_code == 200
     paired = await client.post(
         "/browser-extension/pair",
-        json={"pairing_code": code_response.json()["pairing_code"], "device_name": device_name, "browser": "Chrome", "extension_version": "0.3.0"},
+        json={"pairing_code": code_response.json()["pairing_code"], "device_name": device_name, "browser": "Chrome", "extension_version": "0.3.1"},
     )
     assert paired.status_code == 200
     body = paired.json()
@@ -225,10 +225,11 @@ async def test_marketplace_diagnostic_is_tenant_scoped_and_persists_field_result
         "action": "DIAGNOSTIC",
         "login_state": "LOGGED_IN",
         "page_state": "FORM_AVAILABLE",
+        "capability_ready": True,
         "submission_performed": False,
         "cookies": "must not be persisted",
         "password": "must not be persisted",
-        "field_results": [{"field": "category", "required": True, "detected": False, "attempted": True, "filled": False, "verified_value": None, "error_code": "FIELD_NOT_FOUND"}],
+        "field_results": [{"field": "category", "required": True, "detected": False, "attempted": True, "filled": False, "verified_value": None, "error_code": "FIELD_NOT_FOUND", "selector_diagnostic": {"field": "category", "page_path": "/marketplace/create/item?access_token=private", "selectors_tried": ["select[name=category]"], "controls": [{"tag": "button", "role": "button", "aria_label": "Category", "nearby_label": "Category", "name": "category", "placeholder": "", "option_labels": ["Clothing", "access_token=should-not-leak", "Collectibles"], "value": "private account data"}, {"tag": "input", "aria_label": "owner@example.com", "name": "access_token_secret"}]}}],
     }
     for status in ("NAVIGATING", "FORM_DETECTED", "TESTING_FIELDS", "COMPLETED"):
         response = await async_client.post(
@@ -239,9 +240,20 @@ async def test_marketplace_diagnostic_is_tenant_scoped_and_persists_field_result
         assert response.status_code == 200
     latest = await async_client.get("/browser-extension/diagnostics/latest/facebook")
     assert latest.status_code == 200
+    assert latest.json()["current_version"] == "0.3.1"
+    assert latest.json()["minimum_version"] == "0.3.1"
     assert latest.json()["result"]["field_results"][0]["error_code"] == "FIELD_NOT_FOUND"
+    assert latest.json()["result"]["capability_ready"] is False
     assert "cookies" not in latest.json()["result"]
     assert "password" not in latest.json()["result"]
+    diagnostic_field = latest.json()["result"]["field_results"][0]["selector_diagnostic"]
+    assert diagnostic_field["page_path"] == "/marketplace/create/item"
+    assert diagnostic_field["controls"][0] == {"tag": "button", "role": "button", "aria_label": "Category", "name": "category", "nearby_label": "Category", "option_labels": ["Clothing", "Collectibles"]}
+    assert diagnostic_field["controls"][1] == {"tag": "input"}
+    history = await async_client.get("/browser-extension/diagnostics/history/facebook")
+    assert history.status_code == 200 and len(history.json()) == 1
+    assert history.json()[0]["device"]["browser"] == "Chrome"
+    assert history.json()[0]["minimum_version"] == "0.3.1"
 
     foreign = await _register(async_client, "ForeignDiagnostic")
     foreign_detail = await async_client.get(f"/browser-extension/diagnostics/{job['id']}")
@@ -254,6 +266,25 @@ async def test_marketplace_diagnostic_is_tenant_scoped_and_persists_field_result
         assert db.query(MarketplaceListing).filter_by(marketplace=MarketplaceName.facebook).count() == 0
     finally:
         db.close()
+
+
+@pytest.mark.anyio
+async def test_extension_version_status_updates_in_place_without_repairing_pairing(async_client):
+    await _register(async_client, "ExtensionVersion")
+    token, device_id = await _pair(async_client, "Existing Chrome Profile")
+    headers = {"Authorization": f"Bearer {token}"}
+    old = await async_client.post("/browser-extension/heartbeat", headers=headers, json={"browser": "Chrome", "extension_version": "0.2.0"})
+    assert old.status_code == 200
+    state = await async_client.get("/browser-extension/devices")
+    device = next(item for item in state.json()["devices"] if item["id"] == device_id)
+    assert state.json()["current_version"] == "0.3.1"
+    assert state.json()["minimum_version"] == "0.3.1"
+    assert device["update_required"] is True
+    refreshed = await async_client.post("/browser-extension/heartbeat", headers=headers, json={"browser": "Chrome", "extension_version": "0.3.1"})
+    assert refreshed.status_code == 200
+    state = await async_client.get("/browser-extension/devices")
+    device = next(item for item in state.json()["devices"] if item["id"] == device_id)
+    assert device["update_required"] is False
 
 
 @pytest.mark.anyio

@@ -1636,6 +1636,10 @@ export function fetchLatestMarketplaceDiagnostic(marketplace) {
   return jsonFetch(`${API_BASE}/browser-extension/diagnostics/latest/${encodeURIComponent(marketplace)}`);
 }
 
+export function fetchMarketplaceDiagnosticHistory(marketplace, limit = 5) {
+  return jsonFetch(`${API_BASE}/browser-extension/diagnostics/history/${encodeURIComponent(marketplace)}?limit=${encodeURIComponent(limit)}`);
+}
+
 export function recordOnboardingEvent(eventName, taskId = null) {
   return jsonFetch(`${API_BASE}/onboarding/event`, {
     method: 'POST',

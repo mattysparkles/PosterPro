@@ -40,6 +40,62 @@ function ppSetValue(node, value) {
   return true;
 }
 
+function ppSafeStructureText(value, limit = 80) {
+  const text = String(value || "").replace(/\s+/g, " ").trim().slice(0, limit);
+  if (!text || /@|password|cookie|token|secret|bearer|\b\d{3}[- .]?\d{3}[- .]?\d{4}\b/i.test(text)) return null;
+  return /^[\p{L}\p{N}_ .,:/()&+'’-]+$/u.test(text) ? text : null;
+}
+
+function ppControlStructure(node, field) {
+  if (!node) return null;
+  const type = String(node.getAttribute("type") || "").toLowerCase();
+  if (["password", "email", "tel", "hidden"].includes(type)) return null;
+  const tag = String(node.tagName || "").toLowerCase();
+  const role = String(node.getAttribute("role") || (tag === "select" ? "combobox" : tag === "textarea" || tag === "input" ? "textbox" : tag === "button" ? "button" : "")).toLowerCase();
+  const labelNode = node.labels?.[0] || node.closest?.("label") || (node.id ? document.querySelector(`label[for="${CSS.escape(node.id)}"]`) : null);
+  const result = { tag, role };
+  const fieldAliases = {
+    category: ["category", "department", "item type"], condition: ["condition"], availability: ["availability", "quantity"],
+    department: ["department"], subcategory: ["subcategory", "category"], shipping: ["shipping", "delivery", "parcel"],
+    shipping_payer: ["shipping", "delivery", "payer"], shipping_method: ["shipping", "delivery", "method"], package: ["package", "parcel", "weight"],
+  };
+  const aliasHints = fieldAliases[field] || [field];
+  const rawAttrs = [
+    ["aria_label", node.getAttribute("aria-label")],
+    ["name", node.getAttribute("name")],
+    ["placeholder", node.getAttribute("placeholder")],
+    ["nearby_label", labelNode?.innerText || labelNode?.textContent],
+  ].map(([key, value]) => [key, ppSafeStructureText(value, key === "name" ? 64 : 80)]).filter(([, value]) => value);
+  const labelHint = rawAttrs.map(([, value]) => value).join(" ").toLowerCase();
+  const isMatchingControl = aliasHints.some((alias) => labelHint.includes(alias));
+  if (isMatchingControl) for (const [key, value] of rawAttrs) result[key] = value;
+  if (tag === "select" && isMatchingControl) {
+    result.option_labels = Array.from(node.options || []).slice(0, 12).map((option) => ppSafeStructureText(option.label || option.textContent, 80)).filter(Boolean);
+  }
+  return result;
+}
+
+function ppSelectorDiagnostic(field, node, selectors, labels = []) {
+  const root = node?.closest?.("form") || document.querySelector("form") || document;
+  let controls = node ? [node] : Array.from(root.querySelectorAll("input:not([type=password]):not([type=email]):not([type=tel]):not([type=hidden]), textarea, select, [role=combobox], [role=button], button[aria-label]"))
+    .filter((candidate) => candidate.offsetParent !== null && !candidate.disabled)
+    .filter((candidate) => {
+      const role = String(candidate.getAttribute("role") || "").toLowerCase();
+      const tag = String(candidate.tagName || "").toLowerCase();
+      const semantic = ["category", "condition", "availability", "department", "subcategory", "shipping", "shipping_payer", "shipping_method", "package"].includes(field);
+      return semantic ? tag === "select" || ["combobox", "button", "option"].includes(role) || tag === "button" : ["input", "textarea"].includes(tag) || role === "textbox";
+    }).slice(0, 6);
+  if (!controls.length) controls = [null];
+  const safeLabels = (labels || []).map((label) => ppSafeStructureText(label, 80)).filter(Boolean);
+  return {
+    field,
+    page_path: location.pathname.split("/").map((part) => (/^\d+$/.test(part) || part.length > 48 ? ":id" : part)).join("/").slice(0, 300),
+    selectors_tried: (selectors || []).slice(0, 8).map(String),
+    controls: controls.map((control) => ppControlStructure(control, field)).filter(Boolean),
+    expected_label_hints: safeLabels,
+  };
+}
+
 const ppWait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function ppOptionAliases(marketplace, field, value) {
@@ -160,14 +216,19 @@ async function ppFillListing({ marketplace, payload = {}, images = [], diagnosti
   const populated_fields = [];
   const missing_required_fields = [];
   const field_results = [];
-  const record = (field, required, detected, attempted, filled, value, error_code = null) => field_results.push({ field, required, detected, attempted, filled, verified_value: filled ? String(value ?? "").slice(0, 160) : null, error_code });
+  const record = (field, required, detected, attempted, filled, value, error_code = null, node = null, selectors = [], labels = []) => field_results.push({
+    field, required, detected, attempted, filled,
+    verified_value: filled ? String(value ?? "").slice(0, 160) : null,
+    error_code,
+    ...(filled ? {} : { selector_diagnostic: ppSelectorDiagnostic(field, node, selectors, labels) }),
+  });
   const fields = [["title", adapter.title, ["title"]], ["price", adapter.price, ["price"]], ["description", adapter.description, ["description", "describe"]]];
   for (const [name, selectors, labels] of fields) {
     const node = ppFindField(selectors, labels);
     const value = name === "price" ? payload[name] : payload[name];
     const filled = ppSetValue(node, value);
     if (filled) populated_fields.push(name); else missing_required_fields.push(name);
-    record(name, true, Boolean(node), true, filled, value, filled ? null : (node ? "VALUE_NOT_ACCEPTED" : "FIELD_NOT_FOUND"));
+    record(name, true, Boolean(node), true, filled, value, filled ? null : (node ? "VALUE_NOT_ACCEPTED" : "FIELD_NOT_FOUND"), node, selectors, labels);
   }
 
   const diagnosticValues = {
@@ -199,7 +260,7 @@ async function ppFillListing({ marketplace, payload = {}, images = [], diagnosti
     const node = ppFindField(selectors, [name, ...(name === "shipping" ? ["delivery", "parcel"] : [])]);
     const selected = await ppSelectOption(node, value, market, name);
     if (selected.ok) populated_fields.push(name); else if (required) missing_required_fields.push(name);
-    record(name, required, Boolean(node), true, selected.ok, selected.value || value, selected.error_code || null);
+    record(name, required, Boolean(node), true, selected.ok, selected.value || value, selected.error_code || null, node, selectors, [name, ...(name === "shipping" ? ["delivery", "parcel"] : [])]);
   }
 
   const diagnosticOptionalValues = diagnostic ? {
@@ -217,7 +278,7 @@ async function ppFillListing({ marketplace, payload = {}, images = [], diagnosti
     const filled = ppSetValue(node, optionalValues[name]);
     const required = (adapter.required_text_fields || []).includes(name);
     if (filled) populated_fields.push(name); else if (required) missing_required_fields.push(name);
-    record(name, required, Boolean(node), true, filled, optionalValues[name], filled ? null : (node ? "VALUE_NOT_ACCEPTED" : "FIELD_NOT_FOUND"));
+    record(name, required, Boolean(node), true, filled, optionalValues[name], filled ? null : (node ? "VALUE_NOT_ACCEPTED" : "FIELD_NOT_FOUND"), node, adapter[name], [name]);
   }
 
   let uploadImages = Array.isArray(images) ? images : [];
@@ -240,7 +301,7 @@ async function ppFillListing({ marketplace, payload = {}, images = [], diagnosti
   }
   const photoOk = uploaded_image_count > 0;
   if (!photoOk) missing_required_fields.push("photos");
-  record("photos", true, detectedPhotoInput, true, photoOk, `${uploaded_image_count} synthetic/canonical image(s)`, photoOk ? null : (detectedPhotoInput ? "IMAGE_TRANSFER_FAILED" : "FILE_INPUT_NOT_FOUND"));
+  record("photos", true, detectedPhotoInput, true, photoOk, `${uploaded_image_count} synthetic/canonical image(s)`, photoOk ? null : (detectedPhotoInput ? "IMAGE_TRANSFER_FAILED" : "FILE_INPUT_NOT_FOUND"), input, [adapter.photos], ["photos", "add photos", "upload"]);
 
   const baseFieldsDetected = fields.every(([name, selectors, labels]) => Boolean(ppFindField(selectors, labels)));
   const page_state = baseFieldsDetected ? "FORM_AVAILABLE" : "FORM_CHANGED";

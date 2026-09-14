@@ -29,8 +29,8 @@ from app.services.marketplace_extension_jobs import MarketplaceExtensionJobError
 from app.services.process_notifications import create_process_notification
 
 router = APIRouter()
-CURRENT_EXTENSION_VERSION = "0.3.0"
-MINIMUM_EXTENSION_VERSION = "0.3.0"
+CURRENT_EXTENSION_VERSION = "0.3.1"
+MINIMUM_EXTENSION_VERSION = "0.3.1"
 
 ASSISTED_MARKETPLACES = {"facebook", "mercari", "poshmark", "vinted", "etsy", "offerup", "depop", "whatnot"}
 JOB_STATES = {
@@ -172,6 +172,84 @@ def _job_payload(job: MarketplaceExtensionJob) -> dict:
     }
 
 
+def _diagnostic_payload(db: Session, job: MarketplaceExtensionJob) -> dict:
+    payload = _job_payload(job)
+    payload["current_version"] = CURRENT_EXTENSION_VERSION
+    payload["minimum_version"] = MINIMUM_EXTENSION_VERSION
+    device = db.get(MarketplaceExtensionDevice, job.device_id) if job.device_id else None
+    payload["device"] = ({
+        "id": device.id,
+        "name": _safe_structural_text(device.name, 48) or f"Device {device.id}",
+        "browser": _safe_structural_text(device.browser, 24) or "unknown",
+        "extension_version": device.extension_version,
+        "last_seen_at": _iso(device.last_seen_at),
+    } if device else None)
+    return payload
+
+
+def _safe_structural_text(value, limit: int = 100) -> str | None:
+    if not isinstance(value, str):
+        return None
+    candidate = " ".join(value.split())[:limit]
+    if not candidate or "@" in candidate or re.search(
+        r"(?i)(password|cookie|token|bearer|secret|session|\b[A-F0-9]{24,}\b|\b\d{3}[- .]?\d{3}[- .]?\d{4}\b)",
+        candidate,
+    ):
+        return None
+    return candidate if re.fullmatch(r"[\w .,:/()&+’'’-]+", candidate, flags=re.UNICODE) else None
+
+
+def _safe_selector_diagnostic(value, field_name: str) -> dict | None:
+    if not isinstance(value, dict) or str(value.get("field") or "") != field_name:
+        return None
+    safe = {"field": field_name}
+    path = value.get("page_path")
+    if isinstance(path, str) and path.startswith("/"):
+        safe_path = path.split("?", 1)[0].split("#", 1)[0]
+        segments = [segment for segment in safe_path.split("/") if segment]
+        safe["page_path"] = "/" + "/".join(":id" if (segment.isdigit() or len(segment) > 48 or re.search(r"(?i)(token|secret|session|auth|key)", segment) or re.fullmatch(r"[a-z0-9_-]{24,}", segment, re.I)) else segment for segment in segments[:12])
+    selectors = value.get("selectors_tried")
+    if isinstance(selectors, list):
+        safe["selectors_tried"] = [item[:140] for item in selectors[:8] if isinstance(item, str) and len(item) <= 140 and re.fullmatch(r"[A-Za-z0-9_#.[\] ='\"():->,*+-]+", item)]
+    controls = value.get("controls")
+    safe_controls = []
+    field_aliases = {
+        "category": ("category", "department", "item type"), "condition": ("condition",), "availability": ("availability", "quantity"),
+        "department": ("department",), "subcategory": ("subcategory", "category"), "shipping": ("shipping", "delivery", "parcel"),
+        "shipping_payer": ("shipping", "delivery", "payer"), "shipping_method": ("shipping", "delivery", "method"), "package": ("package", "parcel", "weight"),
+    }
+    if isinstance(controls, list):
+        for control in controls[:8]:
+            if not isinstance(control, dict):
+                continue
+            item = {}
+            tag = str(control.get("tag") or "").lower()
+            role = str(control.get("role") or "").lower()
+            if tag in {"input", "textarea", "select", "button", "div", "span", "label"}:
+                item["tag"] = tag
+            if role in {"textbox", "combobox", "button", "option", "listbox", "radio", "checkbox", "switch"}:
+                item["role"] = role
+            attributes = {}
+            for key, limit in (("aria_label", 80), ("name", 64), ("placeholder", 80), ("nearby_label", 80)):
+                text = _safe_structural_text(control.get(key), limit)
+                if text:
+                    attributes[key] = text
+            label_hint = " ".join(attributes.values()).lower()
+            associated = any(alias in label_hint for alias in field_aliases.get(field_name, (field_name,)))
+            if associated:
+                item.update(attributes)
+            options = control.get("option_labels")
+            if isinstance(options, list) and associated:
+                item["option_labels"] = [text for option in options[:12] if (text := _safe_structural_text(option, 80))]
+            if item:
+                safe_controls.append(item)
+    safe["controls"] = safe_controls
+    hints = value.get("expected_label_hints")
+    if isinstance(hints, list):
+        safe["expected_label_hints"] = [text for hint in hints[:8] if (text := _safe_structural_text(hint, 80))]
+    return safe
+
+
 def _safe_diagnostic_result(value: dict | None, marketplace: str) -> dict | None:
     """Persist only structured, non-sensitive capability facts from the extension."""
     if not isinstance(value, dict):
@@ -186,9 +264,8 @@ def _safe_diagnostic_result(value: dict | None, marketplace: str) -> dict | None
         candidate = str(value.get(key) or "").upper()
         if candidate in choices:
             safe[key] = candidate
-    for key in ("capability_ready", "form_detected", "operator_review_required"):
-        if isinstance(value.get(key), bool):
-            safe[key] = value[key]
+    if isinstance(value.get("operator_review_required"), bool):
+        safe["operator_review_required"] = value["operator_review_required"]
     for key in ("error_code", "selector_strategy"):
         candidate = str(value.get(key) or "")
         if key == "error_code" and candidate and all(char.isalnum() or char in "_-" for char in candidate):
@@ -221,17 +298,30 @@ def _safe_diagnostic_result(value: dict | None, marketplace: str) -> dict | None
             if isinstance(verified, (str, int, float)):
                 # This value is the extension's entered/mapped value, never page content.
                 verified_text = str(verified)[:160]
-                secret_shape = re.search(r"(?i)(password|cookie|session.?token|access.?token|refresh.?token|bearer\s+|sk-[a-z0-9_-]{12,}|ya29\.[a-z0-9._-]{12,})", verified_text)
+                secret_shape = re.search(r"(?i)(password|cookie|session.?token|access.?token|refresh.?token|bearer\s+|sk-[a-z0-9_-]{12,}|ya29\.[a-z0-9._-]{12,}|https?://|[?&][a-z0-9_-]+=|@[a-z0-9.-]+)", verified_text)
                 item["verified_value"] = None if secret_shape else verified_text
             error_code = str(row.get("error_code") or "")
             if error_code and all(char.isalnum() or char in "_-" for char in error_code):
                 item["error_code"] = error_code[:100]
+            if item.get("filled") is not True:
+                selector_diagnostic = _safe_selector_diagnostic(row.get("selector_diagnostic"), name)
+                if selector_diagnostic:
+                    item["selector_diagnostic"] = selector_diagnostic
             safe_fields.append(item)
         safe["field_results"] = safe_fields
     missing = value.get("missing_required_fields")
     if isinstance(missing, list):
         safe["missing_required_fields"] = [str(item)[:64] for item in missing[:40] if all(char.isalnum() or char in "_-" for char in str(item))]
     safe["form_detected"] = safe.get("page_state") == "FORM_AVAILABLE"
+    required_results = [field for field in safe.get("field_results", []) if field.get("required") is True]
+    missing_required = safe.get("missing_required_fields") or []
+    safe["capability_ready"] = bool(
+        safe.get("login_state") == "LOGGED_IN"
+        and safe["form_detected"]
+        and required_results
+        and all(field.get("detected") is True and field.get("attempted") is True and field.get("filled") is True for field in required_results)
+        and not missing_required
+    )
     return safe
 
 
@@ -303,6 +393,8 @@ def list_extension_devices(db: Session = Depends(get_db), current_user: User = D
     active = [job for job in jobs if job.status in {"CLAIMED", "NAVIGATING", "FORM_FILLING", "AWAITING_OPERATOR_REVIEW", "SUBMITTING"}]
     return {
         "devices": [_device_payload(device) for device in devices],
+        "current_version": CURRENT_EXTENSION_VERSION,
+        "minimum_version": MINIMUM_EXTENSION_VERSION,
         "pending_jobs": int(pending_jobs or 0),
         "active_jobs": [_job_payload(job) for job in active[:20]],
         "recent_failures": [_job_payload(job) for job in jobs if job.status == "FAILED"][:20],
@@ -452,7 +544,21 @@ def get_latest_marketplace_diagnostic(marketplace: str, db: Session = Depends(ge
         MarketplaceExtensionJob.marketplace == market,
         MarketplaceExtensionJob.action == "DIAGNOSTIC",
     ).order_by(MarketplaceExtensionJob.created_at.desc(), MarketplaceExtensionJob.id.desc()).limit(1)).scalars().first()
-    return _job_payload(job) if job else {"status": "NOT_RUN", "marketplace": market}
+    return _diagnostic_payload(db, job) if job else {"status": "NOT_RUN", "marketplace": market, "current_version": CURRENT_EXTENSION_VERSION, "minimum_version": MINIMUM_EXTENSION_VERSION}
+
+
+@router.get("/browser-extension/diagnostics/history/{marketplace}")
+def list_marketplace_diagnostic_history(marketplace: str, limit: int = 5, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    market = marketplace.strip().lower()
+    if market not in {"facebook", "mercari", "poshmark", "vinted", "offerup"}:
+        raise HTTPException(status_code=422, detail="A live form diagnostic is not available for this marketplace")
+    bounded_limit = max(1, min(int(limit), 10))
+    jobs = db.execute(select(MarketplaceExtensionJob).where(
+        MarketplaceExtensionJob.user_id == current_user.id,
+        MarketplaceExtensionJob.marketplace == market,
+        MarketplaceExtensionJob.action == "DIAGNOSTIC",
+    ).order_by(MarketplaceExtensionJob.created_at.desc(), MarketplaceExtensionJob.id.desc()).limit(bounded_limit)).scalars().all()
+    return [_diagnostic_payload(db, job) for job in jobs]
 
 
 @router.get("/browser-extension/diagnostics/{job_id}")
@@ -464,7 +570,7 @@ def get_marketplace_diagnostic(job_id: int, db: Session = Depends(get_db), curre
     )).scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Marketplace diagnostic not found")
-    return _job_payload(job)
+    return _diagnostic_payload(db, job)
 
 
 @router.get("/assisted-marketplace-jobs")

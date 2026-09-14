@@ -69,7 +69,7 @@ def test_onboarding_assisted_marketplace_requires_passed_live_diagnostic(db_sess
         "guided_onboarding_v1": {"started_at": "2026-09-14T12:00:00+00:00", "selected_marketplaces": ["facebook"], "marketplace_choice_saved": True},
     })
     db_session.add(user); db_session.flush()
-    device = MarketplaceExtensionDevice(user_id=user.id, device_key=f"device-{uuid4()}", token_hash=f"hash-{uuid4()}", extension_version="0.3.0", last_seen_at=datetime.now(UTC).replace(tzinfo=None))
+    device = MarketplaceExtensionDevice(user_id=user.id, device_key=f"device-{uuid4()}", token_hash=f"hash-{uuid4()}", extension_version="0.3.1", last_seen_at=datetime.now(UTC).replace(tzinfo=None))
     db_session.add(device); db_session.flush()
     snapshot = onboarding_snapshot(user, db_session)
     task = next(row for row in snapshot["tasks"] if row["id"] == "marketplace:facebook")

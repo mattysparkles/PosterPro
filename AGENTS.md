@@ -35,6 +35,41 @@
 - The real authenticated marketplace diagnostic still requires an operator
   browser session; no live listing was created, updated, or ended in this pass.
 
+## 2026-09-14 - Marketplace operator diagnostic loop readiness
+
+### Implemented
+- Raised the diagnostic-capable extension to `0.3.1` and minimum compatible
+  version to `0.3.1`; the API reports current/minimum versions even when no
+  device is paired. A live heartbeat after reloading the unpacked extension
+  updates its recorded version without creating a new device or pairing.
+- Added version/device/last-seen visibility to Dashboard, Guided Setup, and
+  Settings, with an explicit update-required panel and same-folder Chrome/Edge
+  reload instructions. The instructions tell operators not to remove or unpair
+  the existing extension during an in-place update.
+- Added recent tenant-scoped diagnostic history (five recent runs by default)
+  and a shared result view with login state, form detected, capability ready,
+  all field flags/values/errors, run-again, open-marketplace, and copy-summary
+  actions.
+- Diagnostic failures now include bounded selector structure (tag, role,
+  safe ARIA/name/placeholder/nearby label, relevant option labels, and
+  query-free pathname) only for failed fields. The server allow-lists this
+  structure, drops sensitive-shaped labels and unrelated option lists, and
+  recomputes readiness from login/form/required-field results rather than
+  trusting the extension's claimed boolean.
+- Diagnostic summary clipboard content is constructed from an explicit safe
+  field allowlist; a visible summary remains available for manual copying if
+  clipboard access is unavailable.
+
+### Validation and deployment
+- Backend marketplace diagnostic/onboarding tests: `26 passed`.
+- Browser extension tests: `17 passed`.
+- Frontend production build passed with existing lint/noVNC warnings.
+- A regression verifies v0.3.0 is flagged for update and a v0.3.1 heartbeat
+  updates the same device without re-pairing. No migration was needed.
+- No real marketplace form test was run from this server. Operator should
+  install v0.3.1 and run the five non-submitting diagnostics from Guided Setup
+  or Settings → Marketplaces.
+
 ## 2026-09-13 - Vine cohort content finalization and preflight repair
 
 ### Fixed

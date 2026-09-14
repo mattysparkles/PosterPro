@@ -142,6 +142,12 @@ test("real-form diagnostic reports per-field capability and never submits", asyn
   assert.ok(response.field_results.some((field) => field.field === "category"));
   assert.ok(response.field_results.some((field) => field.field === "condition"));
   assert.equal(response.field_results.find((field) => field.field === "photos").filled, true);
+  const failedCategory = response.field_results.find((field) => field.field === "category");
+  assert.equal(failedCategory.filled, false);
+  assert.equal(failedCategory.selector_diagnostic.field, "category");
+  assert.equal(failedCategory.selector_diagnostic.page_path, "/marketplace/create/item");
+  assert.ok(response.field_results.filter((field) => field.filled).every((field) => !field.selector_diagnostic));
+  assert.equal(response.submission_performed, false);
 });
 
 test("UPDATE requires the exact stored URL and preserves it for operator-reviewed edits", async () => {

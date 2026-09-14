@@ -18,6 +18,7 @@ import { useRouter } from 'next/router';
 
 import AppShell from '../components/layout/AppShell';
 import GuidedSetupCard from '../components/onboarding/GuidedSetupCard';
+import ExtensionVersionStatus from '../components/marketplaces/ExtensionVersionStatus';
 import GooglePhotosConnectionGuide from '../components/google/GooglePhotosConnectionGuide';
 import ActionBar from '../components/ui/action-bar';
 import Button from '../components/ui/button';
@@ -40,6 +41,7 @@ import {
   fetchIntakeQueue,
   fetchIntakeSettings,
   fetchMarketplaceJobsOverview,
+  fetchMarketplaceExtensionDevices,
   runDashboardOperatorCommand,
   runIntakeMonitor,
   fetchSalesDashboard,
@@ -107,6 +109,7 @@ export default function Dashboard() {
   });
   const [alerts, setAlerts] = useState([]);
   const [setupSummary, setSetupSummary] = useState(null);
+  const [extensionState, setExtensionState] = useState({ devices: [], current_version: 'unknown', minimum_version: 'unknown' });
   const [jobsOverview, setJobsOverview] = useState({ import_jobs: [], crosspost_jobs: [] });
   const [salesDashboard, setSalesDashboard] = useState({ summary: {} });
   const [activeSection, setActiveSection] = useState('overview');
@@ -180,6 +183,15 @@ export default function Dashboard() {
       setIntakeFolderId(nextIntakeSettings?.folder_id || '');
       setLoadingPanels(false);
     });
+  }, [user?.id]);
+
+  useEffect(() => {
+    if (!user?.id) return undefined;
+    let active = true;
+    const refreshExtension = () => fetchMarketplaceExtensionDevices().then((value) => { if (active) setExtensionState(value || { devices: [] }); }).catch(() => {});
+    void refreshExtension();
+    const timer = window.setInterval(refreshExtension, 15000);
+    return () => { active = false; window.clearInterval(timer); };
   }, [user?.id]);
 
   useEffect(() => {
@@ -424,6 +436,7 @@ export default function Dashboard() {
   const renderOverview = () => (
     <div className="space-y-5">
       <GuidedSetupCard />
+      <ExtensionVersionStatus state={extensionState} compact />
       {showBrowserAssistPrompt ? (
         <div className="rounded-[18px] border border-[#dbe7ff] bg-[linear-gradient(135deg,#f8fbff_0%,#ffffff_100%)] p-5 shadow-[0_12px_32px_rgba(15,23,42,0.06)]">
           <div className="flex flex-wrap items-start justify-between gap-4">
