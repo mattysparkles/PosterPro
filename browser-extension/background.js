@@ -14,7 +14,7 @@ const MARKETPLACE_HOST_HINTS = [
   { marketplace: "offerup", match: "offerup.com" },
 ];
 
-const EXTENSION_VERSION = "0.2.2";
+const EXTENSION_VERSION = "0.3.0";
 let queuePollActive = false;
 
 function apiRoot(baseUrl) {
@@ -127,24 +127,82 @@ async function runClaimedJob(job) {
     }
     const tab = await chrome.tabs.create({ url: startUrl, active: true });
     await waitForTabComplete(tab.id);
-    const review = {
-      ok: true,
-      stage: "AWAITING_OPERATOR_REVIEW",
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["marketplace-adapters.js", "content.js"] });
+    const inspection = await chrome.tabs.sendMessage(tab.id, {
+      action: "posterpro_inspect_exact_end",
       marketplace: job.marketplace,
-      action: "END",
-      page_url: new URL(startUrl).origin + new URL(startUrl).pathname,
+      payload: snapshot,
       external_listing_id: job.external_listing_id || snapshot.external_listing_id || null,
-      external_url: startUrl,
-      populated_fields: [],
-      missing_required_fields: ["operator_must_end_listing_and_confirm"],
-      submission_performed: false,
-    };
+      expected_external_url: job.external_url || snapshot.external_url || startUrl,
+    });
+    if (!inspection?.identity_verified) {
+      await setJobState(jobId, "BLOCKED_EXTERNAL", { error_code: inspection?.error_code || "EXTERNAL_IDENTITY_NOT_VERIFIED", error_detail: "The browser could not verify that the open page is the exact stored marketplace listing.", result: inspection });
+      await chrome.storage.local.set({ posterproActiveJob: null, posterproLastJob: { ...job, tab_id: tab.id, status: "BLOCKED_EXTERNAL", result: inspection } });
+      return inspection;
+    }
+    const review = { ...inspection, stage: "AWAITING_OPERATOR_REVIEW" };
     await chrome.storage.local.set({ posterproActiveJob: { ...job, tab_id: tab.id, status: "AWAITING_OPERATOR_REVIEW", fill_result: review } });
     await setJobState(jobId, "AWAITING_OPERATOR_REVIEW", { result: review });
     return review;
   }
   const tab = await chrome.tabs.create({ url: startUrl, active: true });
   await waitForTabComplete(tab.id);
+  if (String(job.action || "").toUpperCase() === "DIAGNOSTIC" || job.payload?.diagnostic) {
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["marketplace-adapters.js", "content.js"] });
+    const diagnostic = await chrome.tabs.sendMessage(tab.id, {
+      action: "posterpro_diagnose_listing",
+      marketplace: job.marketplace,
+      payload: snapshot,
+      images: [],
+    });
+    const terminalStatus = diagnostic?.login_state === "LOGIN_REQUIRED" ? "LOGIN_REQUIRED" : diagnostic?.page_state === "FORM_AVAILABLE" ? "COMPLETED" : "FAILED";
+    await chrome.storage.local.set({ posterproLastJob: { ...job, tab_id: tab.id, status: terminalStatus, diagnostic_result: diagnostic } });
+    if (diagnostic?.login_state === "LOGIN_REQUIRED") {
+      await setJobState(jobId, "LOGIN_REQUIRED", { error_code: "MARKETPLACE_LOGIN_REQUIRED", error_detail: "Sign in to the marketplace in this browser, then start the form test again.", result: diagnostic });
+      await chrome.storage.local.set({ posterproActiveJob: null });
+      return diagnostic;
+    }
+    if (["CAPTCHA_REQUIRED", "CHECKPOINT_REQUIRED", "ACCOUNT_RESTRICTION", "UNKNOWN"].includes(diagnostic?.login_state)) {
+      await setJobState(jobId, "BLOCKED_EXTERNAL", { error_code: diagnostic.login_state, error_detail: "The marketplace requires attention before PosterPro can inspect its listing form.", result: diagnostic });
+      await chrome.storage.local.set({ posterproActiveJob: null });
+      return diagnostic;
+    }
+    await setJobState(jobId, "FORM_DETECTED", { result: diagnostic });
+    await setJobState(jobId, "TESTING_FIELDS", { result: diagnostic });
+    await setJobState(jobId, terminalStatus, {
+      error_code: diagnostic?.capability_ready ? null : (diagnostic?.error_code || "DIAGNOSTIC_FIELDS_FAILED"),
+      error_detail: diagnostic?.capability_ready ? null : (diagnostic?.missing_required_fields || []).join(", "),
+      result: diagnostic,
+    });
+    await chrome.storage.local.set({ posterproActiveJob: null });
+    return diagnostic;
+  }
+  if (String(job.action || "").toUpperCase() === "UPDATE") {
+    await setJobState(jobId, "FORM_FILLING");
+    const images = await downloadCanonicalImages(snapshot, job.marketplace);
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["marketplace-adapters.js", "content.js"] });
+    const result = await chrome.tabs.sendMessage(tab.id, {
+      action: "posterpro_update_exact_listing",
+      marketplace: job.marketplace,
+      payload: snapshot,
+      images,
+      external_listing_id: job.external_listing_id || snapshot.external_listing_id || null,
+      expected_external_url: job.external_url || snapshot.external_url || startUrl,
+    });
+    if (!result?.identity_verified) {
+      await setJobState(jobId, "BLOCKED_EXTERNAL", { error_code: result?.error_code || "EXTERNAL_IDENTITY_NOT_VERIFIED", error_detail: "The browser refused to edit because exact listing identity could not be verified.", result });
+      await chrome.storage.local.set({ posterProActiveJob: null, posterProLastJob: { ...job, tab_id: tab.id, status: "BLOCKED_EXTERNAL", result } });
+      return result;
+    }
+    if (!result?.ok) {
+      await setJobState(jobId, "FAILED", { error_code: result?.error_code || "UPDATE_FORM_NOT_READY", error_detail: result?.error_code || "The exact listing was identified, but its edit form could not be prepared.", result });
+      await chrome.storage.local.set({ posterProActiveJob: null, posterProLastJob: { ...job, tab_id: tab.id, status: "FAILED", result } });
+      return result;
+    }
+    await chrome.storage.local.set({ posterProActiveJob: { ...job, tab_id: tab.id, status: "AWAITING_OPERATOR_REVIEW", fill_result: result } });
+    await setJobState(jobId, "AWAITING_OPERATOR_REVIEW", { result });
+    return result;
+  }
   await setJobState(jobId, "FORM_FILLING");
   const images = await downloadCanonicalImages(snapshot, job.marketplace);
   await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["marketplace-adapters.js", "content.js"] });
@@ -198,7 +256,9 @@ async function pollMarketplaceQueue() {
     await chrome.storage.local.set({ posterproLastJob: response.job });
     try {
       const result = await runClaimedJob(response.job);
-      await chrome.storage.local.set({ posterproLastJob: { ...response.job, status: "AWAITING_OPERATOR_REVIEW", fill_result: result } });
+      if (String(response.job.action || "").toUpperCase() !== "DIAGNOSTIC") {
+        await chrome.storage.local.set({ posterproLastJob: { ...response.job, status: "AWAITING_OPERATOR_REVIEW", fill_result: result } });
+      }
     } catch (error) {
       await setJobState(response.job.id, "FAILED", { error_code: "EXTENSION_EXECUTION_FAILED", error_detail: String(error?.message || error).slice(0, 1800) }).catch(() => {});
       await chrome.storage.local.set({ posterproActiveJob: null, posterproLastJob: { ...response.job, status: "FAILED", error: String(error?.message || error) } });

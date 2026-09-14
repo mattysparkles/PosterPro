@@ -312,11 +312,22 @@ async def verify_setup_task(task_id: str, db: Session = Depends(get_db), current
         else:
             verification = {"level": "SAVED_OAUTH_ONLY", "message": "Google authorization is saved, but PosterPro has not performed a harmless Google Photos capability test. Photo upload is not marked ready."}
     elif task_id.startswith("marketplace:") and task_id != "marketplace:ebay":
-        verification = {"level": "OPERATOR_TEST_REQUIRED", "message": "This deployment has no safe, non-submitting form-fill check for this marketplace yet. Saved settings are not treated as working automation."}
+        market = task_id.split(":", 1)[1]
+        check = _destination_status(market, current_user, db)
+        state = str(check.get("status") or "OPERATOR_TEST_REQUIRED").upper()
+        level = {
+            "CONNECTED": "LIVE_FORM_DIAGNOSTIC_PASS",
+            "AUTH_REQUIRED": "LOGIN_REQUIRED",
+            "BLOCKED_EXTERNAL": "BLOCKED_EXTERNAL",
+            "NEEDS_ATTENTION": "FORM_FIELDS_FAILED",
+            "VERIFYING": "DIAGNOSTIC_RUNNING",
+        }.get(state, "OPERATOR_TEST_REQUIRED")
+        verification = {"level": level, "message": check.get("message"), "diagnostic_status": check.get("diagnostic_status"), "missing_required_fields": check.get("missing_required_fields") or [], "field_results": check.get("field_results") or []}
 
     ebay_ready = verification["level"] == "LIVE_SELL_API_READ" and bool(verification.get("publish_setup_complete"))
-    complete = verification["level"] == "LIVE_EXTENSION_HEARTBEAT" or ebay_ready
-    update_task_state(current_user, task_id, status="COMPLETE" if complete else "NEEDS_ATTENTION" if verification["level"] in {"FAILED", "NOT_CONNECTED"} else "WAITING_FOR_USER", error_code="SELLER_API_CHECK_FAILED" if verification["level"] == "FAILED" else None, summary=verification["message"], verified=complete)
+    complete = verification["level"] in {"LIVE_EXTENSION_HEARTBEAT", "LIVE_FORM_DIAGNOSTIC_PASS"} or ebay_ready
+    needs_attention = verification["level"] in {"FAILED", "NOT_CONNECTED", "FORM_FIELDS_FAILED", "BLOCKED_EXTERNAL"}
+    update_task_state(current_user, task_id, status="COMPLETE" if complete else "NEEDS_ATTENTION" if needs_attention else "WAITING_FOR_USER", error_code=verification["level"] if needs_attention else None, summary=verification["message"], verified=complete)
 
     # For browser/Google integrations this endpoint refreshes only PosterPro's
     # observed status. It must not imply a marketplace form or photo operation

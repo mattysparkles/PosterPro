@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Literal
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -28,18 +29,21 @@ from app.services.marketplace_extension_jobs import MarketplaceExtensionJobError
 from app.services.process_notifications import create_process_notification
 
 router = APIRouter()
-CURRENT_EXTENSION_VERSION = "0.2.2"
-MINIMUM_EXTENSION_VERSION = "0.2.0"
+CURRENT_EXTENSION_VERSION = "0.3.0"
+MINIMUM_EXTENSION_VERSION = "0.3.0"
 
 ASSISTED_MARKETPLACES = {"facebook", "mercari", "poshmark", "vinted", "etsy", "offerup", "depop", "whatnot"}
 JOB_STATES = {
     "CLAIMED", "NAVIGATING", "FORM_FILLING", "AWAITING_OPERATOR_REVIEW",
     "SUBMITTING", "SUBMITTED", "COMPLETED", "FAILED", "RETRYABLE", "CANCELLED",
+    "LOGIN_REQUIRED", "FORM_DETECTED", "TESTING_FIELDS", "BLOCKED_EXTERNAL",
 }
 TRANSITIONS = {
     "CLAIMED": {"NAVIGATING", "FAILED", "RETRYABLE", "CANCELLED"},
-    "NAVIGATING": {"FORM_FILLING", "AWAITING_OPERATOR_REVIEW", "FAILED", "RETRYABLE", "CANCELLED"},
-    "FORM_FILLING": {"AWAITING_OPERATOR_REVIEW", "FAILED", "RETRYABLE", "CANCELLED"},
+    "NAVIGATING": {"FORM_DETECTED", "FORM_FILLING", "LOGIN_REQUIRED", "BLOCKED_EXTERNAL", "AWAITING_OPERATOR_REVIEW", "FAILED", "RETRYABLE", "CANCELLED"},
+    "FORM_DETECTED": {"TESTING_FIELDS", "FORM_FILLING", "FAILED", "BLOCKED_EXTERNAL", "CANCELLED"},
+    "TESTING_FIELDS": {"COMPLETED", "LOGIN_REQUIRED", "BLOCKED_EXTERNAL", "FAILED", "AWAITING_OPERATOR_REVIEW", "CANCELLED"},
+    "FORM_FILLING": {"AWAITING_OPERATOR_REVIEW", "LOGIN_REQUIRED", "BLOCKED_EXTERNAL", "FAILED", "RETRYABLE", "CANCELLED"},
     "AWAITING_OPERATOR_REVIEW": {"SUBMITTING", "CANCELLED", "FAILED"},
     "SUBMITTING": {"SUBMITTED", "COMPLETED", "FAILED", "RETRYABLE"},
     "SUBMITTED": {"COMPLETED", "FAILED", "RETRYABLE"},
@@ -74,6 +78,10 @@ class AssistedJobRequest(BaseModel):
     marketplace: str
     action: Literal["CREATE", "UPDATE", "END", "SYNC"] = "CREATE"
     priority: int = Field(default=1, ge=0, le=10)
+
+
+class MarketplaceDiagnosticRequest(BaseModel):
+    device_id: int | None = None
 
 
 class JobStateRequest(BaseModel):
@@ -145,9 +153,11 @@ def _job_payload(job: MarketplaceExtensionJob) -> dict:
     return {
         "id": job.id,
         "listing_id": job.listing_id,
+        "device_id": job.device_id,
         "marketplace": job.marketplace,
         "action": job.action,
         "status": job.status,
+        "requested_at": _iso(job.created_at),
         "attempt_count": job.attempt_count,
         "claimed_at": _iso(job.claimed_at),
         "started_at": _iso(job.started_at),
@@ -160,6 +170,69 @@ def _job_payload(job: MarketplaceExtensionJob) -> dict:
         "payload": job.payload_snapshot,
         "result": job.result,
     }
+
+
+def _safe_diagnostic_result(value: dict | None, marketplace: str) -> dict | None:
+    """Persist only structured, non-sensitive capability facts from the extension."""
+    if not isinstance(value, dict):
+        return None
+    safe: dict = {"marketplace": marketplace, "action": "DIAGNOSTIC", "submission_performed": False}
+    allowed_enums = {
+        "login_state": {"LOGGED_IN", "LOGIN_REQUIRED", "CHECKPOINT_REQUIRED", "CAPTCHA_REQUIRED", "ACCOUNT_RESTRICTION", "UNKNOWN"},
+        "page_state": {"FORM_AVAILABLE", "FORM_CHANGED", "LOGIN_REQUIRED", "CHECKPOINT_REQUIRED", "CAPTCHA_REQUIRED", "ACCOUNT_RESTRICTION", "UNKNOWN"},
+        "stage": {"LOGIN_REQUIRED", "CHECKPOINT_REQUIRED", "CAPTCHA_REQUIRED", "ACCOUNT_RESTRICTION", "UNKNOWN", "FORM_DETECTED", "TESTING_FIELDS", "COMPLETED", "FAILED"},
+    }
+    for key, choices in allowed_enums.items():
+        candidate = str(value.get(key) or "").upper()
+        if candidate in choices:
+            safe[key] = candidate
+    for key in ("capability_ready", "form_detected", "operator_review_required"):
+        if isinstance(value.get(key), bool):
+            safe[key] = value[key]
+    for key in ("error_code", "selector_strategy"):
+        candidate = str(value.get(key) or "")
+        if key == "error_code" and candidate and all(char.isalnum() or char in "_-" for char in candidate):
+            safe[key] = candidate[:100]
+        elif key == "selector_strategy" and candidate == "central_marketplace_map_then_semantic_labels":
+            safe[key] = candidate
+    page_url = value.get("page_url")
+    if page_url and _marketplace_url_matches(marketplace, str(page_url)):
+        parsed = urlsplit(str(page_url))
+        safe["page_url"] = urlunsplit((parsed.scheme, parsed.netloc, parsed.path[:500], "", ""))
+    for key in ("uploaded_image_count",):
+        try:
+            safe[key] = max(0, min(30, int(value.get(key) or 0)))
+        except (TypeError, ValueError):
+            pass
+    fields = value.get("field_results")
+    if isinstance(fields, list):
+        safe_fields = []
+        for row in fields[:40]:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("field") or "")[:64]
+            if not name or not all(char.isalnum() or char == "_" for char in name):
+                continue
+            item = {"field": name}
+            for flag in ("required", "detected", "attempted", "filled"):
+                if isinstance(row.get(flag), bool):
+                    item[flag] = row[flag]
+            verified = row.get("verified_value")
+            if isinstance(verified, (str, int, float)):
+                # This value is the extension's entered/mapped value, never page content.
+                verified_text = str(verified)[:160]
+                secret_shape = re.search(r"(?i)(password|cookie|session.?token|access.?token|refresh.?token|bearer\s+|sk-[a-z0-9_-]{12,}|ya29\.[a-z0-9._-]{12,})", verified_text)
+                item["verified_value"] = None if secret_shape else verified_text
+            error_code = str(row.get("error_code") or "")
+            if error_code and all(char.isalnum() or char in "_-" for char in error_code):
+                item["error_code"] = error_code[:100]
+            safe_fields.append(item)
+        safe["field_results"] = safe_fields
+    missing = value.get("missing_required_fields")
+    if isinstance(missing, list):
+        safe["missing_required_fields"] = [str(item)[:64] for item in missing[:40] if all(char.isalnum() or char in "_-" for char in str(item))]
+    safe["form_detected"] = safe.get("page_state") == "FORM_AVAILABLE"
+    return safe
 
 
 @router.post("/browser-extension/pairing-codes")
@@ -305,6 +378,93 @@ def create_assisted_job(
     result = _job_payload(job)
     result["deduplicated"] = not created
     return result
+
+
+@router.post("/browser-extension/diagnostics/{marketplace}")
+def create_marketplace_diagnostic(
+    marketplace: str,
+    payload: MarketplaceDiagnosticRequest | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Queue a synthetic, non-submitting live-form capability test."""
+    market = marketplace.strip().lower()
+    if market not in {"facebook", "mercari", "poshmark", "vinted", "offerup"}:
+        raise HTTPException(status_code=422, detail="A live form diagnostic is not available for this marketplace")
+    now = datetime.now(UTC).replace(tzinfo=None)
+    device_stmt = select(MarketplaceExtensionDevice).where(
+        MarketplaceExtensionDevice.user_id == current_user.id,
+        MarketplaceExtensionDevice.revoked_at.is_(None),
+    )
+    if payload and payload.device_id:
+        device_stmt = device_stmt.where(MarketplaceExtensionDevice.id == payload.device_id)
+    device = db.execute(device_stmt.order_by(MarketplaceExtensionDevice.last_seen_at.desc().nullslast())).scalars().first()
+    if not device:
+        raise HTTPException(status_code=409, detail={"code": "EXTENSION_REQUIRED", "message": "Pair the PosterPro extension before starting a browser form test."})
+    if not device.last_seen_at or device.last_seen_at < now - timedelta(minutes=3):
+        raise HTTPException(status_code=409, detail={"code": "EXTENSION_OFFLINE", "message": "Open PosterPro in the browser where the extension is installed. The browser must check in before a real form test can start."})
+    if _version_tuple(device.extension_version) < _version_tuple(MINIMUM_EXTENSION_VERSION):
+        raise HTTPException(status_code=426, detail={"code": "EXTENSION_UPDATE_REQUIRED", "minimum_version": MINIMUM_EXTENSION_VERSION})
+
+    from app.services.marketplace_extension_jobs import _create_url
+
+    shipping_mode = {"facebook": "local pickup", "mercari": "shipping", "vinted": "small parcel", "offerup": "local pickup"}.get(market, "shipping")
+    synthetic = {
+        "marketplace": market,
+        "diagnostic": True,
+        "title": "PosterPro Safe Form Test Garment - Do Not Publish",
+        "description": "This is a temporary PosterPro form test. It is not a real product and must not be submitted.",
+        "price": 1,
+        "category": "Clothing",
+        "condition": "Used - good",
+        "availability": "in stock",
+        "quantity": 1,
+        "brand": "PosterPro Test",
+        "size": "M",
+        "location": "",
+        "delivery_method": shipping_mode,
+        "shipping": {"mode": shipping_mode, "local_pickup_enabled": market in {"facebook", "offerup"}, "shipping_payer": "buyer", "shipping_method": "standard", "parcel_weight": "1 lb", "parcel_size": "small"},
+        "image_urls": [],
+        "start_url": _create_url(market),
+    }
+    job = MarketplaceExtensionJob(
+        user_id=current_user.id,
+        listing_id=None,
+        marketplace=market,
+        action="DIAGNOSTIC",
+        status="QUEUED",
+        priority=0,
+        payload_version=1,
+        payload_snapshot={"version": 1, "diagnostic": True, "marketplace_payload": synthetic},
+        last_state_at=now,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    return _job_payload(job)
+
+
+@router.get("/browser-extension/diagnostics/latest/{marketplace}")
+def get_latest_marketplace_diagnostic(marketplace: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    market = marketplace.strip().lower()
+    job = db.execute(select(MarketplaceExtensionJob).where(
+        MarketplaceExtensionJob.user_id == current_user.id,
+        MarketplaceExtensionJob.marketplace == market,
+        MarketplaceExtensionJob.action == "DIAGNOSTIC",
+    ).order_by(MarketplaceExtensionJob.created_at.desc(), MarketplaceExtensionJob.id.desc()).limit(1)).scalars().first()
+    return _job_payload(job) if job else {"status": "NOT_RUN", "marketplace": market}
+
+
+@router.get("/browser-extension/diagnostics/{job_id}")
+def get_marketplace_diagnostic(job_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    job = db.execute(select(MarketplaceExtensionJob).where(
+        MarketplaceExtensionJob.id == job_id,
+        MarketplaceExtensionJob.user_id == current_user.id,
+        MarketplaceExtensionJob.action == "DIAGNOSTIC",
+    )).scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Marketplace diagnostic not found")
+    return _job_payload(job)
 
 
 @router.get("/assisted-marketplace-jobs")
@@ -552,7 +712,12 @@ def update_extension_job_state(
     if payload.external_url:
         job.external_url = payload.external_url
     if payload.result is not None:
-        job.result = payload.result
+        job.result = _safe_diagnostic_result(payload.result, job.marketplace) if job.action == "DIAGNOSTIC" else payload.result
+        if job.action == "DIAGNOSTIC":
+            safe_missing = (job.result or {}).get("missing_required_fields") or []
+            job.error_detail = ", ".join(safe_missing)[:2000] or None
+            if next_status == "COMPLETED" and (job.result or {}).get("capability_ready") is not True:
+                job.error_code = (job.result or {}).get("error_code") or "DIAGNOSTIC_CAPABILITY_INCOMPLETE"
     if next_status in {"FAILED", "RETRYABLE", "CANCELLED", "COMPLETED"}:
         job.completed_at = now
         job.lease_expires_at = None

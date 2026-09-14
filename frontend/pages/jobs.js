@@ -539,7 +539,7 @@ export default function JobsPage() {
 
   const crosspostColumns = [
     { key: "id", label: "Job", render: (row) => `#${row.id}` },
-    { key: "listing_id", label: "Listing", render: (row) => <Link href={`/listings/${row.listing_id}`} className="font-medium text-[#2563eb]">#{row.listing_id}</Link> },
+    { key: "listing_id", label: "Listing", render: (row) => row.listing_id ? <Link href={`/listings/${row.listing_id}`} className="font-medium text-[#2563eb]">#{row.listing_id}</Link> : String(row.action || "").toUpperCase() === "DIAGNOSTIC" ? "Marketplace setup test" : "—" },
     { key: "targets", label: "Targets", cellClassName: "min-w-[220px]", render: (row) => (row.target_marketplaces || []).join(", ") || "None" },
     {
       key: "status",
@@ -940,6 +940,23 @@ export default function JobsPage() {
                 <p className="text-sm font-semibold text-[#101828]">{startCase(activeJob.job.marketplace)} · {activeJob.job.action}</p>
                 <p className="mt-2 text-sm text-[#344054]">State: {startCase(activeJob.job.status)} · Attempts: {activeJob.job.attempt_count || 0} · Device: {activeJob.job.device_id ? `#${activeJob.job.device_id}` : "not claimed"}</p>
                 <p className="mt-1 text-xs text-[#667085]">Claimed {formatExactTime(activeJob.job.claimed_at)} · Started {formatExactTime(activeJob.job.started_at)} · Completed {formatExactTime(activeJob.job.completed_at)}</p>
+                {String(activeJob.job.action || "").toUpperCase() === "DIAGNOSTIC" ? (
+                  <div className="mt-4 rounded-lg border border-slate-200 bg-white p-3">
+                    <p className="text-sm font-semibold text-[#101828]">Real-browser form diagnostic · {startCase(activeJob.job.result?.login_state || "login state not reported")}</p>
+                    <p className="mt-1 text-xs text-[#475467]">Form detected: {activeJob.job.result?.form_detected ? "Yes" : "No"} · Capability ready: {activeJob.job.result?.capability_ready ? "Yes" : "No"}</p>
+                    {Array.isArray(activeJob.job.result?.field_results) && activeJob.job.result.field_results.length ? (
+                      <div className="mt-3 grid gap-2 md:grid-cols-2">
+                        {activeJob.job.result.field_results.map((field) => (
+                          <div key={field.field} className={`rounded border p-2 text-xs ${field.filled ? "border-emerald-200 bg-emerald-50" : field.required ? "border-rose-200 bg-rose-50" : "border-slate-200 bg-slate-50"}`}>
+                            <p className="font-semibold">{field.field} · {field.filled ? "passed" : field.required ? "needs attention" : "not available"}</p>
+                            <p className="mt-1 text-slate-600">Detected {field.detected ? "yes" : "no"} · Attempted {field.attempted ? "yes" : "no"}{field.error_code ? ` · ${field.error_code}` : ""}</p>
+                          </div>
+                        ))}
+                      </div>
+                    ) : <p className="mt-2 text-xs text-slate-600">No field results have been reported yet.</p>}
+                    {activeJob.job.error_code || activeJob.job.error_detail ? <p role="alert" className="mt-2 text-xs text-rose-700">{activeJob.job.error_code ? `${activeJob.job.error_code}: ` : ""}{activeJob.job.error_detail}</p> : null}
+                  </div>
+                ) : null}
                 {activeJob.job.external_listing_id ? <p className="mt-2 break-all text-sm">External ID: {activeJob.job.external_listing_id}</p> : null}
                 {activeJob.job.external_url ? <a href={activeJob.job.external_url} target="_blank" rel="noreferrer" className="mt-1 inline-block break-all text-sm text-[#175cd3] hover:underline">Open external listing</a> : null}
                 {String(activeJob.job.status || "").toUpperCase() === "AWAITING_OPERATOR_REVIEW" ? (

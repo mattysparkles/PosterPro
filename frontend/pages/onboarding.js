@@ -6,6 +6,8 @@ import PageHeader from '../components/ui/page-header';
 import {
   chooseOnboardingAiMode,
   askOnboardingHelp,
+  fetchLatestMarketplaceDiagnostic,
+  fetchMarketplaceDiagnostic,
   fetchOnboardingState,
   recordOnboardingEvent,
   restartOnboarding,
@@ -13,6 +15,7 @@ import {
   saveOnboardingStep,
   skipOnboardingForNow,
   skipOnboardingTask,
+  startMarketplaceDiagnostic,
   startOnboarding,
   startGooglePhotosOAuth,
   testOnboardingOpenAiKey,
@@ -59,6 +62,7 @@ export default function OnboardingPage() {
   const [helpAnswer, setHelpAnswer] = useState(null);
   const [helpBusy, setHelpBusy] = useState(false);
   const [tourOpen, setTourOpen] = useState(false);
+  const [diagnostic, setDiagnostic] = useState(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -97,6 +101,7 @@ export default function OnboardingPage() {
   };
 
   const status = String(currentTask?.status || 'NOT_STARTED').toUpperCase();
+  const diagnosticMarketplace = currentTask?.id?.startsWith('marketplace:') ? currentTask.id.split(':')[1] : '';
   const statusCopy = STATUS_COPY[status] || [status.replaceAll('_', ' '), currentTask?.message || 'PosterPro has not verified this step yet.'];
   const tourSteps = useMemo(() => {
     if (!currentTask) return [];
@@ -136,6 +141,30 @@ export default function OnboardingPage() {
     if (snapshot?.started && currentTask?.id === 'ai') void recordOnboardingEvent('AI_SETUP_VIEWED', 'ai').catch(() => {});
   }, [snapshot?.started, currentTask?.id]);
 
+  useEffect(() => {
+    let active = true;
+    if (!['facebook', 'mercari', 'poshmark', 'vinted', 'offerup'].includes(diagnosticMarketplace)) {
+      setDiagnostic(null);
+      return () => { active = false; };
+    }
+    fetchLatestMarketplaceDiagnostic(diagnosticMarketplace).then((value) => { if (active) setDiagnostic(value?.status === 'NOT_RUN' ? null : value); }).catch(() => {});
+    return () => { active = false; };
+  }, [diagnosticMarketplace]);
+
+  useEffect(() => {
+    if (!diagnostic?.id || !['QUEUED', 'CLAIMED', 'NAVIGATING', 'FORM_DETECTED', 'TESTING_FIELDS'].includes(String(diagnostic.status).toUpperCase())) return undefined;
+    const timer = setInterval(() => fetchMarketplaceDiagnostic(diagnostic.id).then(setDiagnostic).catch(() => {}), 2500);
+    return () => clearInterval(timer);
+  }, [diagnostic?.id, diagnostic?.status]);
+
+  const runMarketplaceDiagnostic = async () => {
+    if (!diagnosticMarketplace) return;
+    setBusy(true); setError('');
+    try { setDiagnostic(await startMarketplaceDiagnostic(diagnosticMarketplace)); }
+    catch (caught) { setError(caught.message || 'PosterPro could not start the browser form test. Pair the extension and try again.'); }
+    finally { setBusy(false); }
+  };
+
   return (
     <AppShell active="/onboarding" title="Guided setup" contentWidth="default">
       <PageHeader eyebrow="One step at a time" title="Set up PosterPro" description="Choose what you want to connect. PosterPro checks each step and tells you what is—and is not—ready." actions={<Button variant="outline" onClick={() => run(restartOnboarding)}>Restart setup</Button>} />
@@ -171,6 +200,7 @@ export default function OnboardingPage() {
             </div> : null}
 
             {currentTask.id === 'google_photos' ? <div className="mt-3 flex flex-wrap gap-2"><Button data-setup-spotlight="google-connect" disabled={busy} onClick={connectGoogle}>{status === 'EXPIRED' ? 'Reconnect Google Photos' : 'Connect Google Photos'}</Button></div> : null}
+            {['facebook', 'mercari', 'poshmark', 'vinted', 'offerup'].includes(diagnosticMarketplace) ? <section className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-5" aria-label={`${diagnosticMarketplace} real form test`}><h2 className="font-semibold text-slate-950">Test the real {diagnosticMarketplace === 'facebook' ? 'Facebook Marketplace' : diagnosticMarketplace} form</h2><p className="mt-2 text-sm leading-6 text-slate-700">PosterPro will open the create form in your paired browser, use a clearly marked synthetic test, report which fields it could fill, and stop without submitting. Your marketplace password stays in your browser.</p><Button className="mt-4" disabled={busy || ['QUEUED', 'CLAIMED', 'NAVIGATING', 'FORM_DETECTED', 'TESTING_FIELDS'].includes(String(diagnostic?.status || '').toUpperCase())} onClick={runMarketplaceDiagnostic}>Start {diagnosticMarketplace === 'facebook' ? 'Facebook' : diagnosticMarketplace} real form test</Button>{diagnostic ? <div className="mt-4 rounded-xl border bg-white p-4"><p className="font-semibold">Test state: {String(diagnostic.status || 'UNKNOWN').replaceAll('_', ' ')}</p>{diagnostic.status === 'LOGIN_REQUIRED' ? <p className="mt-2 text-sm">You are signed out in this browser. Open the marketplace, sign in normally, then run the test again.</p> : null}{diagnostic.error_detail ? <p className="mt-2 text-sm text-amber-800">{diagnostic.error_detail}</p> : null}{diagnostic.result?.field_results?.length ? <ul className="mt-3 grid gap-2 sm:grid-cols-2">{diagnostic.result.field_results.map((field) => <li key={field.field} className="rounded-lg border p-2 text-sm"><span className="font-semibold">{field.filled ? '✓' : '○'} {field.field}</span><span className="ml-2 text-slate-600">{field.filled ? field.verified_value : field.error_code || 'not detected'}</span></li>)}</ul> : null}<p className="mt-3 text-xs text-slate-500">This diagnostic never submits or publishes a listing.</p></div> : null}</section> : null}
             {currentTask.guidance ? <div data-setup-spotlight="task-guidance" className="mt-5 rounded-2xl border border-blue-100 bg-blue-50/60 p-5"><h2 className="font-semibold text-slate-950">Do this one step at a time</h2><ol className="mt-3 list-decimal space-y-2 pl-5 text-sm leading-6 text-slate-700">{(currentTask.guidance.steps || []).map((step, index) => <li key={`${currentTask.id}-guide-${index}`}>{step}</li>)}</ol>{currentTask.guidance.expect ? <p className="mt-4 rounded-xl bg-white p-3 text-sm leading-6 text-slate-700"><b>What you should see:</b> {currentTask.guidance.expect}</p> : null}{currentTask.guidance.troubleshooting ? <p className="mt-3 text-sm leading-6 text-slate-700"><b>If it does not work:</b> {currentTask.guidance.troubleshooting}</p> : null}<div className="mt-4 flex flex-wrap gap-2">{currentTask.guidance.open_url ? <a data-setup-spotlight="task-open-button" href={currentTask.guidance.open_url} target="_blank" rel="noreferrer" className="inline-flex min-h-10 items-center rounded-lg border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-800">{currentTask.guidance.open_label || 'Open website'}</a> : currentTask.deep_link ? <Button data-setup-spotlight="task-open-button" href={currentTask.deep_link} variant="secondary">{currentTask.guidance.open_label || 'Open setup'}</Button> : null}<Button variant="outline" disabled={busy} onClick={() => run(() => verifyOnboardingTask(currentTask.id))}>Check this step again</Button></div></div> : null}
             {verification ? <div role="status" className="mt-3 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-950"><b>{String(verification.level || '').replaceAll('_', ' ')}</b>: {verification.message}</div> : null}
             {currentTask.id === 'pricing' ? <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-950">PosterPro’s current pricing tools can provide estimates, but a complete sold-comparable and high-value-variant protection workflow is not yet verified. Review prices carefully before publishing.</div> : null}

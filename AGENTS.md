@@ -1,5 +1,40 @@
 # PosterPro Deployment Log
 
+## 2026-09-14 - Assisted marketplace diagnostics and exact-target browser actions
+
+### Implemented
+- Added tenant-scoped durable `DIAGNOSTIC` jobs for Facebook, Mercari,
+  Poshmark, Vinted, and OfferUp. Diagnostics require a recent paired extension
+  heartbeat and a compatible extension version, use synthetic test content,
+  and never submit a listing.
+- Added safe field-by-field diagnostic result persistence and API reads. The
+  server allow-lists diagnostic metadata, strips query strings, bounds values,
+  and discards arbitrary cookie/password fields.
+- Added live-form test controls and result display to Guided Setup and
+  Marketplace Settings. Onboarding readiness now follows the latest real-form
+  field results rather than treating an extension heartbeat as marketplace
+  readiness. The Jobs details surface also shows diagnostic login/form state
+  and field-by-field pass/failure results without linking the listing-less test
+  job to a nonexistent listing.
+- Expanded semantic marketplace field maps, category/condition option matching,
+  login/checkpoint/captcha detection, and supported Vinted regional domains.
+- Added exact stored-URL checks before assisted UPDATE and END browser actions.
+  UPDATE can open an edit form and fill it but stops for operator review; END
+  inspects the exact listing and requires the operator to use/confirm the
+  marketplace's end control. Neither action claims completion without the
+  existing PosterPro confirmation path.
+- Bumped the extension artifact/current/minimum protocol version to `0.3.0`.
+- Applied `20260914_marketplace_diagnostic_jobs.sql` to the PosterPro database;
+  `marketplace_extension_jobs.listing_id` is now nullable for diagnostics.
+
+### Validation
+- Backend focused regression group: `68 passed` (extension transport,
+  onboarding, marketplace preflight, eBay service/publish, sale idempotency).
+- Browser extension suite: `17 passed`.
+- Frontend production build completed successfully with repository warnings.
+- The real authenticated marketplace diagnostic still requires an operator
+  browser session; no live listing was created, updated, or ended in this pass.
+
 ## 2026-09-13 - Vine cohort content finalization and preflight repair
 
 ### Fixed

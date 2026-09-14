@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.enums import MarketplaceName
-from app.models.models import MarketplaceAccount, MarketplaceExtensionDevice, User
+from app.models.models import MarketplaceAccount, MarketplaceExtensionDevice, MarketplaceExtensionJob, User
 from app.services.ai_entitlements import public_ai_setup_state
 from app.services.ebay_service import summarize_ebay_account_health
 from app.services.google_photos_oauth import get_google_photos_oauth_state, google_photos_oauth_ready
@@ -33,11 +33,11 @@ MARKETPLACE_GUIDANCE = {
         "expect": "PosterPro confirms it can read your seller account and required selling policies. The test does not create or change a listing.",
         "troubleshooting": "If eBay says the connection expired, choose Reconnect eBay. If the test names a policy or location, finish that section in eBay setup before retrying.",
     },
-    "facebook": {"open_label": "Open Facebook", "open_url": "https://www.facebook.com/marketplace/", "steps": ["Use the browser where the PosterPro extension is paired.", "Open Facebook and sign in normally if asked; never paste your Facebook password into PosterPro.", "Return here and refresh the browser status.", "A real non-submitting form test is required before automation can be called ready; it is not available in this deployment."], "expect": "Facebook Marketplace opens in your normal browser. A browser heartbeat alone does not prove that every listing field works.", "troubleshooting": "If Facebook asks you to sign in, finish on facebook.com, then return. If the safe form test is unavailable, treat this channel as operator-assisted and unverified."},
-    "mercari": {"open_label": "Open Mercari", "open_url": "https://www.mercari.com/", "steps": ["Open Mercari in the same browser where PosterPro is paired.", "Sign in on Mercari itself if asked; do not enter Mercari credentials in PosterPro.", "Return and refresh browser status.", "A safe form test is required before automation can be called ready; this deployment does not yet provide one."], "expect": "Your signed-in Mercari account opens in the paired browser. Login is not a form-fill test.", "troubleshooting": "Complete sign-in at Mercari. If PosterPro still reports Offline, open PosterPro in the browser profile with the extension enabled. Form automation remains unverified until the safe test is available."},
-    "poshmark": {"open_label": "Open Poshmark", "open_url": "https://poshmark.com/", "steps": ["Open Poshmark in the paired browser.", "Sign in normally on Poshmark if asked.", "Return and refresh browser status.", "A destination form test is still required before automation is ready."], "expect": "Your signed-in Poshmark page opens in the same browser profile.", "troubleshooting": "Finish sign-in at Poshmark. If PosterPro still reports Offline, reconnect the extension from Browser Automation settings."},
-    "vinted": {"open_label": "Open Vinted", "open_url": "https://www.vinted.com/", "steps": ["Open the Vinted site for your country in the paired browser.", "Sign in normally on Vinted if asked.", "Return and refresh browser status.", "Confirm the country site is correct; a safe form test is needed before automation is ready."], "expect": "The regional Vinted site displays your signed-in account.", "troubleshooting": "Use your country's Vinted web address if this opens the wrong region. PosterPro cannot yet automatically verify country-specific listing fields."},
-    "offerup": {"open_label": "Open OfferUp", "open_url": "https://offerup.com/", "steps": ["Open OfferUp in the paired browser.", "Sign in normally on OfferUp if asked.", "Return and refresh browser status.", "A safe form test is still required before automation is ready."], "expect": "Your OfferUp account opens in the same browser profile.", "troubleshooting": "Finish sign-in at OfferUp. If the browser remains Offline, reconnect the extension in PosterPro Settings."},
+    "facebook": {"open_label": "Open Facebook", "open_url": "https://www.facebook.com/marketplace/", "steps": ["Use the browser where the PosterPro extension is paired.", "Open Facebook and sign in normally if asked; never paste your Facebook password into PosterPro.", "Return to PosterPro and start the Facebook real form test.", "Review the field-by-field result. The test stops without submitting."], "expect": "PosterPro reports login state and each supported listing field separately. A browser heartbeat alone does not prove that every listing field works.", "troubleshooting": "If the result says LOGIN_REQUIRED, open Facebook and sign in normally, then run the test again. If a field fails, the result names that field and its safe selector error."},
+    "mercari": {"open_label": "Open Mercari", "open_url": "https://www.mercari.com/", "steps": ["Open Mercari in the same browser where PosterPro is paired.", "Sign in on Mercari itself if asked; do not enter Mercari credentials in PosterPro.", "Return to PosterPro and start the Mercari real form test.", "Review the field-by-field result. The test stops without submitting."], "expect": "PosterPro reports login state and whether the live create form exposes the supported listing fields.", "troubleshooting": "Complete sign-in at Mercari and run the test again. If a field is absent or its options changed, the field result names it so the adapter can be repaired."},
+    "poshmark": {"open_label": "Open Poshmark", "open_url": "https://poshmark.com/", "steps": ["Open Poshmark in the paired browser.", "Sign in normally on Poshmark if asked.", "Return to PosterPro and start the Poshmark real form test.", "Review the field-by-field result; PosterPro will not submit."], "expect": "PosterPro reports whether the live form exposes the destination-specific fields.", "troubleshooting": "Finish sign-in on Poshmark and rerun the test. A missing field is shown by name in the result."},
+    "vinted": {"open_label": "Open Vinted", "open_url": "https://www.vinted.com/", "steps": ["Open the Vinted site for your country in the paired browser.", "Sign in normally on Vinted if asked.", "Return to PosterPro and start the Vinted real form test.", "Review the field-by-field result; PosterPro will not submit."], "expect": "The diagnostic records the Vinted region/domain and supported live form fields.", "troubleshooting": "Use your country's Vinted web address if the wrong region opened. Sign in normally and run the test again."},
+    "offerup": {"open_label": "Open OfferUp", "open_url": "https://offerup.com/", "steps": ["Open OfferUp in the paired browser.", "Sign in normally on OfferUp if asked.", "Return to PosterPro and start the OfferUp real form test.", "Review the field-by-field result; PosterPro will not submit."], "expect": "PosterPro reports login state and whether the live form exposes the mapped fields.", "troubleshooting": "Finish sign-in on OfferUp and rerun the test. If a field is missing, the diagnostic names it."},
     "etsy": {"open_label": "Open Etsy shop", "open_url": "https://www.etsy.com/your/shops/me/dashboard", "steps": ["Open your Etsy shop dashboard.", "Check that the shop is active and signed in.", "Return to PosterPro and review Etsy connection setup.", "Etsy official API authorization is not complete in this deployment, so PosterPro cannot publish through Etsy yet."], "expect": "Your Etsy seller dashboard opens. This is a shop check, not an API connection.", "troubleshooting": "Etsy authorization still needs PosterPro app setup/approval. Do not enter your shop password or API secrets into an unrelated form."},
 }
 ALLOWED_DESTINATIONS = set(DESTINATIONS)
@@ -144,10 +144,26 @@ def _destination_status(name: str, user: User, db: Session) -> dict[str, Any]:
             return {"status": "OFFLINE", "message": "The browser connection has not checked in recently."}
         return {"status": "ONLINE", "message": "Browser connection is online.", "device_name": device.name, "browser": device.browser, "version": device.extension_version, "verified_at": device.last_seen_at.isoformat()}
     if name in DESTINATIONS:
-        # Saved workflow/profile values are not proof that a marketplace form
-        # can be filled or submitted. Those destinations remain operator-test
-        # required until safe, destination-specific verification is recorded.
-        return {"status": "OPERATOR_TEST_REQUIRED", "message": "A safe non-submitting marketplace form test is still required."}
+        if name == "etsy":
+            return {"status": "AUTH_REQUIRED", "message": "Etsy's official API/shop authorization is not connected here. A browser form check is not a substitute for the official integration."}
+        latest = db.execute(select(MarketplaceExtensionJob).where(
+            MarketplaceExtensionJob.user_id == user.id,
+            MarketplaceExtensionJob.marketplace == name,
+            MarketplaceExtensionJob.action == "DIAGNOSTIC",
+        ).order_by(MarketplaceExtensionJob.created_at.desc(), MarketplaceExtensionJob.id.desc()).limit(1)).scalars().first()
+        if not latest:
+            return {"status": "OPERATOR_TEST_REQUIRED", "message": "Start the real, non-submitting form test from this setup step or Marketplace Settings."}
+        result = latest.result if isinstance(latest.result, dict) else {}
+        if latest.status == "LOGIN_REQUIRED":
+            return {"status": "AUTH_REQUIRED", "message": f"Sign in to {DESTINATIONS[name]['title']} in the paired browser, then run the form test again.", "diagnostic_status": latest.status, "last_test_at": latest.created_at.isoformat() if latest.created_at else None}
+        if latest.status == "BLOCKED_EXTERNAL":
+            return {"status": "BLOCKED_EXTERNAL", "message": latest.error_detail or "The marketplace requires an external security or account step.", "diagnostic_status": latest.status, "last_test_at": latest.created_at.isoformat() if latest.created_at else None}
+        if latest.status in {"QUEUED", "CLAIMED", "NAVIGATING", "FORM_DETECTED", "TESTING_FIELDS"}:
+            return {"status": "VERIFYING", "message": "The paired browser is checking the live form. This test never submits.", "diagnostic_status": latest.status}
+        if latest.status == "COMPLETED" and result.get("capability_ready") is True:
+            return {"status": "CONNECTED", "message": "The real form diagnostic passed for the required mapped fields. No listing was submitted.", "diagnostic_status": latest.status, "last_test_at": latest.created_at.isoformat() if latest.created_at else None, "field_results": result.get("field_results") or []}
+        failed = result.get("missing_required_fields") or []
+        return {"status": "NEEDS_ATTENTION", "message": latest.error_detail or ("The real form test found required fields PosterPro could not safely fill." if failed else "The real form test did not complete successfully."), "diagnostic_status": latest.status, "missing_required_fields": failed, "field_results": result.get("field_results") or [], "last_test_at": latest.created_at.isoformat() if latest.created_at else None}
     if name == "ai":
         setup = public_ai_setup_state(user)
         setup["status"] = setup.get("state") or "NOT_CONFIGURED"

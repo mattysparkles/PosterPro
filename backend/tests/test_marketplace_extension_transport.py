@@ -50,7 +50,7 @@ async def _pair(client, device_name: str) -> tuple[str, int]:
     assert code_response.status_code == 200
     paired = await client.post(
         "/browser-extension/pair",
-        json={"pairing_code": code_response.json()["pairing_code"], "device_name": device_name, "browser": "Chrome", "extension_version": "0.2.0"},
+        json={"pairing_code": code_response.json()["pairing_code"], "device_name": device_name, "browser": "Chrome", "extension_version": "0.3.0"},
     )
     assert paired.status_code == 200
     body = paired.json()
@@ -199,6 +199,59 @@ async def test_extension_job_pair_claim_review_complete_and_update_identity(asyn
         marketplace_row = db.query(MarketplaceListing).filter_by(listing_id=listing_id, marketplace=MarketplaceName.facebook).one()
         assert marketplace_row.marketplace_listing_id == "FB-12345"
         assert marketplace_row.status == MarketplaceListingStatus.DELETED
+    finally:
+        db.close()
+
+
+@pytest.mark.anyio
+async def test_marketplace_diagnostic_is_tenant_scoped_and_persists_field_results(async_client):
+    owner = await _register(async_client, "Diagnostic")
+    token, _device_id = await _pair(async_client, "Diagnostic Chrome")
+
+    queued = await async_client.post("/browser-extension/diagnostics/facebook", json={})
+    assert queued.status_code == 200
+    job = queued.json()
+    assert job["action"] == "DIAGNOSTIC"
+    assert job["listing_id"] is None
+    assert job["payload"]["diagnostic"] is True
+    assert job["payload"]["marketplace_payload"]["title"].startswith("PosterPro Safe Form Test")
+    assert job["payload"]["marketplace_payload"]["image_urls"] == []
+
+    claimed = await async_client.post("/browser-extension/jobs/claim", headers={"Authorization": f"Bearer {token}"})
+    assert claimed.status_code == 200
+    assert claimed.json()["job"]["id"] == job["id"]
+    result = {
+        "marketplace": "facebook",
+        "action": "DIAGNOSTIC",
+        "login_state": "LOGGED_IN",
+        "page_state": "FORM_AVAILABLE",
+        "submission_performed": False,
+        "cookies": "must not be persisted",
+        "password": "must not be persisted",
+        "field_results": [{"field": "category", "required": True, "detected": False, "attempted": True, "filled": False, "verified_value": None, "error_code": "FIELD_NOT_FOUND"}],
+    }
+    for status in ("NAVIGATING", "FORM_DETECTED", "TESTING_FIELDS", "COMPLETED"):
+        response = await async_client.post(
+            f"/browser-extension/jobs/{job['id']}/state",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"status": status, "error_code": "REQUIRED_FIELDS_UNRESOLVED" if status == "COMPLETED" else None, "result": result},
+        )
+        assert response.status_code == 200
+    latest = await async_client.get("/browser-extension/diagnostics/latest/facebook")
+    assert latest.status_code == 200
+    assert latest.json()["result"]["field_results"][0]["error_code"] == "FIELD_NOT_FOUND"
+    assert "cookies" not in latest.json()["result"]
+    assert "password" not in latest.json()["result"]
+
+    foreign = await _register(async_client, "ForeignDiagnostic")
+    foreign_detail = await async_client.get(f"/browser-extension/diagnostics/{job['id']}")
+    assert foreign_detail.status_code == 404
+    db = database_module.SessionLocal()
+    try:
+        row = db.get(MarketplaceExtensionJob, job["id"])
+        assert row.user_id == owner["user"]["id"]
+        assert row.listing_id is None
+        assert db.query(MarketplaceListing).filter_by(marketplace=MarketplaceName.facebook).count() == 0
     finally:
         db.close()
 

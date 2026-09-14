@@ -743,7 +743,7 @@ class MarketplaceExtensionJob(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
-    listing_id: Mapped[int] = mapped_column(ForeignKey("listings.id"), index=True)
+    listing_id: Mapped[int | None] = mapped_column(ForeignKey("listings.id"), nullable=True, index=True)
     crosspost_job_id: Mapped[int | None] = mapped_column(ForeignKey("marketplace_crosspost_jobs.id"), nullable=True, index=True)
     marketplace: Mapped[str] = mapped_column(String(32), index=True)
     action: Mapped[str] = mapped_column(String(16), default="CREATE", index=True)

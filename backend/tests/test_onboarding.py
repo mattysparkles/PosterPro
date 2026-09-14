@@ -7,7 +7,7 @@ import pytest
 from app.core import config as config_module
 from app.core.secrets import decrypt_secret_if_needed
 from app.models.enums import MarketplaceName
-from app.models.models import MarketplaceAccount, User
+from app.models.models import MarketplaceAccount, MarketplaceExtensionDevice, MarketplaceExtensionJob, User
 from app.services.ai_entitlements import resolve_openai_key, sponsored_ai_entitlement
 from app.services.onboarding_service import onboarding_snapshot
 
@@ -60,6 +60,33 @@ def test_onboarding_is_resumable_and_marketplace_status_is_not_assumed_ready(db_
     assert by_id["marketplace:facebook"]["guidance"]["open_url"] == "https://www.facebook.com/marketplace/"
     assert any("form test" in step.lower() for step in by_id["marketplace:facebook"]["guidance"]["steps"])
     assert snapshot["completed"] is False
+
+
+def test_onboarding_assisted_marketplace_requires_passed_live_diagnostic(db_session):
+    from datetime import UTC, datetime
+
+    user = User(email=f"setup-diagnostic-{uuid4()}@example.com", role="owner", settings_json={
+        "guided_onboarding_v1": {"started_at": "2026-09-14T12:00:00+00:00", "selected_marketplaces": ["facebook"], "marketplace_choice_saved": True},
+    })
+    db_session.add(user); db_session.flush()
+    device = MarketplaceExtensionDevice(user_id=user.id, device_key=f"device-{uuid4()}", token_hash=f"hash-{uuid4()}", extension_version="0.3.0", last_seen_at=datetime.now(UTC).replace(tzinfo=None))
+    db_session.add(device); db_session.flush()
+    snapshot = onboarding_snapshot(user, db_session)
+    task = next(row for row in snapshot["tasks"] if row["id"] == "marketplace:facebook")
+    assert task["status"] == "OPERATOR_TEST_REQUIRED"
+
+    job = MarketplaceExtensionJob(user_id=user.id, marketplace="facebook", action="DIAGNOSTIC", status="COMPLETED", payload_version=1, payload_snapshot={"diagnostic": True}, result={"capability_ready": True, "field_results": [{"field": "category", "required": True, "detected": True, "attempted": True, "filled": True}]})
+    db_session.add(job); db_session.flush()
+    task = next(row for row in onboarding_snapshot(user, db_session)["tasks"] if row["id"] == "marketplace:facebook")
+    assert task["status"] == "CONNECTED"
+    assert "diagnostic passed" in task["message"].lower()
+
+    job.status = "COMPLETED"
+    job.result = {"capability_ready": False, "missing_required_fields": ["condition"], "field_results": [{"field": "condition", "required": True, "detected": False, "attempted": True, "filled": False, "error_code": "FIELD_NOT_FOUND"}]}
+    db_session.flush()
+    task = next(row for row in onboarding_snapshot(user, db_session)["tasks"] if row["id"] == "marketplace:facebook")
+    assert task["status"] == "NEEDS_ATTENTION"
+    assert task["missing_required_fields"] == ["condition"]
 
 
 def test_google_photos_expired_token_is_reported_without_refreshing_credentials(db_session, monkeypatch):

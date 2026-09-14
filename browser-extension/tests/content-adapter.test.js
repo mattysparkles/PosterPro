@@ -63,6 +63,7 @@ function loadContentFixture(hostname = "www.facebook.com") {
     DataTransfer: FakeDataTransfer,
     File: FakeFile,
     atob: (value) => Buffer.from(value, "base64").toString("binary"),
+    URL,
   };
   context.globalThis = context;
   vm.runInNewContext(fs.readFileSync(path.join(root, "marketplace-adapters.js"), "utf8"), context);
@@ -87,7 +88,9 @@ test("Facebook create form fixture fills supported fields and stops for operator
   assert.equal(fields.price.value, "20");
   assert.equal(fields.description.value, "A useful description");
   assert.equal(response.uploaded_image_count, 1);
-  assert.deepEqual(Array.from(response.missing_required_fields), ["category_operator_selection_required", "condition_operator_selection_required"]);
+  assert.deepEqual(Array.from(response.missing_required_fields), ["category", "condition"]);
+  assert.equal(response.capability_ready, false);
+  assert.equal(response.field_results.find((field) => field.field === "category").error_code, "FIELD_OR_MAPPED_VALUE_MISSING");
   assert.equal(response.selector_strategy, "central_marketplace_map_then_semantic_labels");
 });
 
@@ -110,19 +113,73 @@ test("assisted destination fixtures fill core fields and never submit", async (t
           images: [{ data_url: "data:image/png;base64,aGk=", file_name: "posterpro-1.png" }],
         }, {}, resolve);
       });
-      assert.equal(response.ok, true);
+      assert.equal(response.ok, true, JSON.stringify(response));
       assert.equal(response.stage, "AWAITING_OPERATOR_REVIEW");
       assert.equal(response.submission_performed, false);
       assert.equal(fields.title.value, "Fixture item");
       assert.equal(fields.price.value, "24.5");
       assert.equal(fields.description.value, "Supported source-backed detail.");
       assert.equal(response.uploaded_image_count, 1);
-      assert.deepEqual(Array.from(response.missing_required_fields), [
-        "category_operator_selection_required",
-        "condition_operator_selection_required",
-      ]);
+      assert.equal(response.capability_ready, false);
+      assert.ok(response.field_results.every((field) => "detected" in field && "filled" in field && "error_code" in field));
     });
   }
+});
+
+test("real-form diagnostic reports per-field capability and never submits", async () => {
+  const { fields, listener } = loadContentFixture();
+  const response = await new Promise((resolve) => {
+    listener({
+      action: "posterpro_diagnose_listing",
+      marketplace: "facebook",
+      payload: { title: "PosterPro Safe Form Test - Do Not Publish", price: 1, description: "Temporary diagnostic only", category: "Other", condition: "Used - good" },
+      images: [{ data_url: "data:image/png;base64,aGk=", file_name: "posterpro-safe-diagnostic.png" }],
+    }, {}, resolve);
+  });
+  assert.equal(response.action, "DIAGNOSTIC");
+  assert.equal(response.submission_performed, false);
+  assert.equal(fields.title.value, "PosterPro Safe Form Test - Do Not Publish");
+  assert.ok(response.field_results.some((field) => field.field === "category"));
+  assert.ok(response.field_results.some((field) => field.field === "condition"));
+  assert.equal(response.field_results.find((field) => field.field === "photos").filled, true);
+});
+
+test("UPDATE requires the exact stored URL and preserves it for operator-reviewed edits", async () => {
+  const { fields, listener } = loadContentFixture();
+  const result = await new Promise((resolve) => listener({
+    action: "posterpro_update_exact_listing",
+    marketplace: "facebook",
+    expected_external_url: "https://www.facebook.com/marketplace/create/item",
+    external_listing_id: "FB-55",
+    payload: { title: "Revised item", price: 31, description: "Canonical revised details", condition: "New", category: "Other" },
+    images: [],
+  }, {}, resolve));
+  assert.equal(result.action, "UPDATE");
+  assert.equal(result.identity_verified, true);
+  assert.equal(result.external_listing_id, "FB-55");
+  assert.equal(result.external_url, "https://www.facebook.com/marketplace/create/item");
+  assert.equal(result.submission_performed, false);
+  assert.equal(fields.title.value, "Revised item");
+  const wrong = await new Promise((resolve) => listener({
+    action: "posterpro_update_exact_listing", marketplace: "facebook",
+    expected_external_url: "https://www.facebook.com/marketplace/item/OTHER",
+    payload: {}, images: [],
+  }, {}, resolve));
+  assert.equal(wrong.identity_verified, false);
+  assert.equal(wrong.error_code, "EXTERNAL_IDENTITY_MISMATCH");
+});
+
+test("END inspection verifies exact URL and never clicks a destructive control", () => {
+  const { listener } = loadContentFixture();
+  let result;
+  listener({
+    action: "posterpro_inspect_exact_end", marketplace: "facebook",
+    expected_external_url: "https://www.facebook.com/marketplace/create/item", external_listing_id: "FB-55", payload: {},
+  }, {}, (value) => { result = value; });
+  assert.equal(result.identity_verified, true);
+  assert.equal(result.end_control_detected, false);
+  assert.equal(result.submission_performed, false);
+  assert.equal(result.required_operator_action, "FIND_MARKETPLACE_END_CONTROL_MANUALLY_THEN_CONFIRM_IN_POSTERPRO");
 });
 
 test("adapter refuses to fill a marketplace form on the wrong domain", async () => {

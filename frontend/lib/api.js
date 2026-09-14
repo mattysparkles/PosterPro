@@ -1622,6 +1622,20 @@ export function askOnboardingHelp(taskId, question) {
   });
 }
 
+export function startMarketplaceDiagnostic(marketplace) {
+  return jsonFetch(`${API_BASE}/browser-extension/diagnostics/${encodeURIComponent(marketplace)}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}), timeoutMs: 15000,
+  });
+}
+
+export function fetchMarketplaceDiagnostic(jobId) {
+  return jsonFetch(`${API_BASE}/browser-extension/diagnostics/${encodeURIComponent(jobId)}`);
+}
+
+export function fetchLatestMarketplaceDiagnostic(marketplace) {
+  return jsonFetch(`${API_BASE}/browser-extension/diagnostics/latest/${encodeURIComponent(marketplace)}`);
+}
+
 export function recordOnboardingEvent(eventName, taskId = null) {
   return jsonFetch(`${API_BASE}/onboarding/event`, {
     method: 'POST',
