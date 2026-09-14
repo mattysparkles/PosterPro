@@ -51,6 +51,13 @@
   fresh preflight reconfirmed all ten as blocker-free `needs_review` in the
   review queue; the ten stale cohort jobs are canceled and publish attempts
   remain zero.
+- A subsequent read-only history audit found 27 older failed cohort jobs from
+  September 5, each with zero attempts; their recorded failure was preflight
+  `EBAY_REQUIRED_ASPECT_MISSING` (35 blocker records across those jobs). The
+  ten later stale queued jobs are canceled. Across all 37 cohort jobs there
+  are zero attempts, zero persisted marketplace publish-attempt rows, no
+  external eBay IDs, and no active jobs. The historical job failures remain
+  visible in job history; current listing preflight has zero blockers.
 
 ## 2026-09-12 - Tenant routing rules foundation
 
