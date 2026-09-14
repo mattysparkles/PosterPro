@@ -922,3 +922,10 @@ requirements above. Credentials were not rotated or printed.
   from startup; health now reports the probe as `not_run`. Added a regression
   test proving this status path does not open a database session. After this
   correction, focused suites passed `127 tests`; backend compile passed.
+- Browser-extension fixture suite: `node --test browser-extension/tests/*.test.js`
+  passed `14` tests. These remain mock-DOM/bridge tests, not live marketplace
+  form verification. During health verification an exact temporary file,
+  `/tmp/posterpro-health-check.json`, was created with the full health body and
+  then removed after inspection because it contained internal diagnostics; no
+  other `/tmp` path was inspected, changed, or cleaned. This was a transient
+  shared-temp write and is recorded as an operator-scope mistake.
