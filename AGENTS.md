@@ -1038,8 +1038,8 @@ requirements above. Credentials were not rotated or printed.
   queue and bucket use the same confirmed-identity rule. This avoids treating
   status-only/no-ID projections as live. Added a fixture proving a Published
   marketplace row without external identity stays in Drafts and does not
-  inflate Live. Final `test_marketplace_api.py` +
-  `test_marketplace_preflight.py`: `55 passed`.
+  inflate Live. Final combined marketplace API/preflight/auth/extension
+  transport/browser-extension backend run: `72 passed`.
 - Authenticated browser/visual verification was unavailable in this execution
   environment and remains an operator test. No marketplace operation was run.
   No host-wide cleanup or non-PosterPro resource mutation was performed; the
