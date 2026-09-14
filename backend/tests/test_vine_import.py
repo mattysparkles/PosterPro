@@ -11,6 +11,7 @@ from fastapi import HTTPException
 from fastapi import UploadFile
 
 from app.core.config import settings
+from app.models.enums import ListingStatus
 from app.api.schemas import VineImportActionRequest
 from app.api.vine_imports import (
     auto_build_vine_drafts,
@@ -25,7 +26,7 @@ from app.services.amazon_media import AmazonProductMediaProvider, _extract_amazo
 from app.services.amazon_product_discovery import AmazonProductDiscoveryService
 from app.services.listing_review import normalize_listing_images
 from app.services.listing_review import derive_shipping_profile
-from app.services.vine_import_service import VineImportService, _is_unsafe_vine_image, description_source_similarity
+from app.services.vine_import_service import VineImportService, _clean_amazon_facts, _is_unsafe_vine_image, _merge_amazon_fact_evidence, description_source_similarity
 from app.services.vine_parser import calculate_vine_eligibility, parse_vine_csv, parse_vine_pdf, parse_vine_xlsx
 from app.services.vine_policy import review_vine_product
 
@@ -47,6 +48,42 @@ def test_amazon_dimension_formats_are_normalized(label, value, expected):
     assert dimensions["raw_text"] == value
 
 
+def test_amazon_offer_price_keeps_cents_and_ignores_struck_and_unrelated_prices():
+    html = '''
+    <span id="productTitle">ASIN-bound item</span>
+    <div id="corePriceDisplay_desktop_feature_div">
+      <span class="a-price a-text-price"><span class="a-offscreen">$59.99</span></span>
+      <span class="a-price"><span class="a-offscreen">$45.99</span><span class="a-price-whole">45</span><span class="a-price-fraction">99</span></span>
+    </div>
+    <div class="protection-plan"><span class="a-offscreen">$9.99</span></div>
+    <script type="application/json">{"price":"3.49"}</script>
+    '''
+
+    facts = _extract_amazon_product_facts(html)
+
+    assert facts["current_price"] == 45.99
+    assert facts["price_source"] == "asin_product_offer_widget_v2"
+
+
+def test_amazon_pagewide_price_json_is_not_treated_as_current_offer():
+    facts = _extract_amazon_product_facts('<span id="productTitle">ASIN-bound item</span><script>{"price":"9.99"}</script>')
+
+    assert facts["current_price"] is None
+    assert facts["price_source"] is None
+
+
+def test_vine_normalization_rejects_mislabeled_capacity_values_but_keeps_real_units():
+    facts = _clean_amazon_facts({
+        "capacity": "802.3a",
+        "specifications": {"Capacity": "360 A", "Supported Capacity": "15, 21, 28, and 36 gallon"},
+    })
+
+    assert facts["capacity"] == ""
+    assert "Capacity" not in facts["specifications"]
+    assert facts["untrusted_specifications"]["Capacity"] == "360 A"
+    assert facts["specifications"]["Supported Capacity"] == "15, 21, 28, and 36 gallon"
+
+
 def test_vine_fallback_does_not_copy_source_product_prose():
     item = VineImportItem(product_name="Nilight RV Bumper Tote Tank Carrier", asin="B0TEST2141")
     source_sentence = "This carrier provides a secure and convenient way to transport a portable tote tank on a square RV bumper."
@@ -55,6 +92,85 @@ def test_vine_fallback_does_not_copy_source_product_prose():
     assert "Nilight" in description
     assert "15 gallons" in description
     assert description_source_similarity(description, [source_sentence]) < 1.0
+
+
+def test_vine_description_quality_does_not_count_truncated_title_tail_as_copy():
+    full_title = "2026 Upgraded Automatic Ironing Machine, Hands-Free Wrinkle Remover for Shirts, Pants, Jackets and Shoes, Inflatable Shirt Ironing Machine for Apartments and Business Travel, Gentle On All Fabrics"
+    listing_title = full_title[:80]
+    title_only_description = f"{full_title}\n\nCondition: New."
+
+    assert not VineImportService._vine_description_is_usable(
+        title_only_description,
+        listing_title,
+        {"title": full_title},
+    )
+
+
+def test_vine_hydrates_durable_specifics_and_uses_original_structured_fallback(monkeypatch):
+    from app.services.listing_ai import ListingAIService
+
+    item = VineImportItem(
+        product_name="Automatic Indoor Plant Waterer, 49FT Drip Irrigation Kit for 15 Pots",
+        asin="B0TEST2170",
+    )
+    listing = Listing(
+        user_id=1,
+        source_type="amazon_vine",
+        title=item.product_name,
+        item_specifics={
+            "Brand": "Unbranded", "Model": "B0TEST2170", "Type": "Replacement Part",
+            "Brand Name": "HEKIWAY", "Model Name": "SN15", "Hose Length": "49 feet",
+            "Scheduled irrigation": "Yes", "Customer Reviews": "4.6 var dpAcrHasRegisteredArcLinkClickAction",
+        },
+    )
+    source_sentence = "Choose this Wi-Fi drip system for simple watering while you travel and enjoy complete peace of mind."
+    facts = {"product_description": source_sentence, "current_price": 29.0, "feature_bullets": [source_sentence]}
+    service = VineImportService()
+    hydrated = service._hydrate_vine_facts(facts, item=item, listing=listing)
+    assert hydrated["brand"] == "HEKIWAY"
+    assert hydrated["model"] == "SN15"
+    assert hydrated["weight"] == ""
+    assert hydrated["specifications"]["Hose Length"] == "49 feet"
+    assert "Customer Reviews" not in hydrated["specifications"]
+
+    monkeypatch.setattr(ListingAIService, "generate", lambda *args, **kwargs: {
+        "description": "generic fallback that must not be used", "generation_source": "fallback"
+    })
+    description = service._generate_vine_original_description(None, listing=listing, item=item, facts=hydrated)
+    assert source_sentence not in description
+    assert "HEKIWAY" in description and "SN15" in description and "49 feet" in description
+    assert "var dpAcrHasRegisteredArcLinkClickAction" not in description
+    assert service._vine_description_is_usable(description, listing.title, hydrated)
+
+
+def test_vine_provider_original_description_is_preserved_when_substantive(monkeypatch):
+    from app.services.listing_ai import ListingAIService
+
+    item = VineImportItem(product_name="Compact PoE Splitter", asin="B0TESTPOE01")
+    listing = Listing(user_id=1, source_type="amazon_vine", title=item.product_name, item_specifics={})
+    facts = {
+        "title": item.product_name,
+        "brand": "Network Works",
+        "feature_bullets": ["This compact device separates data and power over one cable."],
+        "specifications": {"Port Configuration": "1 input, 2 outputs", "Network Speed": "Gigabit"},
+    }
+    original = "A compact Gigabit PoE splitter with one input and two outputs. Confirm standards and power requirements for the connected equipment before installation."
+    monkeypatch.setattr(ListingAIService, "generate", lambda *args, **kwargs: {
+        "description": original, "generation_source": "openai"
+    })
+    result = VineImportService()._generate_vine_original_description(None, listing=listing, item=item, facts=facts)
+    assert result == original
+
+
+def test_partial_amazon_refresh_merges_instead_of_erasing_durable_specifics():
+    facts = _merge_amazon_fact_evidence(
+        {"brand": "Durable Co", "specifications": {"Material": "Steel", "Capacity": "40 lb"}, "feature_bullets": ["Durable structured claim"]},
+        {"current_price": 12.5, "specifications": {"Color": "Black"}, "feature_bullets": []},
+    )
+    assert facts["brand"] == "Durable Co"
+    assert facts["specifications"] == {"Material": "Steel", "Capacity": "40 lb", "Color": "Black"}
+    assert facts["feature_bullets"] == ["Durable structured claim"]
+    assert facts["current_price"] == 12.5
 
 
 def _xlsx_sheet_xml(rows):
@@ -1656,6 +1772,88 @@ def test_first_pass_uses_real_preflight_contract_and_persists_ebay_cache(db_sess
     assert bool(refreshed.processing_blocking_reason) is is_blocked
 
 
+def test_vine_finalization_recomputes_stale_blockers_before_review_queue(db_session, monkeypatch):
+    from datetime import UTC, datetime
+    from app.services.marketplace_preflight import MarketplacePreflightService
+    from app.api.routes import _listing_bucket
+
+    user = User(email=f"vine-finalize-{uuid4()}@example.com", role="owner", is_admin=True)
+    db_session.add(user); db_session.flush()
+    batch = VineImportBatch(user_id=user.id, filename="finalize.csv", source_type="csv")
+    listing = Listing(
+        user_id=user.id,
+        source_type="amazon_vine",
+        status=ListingStatus.PROCESSED,
+        processing_state="needs_attention",
+        processing_blocking_reason="DESCRIPTION_INADEQUATE from a previous version",
+        needs_review=False,
+        title="Durable Evidence Workshop Tool",
+        description="Durable Evidence Workshop Tool is a steel workshop tool with a 40 lb rated capacity. It includes a mounting bracket and installation hardware; confirm fit and package contents before use. Condition: New.",
+        listing_price=24.0,
+        suggested_price=24.0,
+        buy_it_now_price=24.0,
+        quantity=1,
+        condition="New",
+        category_id="30090",
+        category_suggestion="Office Supplies > Workshop Tools",
+        image_urls=["/media/amazon-vine/durable-tool.jpg"],
+        listing_images=[{"storage_path": "/media/amazon-vine/durable-tool.jpg", "operator_state": "approved", "is_reference": False, "is_primary": True}],
+        item_specifics={"Brand": "Evidence Co", "Material": "Steel", "Capacity": "40 lb", "Type": "Workshop tool"},
+        source_metadata={"asin": "B000FINALIZE", "amazon_product_facts": {
+        "title": "Durable Evidence Workshop Tool", "brand": "Evidence Co", "current_price": 24.0,
+        "price_source": "asin_product_offer_widget_v2",
+            "product_type": "Workshop tool", "material": "Steel", "capacity": "40 lb",
+            "feature_bullets": ["Steel workshop tool with 40 lb capacity"],
+            "specifications": {"Material": "Steel", "Capacity": "40 lb", "Included Components": "Mounting bracket; installation hardware"},
+        }},
+        marketplace_data={"marketplace_preflight": {"by_marketplace": {"ebay": {
+            "marketplace": "ebay", "status": "blocked", "blockers": [{"code": "DESCRIPTION_INADEQUATE"}], "blocker_codes": ["DESCRIPTION_INADEQUATE"]
+        }}}},
+    )
+    db_session.add_all([batch, listing]); db_session.flush()
+    item = VineImportItem(batch_id=batch.id, user_id=user.id, asin="B000FINALIZE", product_name="Durable Evidence Workshop Tool", estimated_tax_value=30.0, listing_id=listing.id, inventory_item_id=listing.id, eligibility_status="eligible")
+    db_session.add(item); db_session.commit()
+
+    fresh = {"marketplace": "ebay", "status": "ready_with_warnings", "blockers": [], "warnings": [{"code": "OPTIONAL_INFO", "message": "Optional field can be reviewed."}], "payload_preview": {"payload": {"title": listing.title}}, "last_checked_at": datetime.now(UTC)}
+    monkeypatch.setattr(MarketplacePreflightService, "preflight_listing", lambda *args, **kwargs: dict(fresh))
+
+    result = VineImportService().preflight_batch_drafts(db_session, batch=batch, listing_ids=[listing.id])
+    db_session.refresh(listing)
+    cached = listing.marketplace_data["marketplace_preflight"]["by_marketplace"]["ebay"]
+    assert result["results"][0]["blockers"] == []
+    assert listing.processing_state == "complete"
+    assert listing.needs_review is True
+    assert listing.processing_blocking_reason is None
+    assert cached["status"] == "ready_with_warnings" and cached["blockers"] == []
+    assert _listing_bucket(listing) == "review"
+
+
+def test_vine_clean_needs_review_preflight_status_is_not_routed_to_attention():
+    from app.api.routes import _listing_bucket
+
+    listing = Listing(
+        id=991001,
+        status=ListingStatus.PROCESSED,
+        source_type="amazon_vine",
+        title="Supported Product Name with Useful Identity",
+        description="Supported Product Name with Useful Identity. This item includes a documented mounting bracket and a steel body sized for standard workshop use. Condition: New.",
+        category_suggestion="Tools > Workshop Equipment",
+        category_id="12345",
+        condition="New",
+        quantity=1,
+        listing_price=24.0,
+        image_urls=["/media/example.jpg"],
+        needs_review=True,
+        processing_state="complete",
+        source_metadata={"asin": "B000READY", "amazon_product_facts": {"brand": "Example Co"}},
+        marketplace_data={"marketplace_preflight": {"by_marketplace": {"ebay": {
+            "status": "needs_review", "blockers": [], "blocker_count": 0, "warnings": []
+        }}}},
+    )
+
+    assert _listing_bucket(listing) == "review"
+
+
 def test_vine_update_preserves_durable_facts_when_discovery_is_empty(db_session, monkeypatch):
     user = User(email=f"vine-durable-empty-{uuid4()}@example.com", role="owner", is_admin=True)
     db_session.add(user); db_session.flush()
@@ -1676,6 +1874,79 @@ def test_vine_update_preserves_durable_facts_when_discovery_is_empty(db_session,
     fresh = service.preflight_listing(db_session, refreshed, "ebay")
     assert fresh["marketplace"] == "ebay"
     assert not any(issue.get("code") == "DESCRIPTION_INADEQUATE" for issue in fresh["blockers"])
+
+
+def test_vine_finalization_preserves_prior_non_etv_price_when_amazon_fetch_is_empty(db_session, monkeypatch):
+    from app.services.marketplace_preflight import MarketplacePreflightService
+
+    user = User(email=f"vine-price-empty-{uuid4()}@example.com", role="owner", is_admin=True)
+    db_session.add(user); db_session.flush()
+    batch = VineImportBatch(user_id=user.id, filename="durable-price.csv", source_type="csv")
+    facts = {
+        "title": "Durable Evidence Workshop Tool",
+        "brand": "Evidence Co",
+        "model": "DT-40",
+        "current_price": 12.5,
+        "product_type": "Workshop tool",
+        "material": "Steel",
+        "capacity": "40 lb",
+        "feature_bullets": ["Steel body supports tools up to 40 lb", "Mounting bracket included"],
+        "specifications": {"Material": "Steel", "Capacity": "40 lb", "Model": "DT-40"},
+    }
+    listing = Listing(
+        user_id=user.id,
+        source_type="amazon_vine",
+        status=ListingStatus.PROCESSED,
+        processing_state="needs_attention",
+        title="Durable Evidence Workshop Tool",
+        description=("Durable Evidence Workshop Tool has a steel body rated for loads up to 40 lb. "
+                     "The set includes a mounting bracket and hardware for installation. "
+                     "Confirm fit and package contents before approval."),
+        listing_price=12.5,
+        suggested_price=12.5,
+        quantity=1,
+        condition="New",
+        category_id="12345",
+        category_suggestion="Tools > Workshop Equipment",
+        image_urls=["/media/amazon-vine/durable-price.jpg"],
+        listing_images=[{"storage_path": "/media/amazon-vine/durable-price.jpg", "operator_state": "approved", "is_reference": False, "is_primary": True}],
+        item_specifics={"Brand": "Evidence Co", "Model": "DT-40", "Material": "Steel", "Capacity": "40 lb", "Type": "Workshop tool"},
+        source_metadata={"asin": "B000DURPRICE", "amazon_product_facts": facts},
+        marketplace_data={"pricing_analysis": {"listing_price": 12.5}},
+    )
+    db_session.add_all([batch, listing]); db_session.flush()
+    item = VineImportItem(
+        batch_id=batch.id,
+        user_id=user.id,
+        asin="B000DURPRICE",
+        product_name="Durable Evidence Workshop Tool",
+        estimated_tax_value=45.0,
+        listing_id=listing.id,
+        inventory_item_id=listing.id,
+        eligibility_status="eligible",
+    )
+    db_session.add(item); db_session.commit()
+    monkeypatch.setattr(
+        AmazonProductDiscoveryService,
+        "discover_for_vine_item",
+        lambda *_args, **_kwargs: {"status": "fetch_failed", "asin": "B000DURPRICE", "product_facts": {}, "images": []},
+    )
+    monkeypatch.setattr(
+        MarketplacePreflightService,
+        "preflight_listing",
+        lambda *_args, **_kwargs: {"marketplace": "ebay", "status": "ready_with_warnings", "blockers": [], "warnings": []},
+    )
+
+    result = VineImportService().preflight_batch_drafts(db_session, batch=batch, listing_ids=[listing.id])
+    db_session.refresh(listing)
+
+    assert result["results"][0]["blockers"] == []
+    assert listing.processing_state == "complete" and listing.needs_review is True
+    assert listing.listing_price == 12.5
+    pricing = listing.marketplace_data["pricing_analysis"]
+    assert pricing["provenance"] == "durable_prior_listing_price_unverified"
+    assert pricing["amazon_current_price"] is None
+    assert listing.source_metadata["amazon_price_history"][-1]["value"] == 12.5
 
 
 def test_vine_duplicate_import_rows_are_skipped_until_prior_listing_exists(db_session):

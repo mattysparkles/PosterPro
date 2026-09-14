@@ -535,6 +535,13 @@ class MarketplacePreflightService:
             warnings.append(_issue("EBAY_CATEGORY_METADATA_UNAVAILABLE", "eBay category metadata could not be fetched right now.", field="category_id", fix_hint="Retry preflight when eBay metadata is available.", severity="warning", retryable=True))
         elif not listing.category_id:
             warnings.append(_issue("EBAY_CATEGORY_NEEDS_REVIEW", "eBay category was inferred instead of explicitly chosen.", field="category_id", fix_hint="Review the category suggestion before publishing.", severity="warning"))
+        if str(getattr(listing, "source_type", "") or "").lower() == "amazon_vine" and category.get("leaf_verified") is not True:
+            blockers.append(_issue(
+                "EBAY_CATEGORY_LEAF_UNVERIFIED",
+                "The resolved Vine eBay category has not been confirmed as a current leaf category.",
+                field="category_id",
+                fix_hint="Resolve and verify a current leaf category in the eBay taxonomy before publishing.",
+            ))
 
         for field_key, code, label in [
             ("payment_policy_id", "EBAY_PAYMENT_POLICY_MISSING", "payment policy"),

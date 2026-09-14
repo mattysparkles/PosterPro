@@ -642,8 +642,39 @@ def _ebay_listing_query(listing: Listing) -> str:
     for candidate in (metadata.get("product_name"), raw_row.get("Product Name"), listing.title):
         text = str(candidate or "").strip()
         if text:
+            if str(listing.source_type or "").strip().lower() == "amazon_vine" and str(listing.category_suggestion or "").strip():
+                semantic_leaf = str(listing.category_suggestion).split(">")[-1].strip()
+                # Keep the product identity while giving taxonomy search the
+                # already-normalized product classification as strong context.
+                return f"{semantic_leaf} {text}"[:160]
             return text[:160]
     return f"PosterPro listing {listing.id}"
+
+
+def _vine_category_match_score(expected_path: str, candidate_name: str) -> int:
+    expected = str(expected_path or "").lower()
+    candidate = str(candidate_name or "").lower()
+    aliases = (
+        (("blinds", "shades", "roller shade"), ("blind", "shade", "window")),
+        (("power over ethernet", "poe"), ("poe", "ethernet", "splitter")),
+        (("cargo racks", "rv bumper", "tote tank"), ("rack", "cargo", "trailer", "rv")),
+        (("stands & risers", "laptop"), ("stand", "riser", "holder", "laptop")),
+        (("irons & garment steamers", "ironing machine"), ("iron", "ironing", "steamer", "garment")),
+        (("water cooling", "cpu cooler"), ("cooling", "cooler", "water")),
+        (("bird houses", "bird house"), ("bird", "house")),
+        (("drip irrigation", "plant waterer"), ("drip", "irrigation", "watering")),
+        (("ottomans", "ottoman"), ("ottoman", "footstool", "pouf")),
+        (("kvm switches", "kvm switch"), ("kvm", "switch")),
+    )
+    expected_terms: set[str] = set()
+    for markers, terms in aliases:
+        if any(marker in expected for marker in markers):
+            expected_terms.update(terms)
+            break
+    if not expected_terms:
+        expected_terms = {word.rstrip("s") for word in re.findall(r"[a-z0-9]+", expected) if len(word) > 3}
+    candidate_terms = {word.rstrip("s") for word in re.findall(r"[a-z0-9]+", candidate) if len(word) > 2}
+    return len(expected_terms & candidate_terms)
 
 
 def _derive_brand(listing: Listing) -> str:
@@ -1259,22 +1290,75 @@ async def create_inventory_location(
     return {"merchantLocationKey": location_key}
 
 
-async def suggest_ebay_category(listing: Listing, account: MarketplaceAccount, marketplace_id: str = "EBAY_US") -> dict[str, str]:
+async def suggest_ebay_category(listing: Listing, account: MarketplaceAccount, marketplace_id: str = "EBAY_US") -> dict[str, Any]:
     if str(listing.category_suggestion or "").strip().isdigit():
         category_id = str(listing.category_suggestion).strip()
-        return {"categoryId": category_id, "categoryName": category_id}
+        result: dict[str, Any] = {"categoryId": category_id, "categoryName": category_id}
+        if str(listing.source_type or "").strip().lower() == "amazon_vine":
+            client = EbayAPIClient(account.access_token)
+            tree = await client.request("GET", "/commerce/taxonomy/v1/get_default_category_tree_id", params={"marketplace_id": marketplace_id})
+            tree_id = str(tree.get("categoryTreeId") or "")
+            verification = await verify_ebay_category(account, category_id, tree_id, marketplace_id=marketplace_id) if tree_id else {"verified": False, "leaf": None, "source": "tree_unavailable"}
+            result.update({
+                "leafVerified": bool(verification.get("verified") and verification.get("leaf")),
+                "taxonomyTreeId": tree_id,
+                "verificationSource": str(verification.get("source") or "unknown"),
+            })
+        return result
     client = EbayAPIClient(account.access_token)
     tree = await client.request("GET", "/commerce/taxonomy/v1/get_default_category_tree_id", params={"marketplace_id": marketplace_id})
     tree_id = tree.get("categoryTreeId")
     if not tree_id:
         raise EbayIntegrationError("Unable to resolve eBay category tree id")
+    query = _ebay_listing_query(listing)
     suggestions = await client.request(
         "GET",
         f"/commerce/taxonomy/v1/category_tree/{tree_id}/get_category_suggestions",
-        params={"q": _ebay_listing_query(listing)},
+        params={"q": query},
     )
-    first = (suggestions.get("categorySuggestions") or [{}])[0]
-    category = first.get("category") or {}
+    candidates = [row.get("category") or {} for row in suggestions.get("categorySuggestions") or []]
+    verification = None
+    if str(listing.source_type or "").strip().lower() == "amazon_vine":
+        semantic = str(listing.category_suggestion or "").strip()
+        ranked = sorted(
+            (( _vine_category_match_score(semantic, str(row.get("categoryName") or "")), row) for row in candidates),
+            key=lambda pair: pair[0],
+            reverse=True,
+        )
+        async def first_verified_leaf(rows):
+            for score, candidate in rows:
+                if score <= 0:
+                    continue
+                candidate_id = str(candidate.get("categoryId") or "").strip()
+                if not candidate_id:
+                    continue
+                verified = await verify_ebay_category(account, candidate_id, str(tree_id), marketplace_id=marketplace_id)
+                if verified.get("verified") and verified.get("leaf"):
+                    return candidate, verified
+            return None, None
+
+        category, verification = await first_verified_leaf(ranked)
+        if category is None:
+            # Retry against the semantic leaf alone. A top title-only match
+            # such as apparel for a window shade must never become a durable
+            # Vine category merely because eBay returned it first.
+            semantic_leaf = semantic.split(">")[-1].strip() or semantic
+            fallback = await client.request(
+                "GET",
+                f"/commerce/taxonomy/v1/category_tree/{tree_id}/get_category_suggestions",
+                params={"q": semantic_leaf},
+            )
+            candidates = [row.get("category") or {} for row in fallback.get("categorySuggestions") or []]
+            ranked = sorted(
+                ((_vine_category_match_score(semantic, str(row.get("categoryName") or "")), row) for row in candidates),
+                key=lambda pair: pair[0],
+                reverse=True,
+            )
+            category, verification = await first_verified_leaf(ranked)
+        if category is None or verification is None:
+            raise EbayIntegrationError(f"eBay taxonomy suggestions do not semantically match the Vine category: {semantic}")
+    else:
+        category = candidates[0] if candidates else {}
     category_id = str(category.get("categoryId") or "").strip()
     if not category_id:
         fallback_category_id = str(listing.category_id or "").strip() if str(listing.category_id or "").strip().isdigit() else ""
@@ -1282,10 +1366,18 @@ async def suggest_ebay_category(listing: Listing, account: MarketplaceAccount, m
             fallback_category_id = str(listing.category_suggestion or "").strip() if str(listing.category_suggestion or "").strip().isdigit() else ""
         fallback_category_id = fallback_category_id or "171485"
         return {"categoryId": fallback_category_id, "categoryName": fallback_category_id}
-    return {
+    result = {
         "categoryId": category_id,
         "categoryName": str(category.get("categoryName") or "").strip(),
     }
+    if str(listing.source_type or "").strip().lower() == "amazon_vine":
+        verification = verification or await verify_ebay_category(account, category_id, str(tree_id), marketplace_id=marketplace_id)
+        result.update({
+            "leafVerified": bool(verification.get("verified") and verification.get("leaf")),
+            "taxonomyTreeId": str(tree_id),
+            "verificationSource": str(verification.get("source") or "unknown"),
+        })
+    return result
 
 async def search_ebay_categories(query: str, account: MarketplaceAccount, marketplace_id: str = "EBAY_US") -> list[dict[str, object]]:
     """Return the actual eBay taxonomy suggestions for operator selection."""
@@ -2451,6 +2543,9 @@ async def build_ebay_publish_plan(
             "source": "listing.category_suggestion" if str(listing.category_suggestion or "").strip().isdigit() else "ebay_taxonomy",
             "metadata_source": category_aspect_source,
             "metadata_available": category_aspect_available,
+            "leaf_verified": category_data.get("leafVerified") if str(listing.source_type or "").strip().lower() == "amazon_vine" else None,
+            "taxonomy_tree_id": category_data.get("taxonomyTreeId"),
+            "verification_source": category_data.get("verificationSource"),
         },
         "aspect_summary": {
             "required": [str(item.get("localizedAspectName") or "").strip() for item in required_aspects],

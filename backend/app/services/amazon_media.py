@@ -50,6 +50,52 @@ def _extract_json_ld_descriptions(html: str) -> list[str]:
     return descriptions
 
 
+def _price_value(text: str) -> float | None:
+    cleaned = _clean_text(text)
+    match = re.search(r"\$\s*([0-9][0-9,]*(?:\.\d{1,2})?)", cleaned)
+    if not match:
+        match = re.search(r"\b([0-9][0-9,]*\.\d{1,2})\b", cleaned)
+    if not match:
+        return None
+    try:
+        value = float(match.group(1).replace(",", ""))
+    except ValueError:
+        return None
+    return round(value, 2) if value > 0 else None
+
+
+def _extract_asin_page_offer_price(page_html: str) -> float | None:
+    """Read the displayed product offer; ignore unrelated page-wide price JSON."""
+    container_ids = (
+        "corePriceDisplay_desktop_feature_div",
+        "corePrice_feature_div",
+        "priceblock_ourprice",
+        "priceblock_dealprice",
+        "priceblock_saleprice",
+    )
+    for container_id in container_ids:
+        marker = re.search(rf'\bid="{re.escape(container_id)}"', page_html, flags=re.I)
+        if not marker:
+            continue
+        # The primary price widget is small; bounding the scan prevents a
+        # later recommendation/add-on card from being mistaken for its offer.
+        container = page_html[marker.start():marker.start() + 12000]
+        for match in re.finditer(r'<span[^>]+class="[^"]*a-offscreen[^"]*"[^>]*>(.*?)</span>', container, flags=re.I | re.S):
+            context = container[max(0, match.start() - 700):match.start()]
+            parent_nodes = list(re.finditer(r'<span[^>]+class="([^"]*a-price[^\"]*)"[^>]*>', context, flags=re.I | re.S))
+            price_class = parent_nodes[-1].group(1).lower() if parent_nodes else ""
+            if "a-text-price" in price_class or "a-text-strike" in price_class:
+                continue
+            value = _price_value(match.group(1))
+            if value is not None:
+                return value
+        if container_id.startswith("priceblock_"):
+            value = _price_value(container[:1000])
+            if value is not None:
+                return value
+    return None
+
+
 def _clean_text(value: str | None) -> str:
     text = html_lib.unescape(str(value or ""))
     text = re.sub(r"<[^>]+>", " ", text)
@@ -143,23 +189,7 @@ def _extract_amazon_product_facts(html: str) -> dict:
         og_title = re.search(r'<meta\s+property="og:title"\s+content="([^"]+)"', html, flags=re.I)
         title = _clean_text(og_title.group(1)) if og_title else ""
 
-    price = None
-    price_patterns = (
-        r'<span[^>]+class="[^"]*a-price-whole[^"]*"[^>]*>\s*([0-9,]+)',
-        r'"price"\s*:\s*"?([0-9]+(?:\.[0-9]{1,2})?)',
-        r'<span[^>]+id="priceblock_[^"]+"[^>]*>\s*\$?\s*([0-9,]+(?:\.[0-9]{1,2})?)',
-    )
-    for pattern in price_patterns:
-        match = re.search(pattern, html, flags=re.I | re.S)
-        if not match:
-            continue
-        try:
-            candidate = float(match.group(1).replace(",", ""))
-        except ValueError:
-            continue
-        if candidate > 0:
-            price = round(candidate, 2)
-            break
+    price = _extract_asin_page_offer_price(html)
 
     bullets: list[str] = []
     bullet_block = re.search(r'<div[^>]+id="feature-bullets"[^>]*>(.*?)</div>', html, flags=re.I | re.S)
@@ -180,6 +210,7 @@ def _extract_amazon_product_facts(html: str) -> dict:
     return {
         "title": title[:512],
         "current_price": price,
+        "price_source": "asin_product_offer_widget_v2" if price is not None else None,
         "feature_bullets": bullets[:12],
         "specifications": details,
         "dimensions": _normalize_dimension_facts(details),

@@ -1,5 +1,51 @@
 # PosterPro Deployment Log
 
+## 2026-09-13 - Vine cohort content finalization and preflight repair
+
+### Fixed
+- The shared Vine draft finalizer now runs before import-time lifecycle
+  classification, rebuilds copy from structured Amazon evidence, preserves
+  durable facts on empty/transient discovery, and uses current eBay preflight
+  blockers (not historical blocker JSON) to choose Needs Review vs Attention.
+- Amazon current-price extraction now reads the ASIN product offer widget,
+  preserves cents, and rejects unrelated page-wide price JSON. A verified
+  current offer outranks ETV; on a transient empty refresh an existing
+  non-ETV draft price is preserved with explicitly unverified provenance.
+- Mislabeled capacity values such as protocol versions or amperage are retained
+  as untrusted source evidence but excluded from listing aspects and generated
+  descriptions; supported values such as the RV carrier's gallon capacities
+  remain available.
+- Vine category resolution now verifies actual eBay leaf metadata and current
+  preflight requires that verification. Required aspects are derived from that
+  destination category. The catalog queue now routes a blocker-free completed
+  Vine listing with `needs_review=true` to Needs Review.
+- Reconciled the ten explicitly requested production listings through the
+  shared finalizer: all now have provider-generated original descriptions,
+  ASIN-matched current price provenance, condition New, quantity 1, primary
+  usable local images, semantically selected eBay leaf categories, and fresh
+  blocker-free eBay preflight. None was published.
+- Canceled ten pre-existing stale (Sept. 5–6) cohort crosspost jobs after
+  verifying there were no publish-attempt records or external eBay IDs, so the
+  repaired drafts remain in review rather than being submitted automatically.
+- The other 18 historical Vine rows still marked `needs_attention` are
+  archived (17) or sold (1) and have no usable images; fresh read-only
+  preflight reports the image blockers. They were not reactivated.
+
+### Validation and deployment
+- Focused backend regression set across Vine import, marketplace preflight,
+  marketplace API, eBay service/publish, listing review, and pricing:
+  `157 passed`.
+- Added coverage for ASIN-offer price parsing, cents/struck-price handling,
+  rejecting arbitrary page prices, durable price preservation on empty
+  discovery, malformed Capacity filtering, stale blocker recomputation, and
+  semantic eBay leaf selection.
+- One earlier run exposed a stale `_llm_generation` test stub that did not
+  accept the existing optional `db` keyword; updated the stub contract and the
+  final full run passed with zero failures/errors.
+- Production finalization/preflight returned zero hard blockers for all ten;
+  valid local images: 11–12 per listing. No migration or frontend build was
+  required. No live marketplace publication was invoked.
+
 ## 2026-09-12 - Tenant routing rules foundation
 
 ### Added

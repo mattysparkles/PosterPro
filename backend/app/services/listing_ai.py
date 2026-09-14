@@ -291,7 +291,7 @@ class ListingAIService:
         reservation_id = None
         durable_cached_result = None
         if db is not None and settings.ai_cost_mode == "COMPLIMENTARY_ONLY":
-            key = hashlib.sha256(json.dumps({k: image_signals.get(k) for k in ("listing_id", "canonical_item_id", "voice_transcript", "voice_notes", "title_hint", "existing_specifics", "photo_keywords", "marketplace_targets")}, sort_keys=True, default=str).encode()).hexdigest()
+            key = hashlib.sha256(json.dumps({k: image_signals.get(k) for k in ("listing_id", "canonical_item_id", "voice_transcript", "voice_notes", "title_hint", "existing_specifics", "source_facts", "photo_keywords", "marketplace_targets")}, sort_keys=True, default=str).encode()).hexdigest()
             reservation = reserve_durable(db, key=key, pool="mini", estimated_tokens=8000, user_id=user_id, listing_id=listing_id, purpose="listing_intelligence")
             if reservation.get("status") == "DUPLICATE_SUPPRESSED":
                 try:
@@ -390,7 +390,7 @@ class ListingAIService:
             return {"result": None, "metadata": {"validation_status": "budget_blocked", "response_provider": "openai", "error": "AI dispatch withheld: " + str(image_signals["_provider_blocked"].get("status"))}}
         if not settings.openai_api_key:
             return None
-        signature_payload = {k: image_signals.get(k) for k in ("listing_id", "canonical_item_id", "voice_transcript", "voice_notes", "title_hint", "existing_specifics", "photo_keywords", "marketplace_targets")}
+        signature_payload = {k: image_signals.get(k) for k in ("listing_id", "canonical_item_id", "voice_transcript", "voice_notes", "title_hint", "existing_specifics", "source_facts", "photo_keywords", "marketplace_targets")}
         signature = hashlib.sha256(json.dumps(signature_payload, sort_keys=True, default=str).encode()).hexdigest()
         with _AI_GUARD_LOCK:
             if signature in _AI_SUCCESS_CACHE:

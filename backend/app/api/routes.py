@@ -167,11 +167,19 @@ def _listing_bucket(listing: Listing) -> str:
     # allowing them to masquerade as Needs Review.
     preflight_state = marketplace_data.get("marketplace_preflight") if isinstance(marketplace_data, dict) else {}
     by_marketplace = preflight_state.get("by_marketplace") if isinstance(preflight_state, dict) else {}
+    configured_targets = {
+        str(value).strip().lower()
+        for value in marketplace_data.get("targets") or []
+        if str(value).strip()
+    }
+    if not configured_targets and str(listing.source_type or "").lower() == "amazon_vine":
+        configured_targets = {"ebay"}
     if any(
         isinstance(by_marketplace, dict)
         and isinstance(by_marketplace.get(market), dict)
+        and not bool((by_marketplace.get(market) or {}).get("stale"))
         and bool((by_marketplace.get(market) or {}).get("blockers"))
-        for market in ("ebay", "facebook", "mercari", "poshmark", "vinted")
+        for market in configured_targets
     ):
         return "needs_attention"
     if str(listing.processing_state or "").strip().lower() in {"needs_attention", "blocked"}:
@@ -184,9 +192,15 @@ def _listing_bucket(listing: Listing) -> str:
         # accidentally approved as if it were ready.
         preflight = marketplace_data.get("marketplace_preflight") if isinstance(marketplace_data, dict) else {}
         by_marketplace = preflight.get("by_marketplace") if isinstance(preflight, dict) else {}
+        # `needs_review` is a valid preflight outcome when the marketplace
+        # quality service has no hard blockers but still expects a person to
+        # inspect/approve the draft. The exact blocker check above remains
+        # authoritative; status labels alone must not strand clean Vine drafts
+        # in Needs Attention.
         ready = any(
             isinstance(by_marketplace, dict)
-            and str((by_marketplace.get(market) or {}).get("status") or "").lower() in {"ready", "ready_with_warnings", "published"}
+            and str((by_marketplace.get(market) or {}).get("status") or "").lower() in {"ready", "ready_with_warnings", "published", "needs_review"}
+            and not (by_marketplace.get(market) or {}).get("blockers")
             for market in ("ebay", "facebook", "mercari", "poshmark", "vinted")
         )
         return "review" if ready else "needs_attention"

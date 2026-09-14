@@ -161,7 +161,7 @@ def test_listing_ai_fallback_category_uses_product_keywords():
 def test_listing_ai_generate_exposes_structured_contract(monkeypatch):
     service = ListingAIService()
 
-    def fake_llm(_signals):
+    def fake_llm(_signals, **_kwargs):
         return {
             "result": {
                 "schema_version": "posterpro_listing_intelligence_v1",

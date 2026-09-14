@@ -29,6 +29,8 @@ Return strict JSON with these keys:
 Rules:
 - Keep the title under 80 characters and factual.
 - The description must be plain, concise, and resale-safe.
+- When source_facts are provided, write original buyer-facing copy from those structured values; never reproduce Amazon/customer-facing source prose or a feature bullet verbatim.
+- Use only supported product identity, use, features, dimensions, materials, and included components. Do not add generic filler or unsupported benefits.
 - Never invent authenticity, year, accessories, or working condition unless supported by the signals.
 - "missing_information" should list facts the operator still needs to confirm before publishing.
 - "photo_notes" should describe what appears incomplete or unclear from the provided signals.

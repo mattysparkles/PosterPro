@@ -41,6 +41,34 @@ class DummyAccount:
         self.refresh_token = "refresh-token"
 
 
+def test_vine_ebay_taxonomy_rejects_first_semantically_wrong_suggestion(monkeypatch):
+    listing = DummyListing()
+    listing.source_type = "amazon_vine"
+    listing.title = "Motorized Roller Shades with Remote for Bedroom Windows"
+    listing.category_suggestion = "Home & Garden > Window Treatments > Blinds & Shades"
+    listing.source_metadata = {"raw_row_json": {"Product Name": listing.title}}
+    account = DummyAccount()
+    calls = []
+
+    async def fake_request(self, method, path, params=None, payload=None, headers=None):
+        calls.append(params)
+        if path.endswith("get_default_category_tree_id"):
+            return {"categoryTreeId": "0"}
+        if "get_category_subtree" in path:
+            return {"categorySubtreeNode": {"childCategoryTreeNodes": []}}
+        if len(calls) == 2:
+            return {"categorySuggestions": [{"category": {"categoryId": "11525", "categoryName": "Pantyhose & Tights"}}]}
+        return {"categorySuggestions": [{"category": {"categoryId": "20464", "categoryName": "Blinds & Shades"}}]}
+
+    monkeypatch.setattr(ebay_service.EbayAPIClient, "request", fake_request)
+    result = asyncio.run(ebay_service.suggest_ebay_category(listing, account))
+
+    assert result["categoryId"] == "20464"
+    assert result["categoryName"] == "Blinds & Shades"
+    assert len(calls) == 4
+    assert ebay_service._vine_category_match_score(listing.category_suggestion, "Pantyhose & Tights") == 0
+
+
 def test_ebay_image_builder_uses_normalized_listing_images(monkeypatch):
     listing = DummyListing()
     listing.image_urls = []
