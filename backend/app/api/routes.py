@@ -35,7 +35,7 @@ from app.api.schemas import (
     PhotoEditResponse,
     StorageUnitBatchResponse,
 )
-from app.core.auth import ensure_user_owns_resource, get_current_user, resolve_user_scope
+from app.core.auth import ensure_user_owns_resource, get_current_user, is_effective_admin, resolve_user_scope
 from app.core.config import settings
 from app.core.database import get_db
 from app.models.models import (
@@ -2668,7 +2668,7 @@ def run_all_overnight_batches():
 
 
 @router.get("/config/autonomous")
-def get_autonomous_config():
+def get_autonomous_config(current_user: User = Depends(get_current_user)):
     return {
         "autonomous_mode": settings.autonomous_mode,
         "autonomous_dry_run": settings.autonomous_dry_run,
@@ -2677,7 +2677,12 @@ def get_autonomous_config():
 
 
 @router.post("/config/toggle-autonomous")
-def toggle_autonomous_mode(payload: AutonomousToggleRequest | None = None):
+def toggle_autonomous_mode(
+    payload: AutonomousToggleRequest | None = None,
+    current_user: User = Depends(get_current_user),
+):
+    if not current_user.is_admin or not is_effective_admin(current_user):
+        raise HTTPException(status_code=403, detail="Only an active platform admin can change automation settings")
     if payload and payload.enabled is not None:
         settings.autonomous_mode = payload.enabled
     else:
@@ -2685,6 +2690,12 @@ def toggle_autonomous_mode(payload: AutonomousToggleRequest | None = None):
 
     if payload and payload.crosspost_enabled is not None:
         settings.autonomous_crosspost_enabled = payload.crosspost_enabled
+
+    from app.api.auth import _write_env_overrides
+    _write_env_overrides({
+        "AUTONOMOUS_MODE": "true" if settings.autonomous_mode else "false",
+        "AUTONOMOUS_CROSSPOST_ENABLED": "true" if settings.autonomous_crosspost_enabled else "false",
+    })
 
     return {
         "autonomous_mode": settings.autonomous_mode,

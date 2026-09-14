@@ -76,6 +76,7 @@ _STRING_SETTING_FIELDS = {
     "automation_bridge_url": "AUTOMATION_BRIDGE_URL",
 }
 _BOOL_SETTING_FIELDS = {
+    "autonomous_mode": "AUTONOMOUS_MODE",
     "autonomous_dry_run": "AUTONOMOUS_DRY_RUN",
     "autonomous_crosspost_enabled": "AUTONOMOUS_CROSSPOST_ENABLED",
     "automation_bridge_enabled": "AUTOMATION_BRIDGE_ENABLED",

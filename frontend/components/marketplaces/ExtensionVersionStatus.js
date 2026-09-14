@@ -34,6 +34,17 @@ export default function ExtensionVersionStatus({ state, currentDeviceId = null, 
   const stale = devices.filter((device) => !recent.some((online) => online.id === device.id));
   const currentNeedsUpdate = Boolean(currentDevice?.update_required || (detected && versionLessThan(detectedVersion, minimum)));
 
+  if (compact) {
+    if (currentDevice && !currentNeedsUpdate) return null;
+    const missing = !currentDevice && !detected;
+    return (
+      <div role="status" className={`flex flex-wrap items-center justify-between gap-3 rounded-xl border px-4 py-3 ${currentNeedsUpdate ? 'border-amber-300 bg-amber-50' : 'border-slate-200 bg-slate-50'}`}>
+        <div className="min-w-0"><p className={`text-sm font-semibold ${currentNeedsUpdate ? 'text-amber-950' : 'text-slate-900'}`}>{currentNeedsUpdate ? 'PosterPro extension update required' : missing ? 'Browser extension is not connected' : 'Connect this browser'}</p><p className="mt-1 text-sm text-slate-700">{currentNeedsUpdate ? `Installed v${currentDevice?.extension_version || detectedVersion || 'unknown'} · v${current} required` : 'Open setup to connect the extension in this browser.'}</p></div>
+        <Button href={currentNeedsUpdate ? '/api/browser-extension/download' : '/onboarding'} download={currentNeedsUpdate}>{currentNeedsUpdate ? 'Update now' : missing ? 'Install & connect' : 'Connect this browser'}</Button>
+      </div>
+    );
+  }
+
   return (
     <section className={`rounded-2xl border ${currentNeedsUpdate ? 'border-amber-300 bg-amber-50' : 'border-slate-200 bg-white'} p-4 sm:p-5`} aria-label="PosterPro browser connection status">
       <div className="flex flex-wrap items-start justify-between gap-3">

@@ -34,6 +34,7 @@ from app.services.ebay_service import _build_ebay_image_urls
 from app.services.alert_service import AlertService
 from app.services.google_photos import GooglePhotoEnumeration, GooglePhotosService
 from app.services.intake_slate import IntakeSlateService
+from app.services.process_notifications import create_process_notification, mark_all_process_notifications_read
 
 
 def _make_image_file(name: str, color: str = 'white') -> str:
@@ -2057,3 +2058,40 @@ def test_purge_and_regenerate_bad_google_photos_drafts_preserves_recovery_vine_a
     assert db_session.get(Listing, good_google_listing.id) is not None
     assert db_session.get(Listing, recovery_listing.id) is not None
     assert db_session.get(Listing, vine_listing.id) is not None
+
+
+def test_process_notifications_deduplicates_exact_retry_in_short_window(db_session):
+    user = _create_user(db_session, email='notification-dedupe@example.com')
+    first = create_process_notification(
+        db_session, user_id=user.id, title='Marketplace job failed',
+        message='The destination could not be updated.', notification_type='marketplace_update_failed',
+        href='/jobs/failed', canonical_item_id=42,
+    )
+    db_session.commit()
+    repeated = create_process_notification(
+        db_session, user_id=user.id, title='Marketplace job failed',
+        message='The destination could not be updated.', notification_type='marketplace_update_failed',
+        href='/jobs/failed', canonical_item_id=42,
+    )
+    assert repeated.id == first.id
+    distinct = create_process_notification(
+        db_session, user_id=user.id, title='Marketplace job failed',
+        message='A different destination could not be updated.', notification_type='marketplace_update_failed',
+        href='/jobs/failed', canonical_item_id=42,
+    )
+    assert distinct.id != first.id
+
+
+def test_mark_all_process_notifications_read_is_not_limited_to_first_page(db_session):
+    user = _create_user(db_session, email='notification-read-all@example.com')
+    db_session.add_all([
+        IntakeNotification(user_id=user.id, title=f'Notice {index}', notification_type='test')
+        for index in range(260)
+    ])
+    db_session.commit()
+    marked = mark_all_process_notifications_read(db_session, user_id=user.id)
+    assert marked == 260
+    assert db_session.query(IntakeNotification).filter(
+        IntakeNotification.user_id == user.id,
+        IntakeNotification.read_at.is_(None),
+    ).count() == 0

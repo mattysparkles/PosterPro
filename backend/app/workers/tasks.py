@@ -12,7 +12,7 @@ from typing import Any
 from celery import chord, group
 from sqlalchemy import or_, select, update as sql_update, case
 
-from app.core.config import settings
+from app.core.config import reload_settings, settings
 from app.core.database import SessionLocal
 from app.core.config import settings
 from app.models.enums import ListingStatus, MarketplaceListingStatus, MarketplaceName
@@ -2258,12 +2258,13 @@ def process_photo_batch(self, listing_ids: list[int]) -> dict:
                 db.add(listing)
                 processed += 1
                 logger.info("Photo enrichment complete", extra={"listing_id": listing.id, "status": listing.status})
-                if settings.autonomous_mode:
+                runtime_settings = reload_settings()
+                if runtime_settings.autonomous_mode:
                     logger.info(
                         "Queueing autonomous publish from photo pipeline",
-                        extra={"listing_id": listing.id, "dry_run": settings.autonomous_dry_run},
+                        extra={"listing_id": listing.id, "dry_run": runtime_settings.autonomous_dry_run},
                     )
-                    autonomous_publish.delay(listing.id, dry_run=settings.autonomous_dry_run)
+                    autonomous_publish.delay(listing.id, dry_run=runtime_settings.autonomous_dry_run)
                 else:
                     auto_price_listing.delay(listing.id)
             except Exception as exc:
@@ -2314,8 +2315,9 @@ def process_storage_unit_listing(self, listing_id: int, batch_id: int) -> dict:
                 "ingestion_source": "autonomous_storage_batch",
                 "sale_detection_ready": True,
             }
-            if settings.autonomous_mode:
-                autonomous_publish.delay(listing.id, dry_run=settings.autonomous_dry_run)
+            runtime_settings = reload_settings()
+            if runtime_settings.autonomous_mode:
+                autonomous_publish.delay(listing.id, dry_run=runtime_settings.autonomous_dry_run)
             else:
                 auto_price_listing.delay(listing.id)
             batch.processed_items += 1

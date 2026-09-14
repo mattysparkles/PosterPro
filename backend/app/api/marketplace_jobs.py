@@ -227,7 +227,7 @@ def _build_system_status_summary(db: Session, *, user_id: int, import_summary: d
         live_listing_ids_by_marketplace[MarketplaceName.ebay.value] = ebay_live_listing_ids
     distinct_live_listing_ids = set().union(*live_listing_ids_by_marketplace.values()) if live_listing_ids_by_marketplace else set()
     live_counts_by_marketplace: dict[str, int | None] = {
-        market: 0 for market in (
+        market: None for market in (
             MarketplaceName.ebay.value,
             MarketplaceName.facebook.value,
             MarketplaceName.mercari.value,
@@ -238,14 +238,24 @@ def _build_system_status_summary(db: Session, *, user_id: int, import_summary: d
         )
     }
     live_counts_by_marketplace.update({
-        market: len(ids) for market, ids in live_listing_ids_by_marketplace.items()
+        market: (len(ids) if ids else None) for market, ids in live_listing_ids_by_marketplace.items()
     })
     if snapshot.get("status") == "UNAVAILABLE":
         live_counts_by_marketplace[MarketplaceName.ebay.value] = None
         catalog_published = None
+        ebay_reconciliation_candidates = None
     else:
         live_counts_by_marketplace[MarketplaceName.ebay.value] = ebay_live_count
         catalog_published = len(distinct_live_listing_ids)
+        stale_ebay_filter = and_(
+            Listing.user_id == user_id,
+            not_sold,
+            legacy_live,
+            ~Listing.ebay_listing_id.in_(ebay_remote_ids) if ebay_remote_ids else True,
+        )
+        ebay_reconciliation_candidates = int(db.execute(
+            select(func.count(func.distinct(Listing.id))).where(stale_ebay_filter)
+        ).scalar_one())
     active_projection_ids_set = set().union(*live_listing_ids_by_marketplace.values()) if live_listing_ids_by_marketplace else set()
     # Match the catalog's lifecycle buckets, including current preflight and
     # specificity blockers. This query is intentionally narrow (only draft,
@@ -394,6 +404,7 @@ def _build_system_status_summary(db: Session, *, user_id: int, import_summary: d
         "catalog_live_by_marketplace": live_counts_by_marketplace,
         "catalog_live_verification": snapshot.get("status", "LOCAL_LAST_KNOWN"),
         "catalog_live_verified_at": snapshot.get("verified_at"),
+        "catalog_ebay_reconciliation_needed": ebay_reconciliation_candidates,
         "catalog_failed": catalog_failed,
         "catalog_sold": catalog_sold,
         "catalog_archived": catalog_archived,

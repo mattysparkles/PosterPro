@@ -888,7 +888,9 @@ async def test_dashboard_live_breakdown_uses_remote_ebay_snapshot_and_deduplicat
     assert status["catalog_live"] == 3
     assert status["catalog_live_by_marketplace"]["ebay"] == 2
     assert status["catalog_live_by_marketplace"]["facebook"] == 2
+    assert status["catalog_live_by_marketplace"]["mercari"] is None
     assert status["catalog_live_verification"] == "REMOTE_VERIFIED"
+    assert status["catalog_ebay_reconciliation_needed"] == 2
 
     published = await async_client.get("/listings?queue=published&page=1&page_size=10")
     assert published.status_code == 200
@@ -1291,6 +1293,7 @@ async def test_sales_dashboard_reports_profit_and_cost_metrics(async_client):
             profit=50.0,
             roi_percentage=100.0,
             status="DETECTED",
+            sold_at=datetime.utcnow(),
             details={"source": "unit-test"},
         )
         db.add(sale)
@@ -1302,6 +1305,10 @@ async def test_sales_dashboard_reports_profit_and_cost_metrics(async_client):
     assert response.status_code == 200
     payload = response.json()
     assert payload["summary"]["total_profit"] == 50.0
+    assert payload["summary"]["gross"] == 80.0
+    assert payload["summary"]["periods"]["today"]["sales"] == 1
+    assert payload["summary"]["periods"]["last_30_days"]["gross"] == 80.0
+    assert payload["summary"]["fulfillment_status_available"] is False
     assert payload["sales"][0]["fees_actual"] == 12.0
 
 

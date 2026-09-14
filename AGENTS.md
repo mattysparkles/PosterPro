@@ -1085,3 +1085,53 @@ requirements above. Credentials were not rotated or printed.
   deployment route served the newly built dashboard bundle. Only the
   previously authenticated production operator account was queried for the
   read-only metric summary.
+
+## 2026-09-14 - Dashboard product UX and operational truth pass
+
+- Replaced the multi-tab Dashboard with one compact modular summary. Removed
+  the Dashboard tab strip, Vine/photo/create-listing hero actions, oversized
+  browser detail module, repeated setup/jobs panels, and duplicate intake CTA.
+  The primary metrics use a responsive one/four-column desktop layout with a
+  two-column tablet layout; sales, jobs, shipping-data availability, messages,
+  alerts, and connection/setup summaries are separate deep-linking cards.
+- Simplified the persistent sidebar: wordmark links to Dashboard, user identity
+  is at the top, redundant Current Lane/Signed in/account-bottom content was
+  removed, and the dead desktop menu/collapse control was removed. Mobile keeps
+  a separate menu. Admin Automation is now a persisted ON/OFF switch with an
+  accurate tooltip; the setting is admin-gated and background workers reload it
+  before automatic-publish decisions.
+- Reworked the top notification panel into an opaque high-contrast surface with
+  a compact `99+` badge, All/Unread/Errors filters, count, Mark all read, View
+  all, and offset-based Load more. Mark all read now updates every tenant
+  notification in one scoped SQL operation rather than stopping at 250. Added
+  ten-minute exact-event duplicate suppression. No historical notification
+  records were deleted or altered.
+- Production audit (read-only) found `1,066,426` notifications and `27,708`
+  unread; `1,062,572` were `listing_processing_blocked` and `3,818` were
+  `listing_processing_complete`. Repeated exact listing alerts account for
+  approximately `1,063,062` duplicate rows; creation had largely stopped by
+  September 7. Existing history is retained; new exact retries are suppressed.
+- Fixed sales summaries to aggregate the entire tenant sale history and expose
+  actual Today/7-day/30-day SQL totals instead of summing the recent page.
+  Shipment counts are explicitly unavailable because the current data model
+  does not verify fulfillment state; dashboard copy does not guess.
+- Per-market eBay statuses are now clearly distinguished: eBay `161` from the
+  latest official active-list snapshot; Facebook `2` local exact-ID records
+  marked last known; unobserved marketplaces are `Not verified`, not fake zero.
+  The `188` local unsold active-marked eBay rows decompose to `160` matching the
+  current remote set plus `28` unsold/positive-quantity rows absent remotely;
+  one additional remote active identity maps to a PosterPro row without the old
+  PUBLISHED/POSTED marker. Another `20` old local markers have sold/zero
+  quantity. Remote absence alone cannot prove ended vs. sold, so no listing
+  lifecycle history was rewritten; dashboard flags the `28` for review.
+- Focused validation: marketplace API, auth, and intake-head-slate target set
+  passed `7 tests`; the full three-file run had `96 passed, 1 failed`. The sole
+  failure is the unrelated voice-transcription monkeypatch test
+  (`_transcribe_audio_file` now receives `api_key`); this UX pass does not touch
+  transcription. Frontend production build passed (existing repository lint /
+  top-level-await warnings). Authenticated rendered-browser verification was
+  unavailable; operator screenshot verification remains required.
+- No migration was required. No marketplace listing was created/updated/ended.
+  Production notification history was not modified. Only PosterPro services
+  are in scope; `debug_fb_publish.db`, `ops/snapshots/`, and `tmp/` remain
+  untouched.

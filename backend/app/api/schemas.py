@@ -1068,6 +1068,7 @@ class ServerSettingsUpdateRequest(BaseModel):
     storage_root: str | None = None
     environment: str | None = None
     autonomous_dry_run: bool | None = None
+    autonomous_mode: bool | None = None
     autonomous_crosspost_enabled: bool | None = None
     automation_bridge_enabled: bool | None = None
     automation_bridge_url: str | None = None
@@ -1338,6 +1339,7 @@ class SystemStatusSummary(BaseModel):
     catalog_live_by_marketplace: dict[str, int | None] = Field(default_factory=dict)
     catalog_live_verification: str = "LOCAL_LAST_KNOWN"
     catalog_live_verified_at: str | None = None
+    catalog_ebay_reconciliation_needed: int | None = None
     catalog_failed: int = 0
     catalog_sold: int = 0
     catalog_archived: int = 0

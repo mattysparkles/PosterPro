@@ -2,6 +2,29 @@ from uuid import uuid4
 
 import pytest
 
+
+@pytest.mark.anyio
+async def test_automation_toggle_is_admin_only_and_persists(async_client, monkeypatch, tmp_path):
+    from app.api import auth as auth_api
+    from app.core.config import settings
+
+    env_path = tmp_path / 'posterpro.env'
+    monkeypatch.setattr(auth_api, '_BACKEND_ENV_PATH', env_path)
+    monkeypatch.setattr(settings, 'autonomous_mode', True)
+    denied = await async_client.post('/config/toggle-autonomous', json={'enabled': False})
+    assert denied.status_code == 401
+
+    register = await async_client.post('/auth/register', json={
+        'full_name': 'Automation Admin',
+        'email': f'automation-admin-{uuid4()}@example.com',
+        'password': 'supersecret123',
+    })
+    assert register.status_code == 201
+    response = await async_client.post('/config/toggle-autonomous', json={'enabled': False})
+    assert response.status_code == 200
+    assert response.json()['autonomous_mode'] is False
+    assert 'AUTONOMOUS_MODE=false' in env_path.read_text(encoding='utf-8')
+
 @pytest.mark.anyio
 async def test_register_login_password_change_reset_and_view_mode(async_client):
     register_response = await async_client.post(

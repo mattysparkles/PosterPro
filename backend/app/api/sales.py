@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -96,10 +97,32 @@ def sales_dashboard(
         }
         for row in db.execute(platform_stmt).all()
     }
-    pending_shipments = sum(1 for sale in sales if str(sale.status or '').upper() in {'SYNCED','DETECTED'} and sale.listing_id)
+    # Dashboard totals are full-history aggregates, not sums over the recent
+    # table page. Shipment state is intentionally not inferred from a sale
+    # detector status; PosterPro has no normalized fulfillment state yet.
+    summary_filters = [Sale.user_id == scoped_user_id] if scoped_user_id is not None else []
+    summary_row = db.execute(select(
+        func.count(Sale.id), func.coalesce(func.sum(Sale.quantity), 0),
+        func.coalesce(func.sum(Sale.amount), 0), func.coalesce(func.sum(Sale.profit), 0),
+    ).where(*summary_filters)).one()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    period_ranges = {
+        "today": now.replace(hour=0, minute=0, second=0, microsecond=0),
+        "last_7_days": now - timedelta(days=7),
+        "last_30_days": now - timedelta(days=30),
+    }
+    periods = {}
+    for period, start_at in period_ranges.items():
+        period_filters = [*summary_filters, Sale.sold_at >= start_at]
+        row = db.execute(select(
+            func.count(Sale.id), func.coalesce(func.sum(Sale.quantity), 0),
+            func.coalesce(func.sum(Sale.amount), 0),
+        ).where(*period_filters)).one()
+        periods[period] = {"sales": int(row[0] or 0), "units": int(row[1] or 0), "gross": float(row[2] or 0)}
+    full_history_count, full_history_units, full_history_gross, full_history_profit = summary_row
     return {
         "user_id": scoped_user_id,
-        "summary": {"total_sales": len(sales), "units": units, "gross": gross_sales, "total_profit": total_profit, "pending_shipments": pending_shipments, "by_platform": by_platform},
+        "summary": {"total_sales": int(full_history_count or 0), "units": int(full_history_units or 0), "gross": float(full_history_gross or 0), "total_profit": float(full_history_profit or 0), "pending_shipments": None, "fulfillment_status_available": False, "periods": periods, "by_platform": by_platform},
         "sales": [
             {
                 "id": sale.id,

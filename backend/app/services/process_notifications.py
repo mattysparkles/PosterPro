@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from sqlalchemy import select
+from datetime import UTC, datetime, timedelta
+
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.models.models import IntakeNotification
@@ -17,6 +19,7 @@ def create_process_notification(
     metadata_json: dict | None = None,
     canonical_item_id: int | None = None,
 ) -> IntakeNotification | None:
+    now = datetime.now(UTC).replace(tzinfo=None)
     def _normalize(value: str | None) -> str:
         return str(value or "").strip().lower().replace("_", " ").replace("-", " ")
 
@@ -34,6 +37,21 @@ def create_process_notification(
     normalized_tokens = [token.replace("_", " ") for token in suppress_tokens]
     if any(token.replace("_", " ") in notification_type_normalized for token in suppress_tokens) or any(token in combined for token in normalized_tokens):
         return None
+    # Workflow workers can retry the same event repeatedly. Collapse an exact
+    # duplicate from the same tenant/item during a short window; keep distinct
+    # failures, changed messages, and later recurrences visible.
+    duplicate_query = select(IntakeNotification).where(
+        IntakeNotification.user_id == user_id,
+        IntakeNotification.notification_type == notification_type,
+        IntakeNotification.title == title,
+        IntakeNotification.message == message,
+        IntakeNotification.href == href,
+        IntakeNotification.canonical_item_id == canonical_item_id,
+        IntakeNotification.created_at >= now - timedelta(minutes=10),
+    ).order_by(IntakeNotification.created_at.desc(), IntakeNotification.id.desc()).limit(1)
+    duplicate = db.execute(duplicate_query).scalars().first()
+    if duplicate is not None:
+        return duplicate
     notification = IntakeNotification(
         user_id=user_id,
         canonical_item_id=canonical_item_id,
@@ -78,16 +96,12 @@ def mark_process_notification_read(db: Session, *, user_id: int, notification_id
 
 
 def mark_all_process_notifications_read(db: Session, *, user_id: int) -> int:
-    notifications = list_process_notifications(db, user_id=user_id, unread_only=True, limit=250)
-    count = 0
-    if not notifications:
-        return count
-    from datetime import datetime, UTC
-
-    for notification in notifications:
-        if notification.read_at is None:
-            notification.read_at = datetime.now(UTC)
-            db.add(notification)
-            count += 1
+    now = datetime.now(UTC).replace(tzinfo=None)
+    result = db.execute(
+        update(IntakeNotification)
+        .where(IntakeNotification.user_id == user_id, IntakeNotification.read_at.is_(None))
+        .values(read_at=now, updated_at=now)
+        .execution_options(synchronize_session=False)
+    )
     db.commit()
-    return count
+    return int(result.rowcount or 0)
