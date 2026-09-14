@@ -1038,6 +1038,7 @@ class UserUpdateRequest(BaseModel):
     phone_number: str | None = None
     marketing_email_consent: bool | None = None
     marketing_sms_consent: bool | None = None
+    profile_preferences: dict | None = None
     review_before_publish: bool | None = None
     auto_publish_after_approval: bool | None = None
     bulk_approval_enabled: bool | None = None
@@ -1333,6 +1334,8 @@ class SystemStatusSummary(BaseModel):
     catalog_review: int = 0
     catalog_ready: int = 0
     catalog_published: int = 0
+    catalog_live: int = 0
+    catalog_failed: int = 0
     catalog_sold: int = 0
     catalog_archived: int = 0
     intake_batches_active: int = 0

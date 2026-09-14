@@ -1,3 +1,5 @@
+from uuid import uuid4
+
 import pytest
 
 @pytest.mark.anyio
@@ -118,3 +120,19 @@ async def test_auth_routes_support_cross_origin_session_requests(async_client):
     assert options_response.status_code == 200
     assert options_response.headers["access-control-allow-origin"] == "http://localhost:3030"
     assert options_response.headers["access-control-allow-credentials"] == "true"
+
+
+@pytest.mark.anyio
+async def test_dashboard_metric_layout_is_persisted_per_user_and_sanitized(async_client):
+    register = await async_client.post("/auth/register", json={"full_name": "Layout Owner", "email": "dashboard-layout@example.com", "password": "supersecret123"})
+    assert register.status_code == 201
+    saved = await async_client.patch("/auth/me", json={"profile_preferences": {"dashboard_metrics": {"order": ["live", "ready", "live", "secret"], "visible": {"live": True, "ready": False, "secret": True}}}})
+    assert saved.status_code == 200
+    layout = saved.json()["profile_preferences"]["dashboard_metrics"]
+    assert layout["order"] == ["live", "ready", "review", "draft"]
+    assert layout["visible"] == {"ready": False, "review": True, "live": True, "draft": True}
+    reread = await async_client.get("/auth/me")
+    assert reread.json()["profile_preferences"]["dashboard_metrics"] == layout
+    second = await async_client.post("/auth/register", json={"full_name": "Separate Layout Owner", "email": f"dashboard-layout-{uuid4()}@example.com", "password": "supersecret123"})
+    assert second.status_code == 201
+    assert second.json()["user"]["profile_preferences"].get("dashboard_metrics") is None

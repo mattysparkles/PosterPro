@@ -158,9 +158,15 @@ def _listing_bucket(listing: Listing) -> str:
         return "sold"
     if {"archived_vine", "archived_sold"} & labels:
         return "archived"
-    if str(listing.ebay_publish_status or "").upper() == "POSTED" or bool(listing.ebay_listing_id):
+    has_live_projection = any(
+        getattr(row, "status", None) in {MarketplaceListingStatus.PUBLISHED, MarketplaceListingStatus.UPDATED}
+        or str(getattr(row, "status", "")).upper() in {"PUBLISHED", "UPDATED"}
+        for row in (getattr(listing, "marketplace_listings", None) or [])
+    )
+    normalized_status = str(getattr(listing.status, "value", listing.status) or "").strip().lower()
+    if listing.status == ListingStatus.PUBLISHED or normalized_status == "published" or str(listing.ebay_publish_status or "").upper() == "POSTED" or bool(listing.ebay_listing_id) or has_live_projection:
         return "published"
-    if str(listing.status).lower() == "error" or str(listing.ebay_publish_status or "").upper() == "FAILED":
+    if listing.status == ListingStatus.FAILED or normalized_status in {"failed", "error"} or str(listing.ebay_publish_status or "").upper() == "FAILED":
         return "failed"
     # Persisted preflight is authoritative even when an older worker did not
     # set processing_state. Keep blocked rows in the repair queue instead of
@@ -1386,9 +1392,16 @@ def get_listings(
                 Listing.status == ListingStatus.PUBLISHED,
                 Listing.ebay_publish_status == "POSTED",
                 Listing.ebay_listing_id.is_not(None),
+                exists(select(1).where(
+                    MarketplaceListing.listing_id == Listing.id,
+                    MarketplaceListing.status.in_([MarketplaceListingStatus.PUBLISHED, MarketplaceListingStatus.UPDATED]),
+                )),
             ))
         elif normalized_queue == "ready":
-            queue_filters.append(and_(Listing.status == ListingStatus.ready, Listing.source_metadata["operator_approved_at"].as_string().is_not(None)))
+            queue_filters.append(and_(Listing.status == ListingStatus.ready, Listing.source_metadata["operator_approved_at"].as_string().is_not(None), not_(exists(select(1).where(
+                MarketplaceListing.listing_id == Listing.id,
+                MarketplaceListing.status.in_([MarketplaceListingStatus.PUBLISHED, MarketplaceListingStatus.UPDATED]),
+            )))))
         elif normalized_queue == "review":
             # Needs Review is an approval queue, not a holding area for
             # unpublished/photo-less or already-published records.

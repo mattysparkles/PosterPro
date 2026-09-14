@@ -4,7 +4,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import func, case
+from sqlalchemy import func, case, and_, or_
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -32,6 +32,7 @@ from app.services.marketplace_execution import resolve_execution_mode
 from app.services.marketplace_field_mapper import build_marketplace_payload
 from app.services.marketplace_routing import MarketplaceRoutingRule, MarketplaceRoutingService
 from app.services.customer_description import customer_description_is_safe
+from app.services.listing_specificity import classify_listing_reviewability
 from app.services.automation_bridge import (
     bridge_browser_submit_policy,
     connect_bridge_account,
@@ -164,14 +165,132 @@ def _build_system_status_summary(db: Session, *, user_id: int, import_summary: d
     # `custom_labels` is legacy JSON (and is not portable to one SQL JSON
     # predicate across the supported PostgreSQL/SQLite test environments).
     # Fetch only that narrow column rather than full Listing objects.
-    archived_labels = db.execute(
-        select(Listing.custom_labels).where(Listing.user_id == user_id, Listing.custom_labels.is_not(None))
-    ).scalars()
-    catalog_archived = sum(1 for labels in archived_labels if isinstance(labels, list) and any(str(label).lower().startswith("archived") for label in labels))
-    catalog_drafts = int(db.execute(select(func.count(Listing.id)).where(Listing.user_id == user_id, Listing.status.in_([ListingStatus.draft, ListingStatus.FAILED]))).scalar_one())
-    catalog_review = int(db.execute(select(func.count(Listing.id)).where(Listing.user_id == user_id, (Listing.needs_review.is_(True) | Listing.restricted_review_required.is_(True)), Listing.sold_at.is_(None))).scalar_one())
-    catalog_ready = int(db.execute(select(func.count(Listing.id)).where(Listing.user_id == user_id, Listing.status == ListingStatus.ready, Listing.sold_at.is_(None))).scalar_one())
-    catalog_published = int(db.execute(select(func.count(Listing.id)).where(Listing.user_id == user_id, (Listing.ebay_publish_status == EbayPublishStatus.POSTED) | Listing.ebay_listing_id.is_not(None), Listing.sold_at.is_(None))).scalar_one())
+    archived_rows = db.execute(
+        select(Listing.id, Listing.custom_labels).where(Listing.user_id == user_id, Listing.custom_labels.is_not(None))
+    ).all()
+    archived_listing_ids = {
+        listing_id for listing_id, labels in archived_rows
+        if isinstance(labels, list) and any(str(label).lower().startswith("archived") for label in labels)
+    }
+    catalog_archived = len(archived_listing_ids)
+    # Dashboard catalog metrics aggregate the complete tenant catalog. They
+    # must not inherit the paginated Listings page size and must count a
+    # canonical listing once regardless of its number of live projections.
+    active_projection_ids = (
+        select(func.distinct(MarketplaceListing.listing_id))
+        .join(Listing, Listing.id == MarketplaceListing.listing_id)
+        .where(
+            Listing.user_id == user_id,
+            MarketplaceListing.status.in_([MarketplaceListingStatus.PUBLISHED, MarketplaceListingStatus.UPDATED]),
+        )
+    )
+    active_projection_ids_set = set(db.execute(active_projection_ids).scalars().all())
+    legacy_live = or_(
+        Listing.status == ListingStatus.PUBLISHED,
+        Listing.ebay_publish_status == EbayPublishStatus.POSTED,
+    )
+    confirmed_live = or_(legacy_live, Listing.id.in_(active_projection_ids))
+    not_sold = and_(Listing.sold_at.is_(None), func.coalesce(Listing.quantity, 1) > 0)
+    catalog_published = int(db.execute(
+        select(func.count(func.distinct(Listing.id))).where(Listing.user_id == user_id, not_sold, confirmed_live)
+    ).scalar_one())
+    # Match the catalog's lifecycle buckets, including current preflight and
+    # specificity blockers. This query is intentionally narrow (only draft,
+    # ready, or explicitly review-flagged rows) and avoids serializing photos,
+    # jobs, and marketplace relations for the whole catalog.
+    candidate_rows = db.execute(
+        select(
+            Listing.id, Listing.status, Listing.title, Listing.description,
+            Listing.category_suggestion, Listing.item_specifics,
+            Listing.source_metadata, Listing.marketplace_data,
+            Listing.processing_state, Listing.needs_review,
+            Listing.restricted_review_required, Listing.ebay_publish_status,
+            Listing.ebay_listing_id, Listing.source_type,
+            Listing.sold_at, Listing.quantity, Listing.custom_labels,
+        ).where(
+            Listing.user_id == user_id,
+            or_(
+                Listing.status.in_([ListingStatus.draft, ListingStatus.ready, ListingStatus.INGESTED, ListingStatus.PROCESSED]),
+                Listing.needs_review.is_(True),
+                Listing.restricted_review_required.is_(True),
+            ),
+            not_sold,
+        )
+    ).all()
+    catalog_review = 0
+    catalog_ready = 0
+    catalog_drafts = 0
+    for row in candidate_rows:
+        if row.id in archived_listing_ids:
+            continue
+        status_value = str(getattr(row.status, "value", row.status) or "").strip().lower()
+        ebay_status = str(getattr(row.ebay_publish_status, "value", row.ebay_publish_status) or "").strip().upper()
+        legacy_live_row = status_value in {"published", "posted"} or ebay_status == "POSTED" or bool(row.ebay_listing_id)
+        if legacy_live_row or row.id in active_projection_ids_set:
+            continue
+        if status_value in {"failed", "error"} or ebay_status == "FAILED":
+            continue
+        if str(row.processing_state or "").strip().lower() in {"needs_attention", "blocked"}:
+            continue
+        marketplace_data = row.marketplace_data if isinstance(row.marketplace_data, dict) else {}
+        source_metadata = row.source_metadata if isinstance(row.source_metadata, dict) else {}
+        preflight = marketplace_data.get("marketplace_preflight") if isinstance(marketplace_data.get("marketplace_preflight"), dict) else {}
+        by_marketplace = preflight.get("by_marketplace") if isinstance(preflight.get("by_marketplace"), dict) else {}
+        configured_targets = [str(value).strip().lower() for value in marketplace_data.get("targets") or [] if str(value).strip()]
+        if not configured_targets and str(row.source_type or "").strip().lower() == "amazon_vine":
+            configured_targets = ["ebay"]
+        has_current_target_blocker = any(
+            isinstance(by_marketplace.get(market), dict)
+            and not bool(by_marketplace[market].get("stale"))
+            and bool(by_marketplace[market].get("blockers"))
+            for market in configured_targets
+        )
+        if has_current_target_blocker:
+            continue
+        reviewability = classify_listing_reviewability(
+            title=row.title,
+            description=row.description,
+            category=row.category_suggestion,
+            item_specifics=row.item_specifics if isinstance(row.item_specifics, dict) else {},
+            source_metadata=source_metadata,
+            has_images=False,
+        )
+        if reviewability.get("caption_like_title") or reviewability.get("bare_identifier_title"):
+            continue
+        explicitly_approved = bool(source_metadata.get("operator_approved_at"))
+        review_flagged = bool(row.needs_review or row.restricted_review_required)
+        if review_flagged and not explicitly_approved and status_value not in {"ready", "posted", "published"}:
+            review_ready = any(
+                isinstance(by_marketplace.get(market), dict)
+                and str(by_marketplace[market].get("status") or "").strip().lower() in {"ready", "ready_with_warnings", "published", "needs_review"}
+                and not by_marketplace[market].get("blockers")
+                for market in ("ebay", "facebook", "mercari", "poshmark", "vinted")
+            )
+            if review_ready:
+                catalog_review += 1
+            continue
+        if status_value == "ready":
+            targets = [str(value).strip().lower() for value in marketplace_data.get("targets") or [] if str(value).strip()]
+            approved_target = any(
+                isinstance(by_marketplace.get(market), dict)
+                and str(by_marketplace[market].get("status") or "").strip().lower() in {"ready", "ready_with_warnings", "published"}
+                for market in targets
+            )
+            if explicitly_approved and approved_target:
+                catalog_ready += 1
+            elif not explicitly_approved:
+                catalog_drafts += 1
+            continue
+        if status_value in {"draft", "ingested", "processed"}:
+            catalog_drafts += 1
+    catalog_failed = int(db.execute(
+        select(func.count(func.distinct(Listing.id))).where(
+            Listing.user_id == user_id,
+            or_(Listing.status == ListingStatus.FAILED, Listing.ebay_publish_status == EbayPublishStatus.FAILED),
+            ~Listing.id.in_(active_projection_ids),
+            Listing.sold_at.is_(None),
+        )
+    ).scalar_one())
 
     intake_batches_rows = db.execute(
         select(IntakePhotoBatch.status, func.count(IntakePhotoBatch.id))
@@ -193,7 +312,14 @@ def _build_system_status_summary(db: Session, *, user_id: int, import_summary: d
     queued_jobs = int(import_summary.get("queued", 0)) + int(crosspost_summary.get("queued", 0))
     running_jobs = int(import_summary.get("running", 0)) + int(crosspost_summary.get("running", 0))
     failed_jobs = int(import_summary.get("failed", 0)) + int(crosspost_summary.get("failed", 0))
-    visible_total = max(catalog_total - catalog_sold - catalog_archived, 0)
+    visible_total = int(db.execute(
+        select(func.count(Listing.id)).where(
+            Listing.user_id == user_id,
+            Listing.sold_at.is_(None),
+            func.coalesce(Listing.quantity, 1) > 0,
+            ~Listing.id.in_(archived_listing_ids),
+        )
+    ).scalar_one())
     active_batches = sum(int(intake_batches.get(status, 0)) for status in ("collecting", "ready_for_draft", "drafted"))
     processing_photos = sum(int(intake_photos.get(status, 0)) for status in ("discovered", "changed", "retry", "processing"))
     message = "No active work detected."
@@ -212,6 +338,8 @@ def _build_system_status_summary(db: Session, *, user_id: int, import_summary: d
         "catalog_review": catalog_review,
         "catalog_ready": catalog_ready,
         "catalog_published": catalog_published,
+        "catalog_live": catalog_published,
+        "catalog_failed": catalog_failed,
         "catalog_sold": catalog_sold,
         "catalog_archived": catalog_archived,
         "intake_batches_active": active_batches,

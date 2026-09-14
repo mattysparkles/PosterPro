@@ -184,7 +184,7 @@ export default function useDashboardData(userId, options = {}) {
       setMarketplaces(asArray(marketplacesValue?.marketplaces));
       setAnalytics(analyticsValue);
       setAlerts(asArray(alertsValue?.alerts));
-      setAutonomousConfig(autoConfigValue);
+      setAutonomousConfig({ ...(autoConfigValue || {}), loaded: autoConfigResult.status === "fulfilled" });
       setOfferDashboard(offerDataValue);
       setEnabledPlatforms(platformConfigValue?.enabled_platforms || ["ebay"]);
       setStorageBatches(asArray(batchesValue));

@@ -301,6 +301,18 @@ def _persist_sold_sync_preferences(user: User, updates: dict) -> None:
     user.settings_json = settings_json
 
 
+_DASHBOARD_METRIC_IDS = ("ready", "review", "live", "draft")
+
+
+def _normalize_dashboard_metric_preferences(value: object) -> dict:
+    raw = value if isinstance(value, dict) else {}
+    order = [item for item in raw.get("order", []) if item in _DASHBOARD_METRIC_IDS] if isinstance(raw.get("order"), list) else []
+    order = list(dict.fromkeys(order))
+    order.extend(item for item in _DASHBOARD_METRIC_IDS if item not in order)
+    visible = raw.get("visible") if isinstance(raw.get("visible"), dict) else {}
+    return {"order": order, "visible": {item: bool(visible.get(item, True)) for item in _DASHBOARD_METRIC_IDS}}
+
+
 def _serialize_user(user: User) -> dict:
     settings_json = user.settings_json if isinstance(user.settings_json, dict) else {}
     return {
@@ -513,6 +525,10 @@ def update_me(
         value = getattr(payload, field, None)
         if value is not None:
             profile_updates[field] = bool(value)
+    if payload.profile_preferences is not None:
+        submitted_metrics = payload.profile_preferences.get("dashboard_metrics")
+        if submitted_metrics is not None:
+            profile_updates["dashboard_metrics"] = _normalize_dashboard_metric_preferences(submitted_metrics)
     if profile_updates:
         settings_json = current_user.settings_json if isinstance(current_user.settings_json, dict) else {}
         profile = settings_json.get("profile_preferences") if isinstance(settings_json.get("profile_preferences"), dict) else {}

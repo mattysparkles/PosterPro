@@ -14,7 +14,7 @@ const MARKETPLACE_HOST_HINTS = [
   { marketplace: "offerup", match: "offerup.com" },
 ];
 
-const EXTENSION_VERSION = "0.3.1";
+const EXTENSION_VERSION = "0.3.2";
 let queuePollActive = false;
 
 function apiRoot(baseUrl) {
@@ -444,6 +444,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     pairDevice(String(message.pairingCode || "").trim(), String(message.deviceName || "PosterPro browser"))
       .then((device) => sendResponse({ ok: true, device }))
       .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
+
+  if (action === "get_connection_status") {
+    chrome.storage.local.get(["posterproDevice"]).then(({ posterproDevice }) => {
+      const device = posterproDevice && typeof posterproDevice === "object" ? posterproDevice : null;
+      sendResponse({
+        ok: true,
+        device: device ? {
+          id: Number.isInteger(device.id) ? device.id : null,
+          browser: String(device.browser || "").slice(0, 32),
+          extension_version: String(device.extension_version || EXTENSION_VERSION).slice(0, 32),
+          last_seen_at: typeof device.last_seen_at === "string" ? device.last_seen_at.slice(0, 64) : null,
+        } : null,
+      });
+    }).catch(() => sendResponse({ ok: true, device: null }));
     return true;
   }
 

@@ -14,8 +14,10 @@ from app.models.models import (
     ListingTemplate,
     MarketplaceCrosspostJob,
     MarketplaceImportJob,
+    MarketplaceListing,
     Sale,
 )
+from app.models.enums import MarketplaceListingStatus
 from app.api import routes as listings_routes
 from app.api import marketplaces as marketplaces_api
 from app.services.listing_specificity import classify_listing_reviewability, is_bare_identifier_title, is_caption_like_title
@@ -774,6 +776,59 @@ async def test_marketplace_jobs_overview_includes_system_status_snapshot(async_c
     assert status["catalog_archived"] == 1
     assert status["catalog_visible"] == 2
     assert "status_message" in status
+
+
+@pytest.mark.anyio
+async def test_dashboard_catalog_metrics_are_unpaginated_and_count_live_canonical_items_once(async_client):
+    register = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Metric Owner", "email": f"metric-owner-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+
+    db = database_module.SessionLocal()
+    live_rows = [Listing(user_id=user_id, status=ListingStatus.PUBLISHED, title=f"Live {idx}", description="live", quantity=1) for idx in range(161)]
+    db.add_all(live_rows)
+    db.flush()
+    # Two live marketplace projections for one canonical item must not inflate
+    # the dashboard's listing count.
+    db.add_all([
+        MarketplaceListing(listing_id=live_rows[0].id, marketplace=MarketplaceName.facebook, marketplace_listing_id="fb-1", status=MarketplaceListingStatus.PUBLISHED),
+        MarketplaceListing(listing_id=live_rows[0].id, marketplace=MarketplaceName.mercari, marketplace_listing_id="mc-1", status=MarketplaceListingStatus.PUBLISHED),
+    ])
+    draft = Listing(user_id=user_id, status=ListingStatus.draft, title="Women's Brown Leather Crossbody Bag", description="draft", quantity=1)
+    review = Listing(user_id=user_id, status=ListingStatus.draft, title="Vintage Navy Cotton Sweater Size Large", description="review", quantity=1, needs_review=True, marketplace_data={"targets": ["ebay"], "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "needs_review", "blockers": []}}}})
+    ready = Listing(user_id=user_id, status=ListingStatus.ready, title="Ready Product", description="ready", quantity=1, image_urls=["https://example.test/ready.jpg"], category_suggestion="Collectibles", source_metadata={"operator_approved_at": "2026-09-01T00:00:00Z"}, marketplace_data={"targets": ["ebay"], "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "ready", "blockers": []}}}})
+    attention = Listing(user_id=user_id, status=ListingStatus.draft, title="Vintage Brass Table Lamp with Shade", description="blocked", quantity=1, needs_review=True, marketplace_data={"targets": ["ebay"], "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "blocked", "blockers": ["CONDITION_REQUIRED"]}}}})
+    sold = Listing(user_id=user_id, status=ListingStatus.PUBLISHED, title="Sold Vintage Lamp", description="sold", quantity=0, sold_at=datetime.utcnow())
+    archived = Listing(user_id=user_id, status=ListingStatus.draft, title="Archived Wool Coat", description="archived", quantity=1, custom_labels=["archived_vine"])
+    failed = Listing(user_id=user_id, status=ListingStatus.FAILED, title="Failed Sneaker Listing", description="failed", quantity=1)
+    db.add_all([draft, review, ready, attention, sold, archived, failed])
+    db.commit()
+    db.close()
+
+    # The page payload remains limited to five, while all dashboard metrics
+    # are computed independently over the tenant's complete canonical catalog.
+    response = await async_client.get("/marketplace-jobs/overview?compact=true&limit=5")
+    assert response.status_code == 200
+    status = response.json()["system_status"]
+    assert status["catalog_live"] == 161
+    assert status["catalog_published"] == 161
+    assert status["catalog_review"] == 1
+    assert status["catalog_ready"] == 1
+    assert status["catalog_drafts"] == 1
+    assert status["catalog_failed"] == 1
+
+    for queue, expected in (("review", 1), ("ready", 1), ("drafts", 1), ("needs_attention", 1)):
+        queued = await async_client.get(f"/listings?page=1&page_size=5&queue={queue}")
+        assert queued.status_code == 200
+        assert queued.json()["total"] == expected
+
+    published_page = await async_client.get("/listings?page=1&page_size=5&queue=published")
+    assert published_page.status_code == 200
+    assert published_page.json()["total"] == 161
+    assert len(published_page.json()["items"]) == 5
 
 
 @pytest.mark.anyio

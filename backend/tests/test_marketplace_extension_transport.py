@@ -3,6 +3,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from zipfile import ZipFile
+import json
 
 import pytest
 
@@ -69,6 +70,8 @@ async def test_extension_download_serves_current_installable_archive(async_clien
     assert "posterpro-extension/content.js" in names
     assert "posterpro-extension/posterpro-link.js" in names
     assert "/opt/apps/" not in "\n".join(names)
+    manifest = json.loads(archive.read("posterpro-extension/manifest.json"))
+    assert manifest["version"] == "0.3.2"
 
 
 @pytest.mark.anyio
@@ -240,7 +243,7 @@ async def test_marketplace_diagnostic_is_tenant_scoped_and_persists_field_result
         assert response.status_code == 200
     latest = await async_client.get("/browser-extension/diagnostics/latest/facebook")
     assert latest.status_code == 200
-    assert latest.json()["current_version"] == "0.3.1"
+    assert latest.json()["current_version"] == "0.3.2"
     assert latest.json()["minimum_version"] == "0.3.1"
     assert latest.json()["result"]["field_results"][0]["error_code"] == "FIELD_NOT_FOUND"
     assert latest.json()["result"]["capability_ready"] is False
@@ -277,7 +280,7 @@ async def test_extension_version_status_updates_in_place_without_repairing_pairi
     assert old.status_code == 200
     state = await async_client.get("/browser-extension/devices")
     device = next(item for item in state.json()["devices"] if item["id"] == device_id)
-    assert state.json()["current_version"] == "0.3.1"
+    assert state.json()["current_version"] == "0.3.2"
     assert state.json()["minimum_version"] == "0.3.1"
     assert device["update_required"] is True
     refreshed = await async_client.post("/browser-extension/heartbeat", headers=headers, json={"browser": "Chrome", "extension_version": "0.3.1"})

@@ -999,3 +999,41 @@ requirements above. Credentials were not rotated or printed.
   then removed after inspection because it contained internal diagnostics; no
   other `/tmp` path was inspected, changed, or cleaned. This was a transient
   shared-temp write and is recorded as an operator-scope mistake.
+
+## 2026-09-14 - Dashboard metric truth and browser connection simplification
+
+- Replaced Dashboard's page-limited catalog figures with a server-side summary
+  over canonical listing state and active marketplace projections. Live counts
+  are distinct canonical listings, so multiple active marketplace projections
+  do not inflate the number. Review, Ready, and Draft now use explicit queue
+  definitions; failed listings are reported separately. Dashboard metric
+  links open the matching Listings queue.
+- Removed the duplicated primary metric block and condensed the Dashboard into
+  a modular responsive workspace with persistent per-user metric visibility
+  and order. Added discreet source/definition/freshness diagnostics for platform
+  admins. Missing summary data is shown as unavailable rather than a false zero.
+- Simplified browser setup into a state-driven install/connect/online/update
+  flow owned by Guided Setup. Marketplace choices now use accessible checkbox
+  cards. The install guide accurately explains Chrome/Edge's required manual
+  Load unpacked steps when the extension is not distributed through a browser
+  store. Freshly installed compatible extensions can connect without typing a
+  pairing code; onboarding polls for the current browser's heartbeat and
+  completes automatically. Stale device registrations are grouped and never
+  silently deleted.
+- Bumped the extension artifact to `0.3.2`; minimum compatibility remains
+  `0.3.1`. Extension status messages expose only the current safe device ID,
+  paired state, and version, not device credentials.
+- Validation: backend summary/auth/extension suites passed `52 tests`; browser
+  extension fixture suites passed `3 test files`; Python compile and
+  `git diff --check` passed. Frontend production build passed with existing
+  lint warnings. No migration was required. The deployed-data read-only summary
+  before restart returned Ready `0`, Needs Review `599`, Live `188`, Draft
+  backlog `187` (2,129 total; 1,740 visible; 24 sold; 386 archived; 9 failed).
+  The live-count discrepancy from the operator's approximate 161 is retained
+  as a finding to recheck against the canonical projections after deployment,
+  not hidden with a UI override.
+- Authenticated browser/visual verification was unavailable in this execution
+  environment and remains an operator test. No marketplace operation was run.
+  No host-wide cleanup or non-PosterPro resource mutation was performed; the
+  untracked `debug_fb_publish.db`, `ops/snapshots/`, and `tmp/` paths were left
+  untouched.

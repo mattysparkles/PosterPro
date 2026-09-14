@@ -19,7 +19,9 @@ function harness() {
     },
     chrome: {
       runtime: {
+        getManifest: () => ({ version: "0.3.2" }),
         sendMessage: async (message) => {
+          if (message.action === "get_connection_status") return { ok: true, device: { id: 7, browser: "Chrome", extension_version: "0.3.2" } };
           runtimeMessages.push(message);
           return { ok: true, device: { id: 12, name: "Chrome", user_id: 7 } };
         },
@@ -32,7 +34,11 @@ function harness() {
 
 test("PosterPro page detects the extension and one trusted authorize click pairs without exposing a device token", async () => {
   const h = harness();
+  await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(h.outbound[0].message.type, "PRESENCE");
+  assert.equal(h.outbound[0].message.version, "0.3.2");
+  assert.equal(h.outbound[0].message.device_id, 7);
+  assert.equal(h.outbound[0].message.paired, true);
   h.listeners["window:message"]({
     source: h.context.window,
     origin: h.context.location.origin,
@@ -62,6 +68,7 @@ test("extension pairing bridge rejects foreign origins and untrusted clicks", as
     data: { source: "posterpro-settings", type: "PAIR_EXTENSION", pairing_code: "x".repeat(32) },
   });
   assert.equal(h.runtimeMessages.length, 0);
+  await new Promise((resolve) => setTimeout(resolve, 0));
 });
 
 test("extension source and permissions do not read or transmit marketplace cookies", () => {

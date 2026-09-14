@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = "0.2.2";
+  const VERSION = chrome.runtime.getManifest?.().version || "unknown";
   const PAGE_SOURCE = "posterpro-settings";
   const EXTENSION_SOURCE = "posterpro-extension";
   let lastTrustedAuthorizationClick = 0;
@@ -7,6 +7,16 @@
 
   function report(type, details = {}) {
     window.postMessage({ source: EXTENSION_SOURCE, type, version: VERSION, ...details }, location.origin);
+  }
+
+  async function reportPresence() {
+    try {
+      const state = await chrome.runtime.sendMessage({ action: "get_connection_status" });
+      const device = state?.ok ? state.device : null;
+      report("PRESENCE", { device_id: Number.isInteger(device?.id) ? device.id : null, paired: Boolean(device?.id) });
+    } catch {
+      report("PRESENCE", { device_id: null, paired: false });
+    }
   }
 
   document.addEventListener("click", (event) => {
@@ -19,7 +29,7 @@
     const data = event.data || {};
     if (event.source !== window || event.origin !== location.origin || data.source !== PAGE_SOURCE) return;
     if (data.type === "CHECK_EXTENSION") {
-      report("PRESENCE");
+      void reportPresence();
       return;
     }
     if (data.type !== "PAIR_EXTENSION") return;
@@ -39,5 +49,5 @@
     }
   });
 
-  report("PRESENCE");
+  void reportPresence();
 })();

@@ -28,7 +28,6 @@ import EmptyState from '../components/ui/empty-state';
 import MetricCard from '../components/ui/metric-card';
 import PageHeader from '../components/ui/page-header';
 import QuickActionCard from '../components/ui/quick-action-card';
-import SectionPanel from '../components/ui/section-panel';
 import StatusPill from '../components/ui/status-pill';
 import HealthIndicator from '../components/ui/health-indicator';
 import LoadingSkeleton from '../components/ui/loading-skeleton';
@@ -51,11 +50,12 @@ import {
   uploadVineReport,
   getGooglePhotosConnectUrl,
   startGooglePhotosOAuth,
+  updateCurrentUser,
 } from '../lib/api';
-import { formatPublishFailureMessage } from '../lib/publish-status';
 
 const DEFAULT_OPERATOR_PROMPT =
   'Lower all item prices by ten percent if they have been posted for more than 1 week on eBay.';
+const DEFAULT_DASHBOARD_METRIC_LAYOUT = { order: ['ready', 'review', 'live', 'draft'], visible: { ready: true, review: true, live: true, draft: true } };
 
 function formatTime(value) {
   if (!value) return 'Pending';
@@ -92,7 +92,7 @@ export default function Dashboard() {
       ? `${window.location.origin}/api/intake/google-photos/callback`
       : 'https://posterpro.sparkleserver.site/api/intake/google-photos/callback';
   const vineFileInputRef = useRef(null);
-  const { listings, autonomousConfig, readyCount, reload } = useDashboardData(user?.id, {
+  const { listings, autonomousConfig, reload } = useDashboardData(user?.id, {
     includeClusters: false,
     includeMarketplaces: false,
     includeAnalytics: false,
@@ -108,9 +108,16 @@ export default function Dashboard() {
     listingPageSize: 25,
   });
   const [alerts, setAlerts] = useState([]);
+  const [alertsAvailable, setAlertsAvailable] = useState(false);
   const [setupSummary, setSetupSummary] = useState(null);
   const [extensionState, setExtensionState] = useState({ devices: [], current_version: 'unknown', minimum_version: 'unknown' });
-  const [jobsOverview, setJobsOverview] = useState({ import_jobs: [], crosspost_jobs: [] });
+  const [browserExtensionDeviceId, setBrowserExtensionDeviceId] = useState(null);
+  const [browserExtensionDetected, setBrowserExtensionDetected] = useState(false);
+  const [browserExtensionVersion, setBrowserExtensionVersion] = useState('');
+  const [jobsOverview, setJobsOverview] = useState({ import_jobs: [], crosspost_jobs: [], system_status: null });
+  const [metricsUpdatedAt, setMetricsUpdatedAt] = useState(null);
+  const [dashboardMetricLayout, setDashboardMetricLayout] = useState(DEFAULT_DASHBOARD_METRIC_LAYOUT);
+  const [customizingMetrics, setCustomizingMetrics] = useState(false);
   const [salesDashboard, setSalesDashboard] = useState({ summary: {} });
   const [activeSection, setActiveSection] = useState('overview');
   const [vineUploading, setVineUploading] = useState(false);
@@ -120,30 +127,38 @@ export default function Dashboard() {
   const [operatorCommandResult, setOperatorCommandResult] = useState(null);
   const [operatorCommandRunning, setOperatorCommandRunning] = useState(false);
   const [intakeSettings, setIntakeSettings] = useState(null);
-  const [intakeQueue, setIntakeQueue] = useState({ batches: [], unassigned_photos: [] });
+  const [intakeQueue, setIntakeQueue] = useState({ batches: [], unassigned_photos: [], available: false });
   const [intakeAlbumUrl, setIntakeAlbumUrl] = useState('');
   const [intakeFolderId, setIntakeFolderId] = useState('');
   const [intakeSaving, setIntakeSaving] = useState(false);
   const [intakeSyncing, setIntakeSyncing] = useState(false);
   const systemStatus = jobsOverview.system_status || {};
+  const metricsReady = Boolean(jobsOverview.system_status);
+  const jobsSummaryReady = Boolean(jobsOverview.import_summary && jobsOverview.crosspost_summary);
+  const salesSummaryReady = Object.prototype.hasOwnProperty.call(salesDashboard.summary || {}, 'gross') && Object.prototype.hasOwnProperty.call(salesDashboard.summary || {}, 'units');
   const googlePhotosConnected = Boolean(intakeSettings?.google_photos?.connected);
+  const draftCount = Number(systemStatus.catalog_drafts || 0);
+  const reviewCount = Number(systemStatus.catalog_review || 0);
+  const liveCount = Number(systemStatus.catalog_live ?? systemStatus.catalog_published ?? 0);
+  const readyCount = Number(systemStatus.catalog_ready || 0);
+  const failedPublishCount = Number(systemStatus.catalog_failed || 0);
 
-  const draftCount = useMemo(
-    () => listings.filter((listing) => listing.status !== 'ready' && listing.ebay_publish_status !== 'POSTED' && !listing.ebay_listing_id).length,
-    [listings],
-  );
-  const reviewCount = useMemo(
-    () => listings.filter((listing) => listing.needs_review || listing.restricted_review_required).length,
-    [listings],
-  );
-  const liveCount = useMemo(
-    () => listings.filter((listing) => listing.ebay_publish_status === 'POSTED' || listing.ebay_listing_id).length,
-    [listings],
-  );
-  const failedPublishCount = useMemo(
-    () => listings.filter((listing) => listing.status === 'error' || listing.ebay_publish_status === 'FAILED').length,
-    [listings],
-  );
+  useEffect(() => {
+    const stored = user?.profile_preferences?.dashboard_metrics;
+    if (!stored) { setDashboardMetricLayout(DEFAULT_DASHBOARD_METRIC_LAYOUT); return; }
+    const valid = ['ready', 'review', 'live', 'draft'];
+    const order = Array.isArray(stored.order) ? stored.order.filter((id) => valid.includes(id)) : [];
+    setDashboardMetricLayout({
+      order: [...new Set([...order, ...valid])],
+      visible: Object.fromEntries(valid.map((id) => [id, stored.visible?.[id] !== false])),
+    });
+  }, [user?.id, user?.profile_preferences]);
+
+  const saveDashboardMetricLayout = async (next) => {
+    setDashboardMetricLayout(next);
+    try { await updateCurrentUser({ profile_preferences: { dashboard_metrics: next } }); }
+    catch (error) { toast.error(error.message || 'Dashboard layout could not be saved.'); }
+  };
   const recentActivity = useMemo(
     () =>
       listings
@@ -152,11 +167,6 @@ export default function Dashboard() {
         .slice(0, 7),
     [listings],
   );
-  const attentionItems = useMemo(
-    () => listings.filter((listing) => listing.status === 'error' || listing.ebay_publish_status === 'FAILED').slice(0, 5),
-    [listings],
-  );
-
   useEffect(() => {
     if (!user?.id) return;
     setLoadingPanels(true);
@@ -169,14 +179,16 @@ export default function Dashboard() {
     ]).then(([setupResult, jobsResult, salesResult, intakeSettingsResult, intakeQueueResult]) => {
       setSetupSummary(setupResult.status === 'fulfilled' ? setupResult.value : null);
       setJobsOverview(jobsResult.status === 'fulfilled' ? jobsResult.value || { import_jobs: [], crosspost_jobs: [] } : { import_jobs: [], crosspost_jobs: [] });
+      if (jobsResult.status === 'fulfilled') setMetricsUpdatedAt(new Date().toISOString());
       setSalesDashboard(salesResult.status === 'fulfilled' ? salesResult.value || { summary: {} } : { summary: {} });
       const nextIntakeSettings = intakeSettingsResult.status === 'fulfilled' ? intakeSettingsResult.value || null : null;
       const nextIntakeQueue = intakeQueueResult.status === 'fulfilled'
         ? {
             batches: intakeQueueResult.value?.batches || [],
             unassigned_photos: intakeQueueResult.value?.unassigned_photos || [],
+            available: true,
           }
-        : { batches: [], unassigned_photos: [] };
+        : { batches: [], unassigned_photos: [], available: false };
       setIntakeSettings(nextIntakeSettings);
       setIntakeQueue(nextIntakeQueue);
       setIntakeAlbumUrl(nextIntakeSettings?.album_url || '');
@@ -184,6 +196,34 @@ export default function Dashboard() {
       setLoadingPanels(false);
     });
   }, [user?.id]);
+
+  useEffect(() => {
+    if (!user?.id) return undefined;
+    let active = true;
+    const refreshSummary = () => fetchMarketplaceJobsOverview({ limit: 25, compact: true }).then((value) => {
+      if (active && value) {
+        setJobsOverview(value);
+        setMetricsUpdatedAt(new Date().toISOString());
+      }
+    }).catch(() => {});
+    const timer = window.setInterval(refreshSummary, 30000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [user?.id]);
+
+  useEffect(() => {
+    const receiveExtensionPresence = (event) => {
+      if (event.source !== window || event.origin !== window.location.origin || event.data?.source !== 'posterpro-extension') return;
+      if (event.data?.type === 'PRESENCE' || event.data?.type === 'AUTHORIZED') {
+        setBrowserExtensionDetected(true);
+        setBrowserExtensionVersion(String(event.data.version || ''));
+      }
+      const deviceId = Number(event.data.device_id || event.data.device?.id);
+      if (Number.isInteger(deviceId) && deviceId > 0) setBrowserExtensionDeviceId(deviceId);
+    };
+    window.addEventListener('message', receiveExtensionPresence);
+    window.postMessage({ source: 'posterpro-settings', type: 'CHECK_EXTENSION' }, window.location.origin);
+    return () => window.removeEventListener('message', receiveExtensionPresence);
+  }, []);
 
   useEffect(() => {
     if (!user?.id) return undefined;
@@ -198,14 +238,15 @@ export default function Dashboard() {
     let active = true;
     if (!user?.id) {
       setAlerts([]);
+      setAlertsAvailable(false);
       return undefined;
     }
     fetchAlerts(user.id)
       .then((payload) => {
-        if (active) setAlerts(payload?.alerts || []);
+        if (active) { setAlerts(payload?.alerts || []); setAlertsAvailable(true); }
       })
       .catch(() => {
-        if (active) setAlerts([]);
+        if (active) { setAlerts([]); setAlertsAvailable(false); }
       });
     return () => {
       active = false;
@@ -224,7 +265,7 @@ export default function Dashboard() {
   );
 
   const blockers = useMemo(() => {
-    if (!setupSummary) return [];
+    if (!setupSummary) return null;
     const items = [];
     if (!setupSummary.account_profile_complete) items.push('Add an operator or business name.');
     if (!setupSummary.server_readiness?.ebay_oauth_configured) items.push('Server eBay OAuth credentials are still missing.');
@@ -244,16 +285,27 @@ export default function Dashboard() {
   }, [setupSummary]);
   const showBrowserAssistPrompt = Boolean(browserAssistPromptTargets.length || activeBridgeConnectSession);
   const topMetrics = [
-    { label: 'Ready to publish', value: readyCount, detail: 'Listings that can move straight into marketplace publishing.', href: '/listings?tab=ready' },
-    { label: 'Pending review', value: reviewCount, detail: 'Drafts still waiting for operator approval.', href: '/listings?tab=review' },
-    { label: 'Live listings', value: liveCount, detail: 'Listings already posted or actively synced.', href: '/listings?tab=published' },
-    { label: 'Draft backlog', value: draftCount, detail: 'Items still moving through enrichment and manual edits.', href: '/listings?tab=drafts' },
+    { id: 'ready', label: 'Ready to publish', value: metricsReady ? readyCount : 'Not available', detail: 'Approved listings without a live marketplace copy.', href: '/listings?tab=ready' },
+    { id: 'review', label: 'Pending review', value: metricsReady ? reviewCount : 'Not available', detail: 'Current Needs Review queue across the full catalog.', href: '/listings?tab=review' },
+    { id: 'live', label: 'Live listings', value: metricsReady ? liveCount : 'Not available', detail: 'Distinct listings with at least one active marketplace copy.', href: '/listings?tab=published' },
+    { id: 'draft', label: 'Draft backlog', value: metricsReady ? draftCount : 'Not available', detail: 'Unfinished listings not yet ready for human review.', href: '/listings?tab=drafts' },
   ];
+  const orderedMetrics = dashboardMetricLayout.order.map((id) => topMetrics.find((metric) => metric.id === id)).filter((metric) => metric && dashboardMetricLayout.visible[metric.id]);
+  const reorderDashboardMetrics = (draggedId, targetId) => {
+    if (!draggedId || draggedId === targetId) return;
+    const order = [...dashboardMetricLayout.order];
+    const from = order.indexOf(draggedId);
+    const to = order.indexOf(targetId);
+    if (from < 0 || to < 0) return;
+    order.splice(from, 1);
+    order.splice(to, 0, draggedId);
+    void saveDashboardMetricLayout({ ...dashboardMetricLayout, order });
+  };
   const workspaceStats = [
-    { label: 'Batch jobs', value: jobsSummary.queued, note: 'Queued or running' },
-    { label: 'Failures', value: jobsSummary.failed + failedPublishCount, note: 'Jobs plus publish errors' },
-    { label: 'Sales gross', value: `$${Number(salesDashboard.summary?.gross || 0).toFixed(0)}`, note: 'Detected channel revenue' },
-    { label: 'Units sold', value: salesDashboard.summary?.units || 0, note: 'Completed units' },
+    { label: 'Batch jobs', value: jobsSummaryReady ? jobsSummary.queued : 'Not available', note: 'Queued or running, across all jobs' },
+    { label: 'Failures', value: jobsSummaryReady ? jobsSummary.failed + failedPublishCount : 'Not available', note: 'Failed jobs plus unpublished failed listings' },
+    { label: 'Sales gross', value: salesSummaryReady ? `$${Number(salesDashboard.summary.gross || 0).toFixed(0)}` : 'Not available', note: 'Detected channel revenue' },
+    { label: 'Units sold', value: salesSummaryReady ? salesDashboard.summary.units : 'Not available', note: 'Completed units' },
   ];
   const readinessRows = [
     ['OpenAI', setupSummary?.server_readiness?.openai_configured, 'AI enrichment and pricing help'],
@@ -374,11 +426,6 @@ export default function Dashboard() {
     ],
     [],
   );
-  const activeSectionMeta = useMemo(
-    () => dashboardSections.find((section) => section.key === activeSection) || dashboardSections[0],
-    [activeSection, dashboardSections],
-  );
-
   useEffect(() => {
     if (!router.isReady) return;
     const requested = typeof router.query.section === 'string' ? router.query.section : '';
@@ -440,10 +487,10 @@ export default function Dashboard() {
         <div className="rounded-[18px] border border-[#dbe7ff] bg-[linear-gradient(135deg,#f8fbff_0%,#ffffff_100%)] p-5 shadow-[0_12px_32px_rgba(15,23,42,0.06)]">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="max-w-3xl">
-              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">Browser-assist setup</p>
-              <h2 className="mt-2 text-xl font-semibold tracking-[-0.03em] text-[#101828]">Install the marketplace browser assistant and connect Facebook or Mercari.</h2>
+          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">Browser connection</p>
+              <h2 className="mt-2 text-xl font-semibold tracking-[-0.03em] text-[#101828]">Connect the browser you already use.</h2>
               <p className="mt-2 text-sm leading-6 text-[#475467]">
-                PosterPro uses the browser assistant for Facebook Marketplace and Mercari so sessions can be captured and reused without repeating the whole login flow every time.
+                PosterPro works with marketplace accounts already signed in to Chrome or Edge. Your passwords stay in your browser.
               </p>
               {browserAssistPromptTargets.length ? (
                 <p className="mt-2 text-sm text-[#344054]">
@@ -452,11 +499,8 @@ export default function Dashboard() {
               ) : null}
             </div>
             <div className="flex flex-wrap gap-2">
-              <Button href="/settings?tab=marketplaces" variant="outline">
-                Open marketplace setup
-              </Button>
-              <Button href="/bridge-desktop" variant="outline">
-                Open bridge desktop
+              <Button href="/onboarding">
+                Continue guided setup
               </Button>
               {activeBridgeConnectSession ? (
                 <Button href={`/bridge-desktop?connectSessionId=${encodeURIComponent(activeBridgeConnectSession.connect_session_id)}`}>
@@ -468,8 +512,8 @@ export default function Dashboard() {
         </div>
       ) : null}
       <ActionBar
-        left={<HealthIndicator healthy={!blockers.length} label={blockers.length ? `${blockers.length} setup blockers` : 'Setup healthy'} />}
-        right={<span>{jobsSummary.queued} jobs running/queued</span>}
+        left={<HealthIndicator healthy={Boolean(setupSummary) && !blockers?.length} label={!setupSummary ? 'Setup status unavailable' : blockers.length ? `${blockers.length} setup items need attention` : 'Setup healthy'} />}
+        right={<span>{jobsSummaryReady ? `${jobsSummary.queued} jobs running/queued` : 'Job status unavailable'}</span>}
       />
       <CollapsiblePanel title="Head Slate intake" description="Connect or run the photo intake workflow when you need it." defaultOpen={false}>
         <div className="mb-4">
@@ -559,12 +603,12 @@ export default function Dashboard() {
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
             <div className="rounded-[18px] border border-[#e5e7eb] bg-[#fcfcfd] p-4">
               <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Queued intake batches</p>
-              <p className="mt-2 text-2xl font-semibold text-[#101828]">{intakeMetrics.batches}</p>
+              <p className="mt-2 text-2xl font-semibold text-[#101828]">{intakeQueue.available ? intakeMetrics.batches : 'Not available'}</p>
               <p className="mt-1 text-sm text-[#667085]">{intakeMetrics.ready} ready to draft, {intakeMetrics.drafted} drafted</p>
             </div>
             <div className="rounded-[18px] border border-[#e5e7eb] bg-[#fcfcfd] p-4">
               <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Unassigned photos</p>
-              <p className="mt-2 text-2xl font-semibold text-[#101828]">{intakeMetrics.unassigned}</p>
+              <p className="mt-2 text-2xl font-semibold text-[#101828]">{intakeQueue.available ? intakeMetrics.unassigned : 'Not available'}</p>
               <p className="mt-1 text-sm text-[#667085]">{intakeMetrics.unassigned ? 'Photos imported without a matching slate boundary.' : 'Album stream is grouped cleanly.'}</p>
             </div>
             <div className="rounded-[18px] border border-[#e5e7eb] bg-[#fcfcfd] p-4">
@@ -598,9 +642,9 @@ export default function Dashboard() {
       </CollapsiblePanel>
       <CollapsiblePanel
         title="Workspace overview"
-        description="Primary throughput, backlog, and publishing posture in one operator view."
-        defaultOpen
-        badge={`${readyCount} ready`}
+        description="Optional operator tools for intake and eBay repricing."
+        defaultOpen={false}
+        badge={metricsReady ? `${readyCount} ready` : 'Loading catalog summary'}
         action={
           <Link href="/publishing" className="inline-flex items-center gap-1 text-sm font-medium text-[#2563eb]">
             Open publish queue
@@ -610,13 +654,6 @@ export default function Dashboard() {
       >
         <div className="grid gap-4 lg:grid-cols-[minmax(0,1.25fr)_360px]">
           <div className="space-y-4">
-            <div className="rounded-[18px] border border-[#e5e7eb] bg-white p-5">
-              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">Control room</p>
-              <h2 className="mt-3 text-2xl font-semibold tracking-[-0.03em] text-[#101828]">Run the business without the page fighting you.</h2>
-              <p className="mt-3 max-w-2xl text-sm leading-6 text-[#475467]">
-                The dashboard now keeps the shell fixed and lets the section switcher change the operator view without dumping a second wall of controls above the fold.
-              </p>
-            </div>
             <div className="rounded-[18px] border border-[#dbe7ff] bg-[#f8fbff] p-5">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
@@ -725,11 +762,6 @@ export default function Dashboard() {
                 ) : null}
               </div>
             </div>
-            <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
-              {topMetrics.map((card) => (
-                <MetricCard key={card.label} label={card.label} value={card.value} detail={card.detail} href={card.href} />
-              ))}
-            </div>
           </div>
           <CollapsiblePanel title="Fast actions" description="Most common workflow moves kept behind a single task panel." defaultOpen={false}>
             <div className="rounded-[18px] border border-[#e5e7eb] bg-[#fcfcfd] p-5">
@@ -797,27 +829,7 @@ export default function Dashboard() {
 
       <CollapsiblePanel title="Attention feed" description="Errors, alerts, and items that need an operator now." defaultOpen={false}>
         <div className="space-y-3">
-          {attentionItems.length ? (
-            attentionItems.map((listing) => (
-              <Link
-                key={listing.id}
-                href={`/listings/${listing.id}`}
-                className="block rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-3 transition hover:bg-[#f9fafb] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#2563eb]"
-              >
-                <div className="flex items-start gap-3">
-                  <AlertTriangle size={16} className="mt-0.5 shrink-0 text-[#b42318]" />
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-medium text-[#101828]">{listing.title || `Listing #${listing.id}`}</p>
-                    <p className="mt-1 text-sm text-[#667085]">
-                      {listing.ebay_publish_status === 'FAILED'
-                        ? formatPublishFailureMessage(listing.marketplace_data?.error, 'ebay')
-                        : 'Review publish or sync status before requeueing marketplace work.'}
-                    </p>
-                  </div>
-                </div>
-              </Link>
-            ))
-          ) : alerts?.length ? (
+          {alerts?.length ? (
             alerts.slice(0, 5).map((alert, index) => (
               alert.href ? (
                 <Link key={`${alert.title || 'alert'}-${index}`} href={alert.href} className="block rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-3 transition hover:bg-[#f9fafb]">
@@ -833,9 +845,9 @@ export default function Dashboard() {
             ))
           ) : (
             <div className="rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-8 text-center">
-              <Clock3 size={18} className="mx-auto text-[#2563eb]" />
-              <p className="mt-3 text-sm font-medium text-[#101828]">No urgent events right now</p>
-              <p className="mt-1 text-sm text-[#667085]">Failures, alerts, and queue issues will surface here.</p>
+              {alertsAvailable ? <Clock3 size={18} className="mx-auto text-[#2563eb]" /> : <AlertTriangle size={18} className="mx-auto text-[#b54708]" />}
+              <p className="mt-3 text-sm font-medium text-[#101828]">{alertsAvailable ? 'No urgent events right now' : 'Alerts are not available'}</p>
+              <p className="mt-1 text-sm text-[#667085]">{alertsAvailable ? 'Failures, alerts, and queue issues will surface here.' : 'PosterPro could not verify the current alert list. Try refreshing the Dashboard.'}</p>
             </div>
           )}
         </div>
@@ -845,16 +857,12 @@ export default function Dashboard() {
 
   const renderJobs = () => (
     <div className="space-y-5">
-      <CollapsiblePanel title="Live system status" description={systemStatus.status_message || 'A consolidated snapshot of intake, drafts, jobs, and backlog.'} defaultOpen>
+      <CollapsiblePanel title="Live system status" description={systemStatus.status_message || 'Current intake and job-processing state.'} defaultOpen>
         <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
-          <MetricCard label="Visible catalog" value={systemStatus.catalog_visible || 0} detail={`${systemStatus.catalog_total || 0} total listings in the catalog.`} />
-          <MetricCard label="Draft backlog" value={systemStatus.catalog_drafts || 0} detail="Listings still being refined automatically." />
-          <MetricCard label="Needs review" value={systemStatus.catalog_review || 0} detail="Review-ready drafts awaiting approval." />
-          <MetricCard label="Published / sold" value={(systemStatus.catalog_published || 0) + (systemStatus.catalog_sold || 0)} detail="Listings already live or no longer available." />
-          <MetricCard label="Intake active" value={(systemStatus.intake_batches_active || 0) + (systemStatus.intake_photos_processing || 0)} detail="Batches and photos still moving through intake." />
-          <MetricCard label="Queued work" value={(systemStatus.queued_jobs || 0) + (systemStatus.running_jobs || 0)} detail="Worker tasks currently waiting or executing." />
-          <MetricCard label="Failed work" value={systemStatus.failed_jobs || 0} detail="Jobs that need attention or retry." />
-          <MetricCard label="Unread notices" value={systemStatus.unread_notifications || 0} detail="Process updates waiting for review." />
+          <MetricCard label="Intake active" value={metricsReady ? systemStatus.intake_batches_active + systemStatus.intake_photos_processing : 'Not available'} detail="Batches and photos still moving through intake." />
+          <MetricCard label="Queued work" value={metricsReady ? systemStatus.queued_jobs + systemStatus.running_jobs : 'Not available'} detail="Worker tasks currently waiting or executing." href="/jobs/active" />
+          <MetricCard label="Failed work" value={metricsReady ? systemStatus.failed_jobs : 'Not available'} detail="Jobs that need attention or retry." href="/jobs/failed" />
+          <MetricCard label="Unread notices" value={metricsReady ? systemStatus.unread_notifications : 'Not available'} detail="Process updates waiting for review." />
         </div>
       </CollapsiblePanel>
       <CollapsiblePanel title="Batch processing status" description="Recent import and cross-post jobs without leaving the dashboard." defaultOpen>
@@ -890,15 +898,8 @@ export default function Dashboard() {
           ]}
           rows={recentJobRows}
           rowKey={(row) => row.id}
-          emptyState={<EmptyState title="No jobs yet" description="Import and cross-post jobs will appear here once work starts moving through the marketplace execution layer." className="border-0 p-0 py-6" />}
+          emptyState={<EmptyState title={jobsSummaryReady ? 'No jobs yet' : 'Job status unavailable'} description={jobsSummaryReady ? 'Import and cross-post jobs will appear here once work starts moving through the marketplace execution layer.' : 'PosterPro could not verify the current jobs list.'} className="border-0 p-0 py-6" />}
         />
-      </CollapsiblePanel>
-      <CollapsiblePanel title="Job summary" description="Worker load at a glance." defaultOpen={false}>
-        <div className="grid gap-3 md:grid-cols-3 lg:grid-cols-4">
-          <MetricCard label="Queued or running" value={jobsSummary.queued} detail="Current job execution load." href="/jobs/active" />
-          <MetricCard label="Completed" value={jobsSummary.completed} detail="Jobs that finished successfully." href="/jobs/completed" />
-          <MetricCard label="Failed" value={jobsSummary.failed} detail="Jobs that need review or retry." href="/jobs/failed" />
-        </div>
       </CollapsiblePanel>
     </div>
   );
@@ -910,14 +911,14 @@ export default function Dashboard() {
           <div className="rounded-[14px] border border-[#e5e7eb] bg-white p-4">
             <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Marketplace sync</p>
             <div className="mt-3">
-              <StatusPill status={failedPublishCount ? 'warning' : 'success'} label={failedPublishCount ? 'Attention needed' : 'Healthy'} />
+              <StatusPill status={!metricsReady ? 'default' : failedPublishCount ? 'warning' : 'success'} label={!metricsReady ? 'Status unavailable' : failedPublishCount ? 'Attention needed' : 'Healthy'} />
             </div>
             <p className="mt-2 text-sm text-[#667085]">Derived from current publish failures and live listing state.</p>
           </div>
           <div className="rounded-[14px] border border-[#e5e7eb] bg-white p-4">
             <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Automation mode</p>
             <div className="mt-3">
-              <StatusPill status={autonomousConfig?.autonomous_mode ? 'success' : 'default'} label={autonomousConfig?.autonomous_mode ? 'Automation on' : 'Automation off'} />
+              <StatusPill status={autonomousConfig?.loaded ? (autonomousConfig.autonomous_mode ? 'success' : 'default') : 'default'} label={!autonomousConfig?.loaded ? 'Status unavailable' : autonomousConfig.autonomous_mode ? 'Automation on' : 'Automation off'} />
             </div>
             <p className="mt-2 text-sm text-[#667085]">Controls how aggressively drafts advance without human intervention.</p>
           </div>
@@ -935,10 +936,10 @@ export default function Dashboard() {
 
       <CollapsiblePanel title="Quick actions" description="Most common workflow moves kept in a dedicated command module." defaultOpen={false}>
         <div className="grid gap-3 xl:grid-cols-2">
-          <QuickActionCard href="/intake" icon={Upload} eyebrow="Intake" title="Upload Photos" description="Start a new intake batch with loose photos or a zip import." meta={`${listings.length} items`} />
-          <QuickActionCard href="/listings/new" icon={PlusCircle} eyebrow="Listings" title="Create Listing" description="Open the listing workspace directly for a manual item or imported draft." meta={`${draftCount} drafts`} />
-          <QuickActionCard href="/publishing" icon={RefreshCcw} eyebrow="Publishing" title="Publish Queue" description="Review approvals, queue health, and live marketplace rows." meta={`${readyCount} ready`} />
-          <QuickActionCard href="/sales" icon={ShoppingCart} eyebrow="Revenue" title="Sales & Orders" description="Monitor detected sales and finish bookkeeping adjustments." meta={`${salesDashboard.summary?.units || 0} units`} />
+          <QuickActionCard href="/intake" icon={Upload} eyebrow="Intake" title="Upload Photos" description="Start a new intake batch with loose photos or a zip import." meta={metricsReady ? `${systemStatus.catalog_total} items` : 'Catalog unavailable'} />
+          <QuickActionCard href="/listings/new" icon={PlusCircle} eyebrow="Listings" title="Create Listing" description="Open the listing workspace directly for a manual item or imported draft." meta={metricsReady ? `${draftCount} drafts` : 'Draft count unavailable'} />
+          <QuickActionCard href="/publishing" icon={RefreshCcw} eyebrow="Publishing" title="Publish Queue" description="Review approvals, queue health, and live marketplace rows." meta={metricsReady ? `${readyCount} ready` : 'Queue count unavailable'} />
+          <QuickActionCard href="/sales" icon={ShoppingCart} eyebrow="Revenue" title="Sales & Orders" description="Monitor detected sales and finish bookkeeping adjustments." meta={salesSummaryReady ? `${salesDashboard.summary.units} units` : 'Sales summary unavailable'} />
         </div>
       </CollapsiblePanel>
     </div>
@@ -996,7 +997,9 @@ export default function Dashboard() {
       {setupSummary ? <SetupChecklistPanel setupSummary={setupSummary} /> : null}
       <CollapsiblePanel title="Current blockers" description="Missing setup or workflow conditions that still prevent clean end-to-end operation." defaultOpen>
         <div className="space-y-3">
-          {blockers.length ? (
+          {!setupSummary ? (
+            <div className="rounded-[12px] border border-[#e5e7eb] bg-[#f8fafc] px-4 py-5 text-sm text-[#475467]">Setup status is not available right now. Retry from Guided Setup.</div>
+          ) : blockers.length ? (
             blockers.map((item) => (
               <div key={item} className="rounded-[12px] border border-[#fecdca] bg-[#fff6f3] px-4 py-3">
                 <p className="text-sm text-[#912018]">{item}</p>
@@ -1027,7 +1030,7 @@ export default function Dashboard() {
                   </span>
                   <p className="text-sm font-semibold text-[#101828]">{label}</p>
                 </div>
-                <StatusPill status={ok ? 'success' : 'warning'} label={ok ? 'Ready' : 'Missing'} />
+                <StatusPill status={setupSummary && typeof ok === 'boolean' ? (ok ? 'success' : 'warning') : 'default'} label={!setupSummary || typeof ok !== 'boolean' ? 'Not available' : ok ? 'Ready' : 'Missing'} />
               </div>
               <p className="mt-2 text-sm text-[#667085]">{note}</p>
             </div>
@@ -1035,8 +1038,8 @@ export default function Dashboard() {
         </div>
       </CollapsiblePanel>
       <div className="grid gap-3 xl:grid-cols-2">
-        <QuickActionCard href="/settings?tab=ebay" icon={Store} eyebrow="Integrations" title="Connect eBay" description="Finish OAuth setup or reconnect the current operator account." meta={setupSummary?.server_readiness?.ebay_oauth_configured ? 'Configured' : 'Needs setup'} />
-        <QuickActionCard href="/inventory" icon={Package} eyebrow="Inventory" title="View Inventory" description="Inspect intake, active items, sold units, and storage batches." meta={`${listings.length} tracked`} />
+        <QuickActionCard href="/settings?tab=ebay" icon={Store} eyebrow="Integrations" title="Connect eBay" description="Finish OAuth setup or reconnect the current operator account." meta={!setupSummary ? 'Status unavailable' : setupSummary.server_readiness?.ebay_oauth_configured ? 'Configured' : 'Needs setup'} />
+        <QuickActionCard href="/inventory" icon={Package} eyebrow="Inventory" title="View Inventory" description="Inspect intake, active items, sold units, and storage batches." meta={metricsReady ? `${systemStatus.catalog_total} tracked` : 'Catalog unavailable'} />
       </div>
     </div>
   );
@@ -1063,10 +1066,10 @@ export default function Dashboard() {
       contentWidth="default"
     >
       <PageHeader
-        eyebrow="Operations overview"
+        eyebrow="Workspace"
         breadcrumbs={[{ label: 'Workspace' }, { label: 'Dashboard', active: true }]}
-        title="Reseller command center"
-        description="One clean operator dashboard for intake, listing production, marketplace publishing, job flow, and account readiness."
+        title="Dashboard"
+        description="Your inventory, marketplace connections, and work at a glance."
         actions={
           <>
             {user?.can_access_vine_import ? (
@@ -1086,7 +1089,7 @@ export default function Dashboard() {
           </>
         }
       />
-      <ExtensionVersionStatus state={extensionState} compact />
+      <ExtensionVersionStatus state={extensionState} currentDeviceId={browserExtensionDeviceId} detected={browserExtensionDetected} detectedVersion={browserExtensionVersion} compact />
       {user?.can_access_vine_import ? (
         <input
           ref={vineFileInputRef}
@@ -1111,53 +1114,24 @@ export default function Dashboard() {
         />
       ) : null}
 
-      <div className="grid gap-5 sm:grid-cols-[300px_minmax(0,1fr)]">
-        <aside className="space-y-5 sm:sticky sm:top-[112px] sm:self-start">
-          <SectionPanel title="Workspace sections" description="Switch views without a second wall of full-width controls.">
-            <div className="space-y-2">
-              {dashboardSections.map((section) => {
-                const active = activeSection === section.key;
-                return (
-                  <button
-                    key={section.key}
-                    type="button"
-                    onClick={() => selectSection(section.key)}
-                    className={[
-                      'w-full rounded-[14px] border px-4 py-3 text-left transition',
-                      active
-                        ? 'border-[#bfd4ef] bg-[linear-gradient(135deg,#eef5ff_0%,#ffffff_100%)] text-[#173a63] shadow-[0_16px_32px_rgba(23,58,99,0.12)]'
-                        : 'border-[#d0d5dd] bg-white text-[#344054] hover:border-[#98a2b3] hover:bg-[#f9fafb]',
-                    ].join(' ')}
-                  >
-                    <span className="block text-sm font-semibold">{section.label}</span>
-                    <span className="mt-1 block text-xs leading-5 text-[#667085]">{section.description}</span>
-                  </button>
-                );
-              })}
-            </div>
-          </SectionPanel>
-
-          <div className="rounded-[18px] border border-[#e5e7eb] bg-white p-4 shadow-[0_16px_34px_rgba(15,23,42,0.06)]">
-            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#667085]">Current view</p>
-            <p className="mt-2 text-base font-semibold text-[#172033]">{activeSectionMeta.label}</p>
-            <p className="mt-1 text-sm leading-6 text-[#516079]">{activeSectionMeta.description}</p>
-            <div className="mt-4 flex flex-wrap gap-2">
-              <StatusPill status={autonomousConfig?.autonomous_mode ? 'success' : 'default'} label={autonomousConfig?.autonomous_mode ? 'Automation on' : 'Automation off'} />
-              <StatusPill status={blockers.length ? 'warning' : 'success'} label={blockers.length ? `${blockers.length} blockers` : 'Setup healthy'} />
-            </div>
-          </div>
-        </aside>
-
-        <div className="space-y-5">
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-            <MetricCard label="Ready to publish" value={readyCount} detail="Listings that can move straight into marketplace publishing." href="/listings?tab=ready" />
-            <MetricCard label="Pending review" value={reviewCount} detail="Drafts still waiting for operator approval." href="/listings?tab=review" />
-            <MetricCard label="Live listings" value={liveCount} detail="Listings already posted or actively synced." href="/listings?tab=published" />
-            <MetricCard label="Draft backlog" value={draftCount} detail="Items still moving through enrichment and manual edits." href="/listings?tab=drafts" />
-          </div>
-          {sectionContent[activeSection] || sectionContent.overview}
+      <nav aria-label="Dashboard sections" className="flex gap-2 overflow-x-auto rounded-2xl border border-[#e5e7eb] bg-white p-2 shadow-sm">
+        {dashboardSections.map((section) => <button key={section.key} type="button" aria-current={activeSection === section.key ? 'page' : undefined} onClick={() => selectSection(section.key)} className={`min-h-10 shrink-0 rounded-xl px-4 text-sm font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 ${activeSection === section.key ? 'bg-[#173a63] text-white shadow-sm' : 'text-[#344054] hover:bg-[#f2f4f7]'}`}>{section.label}</button>)}
+      </nav>
+      <section aria-label="Primary listing metrics" className="rounded-2xl border border-[#e5e7eb] bg-white p-3 sm:p-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><h2 className="text-base font-semibold text-[#101828]">Listing overview</h2><Button variant="outline" size="sm" onClick={() => setCustomizingMetrics((value) => !value)}>{customizingMetrics ? 'Done customizing' : 'Customize dashboard'}</Button></div>
+        {customizingMetrics ? <div className="mb-4 rounded-xl border border-[#d0d5dd] bg-[#f8fafc] p-4"><div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm font-semibold text-[#101828]">Choose and arrange your metric cards</p><Button size="sm" variant="outline" onClick={() => void saveDashboardMetricLayout(DEFAULT_DASHBOARD_METRIC_LAYOUT)}>Reset layout</Button></div><div className="mt-3 grid gap-2 sm:grid-cols-2">{dashboardMetricLayout.order.map((id, index) => { const item = topMetrics.find((metric) => metric.id === id); if (!item) return null; return <div key={id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#d0d5dd] bg-white p-3"><label className="flex min-h-10 cursor-pointer items-center gap-3 text-sm font-medium text-[#101828]"><input type="checkbox" className="h-5 w-5 accent-blue-700" checked={dashboardMetricLayout.visible[id] !== false} onChange={(event) => void saveDashboardMetricLayout({ ...dashboardMetricLayout, visible: { ...dashboardMetricLayout.visible, [id]: event.target.checked } })} /><span>{item.label}</span></label><div className="flex gap-1"><Button size="sm" variant="outline" disabled={index === 0} aria-label={`Move ${item.label} earlier`} onClick={() => reorderDashboardMetrics(id, dashboardMetricLayout.order[index - 1])}>Move up</Button><Button size="sm" variant="outline" disabled={index === dashboardMetricLayout.order.length - 1} aria-label={`Move ${item.label} later`} onClick={() => reorderDashboardMetrics(id, dashboardMetricLayout.order[index + 1])}>Move down</Button></div></div>; })}</div></div> : null}
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {orderedMetrics.map((card) => <div key={card.id} draggable={customizingMetrics} onDragStart={(event) => event.dataTransfer.setData('text/plain', card.id)} onDragOver={(event) => { if (customizingMetrics) event.preventDefault(); }} onDrop={(event) => { event.preventDefault(); reorderDashboardMetrics(event.dataTransfer.getData('text/plain'), card.id); }}><MetricCard label={card.label} value={card.value} detail={card.detail} href={card.href} /></div>)}
         </div>
-      </div>
+        {user?.is_admin ? <details className="mt-3 rounded-xl border border-[#e5e7eb] bg-[#f8fafc] p-3"><summary className="cursor-pointer text-sm font-semibold text-[#344054]">Metric diagnostics</summary><p className="mt-2 text-xs text-[#667085]">Source: GET /marketplace-jobs/overview → system_status · updated {metricsUpdatedAt ? formatTime(metricsUpdatedAt) : 'not yet verified'}</p><dl className="mt-3 grid gap-2 sm:grid-cols-2">{[
+          ['Ready to publish', readyCount, 'Tenant listings marked ready with operator approval, a passing stored target check, unsold, not archived, and without an active projection.'],
+          ['Pending review', reviewCount, 'Distinct tenant listings with a current needs-review flag and a passing stored review outcome, unsold, not archived, and not already live.'],
+          ['Live listings', liveCount, 'Distinct tenant listing IDs with PUBLISHED status, eBay POSTED status, or at least one PUBLISHED/UPDATED marketplace projection.'],
+          ['Draft backlog', draftCount, 'Tenant draft/ingested/processed listings that are not flagged for review, live, sold, or archived.'],
+        ].map(([name, value, definition]) => <div key={name} className="rounded-lg border border-[#e5e7eb] bg-white p-3"><dt className="text-sm font-semibold text-[#101828]">{name}: {metricsReady ? value : 'Not available'}</dt><dd className="mt-1 text-xs leading-5 text-[#667085]">{definition}</dd></div>)}</dl></details> : null}
+      </section>
+      <p className="-mt-2 text-xs text-[#667085]">Catalog totals updated {metricsUpdatedAt ? formatTime(metricsUpdatedAt) : 'when the summary loads'} · full catalog, not the current page.</p>
+      <div className="min-w-0">{sectionContent[activeSection] || sectionContent.overview}</div>
     </AppShell>
   );
 }

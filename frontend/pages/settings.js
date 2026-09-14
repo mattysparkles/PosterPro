@@ -121,6 +121,8 @@ export default function SettingsPage() {
   const [startingMarketplaceDiagnostic, setStartingMarketplaceDiagnostic] = useState(false);
   const [marketplaceExtensionPairingCode, setMarketplaceExtensionPairingCode] = useState(null);
   const [browserExtensionAvailable, setBrowserExtensionAvailable] = useState(false);
+  const [browserExtensionDeviceId, setBrowserExtensionDeviceId] = useState(null);
+  const [browserExtensionVersion, setBrowserExtensionVersion] = useState('');
   const [loadingExtensionPairing, setLoadingExtensionPairing] = useState(false);
   const [ebayAccountReadiness, setEbayAccountReadiness] = useState(null);
   const [bridgeAccountForm, setBridgeAccountForm] = useState({
@@ -495,11 +497,19 @@ export default function SettingsPage() {
       if (event.source !== window || event.origin !== window.location.origin) return;
       const message = event.data || {};
       if (message.source !== 'posterpro-extension') return;
-      if (message.type === 'PRESENCE') setBrowserExtensionAvailable(true);
+      if (message.type === 'PRESENCE') {
+        setBrowserExtensionAvailable(true);
+        setBrowserExtensionVersion(String(message.version || ''));
+        const deviceId = Number(message.device_id);
+        if (Number.isInteger(deviceId) && deviceId > 0) setBrowserExtensionDeviceId(deviceId);
+      }
       if (message.type === 'AUTHORIZED') {
         setBrowserExtensionAvailable(true);
+        setBrowserExtensionVersion(String(message.version || ''));
+        const deviceId = Number(message.device_id || message.device?.id);
+        if (Number.isInteger(deviceId) && deviceId > 0) setBrowserExtensionDeviceId(deviceId);
         setMarketplaceExtensionPairingCode(null);
-        toast.success('This browser is authorized. Marketplace jobs will run automatically.');
+        toast.success('This browser is connected. PosterPro will handle marketplace work automatically.');
         window.setTimeout(async () => {
           try {
             const result = await fetchMarketplaceExtensionDevices();
@@ -507,7 +517,7 @@ export default function SettingsPage() {
           } catch { /* the device agent will reconnect and retry automatically */ }
         }, 750);
       }
-      if (message.type === 'AUTHORIZATION_FAILED') toast.error(message.error || 'Browser authorization failed. Use the one-time code fallback.');
+      if (message.type === 'AUTHORIZATION_FAILED') toast.error(message.error || 'Browser connection failed. Try again or open Advanced details for recovery steps.');
     };
     window.addEventListener('message', receiveExtensionLink);
     window.postMessage({ source: 'posterpro-settings', type: 'CHECK_EXTENSION' }, window.location.origin);
@@ -564,8 +574,13 @@ export default function SettingsPage() {
   );
   const extensionDevices = marketplaceExtensionState.devices || [];
   const activeExtensionDevices = extensionDevices.filter((device) => !device.revoked);
-  const extensionOnline = activeExtensionDevices.some((device) => device.last_seen_at && Date.now() - new Date(device.last_seen_at).getTime() < 120000);
-  const extensionUpdateRequired = activeExtensionDevices.some((device) => device.update_required);
+  const recentExtensionDevices = activeExtensionDevices.filter((device) => device.last_seen_at && Date.now() - new Date(device.last_seen_at).getTime() < 120000).sort((a, b) => new Date(b.last_seen_at) - new Date(a.last_seen_at));
+  const currentExtensionDeviceId = recentExtensionDevices.some((device) => device.id === browserExtensionDeviceId) ? browserExtensionDeviceId : null;
+  const currentExtensionDevice = recentExtensionDevices.find((device) => device.id === currentExtensionDeviceId) || null;
+  const otherRecentExtensionDevices = recentExtensionDevices.filter((device) => device.id !== currentExtensionDeviceId);
+  const staleExtensionDevices = activeExtensionDevices.filter((device) => !recentExtensionDevices.some((recent) => recent.id === device.id));
+  const extensionOnline = Boolean(currentExtensionDevice);
+  const extensionUpdateRequired = Boolean(currentExtensionDevice?.update_required);
   const activeHostedTheme = useMemo(
     () => (settingsPanels?.hosted_pages?.themes || []).find((theme) => theme.id === hostedPagesForm.active_theme_id) || null,
     [hostedPagesForm.active_theme_id, settingsPanels?.hosted_pages?.themes],
@@ -2795,29 +2810,28 @@ export default function SettingsPage() {
                           <p className="mt-1 text-xs text-[#667085]">Tenant-scoped queue agent for assisted marketplace work.</p>
                         </div>
                         <StatusPill
-                          status={extensionUpdateRequired ? 'danger' : extensionOnline ? 'success' : 'warning'}
-                          label={extensionUpdateRequired ? 'Update required' : extensionOnline ? 'Online' : activeExtensionDevices.length ? 'Offline' : 'Never paired'}
+                          status={extensionUpdateRequired ? 'danger' : extensionOnline ? 'success' : browserExtensionAvailable ? 'info' : 'warning'}
+                          label={extensionUpdateRequired ? 'Update required' : extensionOnline ? 'Connected now' : browserExtensionAvailable ? 'Ready to connect this browser' : otherRecentExtensionDevices.length ? 'Connected on another browser' : activeExtensionDevices.length ? 'Stale connection' : 'Not connected'}
                         />
                       </div>
                       <div className="mt-3 flex flex-wrap gap-2">
-                        <a className="inline-flex items-center rounded-[10px] bg-[#2563eb] px-3 py-2 text-sm font-semibold text-white hover:bg-[#1d4ed8]" href="/api/browser-extension/download" download>Download Extension</a>
-                        {browserExtensionAvailable && <Button type="button" variant="outline" data-posterpro-extension-authorize="true" onClick={() => issueMarketplaceExtensionPairingCode(true)} disabled={loadingExtensionPairing}>Authorize this browser</Button>}
-                        <Button type="button" variant="outline" onClick={issueMarketplaceExtensionPairingCode} disabled={loadingExtensionPairing}>{loadingExtensionPairing ? 'Creating code…' : 'Pair / Reconnect'}</Button>
-                        <Button type="button" variant="outline" onClick={() => reload()}>Test / Refresh Connection</Button>
-                        <Button type="button" variant="outline" href="/jobs?tab=assisted">View Assisted Jobs</Button>
+                        {extensionUpdateRequired ? <a className="inline-flex min-h-11 items-center rounded-xl bg-amber-700 px-4 text-sm font-semibold text-white hover:bg-amber-800" href="/api/browser-extension/download" download>Update extension</a> : browserExtensionAvailable && !extensionOnline ? <Button type="button" data-posterpro-extension-authorize="true" onClick={() => issueMarketplaceExtensionPairingCode(true)} disabled={loadingExtensionPairing}>Connect this browser</Button> : !extensionOnline ? <Button type="button" href="/onboarding">Install &amp; connect extension</Button> : null}
+                        <Button type="button" variant="outline" href="/onboarding">Guided setup</Button>
+                        <Button type="button" variant="outline" onClick={() => reload()}>Refresh status</Button>
+                        <Button type="button" variant="outline" href="/jobs?tab=assisted">View assisted jobs</Button>
                       </div>
-                      <div className="mt-3"><ExtensionVersionStatus state={marketplaceExtensionState} compact /></div>
-                        <p className="mt-2 text-xs text-[#667085]">Install once: download the ZIP, unpack it, and load it from your browser’s extension manager. After signing into PosterPro, {browserExtensionAvailable ? 'this browser is detected; authorize it once below.' : 'the extension will be detected here when this page is reopened.'} Pairing stays scoped to this account; marketplace login stays in this browser.</p>
-                      {marketplaceExtensionPairingCode?.pairing_code ? <div className="mt-3 rounded-lg bg-[#f2f4f7] p-3" role="status">
-                        <p className="text-xs font-semibold text-[#344054]">One-time pairing code · expires {formatDateTimeValue(marketplaceExtensionPairingCode.expires_at)}</p>
-                        <p className="mt-1 select-all font-mono text-lg tracking-widest text-[#101828]">{marketplaceExtensionPairingCode.pairing_code}</p>
-                        <p className="mt-1 text-xs text-[#667085]">Enter this code in the extension popup. It binds the device to your signed-in PosterPro account.</p>
-                      </div> : null}
+                      <div className="mt-3"><ExtensionVersionStatus state={marketplaceExtensionState} currentDeviceId={currentExtensionDeviceId} detected={browserExtensionAvailable} detectedVersion={browserExtensionVersion} showAction={false} compact /></div>
+                        <p className="mt-2 text-sm text-[#475467]">PosterPro works with marketplace accounts already signed in to this browser. Your passwords stay in your browser.</p>
+                      <details className="mt-3 rounded-lg border border-[#d0d5dd] bg-white p-3">
+                        <summary className="cursor-pointer text-sm font-semibold text-[#344054]">Advanced details and recovery pairing</summary>
+                        <p className="mt-2 text-sm text-[#475467]">Use a one-time recovery code only if Connect this browser is unavailable.</p>
+                        <Button className="mt-2" type="button" variant="outline" onClick={issueMarketplaceExtensionPairingCode} disabled={loadingExtensionPairing}>{loadingExtensionPairing ? 'Preparing recovery code…' : 'Create recovery code'}</Button>
+                        {marketplaceExtensionPairingCode?.pairing_code ? <div className="mt-3 rounded-lg bg-[#f2f4f7] p-3" role="status"><p className="text-sm font-semibold text-[#344054]">Recovery code · expires {formatDateTimeValue(marketplaceExtensionPairingCode.expires_at)}</p><p className="mt-1 select-all font-mono text-lg tracking-widest text-[#101828]">{marketplaceExtensionPairingCode.pairing_code}</p><p className="mt-1 text-sm text-[#475467]">Enter this temporary code in the extension only when automatic connection is unavailable.</p></div> : null}
+                      </details>
                       <div className="mt-3 space-y-2">
-                        {activeExtensionDevices.map((device) => <div key={device.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#eaecf0] px-3 py-2 text-xs">
-                          <span className="text-[#344054]">{device.name} · device #{device.id} · {device.browser || 'browser unknown'} · v{device.extension_version || 'unknown'}{device.update_required ? ' · UPDATE REQUIRED' : ''} · account #{device.user_id} · heartbeat {formatDateTimeValue(device.last_seen_at)} · last claim {formatDateTimeValue(device.last_claim_at)}</span>
-                          <Button type="button" size="sm" variant="ghost" onClick={() => unpairMarketplaceExtension(device.id)}>Unpair</Button>
-                        </div>)}
+                        {currentExtensionDevice ? <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-green-200 bg-green-50 px-3 py-3 text-sm"><span className="text-[#344054]">Current browser · {currentExtensionDevice.browser || 'browser'} · v{currentExtensionDevice.extension_version || 'unknown'} · last seen {formatDateTimeValue(currentExtensionDevice.last_seen_at)}</span></div> : null}
+                        {otherRecentExtensionDevices.map((device) => <div key={device.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#eaecf0] px-3 py-3 text-sm"><span className="text-[#344054]">Other connected browser · {device.browser || 'browser'} · v{device.extension_version || 'unknown'}{device.update_required ? ' · UPDATE REQUIRED' : ''} · last seen {formatDateTimeValue(device.last_seen_at)}</span><Button type="button" size="sm" variant="ghost" onClick={() => unpairMarketplaceExtension(device.id)}>Remove browser</Button></div>)}
+                        {staleExtensionDevices.map((device) => <div key={device.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#d0d5dd] bg-[#f2f4f7] px-3 py-3 text-sm"><span className="text-[#475467]">Stale connection · {device.browser || 'browser'} · v{device.extension_version || 'unknown'}{device.update_required ? ' · older version' : ''} · last seen {formatDateTimeValue(device.last_seen_at)}</span><Button type="button" size="sm" variant="outline" onClick={() => unpairMarketplaceExtension(device.id)}>Remove stale connection</Button></div>)}
                         <p className="text-xs text-[#667085]">{marketplaceExtensionState.pending_jobs || 0} pending · {(marketplaceExtensionState.active_jobs || []).length} active/review · {(marketplaceExtensionState.recent_failures || []).length} recent failures</p>
                         {(marketplaceExtensionState.active_jobs || []).slice(0, 2).map((job) => <p key={job.id} className="text-xs text-[#475467]">Job #{job.id} · {job.marketplace} · {job.action} · {job.status}</p>)}
                         {(marketplaceExtensionState.recent_failures || []).slice(0, 2).map((job) => <p key={job.id} className="text-xs text-[#b42318]">Job #{job.id} · {job.marketplace}: {job.error_detail || job.error_code || 'failed'}</p>)}

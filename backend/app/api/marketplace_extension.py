@@ -29,7 +29,7 @@ from app.services.marketplace_extension_jobs import MarketplaceExtensionJobError
 from app.services.process_notifications import create_process_notification
 
 router = APIRouter()
-CURRENT_EXTENSION_VERSION = "0.3.1"
+CURRENT_EXTENSION_VERSION = "0.3.2"
 MINIMUM_EXTENSION_VERSION = "0.3.1"
 
 ASSISTED_MARKETPLACES = {"facebook", "mercari", "poshmark", "vinted", "etsy", "offerup", "depop", "whatnot"}
