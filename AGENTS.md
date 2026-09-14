@@ -45,6 +45,12 @@
 - Production finalization/preflight returned zero hard blockers for all ten;
   valid local images: 11–12 per listing. No migration or frontend build was
   required. No live marketplace publication was invoked.
+- Deployed commit `9644379` by restarting only `posterpro-backend.service` and
+  `posterpro-worker.service`; backend, worker, beat, and frontend are active.
+  `/health` returned `ok=true`, `database_ready=true`. A post-restart read-only
+  fresh preflight reconfirmed all ten as blocker-free `needs_review` in the
+  review queue; the ten stale cohort jobs are canceled and publish attempts
+  remain zero.
 
 ## 2026-09-12 - Tenant routing rules foundation
 
