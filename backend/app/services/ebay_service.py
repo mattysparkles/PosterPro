@@ -2792,6 +2792,71 @@ def _resolve_existing_ebay_offer_id(listing: Listing) -> str | None:
     return None
 
 
+async def end_ebay_listing(
+    listing: Listing,
+    db: Session,
+    *,
+    expected_external_listing_id: str,
+) -> dict[str, Any]:
+    """Withdraw an exact known Inventory API offer without deleting its history.
+
+    We require the caller's external listing ID to match the canonical eBay
+    identity before making a remote request. An offer is then fetched and its
+    current listing ID is checked again before withdrawal. This makes a stale
+    or mismatched job fail closed rather than ending a different listing.
+    """
+    expected = str(expected_external_listing_id or "").strip()
+    canonical_id = str(listing.ebay_listing_id or "").strip()
+    if not expected or not canonical_id or expected != canonical_id:
+        raise EbayIntegrationError("Exact eBay listing identity is missing or no longer matches; no remote action was taken.")
+
+    offer_id = _resolve_existing_ebay_offer_id(listing)
+    if not offer_id:
+        raise EbayIntegrationError("The exact eBay offer ID is not stored; no remote action was taken.")
+
+    account = await get_or_refresh_account(listing.user_id, db)
+    client = EbayAPIClient(account.access_token)
+    offer = await client.request("GET", f"/sell/inventory/v1/offer/{offer_id}")
+    remote_listing = offer.get("listing") if isinstance(offer.get("listing"), dict) else {}
+    remote_listing_id = str(remote_listing.get("listingId") or offer.get("listingId") or "").strip()
+    if remote_listing_id and remote_listing_id != expected:
+        raise EbayIntegrationError("The stored eBay offer points to a different listing; no remote action was taken.")
+
+    offer_status = str(offer.get("status") or offer.get("offerStatus") or "").strip().upper()
+    if offer_status in {"UNPUBLISHED", "WITHDRAWN", "ENDED", "DELETED"}:
+        status = "ALREADY_ENDED"
+        response: dict[str, Any] = {"offerId": offer_id, "listingId": expected, "previous_status": offer_status}
+    else:
+        if not remote_listing_id:
+            raise EbayIntegrationError("eBay did not confirm which external listing belongs to this offer; no remote action was taken.")
+        response = await client.request("POST", f"/sell/inventory/v1/offer/{offer_id}/withdraw")
+        status = "ENDED"
+        response = {"offerId": offer_id, "listingId": expected, "withdrawal": response}
+
+    now = datetime.now(UTC).replace(tzinfo=None).isoformat()
+    previous_data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}
+    listing.marketplace_data = {
+        **previous_data,
+        "ebay_end": {
+            "status": status,
+            "offer_id": offer_id,
+            "listing_id": expected,
+            "completed_at": now,
+            "response": response,
+        },
+        "ebay_status": "ENDED",
+    }
+    _sync_ebay_marketplace_listing(
+        db,
+        listing_id=listing.id,
+        status=MarketplaceListingStatus.CLOSED,
+        response={"status": status, "listing_id": expected, "offer_id": offer_id, "response": response},
+    )
+    db.add(listing)
+    db.commit()
+    return {"status": status, "listing_id": expected, "offer_id": offer_id, "response": response}
+
+
 def _ebay_listing_revision_changes(local: Listing, remote: dict[str, Any]) -> list[str]:
     changed: list[str] = []
     remote_title = str(remote.get("title") or "").strip()
@@ -3111,13 +3176,30 @@ async def sync_ebay_fulfillment_history(
     }
 
 
-async def revise_ebay_listing(listing: Listing, db: Session) -> dict[str, Any]:
+async def revise_ebay_listing(
+    listing: Listing,
+    db: Session,
+    *,
+    expected_external_listing_id: str | None = None,
+) -> dict[str, Any]:
+    expected_id = str(expected_external_listing_id or listing.ebay_listing_id or "").strip()
+    canonical_id = str(listing.ebay_listing_id or "").strip()
+    if not expected_id or expected_id != canonical_id:
+        raise EbayIntegrationError("Exact eBay listing identity is missing or no longer matches; update was not attempted.")
     account = await get_or_refresh_account(listing.user_id, db)
     plan = await build_ebay_publish_plan(listing, db, allow_create_policies=False)
-    sku = _build_ebay_sku(listing.user_id, listing.id)
     offer_id = _resolve_existing_ebay_offer_id(listing)
     if not offer_id and listing.ebay_listing_id:
         offer_id = str((listing.marketplace_data or {}).get("offer", {}).get("offerId") or "").strip() or None
+    if not offer_id:
+        raise EbayIntegrationError("The exact eBay offer ID is not stored; update was not attempted and no replacement offer was created.")
+
+    client = EbayAPIClient(account.access_token)
+    current_offer = await client.request("GET", f"/sell/inventory/v1/offer/{offer_id}")
+    current_listing = current_offer.get("listing") if isinstance(current_offer.get("listing"), dict) else {}
+    remote_listing_id = str(current_listing.get("listingId") or current_offer.get("listingId") or "").strip()
+    if remote_listing_id != expected_id:
+        raise EbayIntegrationError("The stored eBay offer does not confirm the exact external listing identity; update was not attempted.")
 
     item_data = await create_or_replace_item(
         listing,
@@ -3126,21 +3208,10 @@ async def revise_ebay_listing(listing: Listing, db: Session) -> dict[str, Any]:
         inventory_payload=plan["inventory_item_payload"],
     )
 
-    client = EbayAPIClient(account.access_token)
-    if offer_id:
-        offer_payload = dict(plan["offer_payload"])
-        offer_payload["offerId"] = offer_id
-        response = await client.request("PUT", f"/sell/inventory/v1/offer/{offer_id}", payload=offer_payload)
-        publish_data = {"offerId": offer_id, "response": response, "status": "UPDATED"}
-    else:
-        offer_data = await create_offer_for_item(
-            listing,
-            account,
-            item_data["sku"],
-            category_id=plan["category"]["category_id"],
-            offer_payload=plan["offer_payload"],
-        )
-        publish_data = {"offerId": offer_data.get("offerId"), "response": offer_data.get("response"), "status": "CREATED"}
+    offer_payload = dict(plan["offer_payload"])
+    offer_payload["offerId"] = offer_id
+    response = await client.request("PUT", f"/sell/inventory/v1/offer/{offer_id}", payload=offer_payload)
+    publish_data = {"offerId": offer_id, "response": response, "status": "UPDATED"}
 
     previous_data = listing.marketplace_data or {}
     ebay_url = str(previous_data.get("ebay_url") or "").strip() or f"https://www.ebay.com/itm/{listing.ebay_listing_id or item_data['sku']}"

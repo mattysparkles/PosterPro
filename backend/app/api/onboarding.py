@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import re
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -13,10 +14,11 @@ from app.core.database import get_db
 from app.core.secrets import decrypt_secret_if_needed, encrypt_secret
 from app.models.enums import MarketplaceName
 from app.models.models import MarketplaceAccount, User
-from app.services.ai_entitlements import ai_provider_config, public_ai_setup_state, sponsored_ai_entitlement
+from app.services.ai_entitlements import ai_provider_config, public_ai_setup_state, resolve_openai_key, sponsored_ai_entitlement
 from app.services.ebay_service import EbayIntegrationError, _list_business_policies_for_account, get_or_refresh_account
 from app.services.onboarding_service import (
     ALLOWED_DESTINATIONS,
+    _destination_status,
     _root,
     _state,
     onboarding_snapshot,
@@ -47,6 +49,11 @@ class AIModeRequest(BaseModel):
 class OnboardingEventRequest(BaseModel):
     event: str = Field(min_length=1, max_length=64)
     task_id: str | None = Field(default=None, max_length=64)
+
+
+class OnboardingHelpRequest(BaseModel):
+    task_id: str = Field(min_length=1, max_length=64)
+    question: str = Field(min_length=1, max_length=1000)
 
 
 def _save_user(db: Session, user: User) -> None:
@@ -298,7 +305,12 @@ async def verify_setup_task(task_id: str, db: Session = Depends(get_db), current
         extension_online = task.get("status") == "ONLINE"
         verification = {"level": "LIVE_EXTENSION_HEARTBEAT" if extension_online else "NOT_ONLINE", "message": "PosterPro received a recent heartbeat from this browser. Marketplace login and form-fill are not verified by a heartbeat." if extension_online else "The browser extension is not online yet. Open PosterPro in the browser where it is installed, then refresh status."}
     elif task_id == "google_photos":
-        verification = {"level": "SAVED_OAUTH_ONLY", "message": "Google authorization was found, but this deployment does not yet run a harmless upload test. Photo upload is not marked ready."}
+        google_state = _destination_status("google_photos", current_user, db)
+        google_level = str(google_state.get("status") or "").upper()
+        if google_level in {"EXPIRED", "AUTH_REQUIRED", "NOT_CONFIGURED"}:
+            verification = {"level": google_level, "message": google_state.get("message") or "Reconnect Google Photos, then return and try again."}
+        else:
+            verification = {"level": "SAVED_OAUTH_ONLY", "message": "Google authorization is saved, but PosterPro has not performed a harmless Google Photos capability test. Photo upload is not marked ready."}
     elif task_id.startswith("marketplace:") and task_id != "marketplace:ebay":
         verification = {"level": "OPERATOR_TEST_REQUIRED", "message": "This deployment has no safe, non-submitting form-fill check for this marketplace yet. Saved settings are not treated as working automation."}
 
@@ -314,6 +326,75 @@ async def verify_setup_task(task_id: str, db: Session = Depends(get_db), current
     refreshed_state = onboarding_snapshot(current_user, db)
     refreshed_task = next((row for row in refreshed_state["tasks"] if row.get("id") == task_id), task)
     return {"task": refreshed_task, "verification": verification, "state": refreshed_state}
+
+
+@router.post("/help")
+async def onboarding_help(payload: OnboardingHelpRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Answer setup questions using only current step context; never persist chat or credentials."""
+    snapshot = onboarding_snapshot(current_user, db)
+    task = next((row for row in snapshot.get("tasks", []) if row.get("id") == payload.task_id), None)
+    if not task:
+        raise HTTPException(status_code=404, detail="Setup step not found")
+
+    question = payload.question.strip()
+    # Do not forward credential-shaped text to the AI provider.
+    safe_question = re.sub(r"(?i)\b(?:sk-[a-z0-9_-]{12,}|ya29\.[a-z0-9._-]{12,}|bearer\s+[a-z0-9._-]{16,})\b", "[credential removed]", question)
+    guidance = task.get("guidance") if isinstance(task.get("guidance"), dict) else {}
+    key, provider = resolve_openai_key(db, current_user.id)
+    if not key:
+        return {
+            "answer": str(guidance.get("troubleshooting") or task.get("message") or "Follow the instructions shown for this step, then choose Check this step again. If it still does not work, contact PosterPro support and share the error code—not any password, API key, cookie, or token."),
+            "mode": "DETERMINISTIC_HELP",
+            "ai_assisted": False,
+            "secrets_sent": False,
+        }
+
+    context = {
+        "task": task.get("title"),
+        "purpose": task.get("purpose"),
+        "status": task.get("status"),
+        "safe_error": task.get("last_error_code") or task.get("error_code"),
+        "message": task.get("message"),
+        "steps": guidance.get("steps") or [],
+        "expected": guidance.get("expect"),
+        "troubleshooting": guidance.get("troubleshooting"),
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.post(
+                "https://api.openai.com/v1/responses",
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json={
+                    "model": "gpt-4o-mini",
+                    "instructions": "You are PosterPro setup help. Explain one concrete next step in plain English. Use only the supplied step context. Never ask for or repeat passwords, API keys, OAuth secrets, cookies, or tokens. Do not claim a connection is verified unless the supplied status says so. If the user asks about a different task, direct them back to the matching setup step.",
+                    "input": f"SAFE SETUP CONTEXT: {context}\nUSER QUESTION: {safe_question}",
+                    "max_output_tokens": 280,
+                },
+            )
+        if response.is_error:
+            return {
+                "answer": str(guidance.get("troubleshooting") or "PosterPro could not reach your AI provider just now. Follow the instructions on this screen and try again, or contact support without sharing secrets."),
+                "mode": "DETERMINISTIC_HELP",
+                "ai_assisted": False,
+                "secrets_sent": False,
+            }
+        body = response.json()
+        answer = ""
+        for output in body.get("output", []) if isinstance(body, dict) else []:
+            for part in output.get("content", []) if isinstance(output, dict) else []:
+                if isinstance(part, dict) and part.get("type") in {"output_text", "text"}:
+                    answer += str(part.get("text") or "")
+        answer = answer.strip()
+        if not answer:
+            raise ValueError("AI help returned an empty answer")
+        return {"answer": answer[:3000], "mode": provider.upper(), "ai_assisted": True, "secrets_sent": False}
+    except (httpx.HTTPError, ValueError):
+        return {
+            "answer": str(guidance.get("troubleshooting") or "PosterPro could not get an AI answer right now. Follow the steps on this screen and choose Check this step again."),
+            "mode": "DETERMINISTIC_HELP",
+            "ai_assisted": False,
+            "secrets_sent": False,
+        }
 
 
 @router.post("/event")

@@ -866,3 +866,50 @@ requirements above. Credentials were not rotated or printed.
   and public `/onboarding`, plus local Listings and Settings routes, returned
   `200`. Backend, worker, beat, and frontend are active. No listing was
   published. No non-PosterPro project or shared host resource was modified.
+
+## 2026-09-14 - Exact-identity eBay end and guided connection instructions
+
+- Pushed the existing `fefb42f` checkpoint normally before starting this work;
+  the only untracked paths were `debug_fb_publish.db`, `ops/snapshots/`, and
+  `tmp/`, and all three were preserved.
+- Added exact-identity eBay Inventory API offer withdrawal using the retained
+  offer ID. The service confirms the local eBay listing identity, fetches the
+  remote offer, verifies the remote item ID, and only then withdraws it. It
+  preserves the offer object; an already-unpublished offer is treated
+  idempotently. Missing/mismatched identity fails closed.
+- eBay now declares direct END capability. Durable crosspost jobs execute
+  `operation=end`; price-protection pause and confirmed cross-market sale
+  reconciliation can queue exact-identity eBay END jobs. Assisted END failures
+  generate an urgent in-app notification. UPDATE now also confirms the offer's
+  exact external listing ID and never creates a replacement offer when the
+  stored identity is missing or mismatched.
+- Expanded guided setup task data with provider-specific steps, expected result,
+  and recovery instructions. Google Photos onboarding now identifies an
+  expired saved access token without silently refreshing or changing it; the
+  page offers the Google authorization flow and clearly states the upload test
+  is not yet performed. Assisted marketplace guidance clearly distinguishes
+  browser login from the still-missing safe form-fill test.
+- Focused backend validation: `54 passed` plus marketplace job summary
+  execution tests `7 passed`; the eBay/pause/preflight/API group previously
+  passed `90 passed`. Frontend production build passed with existing warnings.
+  eBay docs confirm `POST /sell/inventory/v1/offer/{offerId}/withdraw` ends the
+  active listing while retaining the offer configuration.
+- No migration was required. No live eBay or marketplace operation was run.
+  The eBay end path is mocked in tests and still needs operator-authorized
+  production verification against a confirmed listing. Facebook/Mercari/etc.
+  real browser form acceptance remains an external/operator test requirement.
+- Follow-up completion: onboarding now renders provider-specific steps,
+  expected results, recovery text, and direct connection/open-site actions.
+  Google has an explicit reconnect button. The onboarding page has an
+  accessible spotlight tour for its native setup controls (this is not yet a
+  whole-application tour), and a contextual Ask PosterPro panel. Help uses the
+  tenant's configured AI provider when available, removes credential-shaped
+  strings from the question, does not persist chat, and falls back to saved
+  task-specific guidance. Added coverage for the help path and secret redaction.
+- Final validation after those changes: Python compile passed; the focused
+  onboarding/auth/Google/pricing/preflight/marketplace/eBay/extension suite
+  passed `124 tests`; Next production build passed with existing lint and
+  noVNC warnings. No migration was required. No live browser or marketplace
+  submission was performed; actual Facebook/Mercari/etc. form capability and
+  Google Photos data access still require safe operator verification. The
+  repository pricing research limitation above remains unchanged.

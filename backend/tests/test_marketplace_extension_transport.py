@@ -455,6 +455,8 @@ def test_sold_cross_market_listing_queues_operator_end_without_false_deleted_sta
         quantity=1,
         image_urls=["https://media.example.test/item.jpg"],
         category_suggestion="Home",
+        ebay_listing_id="E-456",
+        marketplace_data={"offer": {"offerId": "offer-456"}},
     )
     db_session.add(listing)
     db_session.flush()
@@ -466,6 +468,13 @@ def test_sold_cross_market_listing_queues_operator_end_without_false_deleted_sta
         raw_response={"external_url": "https://www.mercari.com/us/item/m123/"},
     )
     db_session.add(remote)
+    ebay_remote = MarketplaceListing(
+        listing_id=listing.id,
+        marketplace=MarketplaceName.ebay,
+        marketplace_listing_id="E-456",
+        status=MarketplaceListingStatus.PUBLISHED,
+    )
+    db_session.add(ebay_remote)
     db_session.commit()
 
     result = asyncio.run(
@@ -473,7 +482,7 @@ def test_sold_cross_market_listing_queues_operator_end_without_false_deleted_sta
             db_session,
             listing,
             owner,
-            sold_platform="ebay",
+            sold_platform="facebook",
             quantity_sold=1,
             dry_run=False,
         )
@@ -486,6 +495,10 @@ def test_sold_cross_market_listing_queues_operator_end_without_false_deleted_sta
     assert remote.status == MarketplaceListingStatus.PUBLISHED
     assert result["mercari"]["response"]["extension_job_id"] == child.id
     assert result["mercari"]["response"]["status"] == "QUEUED_FOR_OPERATOR_REVIEW"
+    ebay_end = db_session.query(MarketplaceCrosspostJob).filter_by(listing_id=listing.id, requested_mode="sale_reconciliation_end").one()
+    assert ebay_end.execution_plan["operation"] == "end"
+    assert ebay_end.execution_plan["external_listing_id"] == "E-456"
+    assert result["ebay"]["response"]["status"] == "QUEUED_DIRECT_END"
 
 
 def test_standard_publish_worker_queues_browser_assist_in_durable_transport(monkeypatch):

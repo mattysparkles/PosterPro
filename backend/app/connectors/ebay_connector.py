@@ -6,7 +6,7 @@ from app.connectors.base import BaseMarketplaceConnector
 from app.connectors.capabilities import DIRECT_EBAY
 from app.core.config import settings
 from app.models.models import Listing
-from app.services.ebay_service import authenticate_user_ebay, get_fulfillment_orders, get_or_refresh_account, publish_listing_to_ebay
+from app.services.ebay_service import authenticate_user_ebay, end_ebay_listing, get_fulfillment_orders, get_or_refresh_account, publish_listing_to_ebay
 
 
 class EbayConnector(BaseMarketplaceConnector):
@@ -33,7 +33,15 @@ class EbayConnector(BaseMarketplaceConnector):
         return {"status": "not_implemented", "listing_id": listing.id}
 
     async def delete(self, listing: Listing) -> dict:
-        return {"status": "not_implemented", "listing_id": listing.id}
+        from app.core.database import SessionLocal
+
+        with SessionLocal() as db:
+            fresh = db.get(Listing, listing.id)
+            return await end_ebay_listing(
+                fresh,
+                db,
+                expected_external_listing_id=str(listing.ebay_listing_id or ""),
+            )
 
     async def fetch_status(self, listing: Listing) -> dict:
         return {"status": (listing.marketplace_data or {}).get("ebay_status") or listing.ebay_publish_status}

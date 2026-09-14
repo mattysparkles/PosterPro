@@ -25,6 +25,7 @@ from app.models.models import (
     User,
 )
 from app.services.marketplace_extension_jobs import MarketplaceExtensionJobError, queue_extension_marketplace_action
+from app.services.process_notifications import create_process_notification
 
 router = APIRouter()
 CURRENT_EXTENSION_VERSION = "0.2.2"
@@ -610,6 +611,17 @@ def update_extension_job_state(
                 parent.status = "awaiting_operator_review" if "AWAITING_OPERATOR_REVIEW" in statuses else "running"
             elif "FAILED" in statuses:
                 parent.status = "failed"
+                if job.action == "END":
+                    listing = db.get(Listing, parent.listing_id)
+                    create_process_notification(
+                        db,
+                        user_id=parent.user_id,
+                        title="URGENT: SOLD ITEM MAY STILL BE LISTED",
+                        message=f"PosterPro could not finish removing the {job.marketplace} copy of {(listing.title if listing else 'this item')}. Open the marketplace listing and retry or confirm removal.",
+                        notification_type="marketplace_delist_failed",
+                        href=f"/listings/{parent.listing_id}",
+                        metadata_json={"listing_id": parent.listing_id, "marketplace": job.marketplace, "job_id": parent.id, "extension_job_id": job.id, "external_listing_id": job.external_listing_id, "error_code": job.error_code},
+                    )
             elif children and statuses.issubset({"COMPLETED", "CANCELLED"}):
                 parent.status = "completed"
             parent.result_summary = {

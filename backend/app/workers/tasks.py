@@ -52,10 +52,11 @@ from app.services.pricing_service import PricingService
 from app.services.multi_platform_publisher import get_enabled_platforms, multi_platform_publisher, upsert_marketplace_listing
 from app.services.offer_service import OfferService
 from app.services.sale_detection_service import SaleDetectionService
+from app.services.process_notifications import create_process_notification
 from app.services.intake_slate import IntakeSlateService
 from app.services.ai_guard import release_waiting_for_reset, recover_stale_reservations
 from app.services.vine_import_service import VineImportService, VINE_IMAGE_BACKFILL_CUTOFF
-from app.services.ebay_service import EbayIntegrationError, get_active_ebay_listings, sync_ebay_active_listings, revise_ebay_listing
+from app.services.ebay_service import EbayIntegrationError, end_ebay_listing, get_active_ebay_listings, sync_ebay_active_listings, revise_ebay_listing
 from app.services.ebay_service import search_ebay_categories, get_or_refresh_account, build_ebay_item_specifics, get_required_item_specifics, verify_ebay_category
 from app.workers.celery_app import celery_app
 from app.services.clustering import cluster_embeddings
@@ -1181,9 +1182,40 @@ def process_marketplace_crosspost_job_task(self, job_id: int) -> dict:
             if _crosspost_job_canceled(db, job_id):
                 return {"job_id": job_id, "status": "canceled", "results": results}
             operation = str((job.execution_plan or {}).get("operation") or "create").lower()
+            if operation == "end" and str(market).lower() == MarketplaceName.ebay.value:
+                expected_identity = str((job.execution_plan or {}).get("external_listing_id") or "").strip()
+                try:
+                    ended = asyncio.run(end_ebay_listing(
+                        listing,
+                        db,
+                        expected_external_listing_id=expected_identity,
+                    ))
+                    results.append({"marketplace": market, "execution_mode": "direct_api", "operation": "END", "status": ended["status"], "external_listing_id": expected_identity, "response": ended})
+                except Exception as exc:
+                    failed_markets.append(market)
+                    results.append({"marketplace": market, "execution_mode": "direct_api", "operation": "END", "status": "failed", "external_listing_id": expected_identity or None, "error": str(exc)})
+                continue
+            if operation == "end":
+                try:
+                    extension_job, created = queue_extension_marketplace_action(
+                        db,
+                        user_id=job.user_id,
+                        listing=listing,
+                        marketplace=market,
+                        action="END",
+                        priority=int(job.priority or 1),
+                        crosspost_job=job,
+                    )
+                    assisted_jobs_pending = assisted_jobs_pending or extension_job.status not in {"COMPLETED", "FAILED", "CANCELLED"}
+                    results.append({"marketplace": market, "execution_mode": "browser_extension", "operation": "END", "status": str(extension_job.status).lower(), "extension_job_id": extension_job.id, "external_listing_id": extension_job.external_listing_id, "deduplicated": not created})
+                except MarketplaceExtensionJobError as exc:
+                    failed_markets.append(market)
+                    results.append({"marketplace": market, "execution_mode": "browser_extension", "operation": "END", "status": "failed", "error_code": exc.code, "error": str(exc)})
+                continue
             if operation == "update" and str(market).lower() == "ebay":
                 try:
-                    revised = asyncio.run(revise_ebay_listing(listing, db))
+                    expected_identity = str((job.execution_plan or {}).get("external_listing_id") or "").strip()
+                    revised = asyncio.run(revise_ebay_listing(listing, db, expected_external_listing_id=expected_identity))
                     results.append({"marketplace": market, "execution_mode": "direct_api", "operation": "UPDATE", "status": "UPDATED", "response": revised})
                 except Exception as exc:
                     failed_markets.append(market)
@@ -1449,6 +1481,17 @@ def process_marketplace_crosspost_job_task(self, job_id: int) -> dict:
             job.priority = min(10, int(job.priority or 1) + 1)
             job.next_attempt_at = datetime.now(UTC) + timedelta(minutes=min(120, 2 ** min(job.attempt_count, 6)))
         job.result_summary = {"results": results}
+        operation = str((job.execution_plan or {}).get("operation") or "create").lower()
+        if failed_markets and operation == "end":
+            create_process_notification(
+                db,
+                user_id=job.user_id,
+                title="URGENT: SOLD ITEM MAY STILL BE LISTED",
+                message=f"PosterPro could not confirm the {', '.join(failed_markets)} removal for {listing.title or 'this item'}. Open the exact marketplace listing and retry or confirm removal.",
+                notification_type="marketplace_delist_failed",
+                href=f"/listings/{listing.id}",
+                metadata_json={"listing_id": listing.id, "marketplaces": failed_markets, "job_id": job.id, "external_listing_ids": {str(result.get("marketplace")): (job.execution_plan or {}).get("external_listing_id") for result in results if result.get("marketplace") in failed_markets}},
+            )
         revision_id = (job.execution_plan or {}).get("revision_id")
         if revision_id:
             revision_row = db.get(ListingRevision, int(revision_id))

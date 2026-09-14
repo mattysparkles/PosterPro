@@ -389,3 +389,140 @@ def test_read_only_ebay_sync_creates_idempotent_local_history_for_unmatched_remo
     assert second["created"] == 0
     assert listing.source_type == "ebay_history_reconciliation"
     assert listing.ebay_publish_status == EbayPublishStatus.POSTED
+
+
+def test_end_ebay_listing_withdraws_only_the_confirmed_external_identity(monkeypatch):
+    listing = DummyListing()
+    listing.ebay_listing_id = "123456789012"
+    listing.marketplace_data = {"offer": {"offerId": "offer-abc"}}
+    calls = []
+
+    class FakeClient:
+        def __init__(self, _token):
+            pass
+
+        async def request(self, method, path, **_kwargs):
+            calls.append((method, path))
+            if method == "GET":
+                return {"status": "PUBLISHED", "listing": {"listingId": "123456789012"}}
+            return {}
+
+    async def fake_account(_user_id, _db):
+        return DummyAccount()
+
+    monkeypatch.setattr(ebay_service, "get_or_refresh_account", fake_account)
+    monkeypatch.setattr(ebay_service, "EbayAPIClient", FakeClient)
+    monkeypatch.setattr(ebay_service, "_sync_ebay_marketplace_listing", lambda *_args, **_kwargs: None)
+    result = asyncio.run(ebay_service.end_ebay_listing(
+        listing,
+        DummyDB(),
+        expected_external_listing_id="123456789012",
+    ))
+
+    assert result["status"] == "ENDED"
+    assert calls == [
+        ("GET", "/sell/inventory/v1/offer/offer-abc"),
+        ("POST", "/sell/inventory/v1/offer/offer-abc/withdraw"),
+    ]
+    assert listing.marketplace_data["ebay_status"] == "ENDED"
+
+
+def test_end_ebay_listing_rejects_identity_mismatch_before_api_call(monkeypatch):
+    listing = DummyListing()
+    listing.ebay_listing_id = "123456789012"
+    listing.marketplace_data = {"offer": {"offerId": "offer-abc"}}
+    calls = []
+
+    async def fail_if_called(*_args, **_kwargs):
+        calls.append(True)
+        return DummyAccount()
+
+    monkeypatch.setattr(ebay_service, "get_or_refresh_account", fail_if_called)
+    with pytest.raises(ebay_service.EbayIntegrationError, match="identity"):
+        asyncio.run(ebay_service.end_ebay_listing(
+            listing,
+            DummyDB(),
+            expected_external_listing_id="different-listing",
+        ))
+    assert calls == []
+
+
+def test_end_ebay_listing_treats_unpublished_offer_as_idempotent(monkeypatch):
+    listing = DummyListing()
+    listing.ebay_listing_id = "123456789012"
+    listing.marketplace_data = {"offer": {"offerId": "offer-abc"}}
+    calls = []
+
+    class FakeClient:
+        def __init__(self, _token):
+            pass
+
+        async def request(self, method, path, **_kwargs):
+            calls.append((method, path))
+            return {"status": "UNPUBLISHED"}
+
+    async def fake_account(_user_id, _db):
+        return DummyAccount()
+
+    monkeypatch.setattr(ebay_service, "get_or_refresh_account", fake_account)
+    monkeypatch.setattr(ebay_service, "EbayAPIClient", FakeClient)
+    monkeypatch.setattr(ebay_service, "_sync_ebay_marketplace_listing", lambda *_args, **_kwargs: None)
+    result = asyncio.run(ebay_service.end_ebay_listing(
+        listing,
+        DummyDB(),
+        expected_external_listing_id="123456789012",
+    ))
+    assert result["status"] == "ALREADY_ENDED"
+    assert calls == [("GET", "/sell/inventory/v1/offer/offer-abc")]
+
+
+def test_revise_ebay_listing_never_creates_replacement_when_offer_identity_is_missing(monkeypatch):
+    listing = DummyListing()
+    listing.ebay_listing_id = "123456789012"
+    listing.marketplace_data = {}
+
+    async def fake_account(_user_id, _db):
+        return DummyAccount()
+
+    async def fake_plan(*_args, **_kwargs):
+        return {"payload_preview": {"item_specifics": {}}, "inventory_item_payload": {}, "offer_payload": {}, "category": {"category_id": "123"}}
+
+    async def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("an update must not create a replacement offer")
+
+    monkeypatch.setattr(ebay_service, "get_or_refresh_account", fake_account)
+    monkeypatch.setattr(ebay_service, "build_ebay_publish_plan", fake_plan)
+    monkeypatch.setattr(ebay_service, "create_offer_for_item", fail_if_called)
+    with pytest.raises(ebay_service.EbayIntegrationError, match="no replacement offer was created"):
+        asyncio.run(ebay_service.revise_ebay_listing(listing, DummyDB()))
+
+
+def test_revise_ebay_listing_checks_remote_identity_before_writing(monkeypatch):
+    listing = DummyListing()
+    listing.ebay_listing_id = "123456789012"
+    listing.marketplace_data = {"offer": {"offerId": "offer-abc"}}
+
+    class FakeClient:
+        def __init__(self, _token):
+            pass
+
+        async def request(self, method, path, **_kwargs):
+            assert method == "GET"
+            assert path == "/sell/inventory/v1/offer/offer-abc"
+            return {"status": "PUBLISHED", "listing": {"listingId": "different-listing"}}
+
+    async def fake_account(_user_id, _db):
+        return DummyAccount()
+
+    async def fake_plan(*_args, **_kwargs):
+        return {"payload_preview": {"item_specifics": {}}, "inventory_item_payload": {}, "offer_payload": {}, "category": {"category_id": "123"}}
+
+    async def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("inventory item update must not run on identity mismatch")
+
+    monkeypatch.setattr(ebay_service, "get_or_refresh_account", fake_account)
+    monkeypatch.setattr(ebay_service, "build_ebay_publish_plan", fake_plan)
+    monkeypatch.setattr(ebay_service, "EbayAPIClient", FakeClient)
+    monkeypatch.setattr(ebay_service, "create_or_replace_item", fail_if_called)
+    with pytest.raises(ebay_service.EbayIntegrationError, match="exact external listing identity"):
+        asyncio.run(ebay_service.revise_ebay_listing(listing, DummyDB(), expected_external_listing_id="123456789012"))

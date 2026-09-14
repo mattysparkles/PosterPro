@@ -21,6 +21,7 @@ class MarketplaceCapabilities:
 DIRECT_EBAY = MarketplaceCapabilities(
     supports_direct_create=True,
     supports_direct_update=True,
+    supports_direct_end=True,
     supports_sale_polling=True,
     supports_external_status=True,
 )

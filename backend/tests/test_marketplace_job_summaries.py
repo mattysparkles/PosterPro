@@ -131,6 +131,43 @@ def test_hosted_crosspost_job_waits_for_bridge_completion_and_exposes_review_sum
     assert marketplace_listing.raw_response["bridge_completion"]["result"]["status"] == "draft_form_filled"
 
 
+def test_ebay_end_crosspost_worker_targets_exact_identity_and_completes(db_session, monkeypatch):
+    user = User(email="exact-ebay-end@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(
+        user_id=user.id,
+        status=ListingStatus.posted,
+        title="Exact eBay item",
+        description="A confirmed active listing",
+        listing_price=30,
+        quantity=1,
+        ebay_listing_id="123456789012",
+        marketplace_data={"offer": {"offerId": "offer-123"}},
+    )
+    db_session.add(listing); db_session.flush()
+    db_session.add(MarketplaceListing(listing_id=listing.id, marketplace="ebay", marketplace_listing_id="123456789012", status=MarketplaceListingStatus.PUBLISHED))
+    job = MarketplaceCrosspostJob(
+        user_id=user.id,
+        listing_id=listing.id,
+        target_marketplaces=["ebay"],
+        requested_mode="manual_end",
+        status="queued",
+        execution_plan={"operation": "end", "external_listing_id": "123456789012"},
+    )
+    db_session.add(job); db_session.commit()
+    calls = []
+
+    async def fake_end(_listing, _db, *, expected_external_listing_id):
+        calls.append(expected_external_listing_id)
+        return {"status": "ENDED", "listing_id": expected_external_listing_id, "offer_id": "offer-123"}
+
+    monkeypatch.setattr(tasks, "end_ebay_listing", fake_end)
+    result = tasks.process_marketplace_crosspost_job_task.run(job.id)
+    assert calls == ["123456789012"]
+    assert result["status"] == "completed"
+    assert result["results"][0]["operation"] == "END"
+    assert result["results"][0]["status"] == "ENDED"
+
 def test_hosted_facebook_assist_requires_visible_listing_before_marking_published(db_session, monkeypatch):
     user = User(
         email="facebook-visibility@example.com",

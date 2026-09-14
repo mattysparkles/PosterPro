@@ -221,9 +221,36 @@ def decide_underpricing(
         listing.status = ListingStatus.draft
     listing.marketplace_data = marketplace_data
     db.add(listing); db.commit()
+    direct_end_job_ids: list[int] = []
     for market, row in active.items():
         if market == MarketplaceName.ebay.value:
-            result["manual_end_required"].append({"marketplace": market, "external_listing_id": row.marketplace_listing_id, "reason": "This deployment has no safe direct eBay end-listing operation; the current offer remains live until ended in eBay."})
+            external_id = str(row.marketplace_listing_id or listing.ebay_listing_id or "").strip()
+            if not external_id or external_id != str(listing.ebay_listing_id or "").strip():
+                result["manual_end_required"].append({"marketplace": market, "external_listing_id": external_id or None, "reason": "The active eBay record does not match the listing's confirmed external identity; no remote action was queued."})
+                continue
+            pending_jobs = db.query(MarketplaceCrosspostJob).filter(
+                MarketplaceCrosspostJob.user_id == current_user.id,
+                MarketplaceCrosspostJob.listing_id == listing.id,
+                MarketplaceCrosspostJob.status.in_(["queued", "running"]),
+            ).order_by(MarketplaceCrosspostJob.created_at.desc()).all()
+            existing_end = next((job for job in pending_jobs if market in (job.target_marketplaces or []) and str((job.execution_plan or {}).get("operation") or "").lower() == "end"), None)
+            if existing_end:
+                direct_end_job_ids.append(existing_end.id)
+                result["jobs"].append({"job_id": existing_end.id, "marketplace": market, "status": existing_end.status, "action": "END", "deduplicated": True, "external_listing_id": external_id})
+                continue
+            end_job = MarketplaceCrosspostJob(
+                user_id=current_user.id,
+                listing_id=listing.id,
+                source_marketplace="posterpro",
+                target_marketplaces=[market],
+                requested_mode="pricing_pause_end",
+                status="queued",
+                priority=0,
+                requested_by=current_user.id,
+                execution_plan={"operation": "end", "external_listing_id": external_id, "reason": "pricing_review_pause"},
+            )
+            db.add(end_job); db.flush(); direct_end_job_ids.append(end_job.id)
+            result["jobs"].append({"job_id": end_job.id, "marketplace": market, "status": "queued", "action": "END", "external_listing_id": external_id})
             continue
         try:
             from app.services.marketplace_extension_jobs import queue_extension_marketplace_action
@@ -232,6 +259,19 @@ def decide_underpricing(
         except Exception as exc:
             result["manual_end_required"].append({"marketplace": market, "external_listing_id": row.marketplace_listing_id, "reason": str(exc)[:240]})
     db.commit()
+    if direct_end_job_ids:
+        try:
+            from app.api.marketplace_jobs import _enqueue_priority
+            from app.workers.tasks import process_marketplace_crosspost_job_task
+            for job_id in dict.fromkeys(direct_end_job_ids):
+                task = _enqueue_priority(process_marketplace_crosspost_job_task, job_id, 0)
+                db.query(MarketplaceCrosspostJob).filter(MarketplaceCrosspostJob.id == job_id).update({"task_id": task.id})
+            db.commit()
+        except Exception as exc:
+            # The durable queued job is also picked up by the periodic dispatcher.
+            for item in result["jobs"]:
+                if item.get("job_id") in direct_end_job_ids:
+                    item["dispatch_deferred"] = type(exc).__name__
     result.update({"status": "PAUSED_FOR_REVIEW", "publishing_blocked": True})
     return result
 

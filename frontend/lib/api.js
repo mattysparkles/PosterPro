@@ -1613,6 +1613,15 @@ export function verifyOnboardingTask(taskId) {
   return jsonFetch(`${API_BASE}/onboarding/verify/${encodeURIComponent(taskId)}`, { method: 'POST' });
 }
 
+export function askOnboardingHelp(taskId, question) {
+  return jsonFetch(`${API_BASE}/onboarding/help`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ task_id: taskId, question }),
+    timeoutMs: 25000,
+  });
+}
+
 export function recordOnboardingEvent(eventName, taskId = null) {
   return jsonFetch(`${API_BASE}/onboarding/event`, {
     method: 'POST',

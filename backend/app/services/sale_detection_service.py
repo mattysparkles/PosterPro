@@ -12,7 +12,7 @@ from app.connectors.registry import get_connector
 from app.core.config import settings
 from app.models.enums import MarketplaceListingStatus, MarketplaceName
 from app.models.enums import ListingStatus
-from app.models.models import Listing, MarketplaceListing, Sale, User
+from app.models.models import Listing, MarketplaceCrosspostJob, MarketplaceListing, Sale, User
 from app.services.media_lifecycle import purge_listing_media
 from app.services.marketplace_extension_jobs import MarketplaceExtensionJobError, queue_extension_marketplace_action
 from app.services.profit_service import ProfitService
@@ -234,6 +234,45 @@ class SaleDetectionService:
                             }
                         except MarketplaceExtensionJobError as exc:
                             response = {"status": "NOT_ENQUEUED", "error_code": exc.code, "error": str(exc)}
+                    elif capabilities.get("supports_direct_end") and market == MarketplaceName.ebay.value:
+                        external_id = str(row.marketplace_listing_id or "").strip()
+                        canonical_id = str(listing.ebay_listing_id or "").strip()
+                        if not external_id or external_id != canonical_id:
+                            response = {"status": "NOT_ENQUEUED", "error_code": "EXTERNAL_IDENTITY_MISMATCH", "action": "END", "marketplace": market}
+                        else:
+                            pending_ends = db.execute(
+                                select(MarketplaceCrosspostJob).where(
+                                    MarketplaceCrosspostJob.user_id == user.id,
+                                    MarketplaceCrosspostJob.listing_id == listing.id,
+                                    MarketplaceCrosspostJob.status.in_(["queued", "running"]),
+                                )
+                            ).scalars().all()
+                            existing_end = next((job for job in pending_ends if market in (job.target_marketplaces or []) and str((job.execution_plan or {}).get("operation") or "").lower() == "end"), None)
+                            if existing_end:
+                                end_job = existing_end
+                                created = False
+                            else:
+                                end_job = MarketplaceCrosspostJob(
+                                    user_id=user.id,
+                                    listing_id=listing.id,
+                                    source_marketplace=sold_platform,
+                                    target_marketplaces=[market],
+                                    requested_mode="sale_reconciliation_end",
+                                    status="queued",
+                                    execution_plan={"operation": "end", "external_listing_id": external_id, "sale_source": sold_platform},
+                                    priority=0,
+                                    requested_by=user.id,
+                                )
+                                db.add(end_job)
+                                db.flush()
+                                created = True
+                            response = {
+                                "status": "QUEUED_DIRECT_END",
+                                "action": "END",
+                                "job_id": end_job.id,
+                                "deduplicated": not created,
+                                "external_listing_id": external_id,
+                            }
                     else:
                         response = {"status": "UNSUPPORTED_ACTION", "action": "END", "marketplace": market}
                 else:

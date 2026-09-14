@@ -57,7 +57,33 @@ def test_onboarding_is_resumable_and_marketplace_status_is_not_assumed_ready(db_
     assert "not tested" in by_id["marketplace:facebook"]["message"]
     assert by_id["browser_extension"]["status"] == "EXTENSION_REQUIRED"
     assert by_id["ai"]["status"] == "NOT_CONFIGURED"
+    assert by_id["marketplace:facebook"]["guidance"]["open_url"] == "https://www.facebook.com/marketplace/"
+    assert any("form test" in step.lower() for step in by_id["marketplace:facebook"]["guidance"]["steps"])
     assert snapshot["completed"] is False
+
+
+def test_google_photos_expired_token_is_reported_without_refreshing_credentials(db_session, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+    from app.core.secrets import encrypt_secret
+    import app.services.onboarding_service as onboarding_service
+
+    user = User(email=f"google-expired-{uuid4()}@example.com", role="owner", settings_json={
+        "guided_onboarding_v1": {"started_at": "2026-09-14T12:00:00+00:00"},
+        "google_photos_oauth": {
+            "connected": True,
+            "access_token_enc": encrypt_secret("saved-access-token", secret_key=config_module.settings.session_secret),
+            "refresh_token_enc": encrypt_secret("saved-refresh-token", secret_key=config_module.settings.session_secret),
+            "token_expires_at": (datetime.now(UTC) - timedelta(hours=1)).replace(tzinfo=None).isoformat(),
+        },
+    })
+    db_session.add(user); db_session.flush()
+    monkeypatch.setattr(onboarding_service, "google_photos_oauth_ready", lambda: True)
+    before = user.settings_json["google_photos_oauth"]["access_token_enc"]
+    task = next(task for task in onboarding_service.onboarding_snapshot(user, db_session)["tasks"] if task["id"] == "google_photos")
+    assert task["status"] == "EXPIRED"
+    assert "will not change" in task["message"]
+    assert user.settings_json["google_photos_oauth"]["access_token_enc"] == before
+    assert task["guidance"]["steps"]
 
 
 def test_ebay_connection_is_not_publish_ready_until_seller_policies_and_location_are_verified(db_session):
@@ -199,3 +225,62 @@ async def test_ebay_onboarding_verification_runs_read_only_seller_api_check(asyn
     assert "No listing was created or changed" in result.json()["verification"]["message"]
     db_session.refresh(account)
     assert account.last_successful_check_at is not None
+
+
+@pytest.mark.anyio
+async def test_contextual_onboarding_help_redacts_credentials_and_uses_only_current_step(db_session, monkeypatch):
+    import app.api.onboarding as onboarding_api
+
+    user = User(email=f"setup-help-{uuid4()}@example.com", role="owner", settings_json={
+        "guided_onboarding_v1": {"started_at": "2026-09-14T12:00:00+00:00", "selected_marketplaces": ["facebook"], "marketplace_choice_saved": True},
+        "ai_provider": {"mode": "BYO_OPENAI"},
+    })
+    db_session.add(user); db_session.flush()
+    calls = []
+
+    class Response:
+        is_error = False
+        def json(self):
+            return {"output": [{"content": [{"type": "output_text", "text": "Open Facebook in the paired browser, sign in there, then return here."}]}]}
+
+    class Client:
+        def __init__(self, **_kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return None
+        async def post(self, _url, *, headers, json):
+            calls.append((headers, json))
+            return Response()
+
+    monkeypatch.setattr(onboarding_api, "resolve_openai_key", lambda _db, _user_id: ("tenant-private-key", "byo_openai"))
+    monkeypatch.setattr(onboarding_api.httpx, "AsyncClient", Client)
+    result = await onboarding_api.onboarding_help(
+        onboarding_api.OnboardingHelpRequest(task_id="marketplace:facebook", question="I pasted sk-thisisaverylongsecret1234 and I am confused"),
+        db_session,
+        user,
+    )
+    assert result["ai_assisted"] is True
+    assert result["secrets_sent"] is False
+    assert result["answer"].startswith("Open Facebook")
+    sent = calls[0][1]["input"]
+    assert "sk-thisisaverylongsecret1234" not in sent
+    assert "[credential removed]" in sent
+    assert "tenant-private-key" not in str(calls[0][1])
+
+
+@pytest.mark.anyio
+async def test_contextual_onboarding_help_falls_back_to_saved_guidance_without_ai(db_session, monkeypatch):
+    import app.api.onboarding as onboarding_api
+
+    user = User(email=f"setup-help-fallback-{uuid4()}@example.com", role="owner", settings_json={
+        "guided_onboarding_v1": {"started_at": "2026-09-14T12:00:00+00:00", "selected_marketplaces": ["mercari"], "marketplace_choice_saved": True},
+    })
+    db_session.add(user); db_session.flush()
+    monkeypatch.setattr(onboarding_api, "resolve_openai_key", lambda _db, _user_id: (None, "disabled"))
+    result = await onboarding_api.onboarding_help(
+        onboarding_api.OnboardingHelpRequest(task_id="marketplace:mercari", question="I am signed out"),
+        db_session,
+        user,
+    )
+    assert result["ai_assisted"] is False
+    assert "sign-in" in result["answer"].lower()
+    assert result["secrets_sent"] is False

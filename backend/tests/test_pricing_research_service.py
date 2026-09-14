@@ -120,21 +120,29 @@ def test_underpricing_auto_fix_queues_only_update_for_confirmed_marketplace_iden
     assert len(revisions) == 1
 
 
-def test_underpricing_pause_blocks_new_publish_and_keeps_ebay_end_explicitly_manual(db_session, monkeypatch):
+def test_underpricing_pause_blocks_new_publish_and_queues_exact_ebay_end(db_session, monkeypatch):
+    from types import SimpleNamespace
     from app.api.intelligence import PricingDecisionRequest, decide_underpricing
+    import app.api.marketplace_jobs as marketplace_jobs
     from app.services.pricing_intelligence_service import PricingIntelligenceService
     from app.services.marketplace_preflight import MarketplacePreflightService
 
     user, listing = _seed_listing(db_session, listing_price=20)
+    listing.ebay_listing_id = "ebay-exact-456"
     db_session.add(MarketplaceListing(listing_id=listing.id, marketplace=MarketplaceName.ebay, marketplace_listing_id="ebay-exact-456", status=MarketplaceListingStatus.PUBLISHED))
     db_session.commit()
     risk = {"level": "POTENTIAL", "evidence_signature": "evidence-3", "current_price": 20, "sold_median": 50}
     monkeypatch.setattr(PricingIntelligenceService, "recommend_price", lambda self, _db, _id: {"underpricing_risk": risk, "recommended_price": 48})
+    monkeypatch.setattr(marketplace_jobs, "_enqueue_priority", lambda *_args, **_kwargs: SimpleNamespace(id="end-task"))
 
     result = decide_underpricing(listing.id, PricingDecisionRequest(action="pause_listing"), db_session, user)
     db_session.refresh(listing)
     assert result["status"] == "PAUSED_FOR_REVIEW"
-    assert result["manual_end_required"][0]["external_listing_id"] == "ebay-exact-456"
+    assert result["manual_end_required"] == []
+    end_job = db_session.query(MarketplaceCrosspostJob).filter_by(listing_id=listing.id).one()
+    assert end_job.execution_plan["operation"] == "end"
+    assert end_job.execution_plan["external_listing_id"] == "ebay-exact-456"
+    assert end_job.target_marketplaces == ["ebay"]
     assert listing.marketplace_data["pricing_review_pause"]["active"] is True
     blockers = MarketplacePreflightService().preflight_listing(db_session, listing, "ebay")["blockers"]
     assert any(blocker.get("code") == "PRICING_REVIEW_PAUSED" for blocker in blockers)
