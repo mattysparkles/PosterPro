@@ -101,7 +101,7 @@ export default function MarketplaceDiagnosticReport({ marketplace, diagnostic, h
         {(result.field_results || []).some((field) => field.selector_diagnostic) ? <details className="mt-3"><summary className="cursor-pointer text-sm font-semibold text-slate-800">Safe selector diagnostics (failed fields only)</summary><pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-50 p-3 text-xs">{JSON.stringify((result.field_results || []).filter((field) => field.selector_diagnostic).map((field) => field.selector_diagnostic), null, 2)}</pre></details> : null}
       </> : <p className="mt-2 text-sm text-slate-600">No real form test has been run for {title} yet.</p>}
       <div className="mt-4 flex flex-wrap gap-2">
-        <Button type="button" disabled={running} onClick={onRun}>{running ? 'Starting test…' : 'Run again'}</Button>
+        <Button type="button" disabled={running} onClick={onRun}>{running ? 'Starting test…' : diagnostic ? 'Run again' : `START ${marketplace?.toUpperCase()} REAL FORM TEST`}</Button>
         <a className="inline-flex min-h-10 items-center rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-800" href={MARKETPLACE_DIAGNOSTIC_URLS[marketplace] || '#'} target="_blank" rel="noreferrer">Open marketplace</a>
         <Button type="button" variant="outline" disabled={!diagnostic} onClick={copy}>Copy diagnostic summary</Button>
       </div>
