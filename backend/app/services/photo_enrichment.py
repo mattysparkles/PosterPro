@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 
 from app.core.config import settings
+from app.services.ai_entitlements import resolve_openai_key
 from app.services.ai_guard import allow as ai_allow, mark_completed as ai_mark_completed, signature as ai_signature, open_circuit as ai_open_circuit
 from app.services.listing_specificity import assess_listing_specificity
 from app.prompts.templates import get_prompt_template
@@ -78,20 +79,21 @@ class PhotoEnrichmentService:
     def __init__(self, model: str = "gpt-4o-mini"):
         self.model = model
 
-    def enrich_photo(self, photo_path: str) -> dict[str, Any]:
+    def enrich_photo(self, photo_path: str, *, db: Any = None, user_id: int | None = None) -> dict[str, Any]:
         guard_key = ai_signature(purpose="photo", payload={"path": photo_path, "model": self.model})
         if not ai_allow(guard_key):
             return {"status": "skipped", "reason": "duplicate_or_provider_circuit_open", "photo_path": photo_path}
-        if not settings.openai_api_key:
-            raise RuntimeError("OPENAI_API_KEY is not configured")
+        api_key, _mode = resolve_openai_key(db, user_id)
+        if not api_key:
+            raise RuntimeError("Connect an OpenAI account or enable an eligible PosterPro AI plan")
 
         image_b64 = base64.b64encode(Path(photo_path).read_bytes()).decode("utf-8")
         outputs = {
-            "title": self._extract_json(photo_path, image_b64, "extract_poster_title").get("title"),
-            "description": self._extract_json(photo_path, image_b64, "extract_description").get("description"),
+            "title": self._extract_json(photo_path, image_b64, "extract_poster_title", api_key=api_key).get("title"),
+            "description": self._extract_json(photo_path, image_b64, "extract_description", api_key=api_key).get("description"),
         }
-        category = self._extract_json(photo_path, image_b64, "detect_category")
-        keywords = self._extract_json(photo_path, image_b64, "extract_keywords")
+        category = self._extract_json(photo_path, image_b64, "detect_category", api_key=api_key)
+        keywords = self._extract_json(photo_path, image_b64, "extract_keywords", api_key=api_key)
 
         outputs["category_id"] = category.get("category_id")
         outputs["category_suggestion"] = category.get("category_name")
@@ -101,12 +103,12 @@ class PhotoEnrichmentService:
         ai_mark_completed(guard_key)
         return outputs
 
-    def enrich_group(self, photo_paths: list[str]) -> dict[str, Any]:
+    def enrich_group(self, photo_paths: list[str], *, db: Any = None, user_id: int | None = None) -> dict[str, Any]:
         """Compatibility wrapper: evaluate all photos and synthesize, never select a lead photo."""
         guard_key = ai_signature(purpose="photo_group", payload={"paths": sorted(photo_paths), "model": self.model})
         if not ai_allow(guard_key):
             return {"status": "skipped", "reason": "duplicate_or_provider_circuit_open", "photos_evaluated": 0, "group_synthesis": {}}
-        records = [self.extract_photo_evidence(path, media_id=index + 1) for index, path in enumerate(photo_paths)]
+        records = [self.extract_photo_evidence(path, media_id=index + 1, db=db, user_id=user_id) for index, path in enumerate(photo_paths)]
         synthesis = self.synthesize_group_evidence(records)
         result = {
             "title": synthesis.get("identity", {}).get("title"),
@@ -124,7 +126,7 @@ class PhotoEnrichmentService:
         ai_mark_completed(guard_key)
         return result
 
-    def extract_photo_evidence(self, photo_path: str, *, media_id: int | None = None, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+    def extract_photo_evidence(self, photo_path: str, *, media_id: int | None = None, metadata: dict[str, Any] | None = None, db: Any = None, user_id: int | None = None) -> dict[str, Any]:
         """Photo-local OCR/barcode/vision facts. Errors are durable evidence too."""
         result: dict[str, Any] = {"media_id": media_id, "photo_path": photo_path, "photo_role": "alternate_product_view",
             "barcode_attempts": [], "specifications": {}, "included_components": [], "damage": [], "confidence": 0.0,
@@ -160,9 +162,10 @@ class PhotoEnrichmentService:
         if model:
             result.update(model=model, mpn=model, photo_role="model_label", confidence=max(result["confidence"], 0.9))
         # Vision adds visual/packaging context but never outranks local identifier evidence.
-        if settings.openai_api_key:
+        api_key, _mode = resolve_openai_key(db, user_id)
+        if api_key:
             try:
-                result.update(self._photo_evidence_vision(photo_path))
+                result.update(self._photo_evidence_vision(photo_path, api_key=api_key))
                 result["extraction_method"] = "deterministic_ocr_barcode+vision"
             except Exception as exc:
                 result["vision_error"] = type(exc).__name__
@@ -475,7 +478,7 @@ class PhotoEnrichmentService:
         except Exception:
             return ""
 
-    def _photo_evidence_vision(self, photo_path: str) -> dict[str, Any]:
+    def _photo_evidence_vision(self, photo_path: str, *, api_key: str) -> dict[str, Any]:
         image_b64 = base64.b64encode(Path(photo_path).read_bytes()).decode("utf-8")
         prompt = ("Return strict JSON for this one inventory photograph: photo_role, brand, product_name, product_type, model, mpn, manufacturer_sku, "
                   "packaging_identity, specifications, included_components, damage, condition_evidence, measurement_evidence, testing_evidence, category, visual_title, confidence. "
@@ -483,19 +486,20 @@ class PhotoEnrichmentService:
                   "Do not invent identifiers. State only visible facts.")
         payload = {"model": self.model, "response_format": {"type": "json_object"}, "messages": [{"role": "system", "content": prompt}, {"role": "user", "content": [{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}]}], "temperature": 0}
         with httpx.Client(timeout=90) as client:
-            response = client.post("https://api.openai.com/v1/chat/completions", json=payload, headers={"Authorization": f"Bearer {settings.openai_api_key}", "Content-Type": "application/json"})
+            response = client.post("https://api.openai.com/v1/chat/completions", json=payload, headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
             response.raise_for_status()
         parsed = json.loads(response.json()["choices"][0]["message"]["content"])
         return parsed if isinstance(parsed, dict) else {}
 
-    def analyze_recovery_sequence(self, contact_sheet_path: str, *, image_count: int) -> dict[str, Any]:
+    def analyze_recovery_sequence(self, contact_sheet_path: str, *, image_count: int, db: Any = None, user_id: int | None = None) -> dict[str, Any]:
         """Return ordered product boundaries for a contact sheet of originals.
 
         The sheet is a temporary derivative only; it never replaces source media.
         Indices in the response are zero-based and must cover the photo sequence.
         """
-        if not settings.openai_api_key:
-            raise RuntimeError("OPENAI_API_KEY is not configured")
+        api_key, _mode = resolve_openai_key(db, user_id)
+        if not api_key:
+            raise RuntimeError("Connect an OpenAI account or enable an eligible PosterPro AI plan")
         image_b64 = base64.b64encode(Path(contact_sheet_path).read_bytes()).decode("utf-8")
         prompt = (
             "You are splitting a chronological inventory photo sequence. Each tile is labelled [0] through "
@@ -514,7 +518,7 @@ class PhotoEnrichmentService:
             ],
             "temperature": 0.0,
         }
-        headers = {"Authorization": f"Bearer {settings.openai_api_key}", "Content-Type": "application/json"}
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         with httpx.Client(timeout=90) as client:
             response = client.post("https://api.openai.com/v1/chat/completions", json=payload, headers=headers)
             response.raise_for_status()
@@ -524,7 +528,7 @@ class PhotoEnrichmentService:
             raise RuntimeError("sequence analysis returned invalid JSON") from exc
         return parsed if isinstance(parsed, dict) else {}
 
-    def _extract_json(self, photo_path: str, image_b64: str, template_name: str) -> dict[str, Any]:
+    def _extract_json(self, photo_path: str, image_b64: str, template_name: str, *, api_key: str) -> dict[str, Any]:
         guard_key = ai_signature(purpose=f"photo_extract:{template_name}", payload={"path": photo_path, "model": self.model})
         if not ai_allow(guard_key):
             raise RuntimeError("AI provider circuit open or duplicate photo extraction")
@@ -544,7 +548,7 @@ class PhotoEnrichmentService:
             ],
             "temperature": 0.2,
         }
-        headers = {"Authorization": f"Bearer {settings.openai_api_key}", "Content-Type": "application/json"}
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         with httpx.Client(timeout=60) as client:
             response = client.post("https://api.openai.com/v1/chat/completions", json=payload, headers=headers)
             if response.status_code == 429:

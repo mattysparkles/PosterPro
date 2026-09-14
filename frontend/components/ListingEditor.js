@@ -335,6 +335,7 @@ export default function ListingEditor({
   onPhotoUpdated,
   onRefreshPricing,
   onApplyPricing,
+  onPricingDecision,
   onRefreshMarketplacePreflight,
   onSyncEbayListing,
   onUploadPhotos,
@@ -358,6 +359,8 @@ export default function ListingEditor({
   const [browseNodes, setBrowseNodes] = useState([]);
   const [browseTrail, setBrowseTrail] = useState([]);
   const [conditionValue, setConditionValue] = useState(listing.condition || "");
+  const [pricingDecisionBusy, setPricingDecisionBusy] = useState(false);
+  const [pricingDecisionMessage, setPricingDecisionMessage] = useState("");
   // Do not reset an explicit operator selection when the compact catalog
   // refreshes and returns a stale summary row; the PATCH response is the
   // authoritative value for this open editor.
@@ -366,6 +369,21 @@ export default function ListingEditor({
     setConditionValue(value);
     try { await onSave(listing.id, { condition: value }); }
     catch (error) { setConditionValue(listing.condition || ""); }
+  };
+  const decidePricingRisk = async (action) => {
+    if (!onPricingDecision) return;
+    setPricingDecisionBusy(true);
+    setPricingDecisionMessage("");
+    try {
+      const result = await onPricingDecision(listing.id, action);
+      setPricingDecisionMessage(result?.status === "PAUSED_FOR_REVIEW" && result?.manual_end_required?.length
+        ? `Publishing is paused. ${result.manual_end_required.length} live marketplace listing(s) still require manual ending.`
+        : action === "auto_fix_price" && result?.jobs?.length
+          ? `Protected price applied. ${result.jobs.length} exact existing marketplace listing(s) queued for UPDATE; none will be recreated.`
+          : action === "auto_fix_price" ? "Protected price applied to this PosterPro listing." : action === "leave_price_as_is" ? "Your current price is preserved and this evidence has been acknowledged." : "Publishing is paused for this item.");
+    } catch (error) {
+      setPricingDecisionMessage(error?.message || "PosterPro could not complete that pricing action. Try again or review the item manually.");
+    } finally { setPricingDecisionBusy(false); }
   };
   const router = useRouter();
   const requiresApproval = workflowPreferences?.review_before_publish ?? true;
@@ -1386,6 +1404,14 @@ export default function ListingEditor({
             ) : null}
           </div>
         </div>
+        {pricingAnalysis?.underpricing_risk && ["POTENTIAL", "SEVERE"].includes(pricingAnalysis.underpricing_risk.level) ? (
+          <div role="alert" className={`mt-4 rounded-xl border p-4 ${pricingAnalysis.underpricing_risk.level === "SEVERE" ? "border-red-300 bg-red-50" : "border-amber-300 bg-amber-50"}`}>
+            <p className="font-semibold text-slate-950">{pricingAnalysis.underpricing_risk.acknowledged ? "Price risk acknowledged" : pricingAnalysis.underpricing_risk.level === "SEVERE" ? "Severe underpricing risk" : "Potential underpricing detected"}</p>
+            <p className="mt-1 text-sm text-slate-700">Current ${pricingAnalysis.underpricing_risk.current_price} is {pricingAnalysis.underpricing_risk.percent_below_sold_median}% below the ${pricingAnalysis.underpricing_risk.sold_median} median of {pricingAnalysis.underpricing_risk.sold_comparable_count} relevant sold comparables. These are evidence-backed matches, not an AI-only estimate.</p>
+            {!pricingAnalysis.underpricing_risk.acknowledged ? <div className="mt-3 flex flex-wrap gap-2"><Button disabled={pricingDecisionBusy} variant="outline" onClick={() => decidePricingRisk("leave_price_as_is")}>LEAVE PRICE AS IS</Button><Button disabled={pricingDecisionBusy} onClick={() => decidePricingRisk("auto_fix_price")}>AUTO-FIX PRICE</Button><Button disabled={pricingDecisionBusy} variant="danger" onClick={() => decidePricingRisk("pause_listing")}>PAUSE LISTING</Button></div> : null}
+            {pricingDecisionMessage ? <p aria-live="polite" className="mt-3 text-sm font-medium text-slate-800">{pricingDecisionMessage}</p> : null}
+          </div>
+        ) : null}
         <div className="mt-4 grid gap-3 md:grid-cols-3">
           <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
             <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Current price</p>

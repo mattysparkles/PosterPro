@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.services.ai_guard import allow as ai_allow, mark_completed as ai_mark_completed, open_circuit as ai_open_circuit, signature as ai_signature
+from app.services.ai_entitlements import resolve_openai_key
 from app.models.models import Listing
 from app.prompts.templates import get_prompt_template
 
@@ -30,7 +31,7 @@ class PricingService:
             raise ValueError("Listing not found")
 
         rule_based = self._rule_based_pricing(listing)
-        llm = self._llm_pricing_fallback(listing)
+        llm = self._llm_pricing_fallback(listing, db=db)
         pricing = self._merge_pricing(rule_based, llm)
 
         listing.start_price = pricing["start_price"]
@@ -97,8 +98,9 @@ class PricingService:
             "min_acceptable_offer": min_acceptable_offer,
         }
 
-    def _llm_pricing_fallback(self, listing: Listing) -> dict[str, float] | None:
-        if not settings.openai_api_key:
+    def _llm_pricing_fallback(self, listing: Listing, *, db: Session | None = None) -> dict[str, float] | None:
+        api_key, _provider_mode = resolve_openai_key(db, listing.user_id)
+        if not api_key:
             logger.info("Skipping LLM pricing fallback; OPENAI_API_KEY not configured", extra={"listing_id": listing.id})
             return None
 
@@ -128,7 +130,7 @@ class PricingService:
             ],
             "temperature": 0.1,
         }
-        headers = {"Authorization": f"Bearer {settings.openai_api_key}", "Content-Type": "application/json"}
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
         backoff_seconds = 0.5
         with httpx.Client(timeout=45) as client:

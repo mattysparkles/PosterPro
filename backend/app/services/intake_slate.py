@@ -60,6 +60,7 @@ from app.services.automation_bridge import AutomationBridgeError, submit_bridge_
 from app.services.google_photos import GooglePhotosService
 from app.services.google_photos_oauth import get_google_photos_oauth_state, upload_photo_to_album, GooglePhotosOAuthError
 from app.services.listing_ai import ListingAIService
+from app.services.ai_entitlements import resolve_openai_key
 from app.services.listing_review import derive_condition_data, derive_shipping_profile, normalize_listing_images, shipping_policy_for_user, summarize_listing_readiness
 from app.services.media_lifecycle import purge_listing_media
 from app.services.listing_workspace import normalize_marketplace_data
@@ -768,6 +769,8 @@ class IntakeSlateService:
         *,
         voice_audio_data_url: str,
         fallback_transcript: str | None = None,
+        db=None,
+        user_id: int | None = None,
     ) -> dict[str, Any]:
         fallback = str(fallback_transcript or "").strip()
         audio_bytes, mime_type = self._parse_data_url(voice_audio_data_url)
@@ -778,7 +781,8 @@ class IntakeSlateService:
                 "audio_present": False,
                 "transcription_source": "fallback" if fallback else "missing_audio",
             }
-        if not settings.openai_api_key:
+        api_key, _mode = resolve_openai_key(db, user_id)
+        if not api_key:
             return {
                 "transcript": fallback,
                 "used_fallback": bool(fallback),
@@ -799,7 +803,7 @@ class IntakeSlateService:
         with NamedTemporaryFile(suffix=extension, delete=True) as temp_audio:
             temp_audio.write(audio_bytes)
             temp_audio.flush()
-            transcription = self._transcribe_audio_file(Path(temp_audio.name))
+            transcription = self._transcribe_audio_file(Path(temp_audio.name), api_key=api_key)
         transcript = str((transcription or {}).get("text") or "").strip() or fallback
         return {
             "transcript": transcript,
@@ -810,10 +814,8 @@ class IntakeSlateService:
             "language": (transcription or {}).get("language"),
         }
 
-    def _transcribe_audio_file(self, audio_path: Path) -> dict[str, Any]:
-        if not settings.openai_api_key:
-            raise RuntimeError("OPENAI_API_KEY is not configured")
-        headers = {"Authorization": f"Bearer {settings.openai_api_key}"}
+    def _transcribe_audio_file(self, audio_path: Path, *, api_key: str) -> dict[str, Any]:
+        headers = {"Authorization": f"Bearer {api_key}"}
         data = {"model": "whisper-1"}
         with audio_path.open("rb") as handle:
             files = {"file": (audio_path.name, handle, "application/octet-stream")}
@@ -3337,7 +3339,7 @@ class IntakeSlateService:
             )
             return listing
         try:
-            group_evidence = self.photo_enrichment.enrich_group([photo.local_path for photo in photos])
+            group_evidence = self.photo_enrichment.enrich_group([photo.local_path for photo in photos], db=db, user_id=user.id)
         except Exception as exc:  # noqa: BLE001
             logger.warning("intake_group_enrichment_failed", extra={"batch_id": batch.id, "item_id": batch.item_id, "error": str(exc)})
             group_evidence = {}

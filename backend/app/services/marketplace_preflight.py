@@ -375,6 +375,13 @@ class MarketplacePreflightService:
         readiness: dict[str, Any],
     ) -> list[dict[str, Any]]:
         blockers: list[dict[str, Any]] = []
+        marketplace_data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}
+        if isinstance(marketplace_data.get("pricing_review_pause"), dict) and marketplace_data["pricing_review_pause"].get("active"):
+            blockers.append(_issue("PRICING_REVIEW_PAUSED", "Publishing is paused while the operator reviews a high-confidence price risk.", field="listing_price", fix_hint="Review the sold-comparable evidence and choose leave price, apply the protected price, or clear the pause."))
+        risk = pricing.get("underpricing_risk") if isinstance(pricing.get("underpricing_risk"), dict) else {}
+        acknowledgement = marketplace_data.get("pricing_underpricing_acknowledgement") if isinstance(marketplace_data.get("pricing_underpricing_acknowledgement"), dict) else {}
+        if risk.get("level") == "SEVERE" and risk.get("evidence_signature") and acknowledgement.get("evidence_signature") != risk.get("evidence_signature"):
+            blockers.append(_issue("UNDERPRICING_REVIEW_REQUIRED", "High-confidence sold evidence suggests this price may be substantially too low.", field="listing_price", fix_hint="Review the sold-comparable evidence and choose Leave Price As Is, Auto-fix Price, or Pause Listing."))
         if not (listing.title or "").strip():
             blockers.append(_issue("TITLE_MISSING", "Draft title is missing.", field="title", fix_hint="Enter a concise product title."))
         if not (listing.description or "").strip():

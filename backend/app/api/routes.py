@@ -2761,7 +2761,10 @@ def generate_listing(
             "existing_specifics": listing.item_specifics or {},
             "existing_condition": listing.condition,
             "custom_labels": listing.custom_labels or [],
-        }
+        },
+        db=db,
+        user_id=current_user.id,
+        listing_id=listing.id,
     )
     price_data = ebay.enrich_price(generated["title"], payload.barcode)
     pricing_analysis = PricingIntelligenceService().recommend_price(

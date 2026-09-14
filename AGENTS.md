@@ -815,3 +815,54 @@ requirements above. Credentials were not rotated or printed.
   `EBAY_IMAGE_URL_INVALID`); reference-only Amazon images were not promoted as
   actual product photos. This repair did not publish or change external
   marketplace listings.
+
+## 2026-09-14 - Guided setup, AI mode safety, and price-risk controls
+
+- Added authenticated, user-scoped Guided Setup state in `User.settings_json`:
+  selected destinations, resumable current step, skipped tasks, lifecycle
+  metadata, and privacy-safe funnel events. Dashboard and Settings expose
+  Start/Continue/Review setup; the first Dashboard visit offers a dismissible
+  welcome. Setup does not trust client-supplied tenant IDs.
+- Added a one-task-at-a-time `/onboarding` flow with destination selection,
+  BYO OpenAI versus PosterPro AI choice, encrypted BYO key storage, low-cost
+  provider test, and an honest pre-launch plan preview. No key is returned to
+  the browser. PosterPro-managed AI remains unavailable: server-side plan
+  entitlement, feature enablement, and a separate fail-closed metering-ready
+  gate are all required. Billing is not active and this pass did not activate
+  sponsored AI.
+- AI provider resolution now uses the signed-in user's encrypted BYO key for
+  listing, pricing, image, photo-group, and voice calls; ordinary users cannot
+  inherit the platform administrator's key. Durable AI de-duplication
+  signatures now include user and provider mode to prevent cross-account
+  result reuse.
+- eBay onboarding verification uses a read-only seller-policy API call and
+  only reports connected setup when the recent account check, saved payment /
+  fulfillment / return policies, and verified merchant location are present.
+  It never creates a listing. Browser-extension onboarding verifies heartbeat
+  only, not marketplace login or form-fill. Other assisted marketplaces remain
+  `OPERATOR_TEST_REQUIRED`; saved settings do not count as working publishing.
+  Google Photos OAuth is reported as connected-but-upload-unverified because
+  there is no harmless upload verification step. The deployment's startup
+  integration probe reported Google's saved refresh authorization rejected
+  (`Token has been expired or revoked`); no Google credential was changed.
+- Added sold-evidence underpricing assessment requiring at least three relevant
+  sold comps plus high relevance/confidence. Severe alerts create idempotent
+  in-app notifications and block publish until the operator acknowledges the
+  current evidence, applies the protected recommendation, or pauses. The three
+  choices are available in Listing Editor. Auto-fix records a revision and
+  queues exact-identity UPDATE jobs only; paused listings are blocked in
+  preflight. eBay end remains a manual action because this deployment has no
+  safe direct eBay end operation.
+- Pricing evidence in this pass is limited to PosterPro sale history, manually
+  entered comps, and supplied external-comparable inputs. No new sold-market
+  provider, collectible-variant research, confidence-calibrated external
+  comp cache, or tenant pricing-settings UI was added; the broader pricing
+  system is therefore partial, not a verified market-value service.
+- Validation: the focused onboarding/auth/Google OAuth/pricing/preflight/
+  marketplace API/eBay publish/extension suites passed `96 tests`; Python
+  compile passed; Next production build passed (repository lint/noVNC warnings
+  remain). No migration was required. Restarted only PosterPro backend,
+  worker, and frontend. Backend `/health` reports `database_ready=true`; local
+  and public `/onboarding`, plus local Listings and Settings routes, returned
+  `200`. Backend, worker, beat, and frontend are active. No listing was
+  published. No non-PosterPro project or shared host resource was modified.

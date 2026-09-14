@@ -1,9 +1,11 @@
 from datetime import UTC, datetime, timedelta
 
 from app.models.enums import ListingStatus
-from app.models.models import Listing, User
+from app.models.enums import MarketplaceListingStatus, MarketplaceName
+from app.models.models import Listing, MarketplaceCrosspostJob, MarketplaceListing, ListingRevision, User
 from app.services.listing_ai import ListingAIService
 from app.services.pricing_intelligence_service import PricingIntelligenceService
+from app.services.marketplace_preflight import MarketplacePreflightService
 from app.services.pricing_research_service import PricingResearchService, compute_listing_quality_summary, validate_marketplace_readiness
 
 
@@ -55,6 +57,113 @@ def test_pricing_research_normalizes_and_scores_comps(db_session):
     assert any(comp["include"] for comp in result["included_comps"])
     assert any(comp["reason_excluded"] for comp in result["excluded_comps"])
     assert result["recommended_price"] > 0
+
+
+def test_high_confidence_sold_evidence_flags_severe_underpricing_but_weak_evidence_does_not(db_session):
+    _, listing = _seed_listing(db_session, title="Pokemon Base Set Ninetales Holo Card 1999", category="Trading Cards", listing_price=20)
+    listing.item_specifics = {"Brand": "Pokemon", "Model": "Ninetales", "UPC": "012345678901"}
+    db_session.add(listing)
+    db_session.commit()
+    comps = [
+        {"title": "Pokemon Base Set Ninetales Holo Card 1999", "price": amount, "comp_type": "sold", "condition": "Used", "source_marketplace": "ebay", "matched_identifiers": {"upc": "012345678901"}}
+        for amount in (98, 100, 110)
+    ]
+    result = PricingResearchService().build_research(db_session, listing, external_comparables=comps)
+    assert result["underpricing_risk"]["level"] == "SEVERE", (result["underpricing_risk"], [(row["relevance_score"], row["include"], row["mismatch_flags"]) for row in result["included_comps"] + result["excluded_comps"]])
+    assert result["underpricing_risk"]["sold_comparable_count"] == 3
+    assert result["underpricing_risk"]["sold_median"] == 100
+
+    weak = PricingResearchService().build_research(db_session, listing, external_comparables=[
+        {"title": "Possibly related card", "price": 100, "comp_type": "sold", "condition": "Used", "source_marketplace": "ebay"},
+    ])
+    assert weak["underpricing_risk"]["level"] == "NONE"
+
+
+def test_underpricing_leave_acknowledges_current_evidence_without_price_change(db_session, monkeypatch):
+    from types import SimpleNamespace
+    from app.api.intelligence import PricingDecisionRequest, decide_underpricing
+    from app.services.pricing_intelligence_service import PricingIntelligenceService
+
+    user, listing = _seed_listing(db_session, listing_price=20)
+    risk = {"level": "SEVERE", "evidence_signature": "evidence-1", "current_price": 20, "sold_median": 100}
+    monkeypatch.setattr(PricingIntelligenceService, "recommend_price", lambda self, _db, _id: {"underpricing_risk": risk, "recommended_price": 96})
+    result = decide_underpricing(listing.id, PricingDecisionRequest(action="leave_price_as_is"), db_session, user)
+    db_session.refresh(listing)
+    assert result["status"] == "ACKNOWLEDGED"
+    assert listing.listing_price == 20
+    assert listing.marketplace_data["pricing_underpricing_acknowledgement"]["evidence_signature"] == "evidence-1"
+
+
+def test_underpricing_auto_fix_queues_only_update_for_confirmed_marketplace_identity(db_session, monkeypatch):
+    from types import SimpleNamespace
+    from app.api.intelligence import PricingDecisionRequest, decide_underpricing
+    from app.services.pricing_intelligence_service import PricingIntelligenceService
+    import app.api.marketplace_jobs as marketplace_jobs
+
+    user, listing = _seed_listing(db_session, listing_price=20)
+    db_session.add(MarketplaceListing(listing_id=listing.id, marketplace=MarketplaceName.facebook, marketplace_listing_id="fb-exact-123", status=MarketplaceListingStatus.PUBLISHED))
+    db_session.commit()
+    risk = {"level": "SEVERE", "evidence_signature": "evidence-2", "current_price": 20, "sold_median": 100}
+    monkeypatch.setattr(PricingIntelligenceService, "recommend_price", lambda self, _db, _id: {"underpricing_risk": risk, "recommended_price": 96})
+    monkeypatch.setattr(marketplace_jobs, "_enqueue_priority", lambda *_args, **_kwargs: SimpleNamespace(id="celery-test-task"))
+
+    result = decide_underpricing(listing.id, PricingDecisionRequest(action="auto_fix_price"), db_session, user)
+    db_session.refresh(listing)
+    jobs = db_session.query(MarketplaceCrosspostJob).filter_by(listing_id=listing.id).all()
+    revisions = db_session.query(ListingRevision).filter_by(listing_id=listing.id).all()
+    assert result["status"] == "PRICE_UPDATED"
+    assert listing.listing_price == 96
+    assert len(jobs) == 1
+    assert jobs[0].execution_plan["operation"] == "update"
+    assert jobs[0].execution_plan["external_listing_id"] == "fb-exact-123"
+    assert jobs[0].target_marketplaces == ["facebook"]
+    assert len(revisions) == 1
+
+
+def test_underpricing_pause_blocks_new_publish_and_keeps_ebay_end_explicitly_manual(db_session, monkeypatch):
+    from app.api.intelligence import PricingDecisionRequest, decide_underpricing
+    from app.services.pricing_intelligence_service import PricingIntelligenceService
+    from app.services.marketplace_preflight import MarketplacePreflightService
+
+    user, listing = _seed_listing(db_session, listing_price=20)
+    db_session.add(MarketplaceListing(listing_id=listing.id, marketplace=MarketplaceName.ebay, marketplace_listing_id="ebay-exact-456", status=MarketplaceListingStatus.PUBLISHED))
+    db_session.commit()
+    risk = {"level": "POTENTIAL", "evidence_signature": "evidence-3", "current_price": 20, "sold_median": 50}
+    monkeypatch.setattr(PricingIntelligenceService, "recommend_price", lambda self, _db, _id: {"underpricing_risk": risk, "recommended_price": 48})
+
+    result = decide_underpricing(listing.id, PricingDecisionRequest(action="pause_listing"), db_session, user)
+    db_session.refresh(listing)
+    assert result["status"] == "PAUSED_FOR_REVIEW"
+    assert result["manual_end_required"][0]["external_listing_id"] == "ebay-exact-456"
+    assert listing.marketplace_data["pricing_review_pause"]["active"] is True
+    blockers = MarketplacePreflightService().preflight_listing(db_session, listing, "ebay")["blockers"]
+    assert any(blocker.get("code") == "PRICING_REVIEW_PAUSED" for blocker in blockers)
+
+
+def test_severe_underpricing_notification_is_idempotent_for_same_evidence(db_session, monkeypatch):
+    from app.models.models import IntakeNotification
+    from app.services.pricing_intelligence_service import PricingIntelligenceService
+
+    user, listing = _seed_listing(db_session, listing_price=20)
+    service = PricingIntelligenceService()
+    risk = {"level": "SEVERE", "evidence_signature": "same-evidence", "current_price": 20, "sold_median": 100, "sold_comparable_count": 4}
+    monkeypatch.setattr(service.research, "build_research", lambda *_args, **_kwargs: {"underpricing_risk": risk, "recommended_price": 99})
+    service.recommend_price(db_session, listing.id)
+    service.recommend_price(db_session, listing.id)
+    notices = db_session.query(IntakeNotification).filter_by(user_id=user.id, notification_type="pricing_underpricing_severe").all()
+    assert len(notices) == 1
+    assert notices[0].metadata_json["listing_id"] == listing.id
+    assert notices[0].metadata_json["evidence_signature"] == "same-evidence"
+
+
+def test_severe_underpricing_requires_acknowledgement_before_publish(db_session):
+    _, listing = _seed_listing(db_session, listing_price=20)
+    listing.marketplace_data = {"pricing_analysis": {"underpricing_risk": {"level": "SEVERE", "evidence_signature": "risk-v1"}}}
+    blockers = MarketplacePreflightService()._base_blockers(listing, "mercari", listing.marketplace_data["pricing_analysis"], {})
+    assert any(row["code"] == "UNDERPRICING_REVIEW_REQUIRED" for row in blockers)
+    listing.marketplace_data["pricing_underpricing_acknowledgement"] = {"evidence_signature": "risk-v1"}
+    blockers = MarketplacePreflightService()._base_blockers(listing, "mercari", listing.marketplace_data["pricing_analysis"], {})
+    assert all(row["code"] != "UNDERPRICING_REVIEW_REQUIRED" for row in blockers)
 
 
 def test_weak_no_comp_fallback_and_manual_override_preserved(db_session):

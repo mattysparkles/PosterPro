@@ -65,6 +65,10 @@ class Settings(BaseSettings):
     ai_large_daily_entitlement: int = 250_000
     ai_large_daily_safe_ceiling: int = 225_000
     ai_provider_circuit_cooldown_seconds: int = 900
+    sponsored_ai_enabled: bool = False
+    sponsored_ai_metering_ready: bool = False
+    sponsored_ai_allowed_models: str = "gpt-4o-mini"
+    sponsored_ai_request_limit_per_minute: int = 20
     bulk_chunk_size: int = 0
     amazon_vine_import_enabled: bool = False
     amazon_vine_import_premium_only: bool = False

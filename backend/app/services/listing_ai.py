@@ -16,6 +16,7 @@ from app.services.category_rules import suggest_category_from_text
 from app.prompts.templates import LISTING_PROMPT_TEMPLATE, get_prompt_template
 from app.models.models import AIRequestLedger
 from app.services.ai_guard import reserve_durable, reconcile_durable, provider_circuit_open, open_provider_circuit, close_provider_circuit
+from app.services.ai_entitlements import resolve_openai_key
 
 logger = logging.getLogger(__name__)
 
@@ -290,8 +291,11 @@ class ListingAIService:
         fallback = self._fallback_generation(image_signals)
         reservation_id = None
         durable_cached_result = None
-        if db is not None and settings.ai_cost_mode == "COMPLIMENTARY_ONLY":
-            key = hashlib.sha256(json.dumps({k: image_signals.get(k) for k in ("listing_id", "canonical_item_id", "voice_transcript", "voice_notes", "title_hint", "existing_specifics", "source_facts", "photo_keywords", "marketplace_targets")}, sort_keys=True, default=str).encode()).hexdigest()
+        _, provider_mode = resolve_openai_key(db, user_id)
+        if db is not None and settings.ai_cost_mode == "COMPLIMENTARY_ONLY" and provider_mode in {"platform_admin", "posterpro_sponsored"}:
+            key_payload = {k: image_signals.get(k) for k in ("listing_id", "canonical_item_id", "voice_transcript", "voice_notes", "title_hint", "existing_specifics", "source_facts", "photo_keywords", "marketplace_targets")}
+            key_payload.update({"user_id": user_id, "provider_mode": provider_mode})
+            key = hashlib.sha256(json.dumps(key_payload, sort_keys=True, default=str).encode()).hexdigest()
             reservation = reserve_durable(db, key=key, pool="mini", estimated_tokens=8000, user_id=user_id, listing_id=listing_id, purpose="listing_intelligence")
             if reservation.get("status") == "DUPLICATE_SUPPRESSED":
                 try:
@@ -306,7 +310,7 @@ class ListingAIService:
                     image_signals = {**image_signals, "_provider_blocked": reservation}
             else:
                 reservation_id = reservation.get("reservation_id")
-        llm_bundle = {"result": durable_cached_result, "metadata": {"validation_status": "CACHE_REUSE", "response_provider": "openai"}} if durable_cached_result else self._llm_generation(image_signals, db=db)
+        llm_bundle = {"result": durable_cached_result, "metadata": {"validation_status": "CACHE_REUSE", "response_provider": "openai", "provider_mode": provider_mode}} if durable_cached_result else self._llm_generation(image_signals, db=db, user_id=user_id)
         llm = llm_bundle.get("result") if isinstance(llm_bundle, dict) else None
         llm_metadata = llm_bundle.get("metadata") if isinstance(llm_bundle, dict) else {}
         merged = {**fallback, **(llm or {})}
@@ -384,13 +388,16 @@ class ListingAIService:
                 logger.warning("ai_ledger_persist_failed listing_id=%s error=%s", listing_id, type(exc).__name__)
         return merged
 
-    def _llm_generation(self, image_signals: dict[str, Any], db: Any = None) -> dict[str, Any] | None:
+    def _llm_generation(self, image_signals: dict[str, Any], db: Any = None, user_id: int | None = None) -> dict[str, Any] | None:
         global _AI_CIRCUIT_UNTIL, _AI_CIRCUIT_REASON
         if isinstance(image_signals.get("_provider_blocked"), dict):
             return {"result": None, "metadata": {"validation_status": "budget_blocked", "response_provider": "openai", "error": "AI dispatch withheld: " + str(image_signals["_provider_blocked"].get("status"))}}
-        if not settings.openai_api_key:
-            return None
+        api_key, provider_mode = resolve_openai_key(db, user_id)
+        if not api_key:
+            return {"result": None, "metadata": {"validation_status": "provider_not_configured", "response_provider": "openai", "provider_mode": provider_mode, "error": "Connect an OpenAI account or enable an eligible PosterPro AI plan."}}
         signature_payload = {k: image_signals.get(k) for k in ("listing_id", "canonical_item_id", "voice_transcript", "voice_notes", "title_hint", "existing_specifics", "source_facts", "photo_keywords", "marketplace_targets")}
+        signature_payload["user_id"] = user_id
+        signature_payload["provider_mode"] = provider_mode
         signature = hashlib.sha256(json.dumps(signature_payload, sort_keys=True, default=str).encode()).hexdigest()
         with _AI_GUARD_LOCK:
             if signature in _AI_SUCCESS_CACHE:
@@ -432,7 +439,7 @@ class ListingAIService:
             },
             "temperature": 0.1,
         }
-        headers = {"Authorization": f"Bearer {settings.openai_api_key}", "Content-Type": "application/json"}
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         started = time.perf_counter()
         try:
             with httpx.Client(timeout=60) as client:
@@ -462,6 +469,7 @@ class ListingAIService:
                         "validation_status": "validated",
                         "validation_errors": [],
                         "response_provider": "openai",
+                        "provider_mode": provider_mode,
                         "raw_request_preview": raw_request_preview,
                         "service_tier": body.get("service_tier"),
                     },

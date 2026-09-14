@@ -6,6 +6,7 @@ import { useRouter } from 'next/router';
 import toast from 'react-hot-toast';
 
 import AppShell from '../components/layout/AppShell';
+import GuidedSetupCard from '../components/onboarding/GuidedSetupCard';
 import CmsTemplateWorkspace from '../components/CmsTemplateWorkspace';
 import ThemeSelector from '../components/settings/ThemeSelector';
 import SettingsLayout from '../components/settings/SettingsLayout';
@@ -1295,6 +1296,8 @@ export default function SettingsPage() {
           </Button>
         }
       />
+
+      <GuidedSetupCard />
 
       <SettingsLayout
         nav={

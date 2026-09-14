@@ -53,6 +53,7 @@ from app.services.site_content_service import (
     save_site_content,
 )
 from app.services.automation_bridge import bridge_browser_submit_policy
+from app.services.ai_entitlements import public_ai_setup_state
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -352,6 +353,7 @@ def _build_settings_panel_response(current_user: User, *, ebay_account: Marketpl
     runame = runtime_settings.ebay_runame or runtime_settings.ebay_redirect_uri or ""
     ebay_health = summarize_ebay_account_health(ebay_account)
     google_health = get_google_photos_oauth_state(current_user)
+    ai_health = public_ai_setup_state(current_user)
     bridge_submit_policy = bridge_browser_submit_policy()
     return {
         "profile": {
@@ -399,8 +401,9 @@ def _build_settings_panel_response(current_user: User, *, ebay_account: Marketpl
             "oauth_ready": google_photos_oauth_ready(),
             **google_health,
         },
+        "ai": ai_health,
         "api_keys": {
-            "openai_configured": bool(runtime_settings.openai_api_key),
+            "openai_configured": ai_health["state"] == "CONNECTED",
             "photoroom_configured": bool(runtime_settings.photoroom_api_key),
             "google_photos_client_id_configured": bool(runtime_settings.google_photos_client_id),
             "google_photos_client_secret_configured": bool(runtime_settings.google_photos_client_secret),

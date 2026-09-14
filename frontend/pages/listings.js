@@ -36,6 +36,7 @@ import { formatPublishFailureMessage } from '../lib/publish-status';
 import {
   applyListingTemplate,
   applyPricingRecommendation,
+  decideUnderpricing,
   bulkPricingAction,
   createListingTemplate,
   fetchCrosspostPreview,
@@ -2798,6 +2799,12 @@ export default function ListingsPage() {
               }}
               onApplyPricing={async (id, payload) => {
                 await applyPricingRecommendation(id, payload);
+                setPricingRecommendation(await fetchPricingRecommendation(id));
+                setListingIntelligence(await fetchListingIntelligence(id));
+                await reload();
+              }}
+              onPricingDecision={async (id, action) => {
+                await decideUnderpricing(id, action);
                 setPricingRecommendation(await fetchPricingRecommendation(id));
                 setListingIntelligence(await fetchListingIntelligence(id));
                 await reload();

@@ -856,11 +856,14 @@ def analyze_voice_intake(
 @router.post("/voice/transcribe")
 def transcribe_voice_note(
     payload: IntakeVoiceTranscriptionRequest,
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     return service.transcribe_voice_audio(
         voice_audio_data_url=payload.voice_audio_data_url,
         fallback_transcript=payload.voice_notes,
+        db=db,
+        user_id=current_user.id,
     )
 
 

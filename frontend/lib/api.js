@@ -1089,6 +1089,14 @@ export async function applyPricingRecommendation(id, body) {
   });
 }
 
+export async function decideUnderpricing(id, action) {
+  return jsonFetch(`${API_BASE}/pricing/recommendations/${id}/decision`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action }),
+  });
+}
+
 export async function bulkPricingAction(body) {
   return jsonFetch(`${API_BASE}/pricing/recommendations/bulk`, {
     method: "POST",
@@ -1545,5 +1553,70 @@ export async function diagnoseListings(listingIds, { runFreshPreflight = true, m
   return jsonFetch(`${API_BASE}/admin/listing-diagnostics`, {
     method: "POST",
     body: JSON.stringify({ listing_ids: listingIds, marketplace, run_fresh_preflight: runFreshPreflight }),
+  });
+}
+
+export function fetchOnboardingState() {
+  return jsonFetch(`${API_BASE}/onboarding/state`);
+}
+
+export function startOnboarding() {
+  return jsonFetch(`${API_BASE}/onboarding/start`, { method: 'POST' });
+}
+
+export function skipOnboardingForNow() {
+  return jsonFetch(`${API_BASE}/onboarding/skip-for-now`, { method: 'POST' });
+}
+
+export function restartOnboarding() {
+  return jsonFetch(`${API_BASE}/onboarding/restart`, { method: 'POST' });
+}
+
+export function saveOnboardingSelection(marketplaces) {
+  return jsonFetch(`${API_BASE}/onboarding/selection`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ marketplaces }),
+  });
+}
+
+export function saveOnboardingStep(stepId) {
+  return jsonFetch(`${API_BASE}/onboarding/step`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ step_id: stepId }),
+  });
+}
+
+export function skipOnboardingTask(taskId) {
+  return jsonFetch(`${API_BASE}/onboarding/skip/${encodeURIComponent(taskId)}`, { method: 'POST' });
+}
+
+export function chooseOnboardingAiMode(mode) {
+  return jsonFetch(`${API_BASE}/onboarding/ai/mode`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode }),
+  });
+}
+
+export function testOnboardingOpenAiKey(apiKey) {
+  return jsonFetch(`${API_BASE}/onboarding/ai/test`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ api_key: apiKey }),
+    timeoutMs: 30000,
+  });
+}
+
+export function verifyOnboardingTask(taskId) {
+  return jsonFetch(`${API_BASE}/onboarding/verify/${encodeURIComponent(taskId)}`, { method: 'POST' });
+}
+
+export function recordOnboardingEvent(eventName, taskId = null) {
+  return jsonFetch(`${API_BASE}/onboarding/event`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ event: eventName, task_id: taskId }),
   });
 }

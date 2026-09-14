@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import math
 import re
+import hashlib
+import json
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -323,6 +325,38 @@ class PricingResearchService:
         if preserve_manual_override and manual_override_price:
             current_price = manual_override_price
 
+        sold_median = self._median(sold_prices) if sold_prices else None
+        sold_confidence = round(sum(float(comp.get("relevance_score") or 0) for comp in sold) / len(sold), 2) if sold else 0.0
+        risk_level = "NONE"
+        price_gap_percent = None
+        evidence_signature = None
+        if sold_median and len(sold) >= 3 and confidence >= 0.70 and sold_confidence >= 0.60:
+            price_gap_percent = round(max(0.0, 1.0 - float(current_price) / sold_median) * 100, 1)
+            if float(current_price) <= sold_median * 0.40:
+                risk_level = "SEVERE"
+            elif float(current_price) <= sold_median * 0.60:
+                risk_level = "POTENTIAL"
+            evidence_signature = hashlib.sha256(json.dumps({
+                "price": round(float(current_price), 2),
+                "sold_median": round(sold_median, 2),
+                "sold_count": len(sold),
+                "titles": sorted(str(comp.get("title") or "") for comp in sold),
+            }, sort_keys=True).encode()).hexdigest()[:24]
+        saved_ack = marketplace_data.get("pricing_underpricing_acknowledgement")
+        acknowledged = bool(risk_level != "NONE" and isinstance(saved_ack, dict) and saved_ack.get("evidence_signature") == evidence_signature)
+        underpricing_risk = {
+            "level": risk_level,
+            "acknowledged": acknowledged,
+            "current_price": round(float(current_price), 2),
+            "sold_median": round(sold_median, 2) if sold_median else None,
+            "percent_below_sold_median": price_gap_percent,
+            "sold_comparable_count": len(sold),
+            "sold_comparable_confidence": sold_confidence,
+            "price_confidence": confidence,
+            "evidence_signature": evidence_signature,
+            "reason": "Not enough recent/high-confidence sold evidence to issue an underpricing alert." if risk_level == "NONE" else f"Current price is {price_gap_percent}% below the median of {len(sold)} relevant sold comparables.",
+        }
+
         explanation = self._build_explanation(
             included=included,
             sold=sold,
@@ -351,6 +385,7 @@ class PricingResearchService:
             "condition_adjustment_explanation": f"Condition multiplier {condition_adjustment:.2f} applied for {_condition_bucket(listing)} state.",
             "shipping_price_interaction_note": shipping_note,
             "warning": warning,
+            "underpricing_risk": underpricing_risk,
             "sold_comps_available": bool(sold),
             "sold_comps_unavailable": not bool(sold),
             "included_comps": included[:20],

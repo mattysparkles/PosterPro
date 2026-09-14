@@ -1297,7 +1297,7 @@ class ListingProcessingService:
                 return updated
             sample_paths = image_paths[:3]
             try:
-                sample = self.photo_enrichment.enrich_group(sample_paths)
+                sample = self.photo_enrichment.enrich_group(sample_paths, db=db, user_id=listing.user_id)
             except Exception as exc:  # noqa: BLE001
                 sample = {"error": type(exc).__name__, "message": str(exc), "photos_evaluated": len(sample_paths)}
                 updated["image_identity_error"] = str(exc)
