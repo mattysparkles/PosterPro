@@ -668,9 +668,11 @@ async def test_all_queue_excludes_sold_archived_and_review_requires_publishable_
 
     review_payload = (await async_client.get("/listings?queue=review&source_type=amazon_vine&page_size=50")).json()
     assert {row["id"] for row in review_payload["items"]} == {active_review}
+    assert review_payload["items"][0]["queue_bucket"] == "review"
     attention_payload = (await async_client.get("/listings?queue=attention&source_type=amazon_vine&page_size=50")).json()
     attention_ids = {row["id"] for row in attention_payload["items"]}
     assert blocked_review in attention_ids and approved_but_blocked in attention_ids
+    assert all(row["queue_bucket"] == "needs_attention" for row in attention_payload["items"])
     ready_ids = {row["id"] for row in (await async_client.get("/listings?queue=ready&source_type=amazon_vine&page_size=50")).json()["items"]}
     assert approved_but_blocked not in ready_ids
 

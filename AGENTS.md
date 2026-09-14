@@ -785,3 +785,33 @@ requirements above. Credentials were not rotated or printed.
   An unrouted listing no longer silently defaults to eBay. Frontend build and
   Frontend build passed. Deployment/runtime verification is pending this
   checkpoint.
+
+## 2026-09-13 - Vine cohort finalization and authoritative queue badges
+
+- Completed the shared Vine finalization repairs for the ten acceptance
+  listings `2191, 2187, 2185, 2179, 2178, 2177, 2174, 2170, 2167, 2141`.
+  A post-deployment read-only check found all ten in the canonical `review`
+  bucket with `processing_state=complete`, `needs_review=true`, New condition,
+  quantity 1, usable category IDs, 11–12 images, and an eBay preflight result
+  of `needs_review` with zero blockers. No publish operation was invoked.
+- Added shared Vine category rules for mirrors and lithium battery chargers,
+  destination-aware matching for verified eBay leaves, and category-aware
+  mapping of Amazon mirror dimensions to required eBay Item Height/Width.
+- Fixed the Listings queue-card mismatch: filtered queue membership and the
+  visible badge now use the same backend-computed `queue_bucket`. This avoids
+  summary cards being mislabeled Needs Attention when their omitted quality /
+  readiness summaries prevented the browser from independently recomputing
+  readiness. The two screenshot examples, listings `2164` and `2208`, were
+  read-only verified as `review`, with cached eBay `ready_with_warnings` and no
+  blockers.
+- Validation: `test_vine_import.py`, `test_marketplace_preflight.py`,
+  `test_marketplace_api.py`, and `test_ebay_service.py` — `139 passed`; the
+  targeted queue-contract test also passed before the full run. Frontend
+  production build passed with existing lint warnings. Backend and frontend
+  were restarted; backend health reports `database_ready=true` and the
+  backend, worker, beat, and frontend services are active.
+- Three other current Vine rows remain in Needs Attention only for unresolved
+  genuine-image blockers (`ACTUAL_PHOTOS_MISSING` / `REFERENCE_IMAGES_ONLY` /
+  `EBAY_IMAGE_URL_INVALID`); reference-only Amazon images were not promoted as
+  actual product photos. This repair did not publish or change external
+  marketplace listings.

@@ -195,6 +195,10 @@ function getListingThumbnail(listing) {
 }
 
 function getListingBucket(listing) {
+  const canonicalBucket = String(listing?.queue_bucket || '').trim().toLowerCase();
+  if (canonicalBucket) {
+    return canonicalBucket === 'needs_attention' ? 'attention' : canonicalBucket;
+  }
   if (isSoldListing(listing)) return 'sold';
   if (isArchivedListing(listing)) return 'archived';
   if (listing.ebay_publish_status === 'POSTED' || listing.ebay_listing_id) return 'published';

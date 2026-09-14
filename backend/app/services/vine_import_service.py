@@ -1407,6 +1407,21 @@ class VineImportService:
                 specifics[key] = value
                 provenance[key] = "amazon_product_page"
         _merge_dimension_specifics(specifics, provenance, facts)
+        # eBay's Mirrors leaf asks for Item Height/Width, while Amazon often
+        # records the same wall-mounted product as Item Length x Item Width.
+        # For a mirror, preserve those measured axes in the destination's
+        # category vocabulary instead of leaving a required height blank.
+        if "mirror" in str(listing.category_suggestion or "").lower():
+            dimensions = facts.get("dimensions") if isinstance(facts.get("dimensions"), dict) else {}
+            unit = str(dimensions.get("unit") or "in").strip()
+            length = dimensions.get("length")
+            width = dimensions.get("width")
+            if length and not self._usable_vine_fact(specifics.get("Item Height")):
+                specifics["Item Height"] = f"{length:g} {unit}"
+                provenance["Item Height"] = "amazon_product_dimensions_category_mapping"
+            if width and not self._usable_vine_fact(specifics.get("Item Width")):
+                specifics["Item Width"] = f"{width:g} {unit}"
+                provenance["Item Width"] = "amazon_product_dimensions_category_mapping"
         listing.item_specifics = specifics
         listing.condition_data = derive_condition_data(
             listing={"condition": "New", "source_type": "amazon_vine"},

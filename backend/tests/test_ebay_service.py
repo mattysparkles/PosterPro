@@ -69,6 +69,17 @@ def test_vine_ebay_taxonomy_rejects_first_semantically_wrong_suggestion(monkeypa
     assert ebay_service._vine_category_match_score(listing.category_suggestion, "Pantyhose & Tights") == 0
 
 
+@pytest.mark.parametrize(
+    ("semantic_category", "candidate_name"),
+    [
+        ("Home & Garden > Home Décor > Mirrors", "Mirrors"),
+        ("Consumer Electronics > Multipurpose Batteries & Power > Battery Chargers", "Battery Chargers"),
+    ],
+)
+def test_vine_taxonomy_semantic_matching_accepts_verified_mirror_and_charger_leaves(semantic_category, candidate_name):
+    assert ebay_service._vine_category_match_score(semantic_category, candidate_name) > 0
+
+
 def test_ebay_image_builder_uses_normalized_listing_images(monkeypatch):
     listing = DummyListing()
     listing.image_urls = []

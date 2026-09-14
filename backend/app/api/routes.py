@@ -445,6 +445,10 @@ def _approval_preflight_status(listing: Listing) -> dict:
 def _serialize_listing_response(listing: Listing) -> dict:
     sync_listing_review_state(listing=listing)
     base = ListingResponse.model_validate(listing).model_dump()
+    # The catalog card and its queue filter must share one readiness decision.
+    # Frontend-only recomputation can be incomplete because summary responses
+    # intentionally omit the heavyweight quality/readiness summaries.
+    base["queue_bucket"] = _listing_bucket(listing)
     latest_rows_by_marketplace: dict[str, MarketplaceListing] = {}
     for row in sorted(
         listing.marketplace_listings or [],
@@ -527,6 +531,7 @@ def _serialize_listing_response(listing: Listing) -> dict:
 def _serialize_listing_summary(listing: Listing) -> dict:
     sync_listing_review_state(listing=listing)
     base = ListingResponse.model_validate(listing).model_dump()
+    base["queue_bucket"] = _listing_bucket(listing)
     base.pop("marketplace_statuses", None)
     base.pop("latest_publish_attempt", None)
     return base

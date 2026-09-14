@@ -964,6 +964,20 @@ def test_vine_category_and_pricing_policy_uses_product_facts_without_etv():
     assert pricing["price_source"] == "amazon_current_price"
 
 
+@pytest.mark.parametrize(
+    ("product_name", "expected_category"),
+    [
+        ('Solid Wood Asymmetrical Irregular Framed Wall Mirror, 24"x36"', "Home & Garden > Home Décor > Mirrors"),
+        ("36V Lithium Battery Charger 900W 20A", "Consumer Electronics > Multipurpose Batteries & Power > Battery Chargers"),
+    ],
+)
+def test_vine_semantic_category_rules_cover_mirrors_and_battery_chargers(product_name, expected_category):
+    item = VineImportItem(product_name=product_name, category="Computers/Tablets & Networking")
+    category, source = VineImportService()._resolve_category(item, amazon_facts={"title": product_name})
+    assert category == expected_category
+    assert source == "keyword_rules"
+
+
 def test_shared_shipping_policy_charges_buyer_below_ten_dollars():
     low = derive_shipping_profile(listing={"listing_price": 9.99})
     regular = derive_shipping_profile(listing={"listing_price": 10.00})
@@ -1826,6 +1840,56 @@ def test_vine_finalization_recomputes_stale_blockers_before_review_queue(db_sess
     assert listing.processing_blocking_reason is None
     assert cached["status"] == "ready_with_warnings" and cached["blockers"] == []
     assert _listing_bucket(listing) == "review"
+
+
+def test_vine_mirror_dimensions_map_amazon_length_to_required_ebay_height(db_session, monkeypatch):
+    from app.services.marketplace_preflight import MarketplacePreflightService
+
+    user = User(email=f"vine-mirror-dimensions-{uuid4()}@example.com", role="owner", is_admin=True)
+    db_session.add(user); db_session.flush()
+    batch = VineImportBatch(user_id=user.id, filename="mirror.csv", source_type="csv")
+    listing = Listing(
+        user_id=user.id,
+        source_type="amazon_vine",
+        status=ListingStatus.PROCESSED,
+        title='Framed Wall Mirror, 24"x36"',
+        description="Framed Wall Mirror, 24 x 36 inches. The solid-wood frame surrounds an irregular mirror intended for wall display. Confirm mounting hardware and final placement before installation.",
+        listing_price=119.0,
+        suggested_price=119.0,
+        quantity=1,
+        condition="New",
+        category_suggestion="Home & Garden > Home Décor > Mirrors",
+        category_id="20580",
+        image_urls=["/media/vine/mirror.jpg"],
+        listing_images=[{"storage_path": "/media/vine/mirror.jpg", "operator_state": "approved", "is_reference": False, "is_primary": True}],
+        item_specifics={"Brand": "Gessolane", "Product Dimensions": '36"L x 24"W'},
+        source_metadata={"asin": "B0MIRRORDIM", "amazon_product_facts": {
+            "title": 'Framed Wall Mirror, 24"x36"', "brand": "Gessolane", "product_type": "wall mirror",
+            "current_price": 119.0, "price_source": "asin_product_offer_widget_v2",
+            "dimensions": {"length": 36.0, "width": 24.0, "height": None, "unit": "in", "dimension_type": "product", "raw_text": '36"L x 24"W'},
+            "specifications": {"Product Dimensions": '36"L x 24"W', "Material": "Solid wood", "Mounting Type": "Wall mount", "Item Weight": "18 pounds"},
+            "feature_bullets": ["Solid-wood framed wall mirror", "Irregular profile for wall display"],
+        }},
+        marketplace_data={},
+    )
+    db_session.add_all([batch, listing]); db_session.flush()
+    item = VineImportItem(batch_id=batch.id, user_id=user.id, asin="B0MIRRORDIM", product_name=listing.title, listing_id=listing.id, eligibility_status="eligible")
+    db_session.add(item); db_session.commit()
+
+    def fake_preflight(_service, _db, candidate, _marketplace):
+        missing = not candidate.item_specifics.get("Item Height")
+        blockers = [{"code": "EBAY_REQUIRED_ASPECT_MISSING", "field": "item_specifics.Item Height", "message": "Item Height is required."}] if missing else []
+        return {"marketplace": "ebay", "status": "blocked" if blockers else "ready", "blockers": blockers, "warnings": []}
+
+    monkeypatch.setattr(MarketplacePreflightService, "preflight_listing", fake_preflight)
+    result = VineImportService().preflight_batch_drafts(db_session, batch=batch, listing_ids=[listing.id])
+    db_session.refresh(listing)
+
+    assert result["results"][0]["blockers"] == []
+    assert listing.item_specifics["Item Height"] == "36 in"
+    assert listing.item_specifics["Item Width"] == "24 in"
+    assert listing.marketplace_data["ebay_item_specifics_provenance"]["Item Height"] == "amazon_product_dimensions_category_mapping"
+    assert listing.processing_state == "complete" and listing.needs_review is True
 
 
 def test_vine_clean_needs_review_preflight_status_is_not_routed_to_attention():

@@ -662,6 +662,8 @@ def _vine_category_match_score(expected_path: str, candidate_name: str) -> int:
         (("irons & garment steamers", "ironing machine"), ("iron", "ironing", "steamer", "garment")),
         (("water cooling", "cpu cooler"), ("cooling", "cooler", "water")),
         (("bird houses", "bird house"), ("bird", "house")),
+        (("home décor > mirrors", "wall mirror", "mirrors"), ("mirror",)),
+        (("battery chargers", "battery charger"), ("battery", "charger")),
         (("drip irrigation", "plant waterer"), ("drip", "irrigation", "watering")),
         (("ottomans", "ottoman"), ("ottoman", "footstool", "pouf")),
         (("kvm switches", "kvm switch"), ("kvm", "switch")),

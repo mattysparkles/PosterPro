@@ -12,6 +12,8 @@ _CATEGORY_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
     (("bird house", "birdhouse", "martin house"), "Home & Garden > Yard, Garden & Outdoor Living > Bird Houses"),
     (("cpu cooler", "liquid cpu cooler", "liquid cooling", "computer cooler"), "Computers/Tablets & Networking > Computer Components > Fans, Heatsinks & Cooling Systems"),
     (("drip irrigation", "irrigation kit", "plant waterer"), "Home & Garden > Watering Equipment > Drip Irrigation"),
+    (("wall mirror", "framed mirror", "bathroom mirror", "mirror"), "Home & Garden > Home Décor > Mirrors"),
+    (("lithium battery charger", "battery charger", "battery chargers"), "Consumer Electronics > Multipurpose Batteries & Power > Battery Chargers"),
     (("ironing machine", "automatic ironing", "clothing steamer", "garment steamer"), "Home & Garden > Household Supplies & Cleaning > Irons & Garment Steamers"),
     (("rv bumper", "tote tank carrier", "waste tank holder", "rv tote tank"), "Automotive > RV, Trailer & Camper Parts & Accessories > Exterior Accessories > Cargo Racks"),
     (("pool pump", "spa pump", "pool filter pump", "pool booster pump"), "Home & Garden > Yard, Garden & Outdoor Living > Pools & Spas > Pool Pumps"),
