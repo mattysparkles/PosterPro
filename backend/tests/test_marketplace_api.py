@@ -788,7 +788,18 @@ async def test_dashboard_catalog_metrics_are_unpaginated_and_count_live_canonica
     user_id = register.json()["user"]["id"]
 
     db = database_module.SessionLocal()
-    live_rows = [Listing(user_id=user_id, status=ListingStatus.PUBLISHED, title=f"Live {idx}", description="live", quantity=1) for idx in range(161)]
+    live_rows = [
+        Listing(
+            user_id=user_id,
+            status=ListingStatus.PUBLISHED,
+            ebay_publish_status=EbayPublishStatus.POSTED,
+            ebay_listing_id=f"EBAY-{idx}",
+            title=f"Live {idx}",
+            description="live",
+            quantity=1,
+        )
+        for idx in range(161)
+    ]
     db.add_all(live_rows)
     db.flush()
     # Two live marketplace projections for one canonical item must not inflate
@@ -797,6 +808,10 @@ async def test_dashboard_catalog_metrics_are_unpaginated_and_count_live_canonica
         MarketplaceListing(listing_id=live_rows[0].id, marketplace=MarketplaceName.facebook, marketplace_listing_id="fb-1", status=MarketplaceListingStatus.PUBLISHED),
         MarketplaceListing(listing_id=live_rows[0].id, marketplace=MarketplaceName.mercari, marketplace_listing_id="mc-1", status=MarketplaceListingStatus.PUBLISHED),
     ])
+    unconfirmed_projection = Listing(user_id=user_id, status=ListingStatus.draft, title="Unconfirmed projection", description="still a draft", quantity=1)
+    db.add(unconfirmed_projection)
+    db.flush()
+    db.add(MarketplaceListing(listing_id=unconfirmed_projection.id, marketplace=MarketplaceName.facebook, marketplace_listing_id=None, status=MarketplaceListingStatus.PUBLISHED))
     draft = Listing(user_id=user_id, status=ListingStatus.draft, title="Women's Brown Leather Crossbody Bag", description="draft", quantity=1)
     review = Listing(user_id=user_id, status=ListingStatus.draft, title="Vintage Navy Cotton Sweater Size Large", description="review", quantity=1, needs_review=True, marketplace_data={"targets": ["ebay"], "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "needs_review", "blockers": []}}}})
     ready = Listing(user_id=user_id, status=ListingStatus.ready, title="Ready Product", description="ready", quantity=1, image_urls=["https://example.test/ready.jpg"], category_suggestion="Collectibles", source_metadata={"operator_approved_at": "2026-09-01T00:00:00Z"}, marketplace_data={"targets": ["ebay"], "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "ready", "blockers": []}}}})
@@ -817,10 +832,10 @@ async def test_dashboard_catalog_metrics_are_unpaginated_and_count_live_canonica
     assert status["catalog_published"] == 161
     assert status["catalog_review"] == 1
     assert status["catalog_ready"] == 1
-    assert status["catalog_drafts"] == 1
+    assert status["catalog_drafts"] == 2
     assert status["catalog_failed"] == 1
 
-    for queue, expected in (("review", 1), ("ready", 1), ("drafts", 1), ("needs_attention", 1)):
+    for queue, expected in (("review", 1), ("ready", 1), ("drafts", 2), ("needs_attention", 1)):
         queued = await async_client.get(f"/listings?page=1&page_size=5&queue={queue}")
         assert queued.status_code == 200
         assert queued.json()["total"] == expected

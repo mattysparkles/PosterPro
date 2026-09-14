@@ -1032,6 +1032,14 @@ requirements above. Credentials were not rotated or printed.
   The live-count discrepancy from the operator's approximate 161 is retained
   as a finding to recheck against the canonical projections after deployment,
   not hidden with a UI override.
+- Metric-definition follow-up: active marketplace projection rows now count
+  only when they include a non-empty exact external listing ID; legacy eBay
+  lifecycle rows likewise require the eBay listing identity. The Published
+  queue and bucket use the same confirmed-identity rule. This avoids treating
+  status-only/no-ID projections as live. Added a fixture proving a Published
+  marketplace row without external identity stays in Drafts and does not
+  inflate Live. Final `test_marketplace_api.py` +
+  `test_marketplace_preflight.py`: `55 passed`.
 - Authenticated browser/visual verification was unavailable in this execution
   environment and remains an operator test. No marketplace operation was run.
   No host-wide cleanup or non-PosterPro resource mutation was performed; the

@@ -182,12 +182,18 @@ def _build_system_status_summary(db: Session, *, user_id: int, import_summary: d
         .where(
             Listing.user_id == user_id,
             MarketplaceListing.status.in_([MarketplaceListingStatus.PUBLISHED, MarketplaceListingStatus.UPDATED]),
+            MarketplaceListing.marketplace_listing_id.is_not(None),
+            func.trim(MarketplaceListing.marketplace_listing_id) != "",
         )
     )
     active_projection_ids_set = set(db.execute(active_projection_ids).scalars().all())
-    legacy_live = or_(
-        Listing.status == ListingStatus.PUBLISHED,
-        Listing.ebay_publish_status == EbayPublishStatus.POSTED,
+    legacy_live = and_(
+        or_(
+            Listing.status == ListingStatus.PUBLISHED,
+            Listing.ebay_publish_status == EbayPublishStatus.POSTED,
+        ),
+        Listing.ebay_listing_id.is_not(None),
+        func.trim(Listing.ebay_listing_id) != "",
     )
     confirmed_live = or_(legacy_live, Listing.id.in_(active_projection_ids))
     not_sold = and_(Listing.sold_at.is_(None), func.coalesce(Listing.quantity, 1) > 0)
@@ -225,7 +231,10 @@ def _build_system_status_summary(db: Session, *, user_id: int, import_summary: d
             continue
         status_value = str(getattr(row.status, "value", row.status) or "").strip().lower()
         ebay_status = str(getattr(row.ebay_publish_status, "value", row.ebay_publish_status) or "").strip().upper()
-        legacy_live_row = status_value in {"published", "posted"} or ebay_status == "POSTED" or bool(row.ebay_listing_id)
+        has_legacy_external_identity = bool(str(row.ebay_listing_id or "").strip())
+        legacy_live_row = has_legacy_external_identity and (
+            status_value in {"published", "posted"} or ebay_status == "POSTED"
+        )
         if legacy_live_row or row.id in active_projection_ids_set:
             continue
         if status_value in {"failed", "error"} or ebay_status == "FAILED":

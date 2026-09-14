@@ -122,10 +122,21 @@ def _listing_bucket_expression():
     generic_caption = func.lower(func.trim(cast(Listing.title, String))).in_(
         sorted(GENERIC_CAPTION_TITLES)
     )
+    confirmed_ebay_identity = and_(
+        Listing.ebay_listing_id.is_not(None),
+        func.trim(Listing.ebay_listing_id) != "",
+        or_(Listing.status == ListingStatus.PUBLISHED, Listing.ebay_publish_status == "POSTED"),
+    )
+    confirmed_marketplace_projection = exists(select(1).where(and_(
+        MarketplaceListing.listing_id == Listing.id,
+        MarketplaceListing.status.in_([MarketplaceListingStatus.PUBLISHED, MarketplaceListingStatus.UPDATED]),
+        MarketplaceListing.marketplace_listing_id.is_not(None),
+        func.trim(MarketplaceListing.marketplace_listing_id) != "",
+    )))
     return case(
         (or_(Listing.sold_at.is_not(None), Listing.quantity <= 0), "sold"),
         (custom_labels_text.contains("archived_vine"), "archived"),
-        (or_(Listing.status == ListingStatus.PUBLISHED, Listing.ebay_publish_status == "POSTED", Listing.ebay_listing_id.is_not(None)), "published"),
+        (or_(confirmed_ebay_identity, confirmed_marketplace_projection), "published"),
         # An existing external listing is authoritative for queue visibility;
         # a later failed revise must not make an already-live item disappear
         # from Published. The failed job remains visible in Jobs/details.
@@ -159,12 +170,20 @@ def _listing_bucket(listing: Listing) -> str:
     if {"archived_vine", "archived_sold"} & labels:
         return "archived"
     has_live_projection = any(
-        getattr(row, "status", None) in {MarketplaceListingStatus.PUBLISHED, MarketplaceListingStatus.UPDATED}
-        or str(getattr(row, "status", "")).upper() in {"PUBLISHED", "UPDATED"}
+        (
+            getattr(row, "status", None) in {MarketplaceListingStatus.PUBLISHED, MarketplaceListingStatus.UPDATED}
+            or str(getattr(row, "status", "")).upper() in {"PUBLISHED", "UPDATED"}
+        )
+        and bool(str(getattr(row, "marketplace_listing_id", "") or "").strip())
         for row in (getattr(listing, "marketplace_listings", None) or [])
     )
     normalized_status = str(getattr(listing.status, "value", listing.status) or "").strip().lower()
-    if listing.status == ListingStatus.PUBLISHED or normalized_status == "published" or str(listing.ebay_publish_status or "").upper() == "POSTED" or bool(listing.ebay_listing_id) or has_live_projection:
+    has_ebay_identity = bool(str(listing.ebay_listing_id or "").strip())
+    ebay_status = str(getattr(listing.ebay_publish_status, "value", listing.ebay_publish_status) or "").strip().upper()
+    has_confirmed_ebay_identity = has_ebay_identity and (
+        normalized_status == "published" or ebay_status == "POSTED"
+    )
+    if has_confirmed_ebay_identity or has_live_projection:
         return "published"
     if listing.status == ListingStatus.FAILED or normalized_status in {"failed", "error"} or str(listing.ebay_publish_status or "").upper() == "FAILED":
         return "failed"
@@ -638,14 +657,18 @@ def get_public_storefront_listings(
         filters.append(or_(Listing.title.ilike(pattern), Listing.description.ilike(pattern)))
 
     published_filters = or_(
-        Listing.status == ListingStatus.PUBLISHED,
-        Listing.ebay_publish_status == EbayPublishStatus.POSTED,
-        Listing.ebay_listing_id.is_not(None),
+        and_(
+            Listing.ebay_listing_id.is_not(None),
+            func.trim(Listing.ebay_listing_id) != "",
+            or_(Listing.status == ListingStatus.PUBLISHED, Listing.ebay_publish_status == EbayPublishStatus.POSTED),
+        ),
         exists(
             select(1).where(
                 and_(
                     MarketplaceListing.listing_id == Listing.id,
                     MarketplaceListing.status.in_([MarketplaceListingStatus.PUBLISHED, MarketplaceListingStatus.UPDATED]),
+                    MarketplaceListing.marketplace_listing_id.is_not(None),
+                    func.trim(MarketplaceListing.marketplace_listing_id) != "",
                 )
             )
         ),
@@ -1389,18 +1412,28 @@ def get_listings(
             pass
         elif normalized_queue == "published":
             queue_filters.append(or_(
-                Listing.status == ListingStatus.PUBLISHED,
-                Listing.ebay_publish_status == "POSTED",
-                Listing.ebay_listing_id.is_not(None),
+                and_(
+                    Listing.ebay_listing_id.is_not(None),
+                    func.trim(Listing.ebay_listing_id) != "",
+                    or_(Listing.status == ListingStatus.PUBLISHED, Listing.ebay_publish_status == "POSTED"),
+                ),
                 exists(select(1).where(
-                    MarketplaceListing.listing_id == Listing.id,
-                    MarketplaceListing.status.in_([MarketplaceListingStatus.PUBLISHED, MarketplaceListingStatus.UPDATED]),
+                    and_(
+                        MarketplaceListing.listing_id == Listing.id,
+                        MarketplaceListing.status.in_([MarketplaceListingStatus.PUBLISHED, MarketplaceListingStatus.UPDATED]),
+                        MarketplaceListing.marketplace_listing_id.is_not(None),
+                        func.trim(MarketplaceListing.marketplace_listing_id) != "",
+                    )
                 )),
             ))
         elif normalized_queue == "ready":
             queue_filters.append(and_(Listing.status == ListingStatus.ready, Listing.source_metadata["operator_approved_at"].as_string().is_not(None), not_(exists(select(1).where(
-                MarketplaceListing.listing_id == Listing.id,
-                MarketplaceListing.status.in_([MarketplaceListingStatus.PUBLISHED, MarketplaceListingStatus.UPDATED]),
+                and_(
+                    MarketplaceListing.listing_id == Listing.id,
+                    MarketplaceListing.status.in_([MarketplaceListingStatus.PUBLISHED, MarketplaceListingStatus.UPDATED]),
+                    MarketplaceListing.marketplace_listing_id.is_not(None),
+                    func.trim(MarketplaceListing.marketplace_listing_id) != "",
+                )
             )))))
         elif normalized_queue == "review":
             # Needs Review is an approval queue, not a holding area for
