@@ -17,10 +17,130 @@ from app.models.models import AutomatedOfferLog, Listing, MarketplaceAccount, Of
 from app.services.offer_service import OfferService
 from app.services.marketplace_setup import marketplace_status_snapshot
 from app.services.sale_detection_service import SaleDetectionService
+from app.services.ebay_service import EbayAPIClient, EbayIntegrationError, get_or_refresh_account
 
 router = APIRouter(prefix="/sales", tags=["sales"])
 offer_service = OfferService()
 sale_detection_service = SaleDetectionService()
+
+
+def _ebay_fulfillment_counts(orders: list[dict], *, now: datetime | None = None) -> dict:
+    """Derive shipping work only from explicit eBay payment/fulfillment fields."""
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    today = current.date()
+    need_ship = due_today = overdue = 0
+    for order in orders:
+        payment = str(order.get("orderPaymentStatus") or "").upper()
+        fulfillment = str(order.get("orderFulfillmentStatus") or "").upper()
+        if payment != "PAID" or fulfillment in {"FULFILLED", "CANCELLED"}:
+            continue
+        need_ship += 1
+        instructions = order.get("fulfillmentStartInstructions") or []
+        ship_by = None
+        for instruction in instructions:
+            shipping_step = (instruction or {}).get("shippingStep") or {}
+            ship_by = shipping_step.get("shipByDate") or ship_by
+        if not ship_by:
+            continue
+        try:
+            deadline = datetime.fromisoformat(str(ship_by).replace("Z", "+00:00"))
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+            if deadline.date() < today:
+                overdue += 1
+            elif deadline.date() == today:
+                due_today += 1
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return {"need_to_ship": need_ship, "due_today": due_today, "overdue": overdue}
+
+
+@router.get("/operations-summary")
+async def sales_operations_summary(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Read-only eBay shipping + unread-message summary for the current tenant."""
+    account = db.execute(select(MarketplaceAccount).where(
+        MarketplaceAccount.user_id == current_user.id,
+        MarketplaceAccount.marketplace == MarketplaceName.ebay,
+    )).scalars().first()
+    if not account:
+        return {
+            "shipping": {"status": "NOT_CONFIGURED", "marketplace": "ebay", "counts": None},
+            "messages": {"status": "NOT_CONFIGURED", "marketplace": "ebay", "unread": None},
+        }
+    client = None
+    try:
+        account = await get_or_refresh_account(current_user.id, db)
+        client = EbayAPIClient(account.access_token)
+        orders: list[dict] = []
+        total_orders = None
+        offset = 0
+        page_size = 100
+        while offset < 1000:
+            response = await client.request("GET", "/sell/fulfillment/v1/order", params={"limit": page_size, "offset": offset})
+            page = [row for row in (response.get("orders") or []) if isinstance(row, dict)]
+            total_orders = response.get("total", total_orders)
+            orders.extend(page)
+            try:
+                reached_total = total_orders is not None and len(orders) >= int(total_orders)
+            except (TypeError, ValueError):
+                total_orders = None
+                reached_total = False
+            if len(page) < page_size or reached_total:
+                break
+            offset += len(page)
+        shipping_complete = total_orders is None or len(orders) >= int(total_orders) or len(orders) < 1000
+        shipping = {
+            "status": "REMOTE_VERIFIED" if shipping_complete else "PARTIAL_REMOTE_RESULT",
+            "marketplace": "ebay",
+            "counts": _ebay_fulfillment_counts(orders),
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }
+    except EbayIntegrationError as exc:
+        message = str(exc).lower()
+        state = "AUTH_REQUIRED" if "401" in message or "403" in message or "scope" in message or "token" in message else "NEEDS_ATTENTION"
+        shipping = {"status": state, "marketplace": "ebay", "counts": None}
+    except Exception:
+        shipping = {"status": "NEEDS_ATTENTION", "marketplace": "ebay", "counts": None}
+
+    if client is None:
+        messages = {"status": shipping.get("status", "NEEDS_ATTENTION"), "marketplace": "ebay", "unread": None}
+    else:
+        try:
+            # eBay's Commerce Message API supports unread conversation retrieval;
+            # only aggregate counts leave this request (no message body is stored).
+            message_response = await client.request(
+                "GET", "/commerce/message/v1/conversation",
+                params={"conversationStatus": "UNREAD", "conversation_type": "FROM_MEMBERS", "limit": 10, "offset": 0},
+            )
+            conversations = message_response.get("conversations") or message_response.get("conversation") or []
+            metadata = message_response.get("conversationsMetadata") or {}
+            total_unread = metadata.get("total") if isinstance(metadata, dict) else None
+            total_unread = total_unread if total_unread is not None else message_response.get("total")
+            try:
+                total_unread = int(total_unread) if total_unread is not None else None
+            except (TypeError, ValueError, OverflowError):
+                total_unread = None
+            messages = {
+                "status": "REMOTE_VERIFIED" if total_unread is not None or len(conversations) < 10 else "PARTIAL_REMOTE_RESULT",
+                "marketplace": "ebay",
+                "unread": total_unread if total_unread is not None else (len(conversations) if len(conversations) < 10 else None),
+                "at_least": 10 if total_unread is None and len(conversations) >= 10 else None,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+            }
+        except EbayIntegrationError as exc:
+            message = str(exc).lower()
+            state = "AUTH_REQUIRED" if "401" in message or "403" in message or "scope" in message or "token" in message else "NEEDS_ATTENTION"
+            messages = {"status": state, "marketplace": "ebay", "unread": None}
+        except Exception:
+            # A message-scope/API failure must not hide the successful fulfillment
+            # result. The UI reports this channel as needing a check.
+            messages = {"status": "NEEDS_ATTENTION", "marketplace": "ebay", "unread": None}
+    return {"shipping": shipping, "messages": messages}
 
 
 @router.get("/dashboard")

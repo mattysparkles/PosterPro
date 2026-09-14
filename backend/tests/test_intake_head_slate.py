@@ -243,7 +243,7 @@ def test_voice_transcription_uses_backend_audio_helper(db_session, monkeypatch):
     service = IntakeSlateService()
 
     monkeypatch.setattr(settings, 'openai_api_key_plain', 'test-key')
-    monkeypatch.setattr(service, '_transcribe_audio_file', lambda _audio_path: {'text': 'Whirlpool refrigerator control board', 'model': 'whisper-1', 'language': 'en'})
+    monkeypatch.setattr(service, '_transcribe_audio_file', lambda _audio_path, **_kwargs: {'text': 'Whirlpool refrigerator control board', 'model': 'whisper-1', 'language': 'en'})
 
     result = service.transcribe_voice_audio(
         voice_audio_data_url='data:audio/webm;base64,QUJDRA==',
@@ -2080,6 +2080,59 @@ def test_process_notifications_deduplicates_exact_retry_in_short_window(db_sessi
         href='/jobs/failed', canonical_item_id=42,
     )
     assert distinct.id != first.id
+
+
+def test_listing_block_notifications_are_deduplicated_for_stable_blocker(db_session):
+    user = _create_user(db_session, email='notification-block-state@example.com')
+    first = create_process_notification(
+        db_session, user_id=user.id, title='Listing #42 needs attention',
+        message='Add a clear photo of the model label.', notification_type='listing_processing_blocked',
+        href='/listings/42',
+    )
+    db_session.commit()
+    first.created_at = datetime.utcnow() - timedelta(days=45)
+    db_session.commit()
+
+    repeated = create_process_notification(
+        db_session, user_id=user.id, title='Listing #42 needs attention',
+        message='Add a clear photo of the model label.', notification_type='listing_processing_blocked',
+        href='/listings/42',
+    )
+    assert repeated.id == first.id
+
+    changed_blocker = create_process_notification(
+        db_session, user_id=user.id, title='Listing #42 needs attention',
+        message='Choose the correct category before continuing.', notification_type='listing_processing_blocked',
+        href='/listings/42',
+    )
+    assert changed_blocker.id != first.id
+
+
+def test_alerts_aggregate_stale_active_listings(db_session, monkeypatch):
+    from app.models.enums import MarketplaceListingStatus, MarketplaceName
+    from app.models.models import MarketplaceListing
+
+    user = _create_user(db_session, email='stale-alert-aggregate@example.com')
+    stale_live = Listing(user_id=user.id, title='Vintage receiver', status=ListingStatus.PUBLISHED)
+    stale_draft = Listing(user_id=user.id, title='Unpublished draft', status=ListingStatus.draft)
+    db_session.add_all([stale_live, stale_draft])
+    db_session.flush()
+    stale_live.created_at = datetime.utcnow() - timedelta(days=45)
+    stale_draft.created_at = datetime.utcnow() - timedelta(days=60)
+    db_session.add(MarketplaceListing(
+        listing_id=stale_live.id, marketplace=MarketplaceName.facebook,
+        marketplace_listing_id='FB-EXACT-42', status=MarketplaceListingStatus.PUBLISHED,
+    ))
+    db_session.commit()
+    monkeypatch.setattr('app.services.active_listing_snapshot.cached_ebay_active_ids', lambda *_args: set())
+
+    alerts = AlertService().generate_alerts(db_session, user.id)
+    stale = [alert for alert in alerts if alert.get('type') == 'stale_listing']
+    assert stale == [{
+        'type': 'stale_listing', 'title': 'Older active listings', 'count': 1,
+        'message': '1 confirmed active listing(s) have been live for more than 30 days.',
+        'href': '/inventory?stale=true',
+    }]
 
 
 def test_mark_all_process_notifications_read_is_not_limited_to_first_page(db_session):

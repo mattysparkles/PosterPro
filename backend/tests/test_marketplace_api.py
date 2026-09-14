@@ -21,6 +21,8 @@ from app.models.models import (
 from app.models.enums import MarketplaceListingStatus
 from app.api import routes as listings_routes
 from app.api import marketplaces as marketplaces_api
+from app.api import sales as sales_api
+from app.api.sales import _ebay_fulfillment_counts
 from app.services.listing_specificity import classify_listing_reviewability, is_bare_identifier_title, is_caption_like_title
 from app.workers import tasks
 from app.models.models import ListingCorrectionJob
@@ -48,6 +50,81 @@ def seed_bucket_listing(user_id: int, **kwargs) -> int:
     db.refresh(listing)
     db.close()
     return listing.id
+
+
+def test_ebay_fulfillment_counts_use_only_paid_unfulfilled_orders():
+    now = datetime(2026, 9, 14, 12, tzinfo=timezone.utc)
+    orders = [
+        {"orderPaymentStatus": "PAID", "orderFulfillmentStatus": "NOT_STARTED", "fulfillmentStartInstructions": [{"shippingStep": {"shipByDate": "2026-09-13T23:00:00Z"}}]},
+        {"orderPaymentStatus": "PAID", "orderFulfillmentStatus": "IN_PROGRESS", "fulfillmentStartInstructions": [{"shippingStep": {"shipByDate": "2026-09-14T23:00:00Z"}}]},
+        {"orderPaymentStatus": "PAID", "orderFulfillmentStatus": "NOT_STARTED", "fulfillmentStartInstructions": [{"shippingStep": {"shipByDate": "2026-09-16T23:00:00Z"}}]},
+        {"orderPaymentStatus": "PENDING", "orderFulfillmentStatus": "NOT_STARTED"},
+        {"orderPaymentStatus": "PAID", "orderFulfillmentStatus": "FULFILLED"},
+    ]
+    assert _ebay_fulfillment_counts(orders, now=now) == {"need_to_ship": 3, "due_today": 1, "overdue": 1}
+
+
+@pytest.mark.anyio
+async def test_sales_operations_summary_reports_unconfigured_without_faking_zero(async_client):
+    register = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Operations Owner", "email": f"operations-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert register.status_code == 201
+    response = await async_client.get("/sales/operations-summary")
+    assert response.status_code == 200
+    assert response.json() == {
+        "shipping": {"status": "NOT_CONFIGURED", "marketplace": "ebay", "counts": None},
+        "messages": {"status": "NOT_CONFIGURED", "marketplace": "ebay", "unread": None},
+    }
+
+
+@pytest.mark.anyio
+async def test_sales_operations_summary_uses_live_ebay_orders_and_unread_count(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Fulfillment Owner", "email": f"fulfillment-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    db = database_module.SessionLocal()
+    account = MarketplaceAccount(
+        user_id=user_id, marketplace=MarketplaceName.ebay,
+        external_account_id="seller-test", access_token="fake-access", refresh_token="fake-refresh",
+    )
+    db.add(account)
+    db.commit()
+    db.close()
+
+    async def fake_refresh(requested_user_id, session):
+        assert requested_user_id == user_id
+        return session.query(MarketplaceAccount).filter(MarketplaceAccount.user_id == user_id).one()
+
+    class FakeEbayClient:
+        def __init__(self, _token):
+            pass
+
+        async def request(self, _method, path, *, params):
+            if path == "/sell/fulfillment/v1/order":
+                assert params == {"limit": 100, "offset": 0}
+                yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+                return {"total": 1, "orders": [{
+                    "orderPaymentStatus": "PAID", "orderFulfillmentStatus": "NOT_STARTED",
+                    "fulfillmentStartInstructions": [{"shippingStep": {"shipByDate": yesterday}}],
+                }]}
+            assert path == "/commerce/message/v1/conversation"
+            assert params["conversationStatus"] == "UNREAD"
+            return {"conversationsMetadata": {"total": 3}, "conversations": []}
+
+    monkeypatch.setattr(sales_api, "get_or_refresh_account", fake_refresh)
+    monkeypatch.setattr(sales_api, "EbayAPIClient", FakeEbayClient)
+    response = await async_client.get("/sales/operations-summary")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["shipping"]["status"] == "REMOTE_VERIFIED"
+    assert payload["shipping"]["counts"] == {"need_to_ship": 1, "due_today": 0, "overdue": 1}
+    assert payload["messages"]["status"] == "REMOTE_VERIFIED"
+    assert payload["messages"]["unread"] == 3
 
 
 @pytest.mark.anyio

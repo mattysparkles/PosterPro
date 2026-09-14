@@ -1135,3 +1135,49 @@ requirements above. Credentials were not rotated or printed.
   Production notification history was not modified. Only PosterPro services
   are in scope; `debug_fb_publish.db`, `ops/snapshots/`, and `tmp/` remain
   untouched.
+
+## 2026-09-14 - Dashboard geometry and operational signals follow-up
+
+- Replaced the stale desktop shell geometry with one 272px sidebar width source;
+  removed the former 340px content margin and reset Dashboard centering/padding
+  so the operational workspace receives the actual remaining width. The
+  Dashboard uses content-width container rules: four metric cards when space
+  permits, two when constrained, and one on narrow screens; business widgets
+  use a two-column grid. The page background is now a calm neutral surface.
+- Kept the existing wordmark/account/sidebar cleanup and global Button primitive,
+  removed the extra topbar left padding that had compensated for the now-hidden
+  desktop menu, and left only a compact extension issue alert. Added a Dashboard
+  AI row whose “connected” wording requires a recent BYO provider verification;
+  configured-but-unverified or older credentials display “Test required.”
+- The live-by-market display no longer renders unsupported zero counts as
+  verified facts. Current remote eBay counts retain their verified/stale state;
+  positive non-eBay exact-ID records show last-known, and absent market evidence
+  displays “Not verified.” Existing 161 eBay / 2 Facebook / 162 distinct-item
+  data semantics are preserved. Old local eBay lifecycle markers remain review
+  candidates; no listing history was rewritten.
+- Added a read-only `/sales/operations-summary` endpoint. It fetches eBay
+  Fulfillment orders to count paid unfulfilled orders and ship-by deadlines,
+  and requests only eBay unread-conversation totals from the Commerce Message
+  API; no conversation text is stored. Other unsupported channels remain
+  manual links or test-required states, not fabricated zero counts.
+- Dashboard alert service now groups confirmed active items older than 30 days
+  into one aggregate notice with a stale-inventory link instead of repeating an
+  anonymous stale bullet per listing. Stable repeated `listing_processing_blocked`
+  notices are suppressed indefinitely until the blocker message changes. Added
+  a tenant/type/href/created composite index with `CREATE INDEX CONCURRENTLY`;
+  production notifications were retained unchanged.
+- Production notification audit (user 2, read-only): `1,066,426` total,
+  `27,708` unread, oldest `2026-07-21`, newest `2026-09-11`; top categories:
+  `listing_processing_blocked` `1,062,572`, `listing_processing_complete`
+  `3,818`, followed by `vine_import` `11`. No history rows were deleted.
+- Validation: backend compile passed; `test_marketplace_api.py` passed `39`
+  tests after the final API regression was added; focused notification/stale
+  aggregation checks passed `4`; frontend production build passed with existing
+  lint and noVNC top-level-await warnings. A wider combined run ended at `96
+  passed, 1 failed` due to the pre-existing QR payload round-trip decoder test;
+  the dashboard, sales, stale alert, and notification tests passed. No
+  authenticated visual browser is available in this environment, so rendered
+  visual acceptance remains `READY FOR OPERATOR SCREENSHOT REVIEW`.
+- Scoped deployment only: backend, worker, and frontend. No marketplace
+  publication/update/end action was invoked. No non-PosterPro resource was
+  changed. `debug_fb_publish.db`, `ops/snapshots/`, and `tmp/` were left alone.

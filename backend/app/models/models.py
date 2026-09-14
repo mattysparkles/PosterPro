@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, Enum, Float, ForeignKey, Integer, SmallInteger, String, Text, UniqueConstraint
+from sqlalchemy import Index, JSON, Boolean, Date, DateTime, Enum, Float, ForeignKey, Integer, SmallInteger, String, Text, UniqueConstraint
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -553,6 +553,9 @@ class IntakeReconciliationEvent(Base, TimestampMixin):
 
 class IntakeNotification(Base, TimestampMixin):
     __tablename__ = "intake_notifications"
+    __table_args__ = (
+        Index("ix_intake_notifications_user_type_href_created", "user_id", "notification_type", "href", "created_at"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)

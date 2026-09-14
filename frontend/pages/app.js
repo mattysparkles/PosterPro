@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   Clock3,
   Database,
+  ListChecks,
   Package,
   PlusCircle,
   RefreshCcw,
@@ -41,9 +42,12 @@ import {
   fetchIntakeSettings,
   fetchMarketplaceJobsOverview,
   fetchMarketplaceExtensionDevices,
+  fetchLatestMarketplaceDiagnostic,
   runDashboardOperatorCommand,
   runIntakeMonitor,
   fetchSalesDashboard,
+  fetchSalesOperationsSummary,
+  fetchGooglePhotosStatus,
   toggleAutonomousMode,
   setIntakeDraftingPaused,
   updateIntakeSettings,
@@ -122,6 +126,9 @@ export default function Dashboard() {
   const [customizingMetrics, setCustomizingMetrics] = useState(false);
   const [showMetricDetails, setShowMetricDetails] = useState(false);
   const [salesDashboard, setSalesDashboard] = useState({ summary: {} });
+  const [operationsSummary, setOperationsSummary] = useState({ shipping: { status: 'LOADING' }, messages: { status: 'LOADING' } });
+  const [marketplaceDiagnostics, setMarketplaceDiagnostics] = useState({});
+  const [googleStatus, setGoogleStatus] = useState(null);
   const [activeSection, setActiveSection] = useState('overview');
   const [vineUploading, setVineUploading] = useState(false);
   const [loadingPanels, setLoadingPanels] = useState(false);
@@ -186,10 +193,18 @@ export default function Dashboard() {
     Promise.allSettled([
       fetchMarketplaceJobsOverview({ limit: 25, compact: true }),
       fetchSalesDashboard(user.id, 25),
-    ]).then(([jobsResult, salesResult]) => {
+      fetchSalesOperationsSummary(),
+      fetchAccountSetupSummary(user.id),
+      fetchGooglePhotosStatus(),
+      ...['facebook', 'mercari', 'poshmark', 'vinted', 'offerup'].map((market) => fetchLatestMarketplaceDiagnostic(market)),
+    ]).then(([jobsResult, salesResult, operationsResult, setupResult, googleResult, ...diagnosticResults]) => {
       setJobsOverview(jobsResult.status === 'fulfilled' ? jobsResult.value || { import_jobs: [], crosspost_jobs: [] } : { import_jobs: [], crosspost_jobs: [] });
       if (jobsResult.status === 'fulfilled') setMetricsUpdatedAt(new Date().toISOString());
       setSalesDashboard(salesResult.status === 'fulfilled' ? salesResult.value || { summary: {} } : { summary: {} });
+      setOperationsSummary(operationsResult.status === 'fulfilled' ? operationsResult.value : { shipping: { status: 'NEEDS_ATTENTION' }, messages: { status: 'NEEDS_ATTENTION' } });
+      setSetupSummary(setupResult.status === 'fulfilled' ? setupResult.value : null);
+      setGoogleStatus(googleResult.status === 'fulfilled' ? googleResult.value : null);
+      setMarketplaceDiagnostics(Object.fromEntries(['facebook', 'mercari', 'poshmark', 'vinted', 'offerup'].map((market, index) => [market, diagnosticResults[index]?.status === 'fulfilled' ? diagnosticResults[index].value : null])));
       setLoadingPanels(false);
     });
   }, [user?.id]);
@@ -1041,32 +1056,79 @@ export default function Dashboard() {
     </div>
   );
 
-  const renderDashboardSummary = () => (
-    <div className="space-y-4">
-      <ExtensionVersionStatus state={extensionState} currentDeviceId={browserExtensionDeviceId} detected={browserExtensionDetected} detectedVersion={browserExtensionVersion} compact />
-      <section aria-label="Primary listing metrics" className="rounded-2xl border border-[#e5e7eb] bg-white p-3 sm:p-4">
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><h2 className="text-lg font-semibold text-[#101828]">Listings</h2><div className="flex gap-2">{user?.is_admin ? <Button variant="outline" size="sm" onClick={() => setShowMetricDetails((value) => !value)}>Metric definitions</Button> : null}<Button variant="outline" size="sm" onClick={() => setCustomizingMetrics((value) => !value)}>{customizingMetrics ? 'Done' : 'Customize'}</Button></div></div>
-        {customizingMetrics ? <div className="mb-3 grid gap-2 sm:grid-cols-2">{dashboardMetricLayout.order.map((id, index) => { const item = topMetrics.find((metric) => metric.id === id); if (!item) return null; return <div key={id} className="flex min-h-11 items-center justify-between gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3"><label className="flex min-h-11 items-center gap-3 text-sm font-medium text-slate-900"><input type="checkbox" className="h-5 w-5 accent-blue-700" checked={dashboardMetricLayout.visible[id] !== false} onChange={(event) => void saveDashboardMetricLayout({ ...dashboardMetricLayout, visible: { ...dashboardMetricLayout.visible, [id]: event.target.checked } })} />Show {item.label}</label><span className="flex gap-1"><button type="button" aria-label={`Move ${item.label} earlier`} disabled={index === 0} onClick={() => reorderDashboardMetrics(id, dashboardMetricLayout.order[index - 1])} className="min-h-9 rounded-lg border border-slate-300 bg-white px-2 text-sm font-semibold text-slate-800 disabled:opacity-40">↑</button><button type="button" aria-label={`Move ${item.label} later`} disabled={index === dashboardMetricLayout.order.length - 1} onClick={() => reorderDashboardMetrics(id, dashboardMetricLayout.order[index + 1])} className="min-h-9 rounded-lg border border-slate-300 bg-white px-2 text-sm font-semibold text-slate-800 disabled:opacity-40">↓</button></span></div>; })}<Button variant="outline" size="sm" onClick={() => void saveDashboardMetricLayout(DEFAULT_DASHBOARD_METRIC_LAYOUT)}>Reset defaults</Button></div> : null}
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
-          {orderedMetrics.map((card) => <MetricCard key={card.id} className="min-h-[96px] p-3" label={card.label} value={card.value} detail={card.id === 'live' ? liveVerification === 'REMOTE_VERIFIED' ? 'eBay verified · see breakdown' : 'Marketplace copies · see breakdown' : undefined} href={card.href} />)}
-        </div>
-        {dashboardMetricLayout.visible.live !== false ? <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
-          <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-semibold text-slate-900">Live by marketplace</h3><span className="text-sm text-slate-600">{liveVerification === 'REMOTE_VERIFIED' ? `eBay verified ${systemStatus.catalog_live_verified_at ? formatTime(systemStatus.catalog_live_verified_at) : 'recently'}` : liveVerification === 'STALE_REMOTE_SNAPSHOT' ? 'eBay last known · refresh pending' : 'Current marketplace count unavailable'}</span></div>
-          <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-7">{liveMarketplaceLabels.map(([key, label]) => { const count = liveByMarketplace[key]; const ebayVerified = key === 'ebay' && liveVerification === 'REMOTE_VERIFIED'; const value = count == null ? 'Not verified' : `${count}${ebayVerified ? ' · verified' : ' · last known'}`; return <div key={key} className="rounded-lg border border-slate-200 bg-white px-3 py-2"><p className="text-sm font-medium text-slate-700">{label}</p><p className="mt-1 text-base font-semibold text-slate-950">{metricsReady ? value : 'Not available'}</p></div>; })}</div>
-          {metricsReady && Number(systemStatus.catalog_ebay_reconciliation_needed) > 0 ? <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-5 text-amber-950">{systemStatus.catalog_ebay_reconciliation_needed} unsold PosterPro records still carry a local eBay active marker but were absent from the latest active-list check. Their remote end/sale state is not proven, so PosterPro has not changed their history. <Link href="/settings/ebay" className="font-semibold underline underline-offset-2">Review eBay sync</Link>.</p> : null}
-        </div> : null}
-        {showMetricDetails && user?.is_admin ? <dl className="mt-3 grid gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700 sm:grid-cols-2"><div><dt className="font-semibold text-slate-950">Ready to publish</dt><dd>Approved records that passed stored publish checks and have no active marketplace copy.</dd></div><div><dt className="font-semibold text-slate-950">Needs review</dt><dd>Distinct current review-ready records that are unsold and not already live.</dd></div><div><dt className="font-semibold text-slate-950">Live</dt><dd>Distinct inventory records in the current remote eBay active snapshot or with another exact-identity active projection.</dd></div><div><dt className="font-semibold text-slate-950">Draft backlog</dt><dd>Unfinished records not yet ready for review; live and sold items are excluded.</dd></div><p className="sm:col-span-2 text-xs text-slate-600">Source: full-catalog server summary · updated {metricsUpdatedAt ? formatTime(metricsUpdatedAt) : 'when the summary loads'}.</p></dl> : null}
-      </section>
-      <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-3">
-        <section className="rounded-2xl border border-slate-200 bg-white p-4"><div className="flex items-center justify-between"><h2 className="text-base font-semibold text-slate-950">Sales</h2><Link href="/sales" className="text-sm font-semibold text-blue-800 underline-offset-4 hover:underline">View sales</Link></div><p className="mt-1 text-sm text-slate-600">Gross revenue from recorded sales</p><div className="mt-4 grid grid-cols-3 gap-2">{[['Today', salesDashboard.summary?.periods?.today], ['7 days', salesDashboard.summary?.periods?.last_7_days], ['30 days', salesDashboard.summary?.periods?.last_30_days]].map(([label, data]) => <div key={label} className="rounded-xl bg-slate-50 p-3"><p className="text-sm text-slate-600">{label}</p><p className="mt-1 text-lg font-bold text-slate-950">{salesSummaryReady && data ? `$${Number(data.gross || 0).toFixed(0)}` : '—'}</p><p className="text-sm text-slate-600">{data ? `${data.sales} sales` : 'Not available'}</p></div>)}</div></section>
-        <section className="rounded-2xl border border-slate-200 bg-white p-4"><div className="flex items-center justify-between"><h2 className="text-base font-semibold text-slate-950">Work queue</h2><Link href="/jobs" className="text-sm font-semibold text-blue-800 underline-offset-4 hover:underline">View jobs</Link></div><div className="mt-4 grid grid-cols-3 gap-2">{[['Running', systemStatus.running_jobs], ['Queued', systemStatus.queued_jobs], ['Failed', systemStatus.failed_jobs]].map(([label, value]) => <div key={label} className="rounded-xl bg-slate-50 p-3"><p className="text-sm text-slate-600">{label}</p><p className={`mt-1 text-2xl font-bold ${label === 'Failed' && Number(value) > 0 ? 'text-red-700' : 'text-slate-950'}`}>{metricsReady && value != null ? value : '—'}</p></div>)}</div></section>
-        <section className="rounded-2xl border border-slate-200 bg-white p-4"><div className="flex items-center justify-between"><h2 className="text-base font-semibold text-slate-950">Shipping</h2><Link href="/sales" className="text-sm font-semibold text-blue-800 underline-offset-4 hover:underline">Open sales</Link></div><p className="mt-3 text-sm leading-6 text-slate-700">PosterPro does not yet have verified shipment-status data for this account. We won’t guess what is overdue.</p></section>
-        <section className="rounded-2xl border border-slate-200 bg-white p-4"><h2 className="text-base font-semibold text-slate-950">Marketplace messages</h2><p className="mt-2 text-sm leading-6 text-slate-700">Message counts are not synced, so PosterPro cannot reliably show who needs a reply.</p><div className="mt-3 flex flex-wrap gap-2"><a href="https://www.ebay.com/sh/mys/messages" target="_blank" rel="noreferrer" className="inline-flex min-h-10 items-center rounded-xl border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900 hover:bg-slate-50">Open eBay messages</a><a href="https://www.facebook.com/messages" target="_blank" rel="noreferrer" className="inline-flex min-h-10 items-center rounded-xl border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900 hover:bg-slate-50">Open Messenger</a></div></section>
-        <section className="rounded-2xl border border-slate-200 bg-white p-4"><div className="flex items-center justify-between"><h2 className="text-base font-semibold text-slate-950">Alerts</h2><Link href="/notices" className="text-sm font-semibold text-blue-800 underline-offset-4 hover:underline">View notices</Link></div><p className="mt-3 text-sm leading-6 text-slate-700">{alertsAvailable ? alerts.length ? `${alerts.length} current alert${alerts.length === 1 ? '' : 's'} need attention.` : 'No current listing alerts.' : 'Alert status is not available.'}</p>{alerts.slice(0, 3).map((alert, index) => <p key={alert.id || index} className="mt-2 truncate text-sm text-slate-700">• {alert.title || alert.message || 'Listing alert'}</p>)}</section>
-        <section className="rounded-2xl border border-slate-200 bg-white p-4"><h2 className="text-base font-semibold text-slate-950">Connections &amp; setup</h2><p className="mt-2 text-sm leading-6 text-slate-700">Review account connections and run marketplace tests in Settings. A saved connection alone does not mean marketplace automation has been verified.</p><div className="mt-3 flex flex-wrap gap-2"><Link href="/settings?tab=marketplaces" className="inline-flex min-h-10 items-center rounded-xl border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900 hover:bg-slate-50">Review connections</Link><Link href="/onboarding" className="inline-flex min-h-10 items-center rounded-xl border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900 hover:bg-slate-50">Continue setup</Link></div></section>
+  const renderDashboardSummary = () => {
+    const alertsByType = alerts.reduce((groups, alert) => {
+      const type = String(alert.type || '').toLowerCase();
+      const key = type.includes('stale') ? 'stale' : ['overpriced', 'high_demand', 'market_price_drop'].includes(type) ? 'pricing' : type.includes('intake') ? 'intake' : 'other';
+      groups[key] = (groups[key] || 0) + Math.max(1, Number(alert.count || 1));
+      return groups;
+    }, {});
+    const marketplaceStatus = (market) => {
+      const diagnostic = marketplaceDiagnostics[market];
+      if (!diagnostic || diagnostic.status === 'NOT_RUN') return 'Test required';
+      if (diagnostic.result?.capability_ready === true) return 'Form test passed';
+      if (diagnostic.result?.login_state === 'LOGIN_REQUIRED') return 'Sign in required';
+      if (['FAILED', 'BLOCKED_EXTERNAL'].includes(diagnostic.status)) return 'Needs attention';
+      return 'Test required';
+    };
+    const shipping = operationsSummary.shipping || {};
+    const message = operationsSummary.messages || {};
+    const eBayConnection = ['REMOTE_VERIFIED', 'PARTIAL_REMOTE_RESULT'].includes(shipping.status) || ['REMOTE_VERIFIED', 'PARTIAL_REMOTE_RESULT'].includes(message.status)
+      ? 'Connected · live check' : shipping.status === 'AUTH_REQUIRED' || message.status === 'AUTH_REQUIRED' ? 'Reconnect required' : shipping.status === 'NOT_CONFIGURED' ? 'Not connected' : 'Check required';
+    const googleConnection = googleStatus?.connection_state === 'connected' && googleStatus?.connected ? 'Connected' : googleStatus?.connection_state === 'token_expired' || googleStatus?.connection_state === 'revoked' ? 'Reconnect required' : googleStatus ? 'Needs setup' : 'Not checked';
+    const aiSetup = setupSummary?.ai || {};
+    const aiVerifiedAt = aiSetup.verified_at ? new Date(aiSetup.verified_at).getTime() : 0;
+    const aiVerificationRecent = aiVerifiedAt > 0 && Date.now() - aiVerifiedAt < 30 * 24 * 60 * 60 * 1000;
+    const aiConnection = aiSetup.state === 'COMING_SOON' ? 'Premium AI coming soon'
+      : aiSetup.mode === 'BYO_OPENAI' && aiSetup.state === 'CONNECTED' && aiVerificationRecent ? 'Connected · recently tested'
+        : aiSetup.byo_configured || aiSetup.state === 'CONNECTED' ? 'Test required' : 'Not configured';
+    const groupedAlerts = [
+      ['stale', 'Listings older than 30 days', '/inventory?stale=true'],
+      ['pricing', 'Pricing review', '/listings?tab=review'],
+      ['intake', 'Intake needs attention', '/intake/queue'],
+      ['other', 'Other listing issues', '/notices'],
+    ].filter(([key]) => alertsByType[key]);
+    return (
+      <div className="pp-dashboard">
+        <ExtensionVersionStatus state={extensionState} currentDeviceId={browserExtensionDeviceId} detected={browserExtensionDetected} detectedVersion={browserExtensionVersion} compact />
+        <header className="pp-dashboard-header">
+          <h1 className="pp-dashboard-title">Dashboard</h1>
+          <div className="pp-dashboard-actions">
+            <Button variant="tertiary" onClick={() => setCustomizingMetrics((value) => !value)}>{customizingMetrics ? 'Done customizing' : 'Customize'}</Button>
+            <Button href="/intake"><Upload size={17} aria-hidden="true" />Start intake</Button>
+            <Button href="/listings?tab=review" variant="secondary"><ListChecks size={17} aria-hidden="true" />Review listings</Button>
+          </div>
+        </header>
+        <section aria-label="Listing metrics" className="pp-dashboard-metrics">
+          {orderedMetrics.map((card) => <MetricCard key={card.id} className="pp-dashboard-metric" label={card.id === 'ready' ? 'Ready' : card.id === 'review' ? 'Needs review' : card.id === 'live' ? 'Live' : 'Draft'} value={card.value} detail={card.id === 'live' ? liveVerification === 'REMOTE_VERIFIED' ? 'eBay verified' : 'See marketplace status' : undefined} href={card.href} />)}
+        </section>
+        {dashboardMetricLayout.visible.live !== false ? (
+          <section className="pp-dashboard-card" aria-label="Live listings by marketplace">
+            <div className="pp-dashboard-card__header"><h2 className="pp-dashboard-card__title">Live by marketplace</h2><span className="pp-dashboard-meta">{liveVerification === 'REMOTE_VERIFIED' ? 'eBay checked live' : liveVerification === 'STALE_REMOTE_SNAPSHOT' ? 'eBay last known' : 'Marketplace check unavailable'}</span></div>
+            <div className="pp-dashboard-live-grid mt-3">{liveMarketplaceLabels.map(([key, label]) => {
+              const count = liveByMarketplace[key];
+              const verified = key === 'ebay' && liveVerification === 'REMOTE_VERIFIED';
+              const value = verified && count != null
+                ? `${count} · verified`
+                : key === 'ebay' && liveVerification === 'STALE_REMOTE_SNAPSHOT' && count != null
+                  ? `${count} · last known`
+                  : Number(count) > 0 ? `${count} · last known` : 'Not verified';
+              return <div key={key} className="rounded-lg border border-slate-200 bg-white px-3 py-2"><p className="pp-dashboard-meta font-semibold">{label}</p><p className="pp-dashboard-small mt-1 font-semibold text-slate-900">{metricsReady ? value : 'Not available'}</p></div>;
+            })}</div>
+          </section>
+        ) : null}
+        {customizingMetrics ? <section className="pp-dashboard-card" aria-label="Customize dashboard metrics"><div className="pp-dashboard-card__header"><h2 className="pp-dashboard-card__title">Customize metrics</h2><Button variant="secondary" size="sm" onClick={() => void saveDashboardMetricLayout(DEFAULT_DASHBOARD_METRIC_LAYOUT)}>Reset defaults</Button></div><div className="mt-3 grid gap-2 sm:grid-cols-2">{dashboardMetricLayout.order.map((id, index) => { const item = topMetrics.find((metric) => metric.id === id); if (!item) return null; return <div key={id} className="flex min-h-11 items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3"><label className="flex min-h-11 items-center gap-3 text-sm font-medium text-slate-900"><input type="checkbox" className="h-5 w-5 accent-blue-700" checked={dashboardMetricLayout.visible[id] !== false} onChange={(event) => void saveDashboardMetricLayout({ ...dashboardMetricLayout, visible: { ...dashboardMetricLayout.visible, [id]: event.target.checked } })} />Show {item.label}</label><span className="flex gap-1"><Button variant="secondary" size="sm" aria-label={`Move ${item.label} earlier`} disabled={index === 0} onClick={() => reorderDashboardMetrics(id, dashboardMetricLayout.order[index - 1])}>↑</Button><Button variant="secondary" size="sm" aria-label={`Move ${item.label} later`} disabled={index === dashboardMetricLayout.order.length - 1} onClick={() => reorderDashboardMetrics(id, dashboardMetricLayout.order[index + 1])}>↓</Button></span></div>; })}</div>{user?.is_admin ? <div className="mt-3"><Button variant="tertiary" size="sm" onClick={() => setShowMetricDetails((value) => !value)} aria-expanded={showMetricDetails}>ⓘ Metric definitions</Button>{showMetricDetails ? <dl className="mt-2 grid gap-2 text-sm text-slate-700 sm:grid-cols-2"><div><dt className="font-semibold">Ready</dt><dd>Approved records that passed stored publish checks and have no active marketplace copy.</dd></div><div><dt className="font-semibold">Needs review</dt><dd>Distinct review-ready records, unsold and not already live.</dd></div><div><dt className="font-semibold">Live</dt><dd>Distinct records in the current remote eBay snapshot or another exact-identity active projection.</dd></div><div><dt className="font-semibold">Draft</dt><dd>Unfinished records not ready for review, live, sold, or archived.</dd></div><p className="text-xs text-slate-600 sm:col-span-2">Server summary · {metricsUpdatedAt ? formatTime(metricsUpdatedAt) : 'not yet loaded'}.</p></dl> : null}</div> : null}</section> : null}
+        <section className="pp-dashboard-modules" aria-label="Business operations">
+          <article className="pp-dashboard-card"><div className="pp-dashboard-card__header"><h2 className="pp-dashboard-card__title">Sales</h2><Link href="/sales" className="pp-dashboard-card__link">View sales</Link></div><div className="pp-dashboard-stat-grid">{[['Today', salesDashboard.summary?.periods?.today], ['7 days', salesDashboard.summary?.periods?.last_7_days], ['30 days', salesDashboard.summary?.periods?.last_30_days]].map(([label, data]) => <div key={label} className="pp-dashboard-stat"><p className="pp-dashboard-meta">{label}</p><p className="pp-dashboard-number mt-1">{salesSummaryReady && data ? `$${Number(data.gross || 0).toFixed(0)}` : '—'}</p><p className="pp-dashboard-meta mt-1">{data ? `${data.sales} sales` : 'No data'}</p></div>)}</div></article>
+          <article className="pp-dashboard-card"><div className="pp-dashboard-card__header"><h2 className="pp-dashboard-card__title">Work queue</h2><Link href="/jobs" className="pp-dashboard-card__link">View jobs</Link></div><div className="pp-dashboard-stat-grid">{[['Running', systemStatus.running_jobs, '/jobs/active'], ['Queued', systemStatus.queued_jobs, '/jobs/active'], ['Failed', systemStatus.failed_jobs, '/jobs/failed']].map(([label, value, href]) => <Link href={href} key={label} className="pp-dashboard-stat block hover:bg-blue-50"><p className="pp-dashboard-meta">{label}</p><p className={`pp-dashboard-number mt-1 ${label === 'Failed' && Number(value) > 0 ? 'text-red-700' : ''}`}>{metricsReady && value != null ? value : '—'}</p></Link>)}</div></article>
+          <article className="pp-dashboard-card"><div className="pp-dashboard-card__header"><h2 className="pp-dashboard-card__title">Shipping</h2><Button href="https://www.ebay.com/sh/ord/?filter=status:AWAITING_SHIPMENT" external variant="tertiary" size="sm">eBay orders</Button></div>{shipping.status === 'REMOTE_VERIFIED' || shipping.status === 'PARTIAL_REMOTE_RESULT' ? <><p className="pp-dashboard-meta mt-1">eBay · {shipping.status === 'REMOTE_VERIFIED' ? 'live order check' : 'partial order check'}</p><div className="pp-dashboard-stat-grid">{[['Need to ship', shipping.counts?.need_to_ship], ['Due today', shipping.counts?.due_today], ['Overdue', shipping.counts?.overdue]].map(([label, count]) => <div className="pp-dashboard-stat" key={label}><p className="pp-dashboard-meta">{label}</p><p className={`pp-dashboard-number mt-1 ${label === 'Overdue' && Number(count) > 0 ? 'text-red-700' : ''}`}>{count ?? '—'}</p></div>)}</div></> : <div className="mt-3 flex items-center justify-between gap-2"><StatusPill status={shipping.status === 'NOT_CONFIGURED' ? 'warning' : 'danger'} label={shipping.status === 'AUTH_REQUIRED' ? 'Reconnect eBay' : shipping.status === 'NOT_CONFIGURED' ? 'Connect eBay' : 'Check eBay connection'} /><Button href="/settings/ebay" variant="secondary" size="sm">Fix</Button></div>}</article>
+          <article className="pp-dashboard-card"><div className="pp-dashboard-card__header"><h2 className="pp-dashboard-card__title">Marketplace messages</h2><Button href="https://www.ebay.com/sh/mys/messages" external variant="tertiary" size="sm">eBay inbox</Button></div><div className="pp-dashboard-issue-row mt-2"><span className="pp-dashboard-small">eBay unread</span><strong className="pp-dashboard-small">{message.unread != null ? message.at_least ? `${message.at_least}+` : message.unread : message.status === 'AUTH_REQUIRED' ? 'Reconnect required' : 'Not verified'}</strong></div><div className="pp-dashboard-issue-row"><span className="pp-dashboard-small">Facebook</span><Button href="https://www.facebook.com/messages" external variant="tertiary" size="sm">Open Messenger</Button></div></article>
+          <article className="pp-dashboard-card"><div className="pp-dashboard-card__header"><h2 className="pp-dashboard-card__title">Issues to review</h2><Link href="/notices" className="pp-dashboard-card__link">View notices</Link></div>{alertsAvailable && groupedAlerts.length ? groupedAlerts.map(([key, title, href]) => <Link href={href} key={key} className="pp-dashboard-issue-row hover:text-blue-800"><span className="pp-dashboard-small">{title}</span><strong className="pp-dashboard-small tabular-nums">{alertsByType[key]}</strong></Link>) : <p className="pp-dashboard-small mt-3">{alertsAvailable ? 'No current alerts.' : 'Alerts unavailable.'}</p>}{metricsReady && Number(systemStatus.catalog_ebay_reconciliation_needed) > 0 ? <Link href="/settings/ebay" className="pp-dashboard-issue-row mt-1 text-amber-800"><span className="pp-dashboard-small">eBay status checks</span><strong className="pp-dashboard-small">{systemStatus.catalog_ebay_reconciliation_needed}</strong></Link> : null}</article>
+          <article className="pp-dashboard-card"><div className="pp-dashboard-card__header"><h2 className="pp-dashboard-card__title">Connections</h2><Link href="/settings?tab=marketplaces" className="pp-dashboard-card__link">Manage</Link></div><Link href="/settings/ebay" className="pp-dashboard-issue-row mt-2"><span className="pp-dashboard-small">eBay</span><span className="pp-dashboard-small font-semibold">{eBayConnection}</span></Link>{['facebook', 'mercari', 'poshmark', 'vinted', 'offerup'].map((market) => <Link href={`/settings?tab=marketplaces&marketplace=${market}`} className="pp-dashboard-issue-row" key={market}><span className="pp-dashboard-small capitalize">{market === 'facebook' ? 'Facebook Marketplace' : market}</span><span className="pp-dashboard-meta font-semibold">{marketplaceStatus(market)}</span></Link>)}<Link href="/settings/intake" className="pp-dashboard-issue-row"><span className="pp-dashboard-small">Google Photos</span><span className="pp-dashboard-meta font-semibold">{googleConnection}</span></Link><Link href="/settings" className="pp-dashboard-issue-row"><span className="pp-dashboard-small">OpenAI / AI</span><span className="pp-dashboard-meta font-semibold">{aiConnection}</span></Link></article>
+        </section>
       </div>
-    </div>
-  );
+    );
+  };
 
   const sectionContent = { overview: renderDashboardSummary() };
 
@@ -1084,11 +1146,9 @@ export default function Dashboard() {
           toast.error(error.message || 'Automation setting could not be saved.');
         }
       }}
-      contentWidth="default"
+      contentWidth="dashboard"
+      hideTopbarContext
     >
-      <div className="flex justify-end gap-2">
-        <Button href="/intake">Start intake</Button><Button href="/listings?tab=review" variant="secondary">Review listings</Button>
-      </div>
       <div className="min-w-0">{sectionContent.overview}</div>
     </AppShell>
   );

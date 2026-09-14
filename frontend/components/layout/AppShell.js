@@ -132,6 +132,7 @@ export default function AppShell({
   subnav,
   contentClassName = '',
   contentWidth = 'default',
+  hideTopbarContext = false,
   children,
 }) {
   const { user, logout } = useAuth();
@@ -178,10 +179,10 @@ export default function AppShell({
         }))
     : [];
 
-  const contentWidthClass =
-    contentWidth === 'narrow' ? 'max-w-[940px]' : contentWidth === 'wide' ? 'max-w-[1320px]' : 'max-w-[1180px]';
-  const sidebarWidthClass = 'sm:w-[272px]';
-  const contentPaddingClass = 'sm:pl-[272px]';
+  const contentWidthClass = contentWidth === 'dashboard'
+    ? 'pp-dashboard-content'
+    : contentWidth === 'narrow' ? 'max-w-[940px]' : contentWidth === 'wide' ? 'max-w-[1320px]' : 'max-w-[1180px]';
+  const sidebarWidthClass = 'pp-sidebar-width';
 
   const submitSearch = (event) => {
     event.preventDefault();
@@ -287,16 +288,18 @@ export default function AppShell({
   const renderNav = (onNavigate) => (
     <div className="space-y-4">
       <section className="pp-sidebar-brand-panel rounded-2xl p-3 text-[var(--pp-shell-copy)]">
-        <Link href="/app" aria-label="PosterPro home" className="block rounded-xl px-2 py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white">
-          <span className="block font-[var(--pp-heading-font)] text-[1.65rem] font-bold tracking-[-0.055em] text-white">PosterPro</span>
+        <Link href="/app" aria-label="PosterPro home" className="pp-wordmark block rounded-xl px-2 py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white">
+          <span className="block">PosterPro</span>
         </Link>
-        <div className="mt-2 flex items-center gap-2 border-t border-white/10 px-2 pt-3">
-          <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-white/10 text-white"><User size={15} aria-hidden="true" /></span>
-          <div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold text-white">{user?.full_name || 'My account'}</p><p className="truncate text-xs text-[var(--pp-shell-soft-copy)]">{user?.email || ''}</p></div>
-          <Link href="/settings?tab=profile" className="inline-flex min-h-9 shrink-0 items-center rounded-lg border border-white/20 px-2 text-sm font-semibold text-white hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white">My Account</Link>
+        <div className="mt-2 border-t border-white/10 px-2 pt-3">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-white/10 text-white"><User size={15} aria-hidden="true" /></span>
+            <div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold text-white">{user?.full_name || 'My account'}</p><p className="truncate text-xs text-[var(--pp-shell-soft-copy)]" title={user?.email || ''}>{user?.email || ''}</p></div>
+          </div>
+          <Link href="/settings?tab=profile" className="pp-account-link mt-2 inline-flex min-h-9 w-full items-center justify-center rounded-lg border border-white/20 px-3 text-sm font-semibold text-white hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white">My Account</Link>
         </div>
         {user?.is_admin && onToggleAutonomous ? <div className="mt-3 flex items-center justify-between rounded-xl border border-white/10 bg-white/5 px-2.5 py-2">
-          <span className="flex items-center gap-1.5 text-sm font-medium text-white">Automation <button type="button" title="ON lets PosterPro automatically start publishing after supported intake workflows. OFF pauses automatic publishing; it does not stop intake, remove live listings, or disconnect marketplace accounts." aria-label="About automation" className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-white/40 text-xs font-bold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white">i</button></span>
+          <span className="flex items-center gap-1.5 text-sm font-medium text-white">Automation <button type="button" title="ON may auto-publish supported photo and storage intake drafts. OFF keeps intake and auto-pricing available but pauses that automatic publishing. Manual actions and live listings are unchanged." aria-label="About automation" className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-white/40 text-xs font-bold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white">i</button></span>
           <button type="button" role="switch" aria-label="Automation" aria-checked={Boolean(autonomousConfig?.autonomous_mode)} onClick={onToggleAutonomous} className={`inline-flex h-8 min-w-[56px] items-center justify-center rounded-full px-2 text-xs font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white ${autonomousConfig?.autonomous_mode ? 'bg-emerald-400 text-[#102a1f]' : 'bg-slate-200 text-slate-900'}`}><span>{autonomousConfig?.autonomous_mode ? 'ON' : 'OFF'}</span></button>
         </div> : null}
       </section>
@@ -355,19 +358,19 @@ export default function AppShell({
   ) : null;
 
   return (
-    <div className="posterpro-app-shell min-h-screen bg-[var(--pp-bg)] text-[var(--pp-text)]">
+    <div className={`posterpro-app-shell min-h-screen bg-[var(--pp-bg)] text-[var(--pp-text)] ${contentWidth === 'dashboard' ? 'pp-shell-dashboard' : ''}`}>
       <aside className={`pp-shell-sidebar-rail pp-shell-sidebar-surface ${sidebarWidthClass}`}>
         <div className="h-full overflow-y-auto px-4 py-5">{renderNav()}</div>
       </aside>
 
-      <div className={`min-h-screen min-w-0 ${contentPaddingClass}`}>
+      <div className="pp-shell-main min-h-screen min-w-0">
         <div className="pp-shell-content-wrap min-w-0">
-          <header className="pp-shell-header-surface sticky top-0 z-30 backdrop-blur-xl">
-            <div className="mx-auto flex w-full max-w-[1520px] items-center gap-3 py-3 pl-16 pr-4 sm:px-6 md:px-6">
+          <header className="pp-shell-header-surface sticky top-0 z-30">
+            <div className="pp-shell-topbar mx-auto flex w-full max-w-[1520px] items-center gap-3 py-3 px-4 sm:px-6 md:px-6">
               <Button
                 variant="secondary"
                 size="sm"
-                className="fixed left-4 top-4 z-[120] gap-2 px-3 shadow-none sm:hidden"
+                className="pp-mobile-menu-button fixed left-4 top-4 z-[120] gap-2 px-3 shadow-none"
                 onClick={() => setMobileMenuOpen(true)}
                 aria-label="Open navigation menu"
                 title="Open navigation menu"
@@ -375,7 +378,7 @@ export default function AppShell({
                 <span aria-hidden="true">☰</span><span className="sr-only">Open navigation menu</span>
               </Button>
 
-              <div className="min-w-0 flex-1">
+              <div className={`min-w-0 flex-1 ${hideTopbarContext ? 'hidden' : ''}`}>
                 <div className="flex min-w-0 items-center gap-3">
                   <p className="pp-topbar-kicker">
                   {activeNav?.group?.label || 'PosterPro'}
@@ -470,7 +473,7 @@ export default function AppShell({
             </div>
           </header>
 
-          <main className="mx-auto w-full max-w-[1520px] px-4 py-4 pb-20 md:px-6">
+          <main className="pp-shell-main-content mx-auto w-full max-w-[1520px] px-4 py-4 pb-20 md:px-6">
             <div className="space-y-4">
               {sectionBadge}
               <div className={`mx-auto w-full ${contentWidthClass} min-w-0 space-y-4 ${contentClassName}`}>{children}</div>

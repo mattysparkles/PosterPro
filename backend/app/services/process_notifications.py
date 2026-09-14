@@ -27,16 +27,34 @@ def create_process_notification(
     title_normalized = _normalize(title)
     message_normalized = _normalize(message)
     combined = f"{title_normalized} {message_normalized}"
+    semantic_listing_block = (
+        notification_type_normalized == "listing processing blocked"
+        and str(href or "").startswith("/listings/")
+        and str(title or "").startswith("Listing #")
+    )
     suppress_tokens = (
-        "listing_processing_blocked",
         "generic_or_caption_identity",
         "needs_image_identification",
         "insufficient_identity_evidence",
         "caption_identity",
     )
     normalized_tokens = [token.replace("_", " ") for token in suppress_tokens]
-    if any(token.replace("_", " ") in notification_type_normalized for token in suppress_tokens) or any(token in combined for token in normalized_tokens):
+    if not semantic_listing_block and (any(token.replace("_", " ") in notification_type_normalized for token in suppress_tokens) or any(token in combined for token in normalized_tokens)):
         return None
+    if semantic_listing_block:
+        # Listing processing notifications are keyed by the stable listing URL
+        # and the exact current blocker. A retry in the same blocked state is
+        # silent indefinitely; a changed blocker produces one new actionable
+        # notice, without relying on a short time window.
+        duplicate = db.execute(select(IntakeNotification).where(
+            IntakeNotification.user_id == user_id,
+            IntakeNotification.notification_type == notification_type,
+            IntakeNotification.title == title,
+            IntakeNotification.message == message,
+            IntakeNotification.href == href,
+        ).order_by(IntakeNotification.created_at.desc(), IntakeNotification.id.desc()).limit(1)).scalars().first()
+        if duplicate is not None:
+            return duplicate
     # Workflow workers can retry the same event repeatedly. Collapse an exact
     # duplicate from the same tenant/item during a short window; keep distinct
     # failures, changed messages, and later recurrences visible.

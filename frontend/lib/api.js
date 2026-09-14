@@ -1379,6 +1379,10 @@ export async function fetchSalesDashboard(userId, limit = 100, options = {}) {
   return jsonFetch(url.toString());
 }
 
+export async function fetchSalesOperationsSummary() {
+  return jsonFetch(`${API_BASE}/sales/operations-summary`);
+}
+
 export function downloadSalesReportCsv(userId) {
   const suffix = userId ? `?user_id=${userId}` : '';
   window.open(`${API_BASE}/sales/reports/sales.csv${suffix}`, '_blank', 'noopener,noreferrer');
