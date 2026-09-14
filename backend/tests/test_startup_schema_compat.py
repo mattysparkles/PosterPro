@@ -44,4 +44,18 @@ def test_health_reports_startup_schema_compat_summary():
         "database_error": None,
         "startup_schema_compat_enabled": True,
         "legacy_schema_columns_applied": ["users.full_name"],
+        "vine_image_repair": {},
+        "live_intake_probe": None,
     }
+
+
+def test_startup_intake_probe_is_explicitly_non_mutating(monkeypatch):
+    def unexpected_database_access():
+        raise AssertionError("read-only startup status must not open the database")
+
+    monkeypatch.setattr(main_module, "SessionLocal", unexpected_database_access)
+    main_module._run_live_intake_probe()
+
+    state = main_module.app.state.live_intake_probe
+    assert state["status"] == "not_run"
+    assert state["probe_type"] == "read_only_configuration_only"

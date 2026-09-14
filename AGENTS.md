@@ -913,3 +913,12 @@ requirements above. Credentials were not rotated or printed.
   submission was performed; actual Facebook/Mercari/etc. form capability and
   Google Photos data access still require safe operator verification. The
   repository pricing research limitation above remains unchanged.
+- Deployment follow-up safety correction: the first backend restart exposed
+  that the legacy startup diagnostic attempted Google token refresh/userinfo,
+  rendered synthetic Slate/label previews, and attempted an album upload.
+  The current expired Google token caused the request to fail without a Google
+  media ID; no real item/listing was created. The generated local preview
+  artifacts were left untouched. Removed this external/data-writing behavior
+  from startup; health now reports the probe as `not_run`. Added a regression
+  test proving this status path does not open a database session. After this
+  correction, focused suites passed `127 tests`; backend compile passed.
