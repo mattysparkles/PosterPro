@@ -28,6 +28,7 @@ from app.core.auth import ensure_user_owns_resource, get_current_user
 from app.core.database import get_db
 from app.models.enums import EbayPublishStatus, ListingStatus, MarketplaceListingStatus, MarketplaceName
 from app.models.models import IntakeNotification, IntakePhotoBatch, IntakeProviderMedia, Listing, ListingCorrectionJob, MarketplaceCrosspostJob, MarketplaceExtensionJob, MarketplaceImportJob, MarketplaceListing, User
+from app.services.active_listing_snapshot import refresh_ebay_active_snapshot
 from app.services.marketplace_execution import resolve_execution_mode
 from app.services.marketplace_field_mapper import build_marketplace_payload
 from app.services.marketplace_routing import MarketplaceRoutingRule, MarketplaceRoutingService
@@ -176,17 +177,6 @@ def _build_system_status_summary(db: Session, *, user_id: int, import_summary: d
     # Dashboard catalog metrics aggregate the complete tenant catalog. They
     # must not inherit the paginated Listings page size and must count a
     # canonical listing once regardless of its number of live projections.
-    active_projection_ids = (
-        select(func.distinct(MarketplaceListing.listing_id))
-        .join(Listing, Listing.id == MarketplaceListing.listing_id)
-        .where(
-            Listing.user_id == user_id,
-            MarketplaceListing.status.in_([MarketplaceListingStatus.PUBLISHED, MarketplaceListingStatus.UPDATED]),
-            MarketplaceListing.marketplace_listing_id.is_not(None),
-            func.trim(MarketplaceListing.marketplace_listing_id) != "",
-        )
-    )
-    active_projection_ids_set = set(db.execute(active_projection_ids).scalars().all())
     legacy_live = and_(
         or_(
             Listing.status == ListingStatus.PUBLISHED,
@@ -195,11 +185,68 @@ def _build_system_status_summary(db: Session, *, user_id: int, import_summary: d
         Listing.ebay_listing_id.is_not(None),
         func.trim(Listing.ebay_listing_id) != "",
     )
-    confirmed_live = or_(legacy_live, Listing.id.in_(active_projection_ids))
     not_sold = and_(Listing.sold_at.is_(None), func.coalesce(Listing.quantity, 1) > 0)
-    catalog_published = int(db.execute(
-        select(func.count(func.distinct(Listing.id))).where(Listing.user_id == user_id, not_sold, confirmed_live)
-    ).scalar_one())
+    snapshot = refresh_ebay_active_snapshot(db, user_id)
+    ebay_remote_ids = snapshot.get("listing_ids")
+    legacy_ebay_listing_ids = set(db.execute(
+        select(Listing.id).where(Listing.user_id == user_id, not_sold, legacy_live)
+    ).scalars().all())
+    if ebay_remote_ids is None:
+        ebay_live_listing_ids = legacy_ebay_listing_ids
+        ebay_live_count = len(legacy_ebay_listing_ids)
+    else:
+        ebay_live_listing_ids = set(db.execute(
+            select(Listing.id).where(
+                Listing.user_id == user_id,
+                Listing.ebay_listing_id.in_(ebay_remote_ids),
+            )
+        ).scalars().all()) if ebay_remote_ids else set()
+        ebay_live_count = len(ebay_remote_ids)
+
+    active_projection_rows = db.execute(
+        select(MarketplaceListing.marketplace, MarketplaceListing.listing_id)
+        .join(Listing, Listing.id == MarketplaceListing.listing_id)
+        .where(
+            Listing.user_id == user_id,
+            not_sold,
+            MarketplaceListing.status.in_([MarketplaceListingStatus.PUBLISHED, MarketplaceListingStatus.UPDATED]),
+            MarketplaceListing.marketplace_listing_id.is_not(None),
+            func.trim(MarketplaceListing.marketplace_listing_id) != "",
+        )
+    ).all()
+    live_listing_ids_by_marketplace: dict[str, set[int]] = {}
+    for market, listing_id in active_projection_rows:
+        market_key = str(getattr(market, "value", market) or "").strip().lower()
+        if market_key == MarketplaceName.ebay.value:
+            continue  # eBay is based on the refreshed official active-listing result.
+        if listing_id not in archived_listing_ids:
+            live_listing_ids_by_marketplace.setdefault(market_key, set()).add(listing_id)
+    if ebay_remote_ids is None:
+        live_listing_ids_by_marketplace[MarketplaceName.ebay.value] = legacy_ebay_listing_ids
+    else:
+        live_listing_ids_by_marketplace[MarketplaceName.ebay.value] = ebay_live_listing_ids
+    distinct_live_listing_ids = set().union(*live_listing_ids_by_marketplace.values()) if live_listing_ids_by_marketplace else set()
+    live_counts_by_marketplace: dict[str, int | None] = {
+        market: 0 for market in (
+            MarketplaceName.ebay.value,
+            MarketplaceName.facebook.value,
+            MarketplaceName.mercari.value,
+            MarketplaceName.poshmark.value,
+            MarketplaceName.vinted.value,
+            MarketplaceName.etsy.value,
+            MarketplaceName.offerup.value,
+        )
+    }
+    live_counts_by_marketplace.update({
+        market: len(ids) for market, ids in live_listing_ids_by_marketplace.items()
+    })
+    if snapshot.get("status") == "UNAVAILABLE":
+        live_counts_by_marketplace[MarketplaceName.ebay.value] = None
+        catalog_published = None
+    else:
+        live_counts_by_marketplace[MarketplaceName.ebay.value] = ebay_live_count
+        catalog_published = len(distinct_live_listing_ids)
+    active_projection_ids_set = set().union(*live_listing_ids_by_marketplace.values()) if live_listing_ids_by_marketplace else set()
     # Match the catalog's lifecycle buckets, including current preflight and
     # specificity blockers. This query is intentionally narrow (only draft,
     # ready, or explicitly review-flagged rows) and avoids serializing photos,
@@ -231,11 +278,7 @@ def _build_system_status_summary(db: Session, *, user_id: int, import_summary: d
             continue
         status_value = str(getattr(row.status, "value", row.status) or "").strip().lower()
         ebay_status = str(getattr(row.ebay_publish_status, "value", row.ebay_publish_status) or "").strip().upper()
-        has_legacy_external_identity = bool(str(row.ebay_listing_id or "").strip())
-        legacy_live_row = has_legacy_external_identity and (
-            status_value in {"published", "posted"} or ebay_status == "POSTED"
-        )
-        if legacy_live_row or row.id in active_projection_ids_set:
+        if row.id in active_projection_ids_set:
             continue
         if status_value in {"failed", "error"} or ebay_status == "FAILED":
             continue
@@ -296,7 +339,7 @@ def _build_system_status_summary(db: Session, *, user_id: int, import_summary: d
         select(func.count(func.distinct(Listing.id))).where(
             Listing.user_id == user_id,
             or_(Listing.status == ListingStatus.FAILED, Listing.ebay_publish_status == EbayPublishStatus.FAILED),
-            ~Listing.id.in_(active_projection_ids),
+        ~Listing.id.in_(active_projection_ids_set),
             Listing.sold_at.is_(None),
         )
     ).scalar_one())
@@ -348,6 +391,9 @@ def _build_system_status_summary(db: Session, *, user_id: int, import_summary: d
         "catalog_ready": catalog_ready,
         "catalog_published": catalog_published,
         "catalog_live": catalog_published,
+        "catalog_live_by_marketplace": live_counts_by_marketplace,
+        "catalog_live_verification": snapshot.get("status", "LOCAL_LAST_KNOWN"),
+        "catalog_live_verified_at": snapshot.get("verified_at"),
         "catalog_failed": catalog_failed,
         "catalog_sold": catalog_sold,
         "catalog_archived": catalog_archived,

@@ -87,6 +87,7 @@ from app.services.storage import LocalStorage
 from app.services.pricing_service import PricingService
 from app.services.pricing_intelligence_service import PricingIntelligenceService
 from app.services.pricing_research_service import compute_listing_quality_summary
+from app.services.active_listing_snapshot import cached_ebay_active_ids
 from app.services.photo_editor import PhotoEditorService
 from app.services.listing_templates_service import listing_template_service
 from app.services.amazon_media import AmazonProductMediaProvider
@@ -152,7 +153,7 @@ def _listing_bucket_expression():
     )
 
 
-def _listing_bucket(listing: Listing) -> str:
+def _listing_bucket(listing: Listing, remote_ebay_active_ids: set[str] | None = None) -> str:
     labels = {str(value).strip().lower() for value in (listing.custom_labels or [])}
     marketplace_data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}
     source_metadata = listing.source_metadata if isinstance(listing.source_metadata, dict) else {}
@@ -170,7 +171,8 @@ def _listing_bucket(listing: Listing) -> str:
     if {"archived_vine", "archived_sold"} & labels:
         return "archived"
     has_live_projection = any(
-        (
+        (remote_ebay_active_ids is None or str(getattr(row, "marketplace", "")).lower() not in {"ebay", "marketplacename.ebay"})
+        and (
             getattr(row, "status", None) in {MarketplaceListingStatus.PUBLISHED, MarketplaceListingStatus.UPDATED}
             or str(getattr(row, "status", "")).upper() in {"PUBLISHED", "UPDATED"}
         )
@@ -180,8 +182,10 @@ def _listing_bucket(listing: Listing) -> str:
     normalized_status = str(getattr(listing.status, "value", listing.status) or "").strip().lower()
     has_ebay_identity = bool(str(listing.ebay_listing_id or "").strip())
     ebay_status = str(getattr(listing.ebay_publish_status, "value", listing.ebay_publish_status) or "").strip().upper()
-    has_confirmed_ebay_identity = has_ebay_identity and (
-        normalized_status == "published" or ebay_status == "POSTED"
+    has_confirmed_ebay_identity = (
+        str(listing.ebay_listing_id or "").strip() in remote_ebay_active_ids
+        if remote_ebay_active_ids is not None
+        else has_ebay_identity and (normalized_status == "published" or ebay_status == "POSTED")
     )
     if has_confirmed_ebay_identity or has_live_projection:
         return "published"
@@ -1337,6 +1341,7 @@ def get_listings(
     """
     # Every normal catalog request is tenant-scoped. Platform-wide views must
     # use an explicit admin endpoint; never infer that from a missing query arg.
+    remote_ebay_active_ids = cached_ebay_active_ids(db, current_user.id)
     filters = [Listing.user_id == current_user.id]
     normalized_source = str(source_type or "").strip().lower()
     if normalized_source and normalized_source != "all":
@@ -1411,21 +1416,28 @@ def get_listings(
             # legacy rows whose processing_state was never populated.
             pass
         elif normalized_queue == "published":
-            queue_filters.append(or_(
-                and_(
+            if remote_ebay_active_ids is None:
+                ebay_live_filter = and_(
                     Listing.ebay_listing_id.is_not(None),
                     func.trim(Listing.ebay_listing_id) != "",
                     or_(Listing.status == ListingStatus.PUBLISHED, Listing.ebay_publish_status == "POSTED"),
-                ),
-                exists(select(1).where(
-                    and_(
-                        MarketplaceListing.listing_id == Listing.id,
-                        MarketplaceListing.status.in_([MarketplaceListingStatus.PUBLISHED, MarketplaceListingStatus.UPDATED]),
-                        MarketplaceListing.marketplace_listing_id.is_not(None),
-                        func.trim(MarketplaceListing.marketplace_listing_id) != "",
-                    )
-                )),
-            ))
+                )
+                marketplace_live_predicate = and_(
+                    MarketplaceListing.listing_id == Listing.id,
+                    MarketplaceListing.status.in_([MarketplaceListingStatus.PUBLISHED, MarketplaceListingStatus.UPDATED]),
+                    MarketplaceListing.marketplace_listing_id.is_not(None),
+                    func.trim(MarketplaceListing.marketplace_listing_id) != "",
+                )
+            else:
+                ebay_live_filter = Listing.ebay_listing_id.in_(remote_ebay_active_ids) if remote_ebay_active_ids else Listing.id.in_([-1])
+                marketplace_live_predicate = and_(
+                    MarketplaceListing.listing_id == Listing.id,
+                    MarketplaceListing.marketplace != MarketplaceName.ebay,
+                    MarketplaceListing.status.in_([MarketplaceListingStatus.PUBLISHED, MarketplaceListingStatus.UPDATED]),
+                    MarketplaceListing.marketplace_listing_id.is_not(None),
+                    func.trim(MarketplaceListing.marketplace_listing_id) != "",
+                )
+            queue_filters.append(or_(ebay_live_filter, exists(select(1).where(marketplace_live_predicate))))
         elif normalized_queue == "ready":
             queue_filters.append(and_(Listing.status == ListingStatus.ready, Listing.source_metadata["operator_approved_at"].as_string().is_not(None), not_(exists(select(1).where(
                 and_(
@@ -1459,6 +1471,7 @@ def get_listings(
         (normalized_marketplace and normalized_marketplace != "all")
         or (normalized_readiness and normalized_readiness != "all")
         or normalized_queue in {"all", "drafts", "ready", "review", "needs_attention", "published", "failed"}
+        or remote_ebay_active_ids is not None
     )
 
     sort_map = {
@@ -1492,13 +1505,13 @@ def get_listings(
             and _matches_readiness_filter(listing, normalized_readiness)
             and (
                 normalized_queue in {"", "all"}
-                or _listing_bucket(listing) == normalized_queue
+                or _listing_bucket(listing, remote_ebay_active_ids) == normalized_queue
             )
         ]
         total = len(rows)
         bucket_counts: dict[str, int] = {}
         for listing in rows:
-            bucket = _listing_bucket(listing)
+            bucket = _listing_bucket(listing, remote_ebay_active_ids)
             bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
         bucket_counts["all"] = total
         bucket_counts["attention"] = bucket_counts.get("needs_attention", 0)
@@ -1529,8 +1542,12 @@ def get_listings(
             .limit(resolved_page_size)
         ).scalars().all()
     serializer = _serialize_listing_summary if summary_only else _serialize_listing_response
+    serialized_items = [serializer(listing) for listing in rows]
+    if remote_ebay_active_ids is not None:
+        for listing, serialized in zip(rows, serialized_items):
+            serialized["queue_bucket"] = _listing_bucket(listing, remote_ebay_active_ids)
     return {
-        "items": [serializer(listing) for listing in rows],
+        "items": serialized_items,
         "total": total,
         "page": resolved_page,
         "page_size": resolved_page_size,

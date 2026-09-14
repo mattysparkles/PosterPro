@@ -12,6 +12,7 @@ from app.models.models import (
     IntakeSlate,
     Listing,
     ListingTemplate,
+    MarketplaceAccount,
     MarketplaceCrosspostJob,
     MarketplaceImportJob,
     MarketplaceListing,
@@ -844,6 +845,61 @@ async def test_dashboard_catalog_metrics_are_unpaginated_and_count_live_canonica
     assert published_page.status_code == 200
     assert published_page.json()["total"] == 161
     assert len(published_page.json()["items"]) == 5
+
+
+@pytest.mark.anyio
+async def test_dashboard_live_breakdown_uses_remote_ebay_snapshot_and_deduplicates_other_markets(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Live Snapshot Owner", "email": f"live-snapshot-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    db = database_module.SessionLocal()
+    rows = [
+        Listing(user_id=user_id, status=ListingStatus.PUBLISHED, ebay_publish_status=EbayPublishStatus.POSTED, ebay_listing_id=f"EXT-{n}", title=f"Tracked listing {n}", description="live", quantity=1)
+        for n in range(1, 5)
+    ]
+    db.add_all(rows)
+    db.add(MarketplaceAccount(user_id=user_id, marketplace=MarketplaceName.ebay, external_account_id="test-seller", access_token="test-access", refresh_token="test-refresh"))
+    db.flush()
+    db.add_all([
+        MarketplaceListing(listing_id=rows[1].id, marketplace=MarketplaceName.facebook, marketplace_listing_id="FB-2", status=MarketplaceListingStatus.PUBLISHED),
+        MarketplaceListing(listing_id=rows[2].id, marketplace=MarketplaceName.facebook, marketplace_listing_id="FB-3", status=MarketplaceListingStatus.PUBLISHED),
+        MarketplaceListing(listing_id=rows[3].id, marketplace=MarketplaceName.facebook, marketplace_listing_id=None, status=MarketplaceListingStatus.PUBLISHED),
+    ])
+    db.commit()
+    db.close()
+
+    import app.services.active_listing_snapshot as snapshot_service
+    calls = []
+
+    async def fake_active_ebay_listings(requested_user_id, _db, *, limit):
+        calls.append((requested_user_id, limit))
+        return [
+            {"source_identifiers": {"ebay_listing_id": "EXT-1"}},
+            {"source_identifiers": {"ebay_listing_id": "EXT-2"}},
+        ]
+
+    monkeypatch.setattr(snapshot_service, "get_active_ebay_listings", fake_active_ebay_listings)
+    response = await async_client.get("/marketplace-jobs/overview?compact=true&limit=5")
+    assert response.status_code == 200
+    status = response.json()["system_status"]
+    assert status["catalog_live"] == 3
+    assert status["catalog_live_by_marketplace"]["ebay"] == 2
+    assert status["catalog_live_by_marketplace"]["facebook"] == 2
+    assert status["catalog_live_verification"] == "REMOTE_VERIFIED"
+
+    published = await async_client.get("/listings?queue=published&page=1&page_size=10")
+    assert published.status_code == 200
+    assert published.json()["total"] == 3
+
+    # A second summary reads the fresh tenant-scoped snapshot without another
+    # external request, while stale local eBay rows do not re-enter the count.
+    second = await async_client.get("/marketplace-jobs/overview?compact=true&limit=5")
+    assert second.status_code == 200
+    assert second.json()["system_status"]["catalog_live"] == 3
+    assert len(calls) == 1
 
 
 @pytest.mark.anyio

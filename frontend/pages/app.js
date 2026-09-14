@@ -139,7 +139,17 @@ export default function Dashboard() {
   const googlePhotosConnected = Boolean(intakeSettings?.google_photos?.connected);
   const draftCount = Number(systemStatus.catalog_drafts || 0);
   const reviewCount = Number(systemStatus.catalog_review || 0);
-  const liveCount = Number(systemStatus.catalog_live ?? systemStatus.catalog_published ?? 0);
+  const liveCount = systemStatus.catalog_live ?? systemStatus.catalog_published ?? null;
+  const liveByMarketplace = systemStatus.catalog_live_by_marketplace || {};
+  const liveMarketplaceLabels = [
+    ['ebay', 'eBay'], ['facebook', 'Facebook'], ['mercari', 'Mercari'],
+    ['poshmark', 'Poshmark'], ['vinted', 'Vinted'], ['etsy', 'Etsy'], ['offerup', 'OfferUp'],
+  ];
+  const liveVerification = systemStatus.catalog_live_verification || 'LOCAL_LAST_KNOWN';
+  const liveMarketplaceSummary = liveMarketplaceLabels
+    .filter(([key]) => Number(liveByMarketplace[key]) > 0)
+    .map(([key, label]) => `${label} ${liveByMarketplace[key]}`)
+    .join(' · ');
   const readyCount = Number(systemStatus.catalog_ready || 0);
   const failedPublishCount = Number(systemStatus.catalog_failed || 0);
 
@@ -287,7 +297,7 @@ export default function Dashboard() {
   const topMetrics = [
     { id: 'ready', label: 'Ready to publish', value: metricsReady ? readyCount : 'Not available', detail: 'Approved listings without a live marketplace copy.', href: '/listings?tab=ready' },
     { id: 'review', label: 'Pending review', value: metricsReady ? reviewCount : 'Not available', detail: 'Current Needs Review queue across the full catalog.', href: '/listings?tab=review' },
-    { id: 'live', label: 'Live listings', value: metricsReady ? liveCount : 'Not available', detail: 'Distinct listings with at least one active marketplace copy.', href: '/listings?tab=published' },
+    { id: 'live', label: 'Live listings', value: metricsReady && liveCount != null ? Number(liveCount) : 'Not available', detail: metricsReady ? `${liveMarketplaceSummary || 'No confirmed marketplace copies'}${liveVerification === 'STALE_REMOTE_SNAPSHOT' ? ' · eBay check is stale' : liveVerification === 'UNAVAILABLE' ? ' · eBay check unavailable' : ''}` : 'Marketplace counts unavailable.', href: '/listings?tab=published' },
     { id: 'draft', label: 'Draft backlog', value: metricsReady ? draftCount : 'Not available', detail: 'Unfinished listings not yet ready for human review.', href: '/listings?tab=drafts' },
   ];
   const orderedMetrics = dashboardMetricLayout.order.map((id) => topMetrics.find((metric) => metric.id === id)).filter((metric) => metric && dashboardMetricLayout.visible[metric.id]);
@@ -1120,13 +1130,20 @@ export default function Dashboard() {
       <section aria-label="Primary listing metrics" className="rounded-2xl border border-[#e5e7eb] bg-white p-3 sm:p-4">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><h2 className="text-base font-semibold text-[#101828]">Listing overview</h2><Button variant="outline" size="sm" onClick={() => setCustomizingMetrics((value) => !value)}>{customizingMetrics ? 'Done customizing' : 'Customize dashboard'}</Button></div>
         {customizingMetrics ? <div className="mb-4 rounded-xl border border-[#d0d5dd] bg-[#f8fafc] p-4"><div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm font-semibold text-[#101828]">Choose and arrange your metric cards</p><Button size="sm" variant="outline" onClick={() => void saveDashboardMetricLayout(DEFAULT_DASHBOARD_METRIC_LAYOUT)}>Reset layout</Button></div><div className="mt-3 grid gap-2 sm:grid-cols-2">{dashboardMetricLayout.order.map((id, index) => { const item = topMetrics.find((metric) => metric.id === id); if (!item) return null; return <div key={id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#d0d5dd] bg-white p-3"><label className="flex min-h-10 cursor-pointer items-center gap-3 text-sm font-medium text-[#101828]"><input type="checkbox" className="h-5 w-5 accent-blue-700" checked={dashboardMetricLayout.visible[id] !== false} onChange={(event) => void saveDashboardMetricLayout({ ...dashboardMetricLayout, visible: { ...dashboardMetricLayout.visible, [id]: event.target.checked } })} /><span>{item.label}</span></label><div className="flex gap-1"><Button size="sm" variant="outline" disabled={index === 0} aria-label={`Move ${item.label} earlier`} onClick={() => reorderDashboardMetrics(id, dashboardMetricLayout.order[index - 1])}>Move up</Button><Button size="sm" variant="outline" disabled={index === dashboardMetricLayout.order.length - 1} aria-label={`Move ${item.label} later`} onClick={() => reorderDashboardMetrics(id, dashboardMetricLayout.order[index + 1])}>Move down</Button></div></div>; })}</div></div> : null}
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        {orderedMetrics.map((card) => <div key={card.id} draggable={customizingMetrics} onDragStart={(event) => event.dataTransfer.setData('text/plain', card.id)} onDragOver={(event) => { if (customizingMetrics) event.preventDefault(); }} onDrop={(event) => { event.preventDefault(); reorderDashboardMetrics(event.dataTransfer.getData('text/plain'), card.id); }}><MetricCard label={card.label} value={card.value} detail={card.detail} href={card.href} /></div>)}
+        <div className="grid grid-cols-2 gap-2 sm:gap-3 md:grid-cols-4">
+        {orderedMetrics.map((card) => <div key={card.id} className="min-w-0" draggable={customizingMetrics} onDragStart={(event) => event.dataTransfer.setData('text/plain', card.id)} onDragOver={(event) => { if (customizingMetrics) event.preventDefault(); }} onDrop={(event) => { event.preventDefault(); reorderDashboardMetrics(event.dataTransfer.getData('text/plain'), card.id); }}><MetricCard className="min-h-[108px] p-3 sm:p-4" label={card.label} value={card.value} detail={card.detail} href={card.href} /></div>)}
         </div>
+        {dashboardMetricLayout.visible.live !== false ? <details className="mt-3 rounded-xl border border-[#e5e7eb] bg-[#f8fafc] px-3 py-2">
+          <summary className="cursor-pointer text-sm font-semibold text-[#344054]">Live marketplace breakdown <span className="ml-2 font-normal text-[#667085]">{liveVerification === 'REMOTE_VERIFIED' ? `eBay checked ${systemStatus.catalog_live_verified_at ? formatTime(systemStatus.catalog_live_verified_at) : 'recently'}` : liveVerification === 'STALE_REMOTE_SNAPSHOT' ? 'eBay count is from the last successful check' : liveVerification === 'UNAVAILABLE' ? 'eBay count could not be verified' : 'Based on PosterPro’s latest confirmed listing records'}</span></summary>
+          <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-7">
+            {liveMarketplaceLabels.map(([key, label]) => <div key={key} className="rounded-lg border border-[#e4e7ec] bg-white px-3 py-2"><p className="text-xs font-medium text-[#667085]">{label}</p><p className="mt-1 text-lg font-semibold text-[#101828]">{metricsReady && liveByMarketplace[key] != null ? liveByMarketplace[key] : 'Not available'}</p></div>)}
+          </div>
+          <p className="mt-2 text-xs leading-5 text-[#667085]">eBay is refreshed from the connected account every 10 minutes. Other marketplaces use PosterPro’s exact external listing identities; the total counts distinct inventory items, so one item live in multiple places is counted once.</p>
+        </details> : null}
         {user?.is_admin ? <details className="mt-3 rounded-xl border border-[#e5e7eb] bg-[#f8fafc] p-3"><summary className="cursor-pointer text-sm font-semibold text-[#344054]">Metric diagnostics</summary><p className="mt-2 text-xs text-[#667085]">Source: GET /marketplace-jobs/overview → system_status · updated {metricsUpdatedAt ? formatTime(metricsUpdatedAt) : 'not yet verified'}</p><dl className="mt-3 grid gap-2 sm:grid-cols-2">{[
           ['Ready to publish', readyCount, 'Tenant listings marked ready with operator approval, a passing stored target check, unsold, not archived, and without an active projection.'],
           ['Pending review', reviewCount, 'Distinct tenant listings with a current needs-review flag and a passing stored review outcome, unsold, not archived, and not already live.'],
-          ['Live listings', liveCount, 'Distinct tenant listing IDs with PUBLISHED status, eBay POSTED status, or at least one PUBLISHED/UPDATED marketplace projection.'],
+          ['Live listings', liveCount == null ? 'Not available' : liveCount, 'Distinct canonical inventory IDs in the current remote eBay active-list snapshot or another exact-identity PUBLISHED/UPDATED marketplace projection. eBay verification state: ' + liveVerification + '.'],
           ['Draft backlog', draftCount, 'Tenant draft/ingested/processed listings that are not flagged for review, live, sold, or archived.'],
         ].map(([name, value, definition]) => <div key={name} className="rounded-lg border border-[#e5e7eb] bg-white p-3"><dt className="text-sm font-semibold text-[#101828]">{name}: {metricsReady ? value : 'Not available'}</dt><dd className="mt-1 text-xs leading-5 text-[#667085]">{definition}</dd></div>)}</dl></details> : null}
       </section>

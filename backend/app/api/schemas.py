@@ -1333,8 +1333,11 @@ class SystemStatusSummary(BaseModel):
     catalog_drafts: int = 0
     catalog_review: int = 0
     catalog_ready: int = 0
-    catalog_published: int = 0
-    catalog_live: int = 0
+    catalog_published: int | None = 0
+    catalog_live: int | None = 0
+    catalog_live_by_marketplace: dict[str, int | None] = Field(default_factory=dict)
+    catalog_live_verification: str = "LOCAL_LAST_KNOWN"
+    catalog_live_verified_at: str | None = None
     catalog_failed: int = 0
     catalog_sold: int = 0
     catalog_archived: int = 0

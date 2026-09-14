@@ -1045,3 +1045,43 @@ requirements above. Credentials were not rotated or printed.
   No host-wide cleanup or non-PosterPro resource mutation was performed; the
   untracked `debug_fb_publish.db`, `ops/snapshots/`, and `tmp/` paths were left
   untouched.
+
+## 2026-09-14 - Dashboard compact metrics and live marketplace breakdown
+
+- Changed the primary listing metric cards to a compact two-column mobile /
+  four-column desktop grid, reducing card padding and minimum height so the
+  four canonical counts share one desktop row. Added a collapsible per-market
+  live breakdown beneath the row, including eBay verification freshness and a
+  note that totals deduplicate canonical inventory across destinations.
+- Corrected the live-count source: the former `188` treated old local eBay
+  `POSTED` / `PUBLISHED` lifecycle state as current. The dashboard now refreshes
+  a tenant-scoped, ten-minute snapshot of exact active eBay listing IDs through
+  the existing read-only seller-list API, then unions those identities with
+  exact-ID active projections for other marketplaces. Unverified eBay counts
+  fail visibly as unavailable (or identify a stale last-success snapshot)
+  instead of presenting a fabricated precise count. The Published queue uses
+  the same fresh snapshot when available. No migration was needed; the
+  existing marketplace metadata cache stores only listing IDs and timestamp.
+- Live production account verification before deployment found 161 current
+  eBay active listings; all 161 mapped to canonical PosterPro listings.
+  PosterPro had two exact-ID Facebook projections, one overlapping an eBay
+  item, for 162 distinct canonical live items. Deployment verification below
+  after restart returned Ready `0`, Needs Review `610`, Live `162`, Draft
+  backlog `187`. The Live breakdown is eBay `161`, Facebook `2`, and zero for
+  the other configured marketplaces. The distinct headline is 162 because
+  one item is active on both eBay and Facebook; per-market values are not
+  expected to sum to the deduplicated headline.
+- Validation: focused backend marketplace API/preflight/auth/extension suites
+  passed `73 tests`; Python compile passed; frontend production build passed
+  with existing repository lint/top-level-await warnings. No authenticated
+  visual browser was available, so pixel-level rendered confirmation remains
+  an operator check. No marketplace publish/update/end action was invoked.
+- Only PosterPro backend and frontend services were restarted. No migration,
+  host-wide maintenance, or unrelated resource mutation was performed; the
+  untracked `debug_fb_publish.db`, `ops/snapshots/`, and `tmp/` paths were left
+  untouched.
+- Post-restart verification: backend `/health` returned `200` with
+  `database_ready: true`; `/app` and `/settings` returned `200`; the frontend
+  deployment route served the newly built dashboard bundle. Only the
+  previously authenticated production operator account was queried for the
+  read-only metric summary.
