@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/router';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { formatNotificationBadge } from '../../lib/notificationBadge.mjs';
 import {
   BarChart3,
   Briefcase,
@@ -403,7 +404,7 @@ export default function AppShell({
               <div className="relative ml-auto">
                 <Button
                   variant="secondary"
-                  size="icon"
+                  size="icon-sm"
                   className="relative rounded-xl border-[var(--pp-border)] bg-white text-[var(--pp-text)] shadow-sm hover:bg-slate-50"
                   onClick={() => setNotificationsOpen((current) => !current)}
                   aria-label={`Open notifications. ${notificationUnreadCount.toLocaleString()} unread.`}
@@ -411,10 +412,10 @@ export default function AppShell({
                   title="Notifications"
                 >
                   <Bell size={19} aria-hidden="true" />
-                  {notificationUnreadCount ? <span className="absolute -right-2 -top-2 inline-flex h-5 min-w-5 items-center justify-center rounded-full border-2 border-white bg-[#b42318] px-1 text-[10px] font-bold leading-none text-white">{notificationUnreadCount > 99 ? '99+' : notificationUnreadCount}</span> : null}
+                  {formatNotificationBadge(notificationUnreadCount) ? <span aria-hidden="true" className="pp-notification-badge">{formatNotificationBadge(notificationUnreadCount)}</span> : null}
                 </Button>
                 {notificationsOpen && typeof document !== 'undefined' ? createPortal((
-                  <div role="dialog" aria-label="Notifications" style={{ position: 'fixed', top: 64, right: 20, left: 'auto', width: 'min(440px, calc(100vw - 24px))', maxHeight: 'min(78vh, 680px)', zIndex: 9999, backgroundColor: '#ffffff', opacity: 1 }} className="overflow-hidden rounded-2xl border border-slate-200 bg-white text-slate-900 shadow-[0_24px_60px_rgba(16,24,40,0.24)]">
+                  <div role="dialog" aria-label="Notifications" className="pp-notification-popover overflow-hidden rounded-2xl border border-slate-200 bg-white text-slate-900 shadow-[0_24px_60px_rgba(16,24,40,0.24)]">
                     <div className="flex items-start justify-between gap-3 border-b border-slate-200 bg-white px-4 py-4">
                       <div><p className="text-base font-semibold text-slate-950">Notifications</p><p className="mt-1 text-sm text-slate-600">Unread {notificationUnreadCount.toLocaleString()}</p></div>
                       <button type="button" onClick={handleMarkAllNotificationsRead} disabled={!notificationUnreadCount} className="rounded-lg px-2 py-1.5 text-sm font-semibold text-blue-800 hover:bg-blue-50 disabled:cursor-not-allowed disabled:text-slate-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600">Mark all read</button>
@@ -423,13 +424,13 @@ export default function AppShell({
                       <div className="flex gap-1" role="group" aria-label="Filter notifications">{[['all', 'All'], ['unread', 'Unread'], ['errors', 'Errors']].map(([value, label]) => <button key={value} type="button" aria-pressed={notificationFilter === value} onClick={() => setNotificationFilter(value)} className={`min-h-9 rounded-lg px-3 text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 ${notificationFilter === value ? 'bg-blue-800 text-white' : 'bg-transparent text-slate-700 hover:bg-white'}`}>{label}</button>)}</div>
                       <Link href="/notices" onClick={() => setNotificationsOpen(false)} className="rounded-lg px-2 py-1.5 text-sm font-semibold text-blue-800 hover:bg-blue-50">View all notifications</Link>
                     </div>
-                    <div className="max-h-[min(52vh,440px)] overflow-y-auto bg-white p-3">
+                    <div className="pp-notification-list max-h-[min(52vh,440px)] overflow-y-auto bg-white p-3">
                       {filteredNotifications.length ? (
                         filteredNotifications.map((notification) => (
                           <button
                             key={notification.id}
                             type="button"
-                            className={`block w-full rounded-[14px] border px-3 py-3 text-left transition hover:bg-[#f9fafb] ${
+                            className={`pp-notification-item block w-full rounded-[14px] border px-3 py-3 text-left transition hover:bg-[#f9fafb] ${
                               notification.read_at ? 'border-slate-200 bg-white' : 'border-blue-200 bg-blue-50'
                             }`}
                             onClick={async () => {

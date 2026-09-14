@@ -1181,3 +1181,37 @@ requirements above. Credentials were not rotated or printed.
 - Scoped deployment only: backend, worker, and frontend. No marketplace
   publication/update/end action was invoked. No non-PosterPro resource was
   changed. `debug_fb_publish.db`, `ops/snapshots/`, and `tmp/` were left alone.
+
+## 2026-09-14 - Shell overflow and authorized notification history cleanup
+
+- Replaced the fixed sidebar + main `margin-left` offset with one desktop shell
+  grid: the shared `--pp-sidebar-width: 272px` track is reserved once and the
+  main track is `minmax(0, 1fr)`. The main grid child has `min-width: 0`; mobile
+  returns to a single block column. Dashboard metric columns use an available-
+  width-safe `auto-fit/minmax(min(100%, 220px), 1fr)` rule, while the existing
+  two-column operational card layout is preserved.
+- Rebuilt the notification badge formatting (`0` hidden, `1–99` exact, `100+`
+  shown as `99+`) with a 40px utility-button hit target, absolute-positioned
+  white-on-red badge, and viewport-bounded 440px notification panel. The list
+  now wraps long text without creating an internal horizontal scrollbar.
+- Before deletion, verified current operator/admin user `2` (“Matty Sparkles”)
+  owned `1,066,426` notification rows (`27,708` unread; oldest
+  `2026-07-21 02:02:39.356573`, newest `2026-09-11 17:45:02.765690`). Under the
+  explicit one-time operator authorization, deleted exactly `1,066,416` rows
+  for user `2`, preserving the newest ten by `created_at DESC, id DESC`. No
+  other user or data table was touched. Post-cleanup count is `10`, unread `10`,
+  oldest `2026-09-05 14:04:45.749906`, newest `2026-09-11 17:45:02.765690`.
+- Verified stable blocker dedupe in a rolled-back transaction against the
+  production database connection: an unchanged synthetic blocker returned the
+  same ID twice and persisted no rows. Existing semantic dedupe implementation
+  and notification indexes are unchanged. Added an explicit scoped retention
+  utility (not an automatic retention policy) and regression coverage for
+  deterministic newest-row preservation and tenant isolation.
+- Validation: notification/dedupe/cleanup backend tests `3 passed`; badge,
+  shell-width and popover Node tests `3 passed`; frontend production build
+  passed with existing lint/noVNC warnings. No migration or marketplace action
+  was required. Authenticated screenshot capture is unavailable here; final
+  geometry still needs operator screenshot confirmation after deployment.
+- Notification data cleanup affected only PosterPro `intake_notifications`
+  for user `2`. `debug_fb_publish.db`, `ops/snapshots/`, `tmp/`, and all
+  non-PosterPro resources remain untouched.

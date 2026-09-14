@@ -34,7 +34,7 @@ from app.services.ebay_service import _build_ebay_image_urls
 from app.services.alert_service import AlertService
 from app.services.google_photos import GooglePhotoEnumeration, GooglePhotosService
 from app.services.intake_slate import IntakeSlateService
-from app.services.process_notifications import create_process_notification, mark_all_process_notifications_read
+from app.services.process_notifications import create_process_notification, mark_all_process_notifications_read, retain_recent_process_notifications
 
 
 def _make_image_file(name: str, color: str = 'white') -> str:
@@ -2106,6 +2106,51 @@ def test_listing_block_notifications_are_deduplicated_for_stable_blocker(db_sess
         href='/listings/42',
     )
     assert changed_blocker.id != first.id
+
+
+def test_notification_history_cleanup_is_deterministic_and_tenant_scoped(db_session):
+    target = _create_user(db_session, email='notification-cleanup-target@example.com')
+    other = _create_user(db_session, email='notification-cleanup-other@example.com')
+    base = datetime(2026, 1, 1)
+    target_rows = [
+        IntakeNotification(
+            user_id=target.id,
+            title=f'Target notice {index}',
+            notification_type='cleanup_test',
+            created_at=base + timedelta(minutes=index),
+        )
+        for index in range(15)
+    ]
+    # Equal timestamps are resolved by the descending primary key.
+    target_rows.extend([
+        IntakeNotification(user_id=target.id, title='Tied notice A', notification_type='cleanup_test', created_at=base + timedelta(minutes=20)),
+        IntakeNotification(user_id=target.id, title='Tied notice B', notification_type='cleanup_test', created_at=base + timedelta(minutes=20)),
+    ])
+    other_rows = [
+        IntakeNotification(user_id=other.id, title=f'Other notice {index}', notification_type='cleanup_test', created_at=base + timedelta(minutes=index))
+        for index in range(3)
+    ]
+    db_session.add_all([*target_rows, *other_rows])
+    db_session.commit()
+    expected = db_session.scalars(
+        select(IntakeNotification.id)
+        .where(IntakeNotification.user_id == target.id)
+        .order_by(IntakeNotification.created_at.desc(), IntakeNotification.id.desc())
+        .limit(10)
+    ).all()
+
+    deleted = retain_recent_process_notifications(db_session, user_id=target.id, keep=10)
+
+    remaining_target = db_session.scalars(
+        select(IntakeNotification.id).where(IntakeNotification.user_id == target.id)
+    ).all()
+    remaining_other = db_session.scalars(
+        select(IntakeNotification.id).where(IntakeNotification.user_id == other.id)
+    ).all()
+    assert deleted == len(target_rows) - 10
+    assert set(remaining_target) == set(expected)
+    assert len(remaining_target) == 10
+    assert len(remaining_other) == len(other_rows)
 
 
 def test_alerts_aggregate_stale_active_listings(db_session, monkeypatch):

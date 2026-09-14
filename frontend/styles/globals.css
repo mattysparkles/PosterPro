@@ -230,17 +230,55 @@ a {
 
 .posterpro-app-shell {
   background: var(--pp-shell-bg);
+  display: grid;
+  grid-template-columns: var(--pp-sidebar-width) minmax(0, 1fr);
+  width: 100%;
+  min-width: 0;
 }
 
-/* The sidebar width is defined once; the content begins exactly at its edge. */
-.pp-shell-main { min-width: 0; }
+/* The sidebar remains fixed while the grid reserves its one shared width.
+   Main content therefore gets only the width left over in the viewport. */
+.pp-shell-main { grid-column: 2; min-width: 0; }
 .pp-sidebar-width { width: var(--pp-sidebar-width) !important; }
-@media (min-width: 640px) {
-  .posterpro-app-shell > .pp-shell-main { margin-left: var(--pp-sidebar-width) !important; padding-left: 0 !important; }
-}
 @media (max-width: 639px) {
-  .posterpro-app-shell > .pp-shell-main { margin-left: 0 !important; padding-left: 0 !important; }
+  .posterpro-app-shell { display: block; }
 }
+.pp-notification-badge {
+  position: absolute;
+  top: -4px;
+  right: -5px;
+  display: inline-flex;
+  min-width: 20px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 5px;
+  border: 2px solid #fff;
+  border-radius: 999px;
+  background: var(--pp-danger);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 750;
+  line-height: 14px;
+  text-align: center;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.pp-notification-popover {
+  position: fixed;
+  z-index: 9999;
+  top: 64px;
+  right: 12px;
+  left: auto;
+  box-sizing: border-box;
+  width: min(440px, calc(100vw - 24px));
+  max-height: min(78vh, 680px);
+  background: #fff;
+  color: #172033;
+  opacity: 1;
+}
+.pp-notification-list { min-width: 0; overflow-x: hidden; }
+.pp-notification-item { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .pp-mobile-menu-button { display: none !important; }
 @media (max-width: 639px) { .pp-mobile-menu-button { display: inline-flex !important; } }
 .pp-wordmark { color: #fff; font-family: var(--pp-body-font); font-size: 1.55rem; font-weight: 760; letter-spacing: -0.055em; line-height: 1.1; }
@@ -255,7 +293,7 @@ a {
 .pp-dashboard-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-width: 0; }
 .pp-dashboard-title { margin: 0; color: var(--pp-text-primary); font-size: clamp(1.55rem, 2vw, 1.9rem); font-weight: 720; line-height: 1.15; letter-spacing: -.04em; }
 .pp-dashboard-actions { display: flex; align-items: center; justify-content: flex-end; gap: .65rem; flex-wrap: wrap; }
-.pp-dashboard-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); align-items: start; gap: .75rem; }
+.pp-dashboard-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); align-items: start; gap: .75rem; }
 .pp-dashboard-metric { min-width: 0; min-height: 104px !important; height: auto !important; padding: 1rem !important; border-radius: var(--pp-radius-lg) !important; box-shadow: var(--pp-shadow-sm) !important; background: var(--pp-surface) !important; }
 .pp-dashboard-metric::after { display: none; }
 .pp-dashboard-modules { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 1rem; }
@@ -286,12 +324,13 @@ a {
   position: fixed !important;
   inset: 0 auto 0 0 !important;
   z-index: 40 !important;
-  width: 272px !important;
+  width: var(--pp-sidebar-width) !important;
   display: block !important;
   overflow: hidden !important;
 }
 @media (max-width: 639px) {
   .pp-shell-sidebar-rail { display: none !important; }
+  .pp-notification-popover { top: 60px; right: 12px; width: calc(100vw - 24px); }
 }
 
 /* AppShell owns authenticated navigation. Keep the rail visible even when
@@ -320,8 +359,6 @@ a {
   min-height: 100%;
   background: var(--pp-bg);
 }
-@media (min-width: 640px) { .posterpro-app-shell > div.pp-shell-main { margin-left: var(--pp-sidebar-width) !important; } }
-
 .pp-shell-nav-item {
   min-height: 2.6rem;
 }

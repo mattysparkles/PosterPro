@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from app.models.models import IntakeNotification
@@ -119,6 +119,30 @@ def mark_all_process_notifications_read(db: Session, *, user_id: int) -> int:
         update(IntakeNotification)
         .where(IntakeNotification.user_id == user_id, IntakeNotification.read_at.is_(None))
         .values(read_at=now, updated_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    db.commit()
+    return int(result.rowcount or 0)
+
+
+def retain_recent_process_notifications(db: Session, *, user_id: int, keep: int = 10) -> int:
+    """Delete older notification rows for one user, retaining a deterministic newest page.
+
+    This is an explicit operator utility, not an automatic retention policy.
+    """
+    keep = max(0, int(keep))
+    newest_ids = (
+        select(IntakeNotification.id)
+        .where(IntakeNotification.user_id == user_id)
+        .order_by(IntakeNotification.created_at.desc(), IntakeNotification.id.desc())
+        .limit(keep)
+    )
+    result = db.execute(
+        delete(IntakeNotification)
+        .where(
+            IntakeNotification.user_id == user_id,
+            IntakeNotification.id.not_in(newest_ids),
+        )
         .execution_options(synchronize_session=False)
     )
     db.commit()
