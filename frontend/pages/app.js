@@ -436,7 +436,6 @@ export default function Dashboard() {
   const renderOverview = () => (
     <div className="space-y-5">
       <GuidedSetupCard />
-      <ExtensionVersionStatus state={extensionState} compact />
       {showBrowserAssistPrompt ? (
         <div className="rounded-[18px] border border-[#dbe7ff] bg-[linear-gradient(135deg,#f8fbff_0%,#ffffff_100%)] p-5 shadow-[0_12px_32px_rgba(15,23,42,0.06)]">
           <div className="flex flex-wrap items-start justify-between gap-4">
@@ -1087,6 +1086,7 @@ export default function Dashboard() {
           </>
         }
       />
+      <ExtensionVersionStatus state={extensionState} compact />
       {user?.can_access_vine_import ? (
         <input
           ref={vineFileInputRef}
