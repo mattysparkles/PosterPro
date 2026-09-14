@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from app.core.config import settings
-from app.models.enums import MarketplaceName
+from app.models.enums import MARKETPLACE_DESTINATION_VALUES, MarketplaceName
 from app.models.models import MarketplaceAccount, User
 from app.services.ebay_service import summarize_ebay_account_health
 
@@ -235,7 +235,7 @@ def load_manual_marketplace_settings(user: User | None) -> dict[str, dict[str, A
     normalized: dict[str, dict[str, Any]] = {}
     for key, value in raw.items():
         name = str(key or "").strip().lower()
-        if name not in MarketplaceName._value2member_map_ or not isinstance(value, Mapping):
+        if name not in MARKETPLACE_DESTINATION_VALUES or not isinstance(value, Mapping):
             continue
         profile = MARKETPLACE_SETUP_PROFILES.get(name, {})
         normalized[name] = {

@@ -26,7 +26,7 @@ from app.api.schemas import (
 )
 from app.core.auth import ensure_user_owns_resource, get_current_user
 from app.core.database import get_db
-from app.models.enums import EbayPublishStatus, ListingStatus, MarketplaceListingStatus, MarketplaceName
+from app.models.enums import EbayPublishStatus, ListingStatus, MARKETPLACE_DESTINATION_VALUES, MarketplaceListingStatus, MarketplaceName
 from app.models.models import IntakeNotification, IntakePhotoBatch, IntakeProviderMedia, Listing, ListingCorrectionJob, MarketplaceCrosspostJob, MarketplaceExtensionJob, MarketplaceImportJob, MarketplaceListing, User
 from app.services.active_listing_snapshot import refresh_ebay_active_snapshot
 from app.services.marketplace_execution import resolve_execution_mode
@@ -791,7 +791,7 @@ def get_crosspost_preview(
 
     preview: list[CrosspostPreviewEntry] = []
     for market in requested:
-        if market not in MarketplaceName._value2member_map_:
+        if market not in MARKETPLACE_DESTINATION_VALUES:
             continue
         preview.append(_build_preview_for_marketplace(listing=listing, user=current_user, marketplace=market))
     return preview
@@ -820,7 +820,7 @@ def queue_crosspost_job(
             requested = routing_decision["marketplaces"]
         else:
             requested = list((listing.marketplace_data or {}).get("targets") or [MarketplaceName.ebay.value])
-    targets = [name for name in requested if name in MarketplaceName._value2member_map_]
+    targets = [name for name in requested if name in MARKETPLACE_DESTINATION_VALUES]
     if not targets:
         raise HTTPException(status_code=400, detail="No supported target marketplaces were requested")
     if not customer_description_is_safe(listing.description):

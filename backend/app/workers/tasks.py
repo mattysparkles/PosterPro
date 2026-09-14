@@ -1483,15 +1483,26 @@ def process_marketplace_crosspost_job_task(self, job_id: int) -> dict:
         job.result_summary = {"results": results}
         operation = str((job.execution_plan or {}).get("operation") or "create").lower()
         if failed_markets and operation == "end":
-            create_process_notification(
-                db,
-                user_id=job.user_id,
-                title="URGENT: SOLD ITEM MAY STILL BE LISTED",
-                message=f"PosterPro could not confirm the {', '.join(failed_markets)} removal for {listing.title or 'this item'}. Open the exact marketplace listing and retry or confirm removal.",
-                notification_type="marketplace_delist_failed",
-                href=f"/listings/{listing.id}",
-                metadata_json={"listing_id": listing.id, "marketplaces": failed_markets, "job_id": job.id, "external_listing_ids": {str(result.get("marketplace")): (job.execution_plan or {}).get("external_listing_id") for result in results if result.get("marketplace") in failed_markets}},
-            )
+            sale_source = str((job.execution_plan or {}).get("sale_source") or "").strip()
+            for market in failed_markets:
+                external_id = str((job.execution_plan or {}).get("external_listing_id") or "")
+                title = (
+                    f"SOLD ITEM STILL LIVE ON {market.upper()}"
+                    if sale_source
+                    else f"LISTING END FAILED ON {market.upper()}"
+                )
+                failure = next((result for result in results if result.get("marketplace") == market and result.get("status") == "failed"), {})
+                failure_response = failure.get("response") if isinstance(failure.get("response"), dict) else {}
+                reason = str(failure.get("error") or failure_response.get("error") or failure_response.get("error_code") or failure.get("status") or "Removal was not confirmed")
+                create_process_notification(
+                    db,
+                    user_id=job.user_id,
+                    title=title,
+                    message=f"{listing.title or 'This item'} could not be removed from {market}. Reason: {reason}. Open the exact listing and retry or confirm removal.",
+                    notification_type="marketplace_delist_failed",
+                    href=f"/listings/{listing.id}",
+                    metadata_json={"listing_id": listing.id, "marketplace": market, "job_id": job.id, "external_listing_id": external_id or None, "reason": reason, "sale_source": sale_source or None},
+                )
         revision_id = (job.execution_plan or {}).get("revision_id")
         if revision_id:
             revision_row = db.get(ListingRevision, int(revision_id))

@@ -32,6 +32,14 @@ class Settings(BaseSettings):
     ebay_client_secret_enc: str | None = Field(default=None, validation_alias=AliasChoices("EBAY_CLIENT_SECRET_ENC"))
     ebay_runame: str | None = None
     ebay_redirect_uri: str | None = None
+    # Optional EPN link parameters; attribution is disabled unless every
+    # required field is configured on the server.
+    ebay_epn_campaign_id: str | None = None
+    ebay_epn_channel_id: str | None = None
+    ebay_epn_rotation_id: str | None = None
+    ebay_epn_tool_id: str | None = None
+    ebay_epn_event_type: str | None = None
+    commerce_billing_enabled: bool = False
     google_photos_client_id: str | None = None
     google_photos_client_secret_plain: str | None = Field(default=None, validation_alias=AliasChoices("GOOGLE_PHOTOS_CLIENT_SECRET"))
     google_photos_client_secret_enc: str | None = Field(default=None, validation_alias=AliasChoices("GOOGLE_PHOTOS_CLIENT_SECRET_ENC"))

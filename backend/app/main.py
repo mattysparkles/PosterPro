@@ -34,6 +34,7 @@ from app.api.marketplace_jobs import router as marketplace_jobs_router
 from app.api.onboarding import router as onboarding_router
 from app.api.routes import router
 from app.api.sales import router as sales_router
+from app.api.storefront import router as storefront_router
 from app.api.vine_imports import router as vine_imports_router
 from app.core.auth import SESSION_COOKIE_NAME, parse_session_token
 from app.core.config import settings
@@ -270,6 +271,7 @@ app.include_router(inventory_router)
 app.include_router(bulk_jobs_router)
 app.include_router(sales_router)
 app.include_router(vine_imports_router)
+app.include_router(storefront_router)
 app.include_router(router)
 app.mount("/media", StaticFiles(directory=_resolve_media_root()), name="media")
 

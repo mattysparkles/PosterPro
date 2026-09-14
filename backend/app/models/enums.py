@@ -30,6 +30,12 @@ class MarketplaceName(str, enum.Enum):
     whatnot = "whatnot"
     vinted = "vinted"
     offerup = "offerup"
+    storefront_direct = "storefront_direct"
+
+
+MARKETPLACE_DESTINATION_VALUES = frozenset(
+    item.value for item in MarketplaceName if item is not MarketplaceName.storefront_direct
+)
 
 
 class MarketplaceListingStatus(str, enum.Enum):

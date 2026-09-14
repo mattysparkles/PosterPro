@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.connectors.registry import get_connector
-from app.models.enums import MarketplaceListingStatus, MarketplaceName
+from app.models.enums import MARKETPLACE_DESTINATION_VALUES, MarketplaceListingStatus, MarketplaceName
 from app.models.models import Listing, MarketplaceCrosspostJob, MarketplaceExtensionJob, MarketplaceListing
 
 
@@ -42,7 +42,7 @@ def queue_extension_marketplace_action(
     """Create/reuse one durable assisted action without asserting marketplace success."""
     market = str(marketplace or "").strip().lower()
     action_value = str(action or "CREATE").strip().upper()
-    if market not in MarketplaceName._value2member_map_:
+    if market not in MARKETPLACE_DESTINATION_VALUES:
         raise MarketplaceExtensionJobError("UNSUPPORTED_MARKETPLACE", f"Unsupported marketplace: {market or '(empty)'}")
     if action_value not in {"CREATE", "UPDATE", "END"}:
         raise MarketplaceExtensionJobError("UNSUPPORTED_ACTION", f"Unsupported extension action: {action_value}")

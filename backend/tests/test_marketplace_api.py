@@ -13,6 +13,8 @@ from app.models.models import (
     Listing,
     ListingTemplate,
     MarketplaceAccount,
+    StorefrontProfile,
+    User,
     MarketplaceCrosspostJob,
     MarketplaceImportJob,
     MarketplaceListing,
@@ -1584,7 +1586,12 @@ async def test_public_storefront_lists_only_published_items(async_client):
         source_type="amazon_vine",
     )
 
-    response = await async_client.get("/public/storefront/listings?page_size=50")
+    db = database_module.SessionLocal()
+    db.add(StorefrontProfile(user_id=user_id, slug=f"store-{user_id}", store_name="Storefront Owner Shop", enabled=True))
+    db.commit()
+    db.close()
+
+    response = await async_client.get(f"/public/stores/store-{user_id}/listings?page_size=12")
     assert response.status_code == 200
     payload = response.json()
     item_ids = {row["id"] for row in payload["items"]}
@@ -1594,7 +1601,175 @@ async def test_public_storefront_lists_only_published_items(async_client):
     assert storefront_item["title"] == "Live Storefront Item"
     assert storefront_item["price"] == 24.99
     assert storefront_item["thumbnail_url"]
-    assert "ebay" in storefront_item["marketplaces"]
+    assert "ebay" in {link["marketplace"] for link in storefront_item["marketplace_links"]}
+    assert storefront_item["thumbnail_url"].startswith("/media/")
+    detail = await async_client.get(f"/public/stores/store-{user_id}/products/{published_id}")
+    assert detail.status_code == 200
+    assert detail.json()["product"]["title"] == "Live Storefront Item"
+    assert (await async_client.get("/public/storefront/listings")).status_code == 410
+    assert "entitlements" not in (await async_client.get(f"/public/stores/store-{user_id}")).json()["store"]
+    outbound = await async_client.get(f"/public/stores/store-{user_id}/outbound/{published_id}/ebay", follow_redirects=False)
+    assert outbound.status_code == 302
+    assert outbound.headers["location"] == "https://www.ebay.com/itm/1234567890"
+    analytics = await async_client.get("/storefront/analytics/outbound")
+    assert analytics.status_code == 200
+    assert analytics.json()["clicks"][0]["count"] == 1
+    assert analytics.json()["conversions"] == "NOT_REPORTED_BY_MARKETPLACE"
+
+
+@pytest.mark.anyio
+async def test_storefront_settings_are_tenant_scoped_and_provider_secrets_redacted(async_client):
+    first = await async_client.post("/auth/register", json={"full_name": "Payments A", "email": f"pay-a-{uuid4()}@example.com", "password": "supersecret123"})
+    assert first.status_code == 201
+    payload = {
+        "slug": f"payments-{first.json()['user']['id']}", "store_name": "Payments A Store", "enabled": True,
+        "payment_settings": {"cashapp": {"enabled": True, "handle": "$SellerA", "verification_mode": "MANUAL_CONFIRMATION", "discount_percent": 2}},
+        "provider_secrets": {"stripe_secret_key": "sk_test_private-value", "paypal_client_secret": "paypal-private-value"},
+    }
+    saved = await async_client.put("/storefront/settings", json=payload)
+    assert saved.status_code == 200
+    body = saved.json()
+    assert body["profile"]["payment_settings"]["cashapp"]["handle"] == "$SellerA"
+    assert body["provider_credentials_configured"] is True
+    assert "sk_test_private-value" not in str(body) and "paypal-private-value" not in str(body)
+    public_profile = (await async_client.get(f"/public/stores/{payload['slug']}")).json()["store"]
+    assert public_profile["direct_checkout_available"] is False
+    assert public_profile["payment_methods"] == []
+    assert "$SellerA" not in str(public_profile)
+
+    second = await async_client.post("/auth/register", json={"full_name": "Payments B", "email": f"pay-b-{uuid4()}@example.com", "password": "supersecret123"})
+    assert second.status_code == 201
+    other_profile = (await async_client.get("/storefront/settings")).json()["profile"]
+    assert other_profile["enabled"] is False
+    assert other_profile["payment_settings"] == {}
+    assert other_profile["slug"] != payload["slug"]
+    assert (await async_client.get("/storefront/orders")).json()["items"] == []
+
+
+@pytest.mark.anyio
+async def test_direct_store_order_reserves_then_reconciles_exactly_once(async_client, monkeypatch):
+    from sqlalchemy import select
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "commerce_billing_enabled", True)
+    registered = await async_client.post("/auth/register", json={"full_name": "Direct Seller", "email": f"direct-{uuid4()}@example.com", "password": "supersecret123"})
+    assert registered.status_code == 201
+    user_id = registered.json()["user"]["id"]
+    listing_id = seed_bucket_listing(user_id, status=ListingStatus.PUBLISHED, title="Direct sale item", description="One item", listing_price=50, quantity=1, ebay_listing_id="DIRECT12345", ebay_publish_status=EbayPublishStatus.POSTED)
+    db = database_module.SessionLocal()
+    user = db.get(User, user_id)
+    user.settings_json = {"subscription": {"plan": "PREMIUM", "status": "active", "entitlements": {"storefront.public_catalog": True, "storefront.external_purchase_links": True, "storefront.direct_checkout": True, "payments.manual_methods": True}}}
+    db.add(user)
+    db.add(StorefrontProfile(user_id=user_id, slug=f"direct-{user_id}", store_name="Direct Seller", enabled=True, payment_settings_json={"cashapp": {"enabled": True, "handle": "$DirectSeller", "label": "Cash App", "instructions": "Send exact amount", "discount_percent": 10, "verification_mode": "MANUAL_CONFIRMATION"}}))
+    db.add(MarketplaceListing(listing_id=listing_id, marketplace=MarketplaceName.ebay, marketplace_listing_id="DIRECT12345", status=MarketplaceListingStatus.PUBLISHED))
+    db.commit()
+    db.close()
+
+    order_request = {"listing_id": listing_id, "customer_name": "Buyer", "customer_email": "buyer@example.com", "payment_method": "cashapp", "idempotency_key": f"checkout-{uuid4()}", "shipping_address": {"street": "1 Main St", "city": "Boston", "region": "MA", "postal_code": "02110", "country": "US"}}
+    checkout = await async_client.post(f"/public/stores/direct-{user_id}/checkout", json=order_request)
+    assert checkout.status_code == 200
+    body = checkout.json()
+    assert body["status"] == "AWAITING_PAYMENT" and body["payment_handle"] == "$DirectSeller"
+    assert body["subtotal"] == 50 and body["discount_amount"] == 5 and body["total"] == 45
+    duplicate = await async_client.post(f"/public/stores/direct-{user_id}/checkout", json=order_request)
+    assert duplicate.status_code == 200 and duplicate.json()["order_number"] == body["order_number"]
+    db = database_module.SessionLocal()
+    listing = db.get(Listing, listing_id)
+    assert listing.quantity == 1 and listing.sold_at is None
+    db.close()
+
+    marked = await async_client.post(f"/public/stores/direct-{user_id}/orders/{body['order_number']}/payment-sent?token={body['checkout_token']}")
+    assert marked.status_code == 200 and marked.json()["payment_status"] == "PAYMENT_PENDING_VERIFICATION"
+    pending = (await async_client.get("/storefront/orders?status=PAYMENT_PENDING_VERIFICATION")).json()["items"]
+    assert len(pending) == 1 and pending[0]["customer_email"] == "buyer@example.com"
+    order_id = pending[0]["id"]
+    confirmed = await async_client.post(f"/storefront/orders/{order_id}/confirm-payment")
+    assert confirmed.status_code == 200
+    assert confirmed.json()["order"]["payment_status"] == "PAID"
+    sale_id = confirmed.json()["sale_id"]
+    db = database_module.SessionLocal()
+    listing = db.get(Listing, listing_id)
+    sales = db.execute(select(Sale).where(Sale.user_id == user_id, Sale.platform == MarketplaceName.storefront_direct)).scalars().all()
+    jobs = db.execute(select(MarketplaceCrosspostJob).where(MarketplaceCrosspostJob.listing_id == listing_id, MarketplaceCrosspostJob.requested_mode == "sale_reconciliation_end")).scalars().all()
+    assert listing.quantity == 0 and listing.sold_at is not None
+    assert len(sales) == 1 and sales[0].id == sale_id
+    assert len(jobs) == 1 and jobs[0].execution_plan["external_listing_id"] == "DIRECT12345"
+    db.close()
+    repeated = await async_client.post(f"/storefront/orders/{order_id}/confirm-payment")
+    assert repeated.status_code == 200 and repeated.json()["idempotent"] is True and repeated.json()["sale_id"] == sale_id
+
+
+def test_commerce_entitlements_fail_closed_and_ebay_affiliate_requires_complete_epn_config(monkeypatch):
+    from app.api.storefront import _epn_url, _safe_marketplace_url
+    from app.core.config import settings
+    from app.services.commerce_entitlements import commerce_entitlement
+
+    user = User(id=808, settings_json={"subscription": {"plan": "PREMIUM", "status": "active", "entitlements": {"storefront.direct_checkout": True}}})
+    monkeypatch.setattr(settings, "commerce_billing_enabled", False)
+    assert commerce_entitlement(user, "storefront.direct_checkout")["entitled"] is False
+    monkeypatch.setattr(settings, "commerce_billing_enabled", True)
+    assert commerce_entitlement(user, "storefront.direct_checkout")["entitled"] is True
+
+    for key in ("ebay_epn_campaign_id", "ebay_epn_channel_id", "ebay_epn_rotation_id", "ebay_epn_tool_id", "ebay_epn_event_type"):
+        monkeypatch.setattr(settings, key, None)
+    assert _epn_url("https://www.ebay.com/itm/123?token=do-not-forward") is None
+    monkeypatch.setattr(settings, "ebay_epn_campaign_id", "1234567890")
+    monkeypatch.setattr(settings, "ebay_epn_channel_id", "4")
+    monkeypatch.setattr(settings, "ebay_epn_rotation_id", "1")
+    monkeypatch.setattr(settings, "ebay_epn_tool_id", "10001")
+    monkeypatch.setattr(settings, "ebay_epn_event_type", "1")
+    url = _epn_url("https://www.ebay.com/itm/123?token=do-not-forward", custom_id="posterpro_test")
+    assert "campid=1234567890" in url and "customid=posterpro_test" in url
+    assert "token" not in url
+    assert _safe_marketplace_url("ebay", "https://www.ebay.com/itm/other-item/9876543210", "1234567890") == "https://www.ebay.com/itm/1234567890"
+
+
+@pytest.mark.anyio
+async def test_storefront_catalog_is_tenant_scoped_and_database_paginated(async_client):
+    owner = await async_client.post("/auth/register", json={"full_name": "Catalog Owner", "email": f"store-a-{uuid4()}@example.com", "password": "supersecret123"})
+    assert owner.status_code == 201
+    owner_id = owner.json()["user"]["id"]
+    other = await async_client.post("/auth/register", json={"full_name": "Other Owner", "email": f"store-b-{uuid4()}@example.com", "password": "supersecret123"})
+    assert other.status_code == 201
+    other_id = other.json()["user"]["id"]
+    local_ids = []
+    for index in range(25):
+        local_ids.append(seed_bucket_listing(owner_id, status=ListingStatus.PUBLISHED, title=f"Catalog product {index:02d}", description="Tenant product", listing_price=index + 1, image_urls=[f"/media/catalog/{index}.jpg"], listing_images=[{"storage_path": f"/media/catalog/{index}.jpg", "role": "primary", "operator_state": "approved", "is_reference": False}], ebay_listing_id=f"CAT{index:04d}", ebay_publish_status=EbayPublishStatus.POSTED))
+    foreign_id = seed_bucket_listing(other_id, status=ListingStatus.PUBLISHED, title="Foreign catalog secret", listing_price=999, image_urls=["/media/private.jpg"], ebay_listing_id="FOREIGN123", ebay_publish_status=EbayPublishStatus.POSTED)
+    db = database_module.SessionLocal()
+    db.add_all([StorefrontProfile(user_id=owner_id, slug=f"owner-{owner_id}", store_name="Owner", enabled=True), StorefrontProfile(user_id=other_id, slug=f"other-{other_id}", store_name="Other", enabled=True)])
+    db.commit()
+    db.close()
+
+    first = await async_client.get(f"/public/stores/owner-{owner_id}/listings?page=1&page_size=12&sort_by=name&sort_dir=asc")
+    second = await async_client.get(f"/public/stores/owner-{owner_id}/listings?page=2&page_size=12&sort_by=name&sort_dir=asc")
+    last = await async_client.get(f"/public/stores/owner-{owner_id}/listings?page=3&page_size=12")
+    assert first.status_code == second.status_code == last.status_code == 200
+    assert first.json()["total"] == 25 and first.json()["page"] == 1 and len(first.json()["items"]) == 12
+    assert second.json()["page"] == 2 and len(second.json()["items"]) == 12
+    assert last.json()["page"] == 3 and len(last.json()["items"]) == 1
+    assert foreign_id not in {row["id"] for row in first.json()["items"] + second.json()["items"] + last.json()["items"]}
+    assert (await async_client.get(f"/public/stores/owner-{owner_id}/listings?search=Foreign")).json()["total"] == 0
+    assert (await async_client.get(f"/public/stores/owner-{owner_id}/listings?min_price=10&max_price=12")).json()["total"] == 3
+    assert (await async_client.get(f"/public/stores/owner-{owner_id}/listings?page_size=25")).status_code == 422
+
+
+@pytest.mark.anyio
+async def test_storefront_includes_published_store_only_inventory_without_fake_marketplace_links(async_client):
+    owner = await async_client.post("/auth/register", json={"full_name": "Direct Catalog", "email": f"direct-catalog-{uuid4()}@example.com", "password": "supersecret123"})
+    user_id = owner.json()["user"]["id"]
+    item_id = seed_bucket_listing(user_id, status=ListingStatus.PUBLISHED, title="Store-only published item", listing_price=18.50, quantity=1)
+    db = database_module.SessionLocal()
+    db.add(StorefrontProfile(user_id=user_id, slug=f"store-only-{user_id}", store_name="Direct Catalog", enabled=True))
+    db.commit()
+    db.close()
+
+    listing_response = await async_client.get(f"/public/stores/store-only-{user_id}/listings")
+    assert listing_response.status_code == 200
+    payload = listing_response.json()
+    assert payload["total"] == 1
+    assert payload["items"][0]["id"] == item_id
+    assert payload["items"][0]["marketplace_links"] == []
+    assert (await async_client.get(f"/public/stores/store-only-{user_id}/outbound/{item_id}/ebay")).status_code == 404
 
 
 @pytest.mark.anyio

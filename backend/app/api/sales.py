@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app.api.schemas import SaleDetailsUpdateRequest, SaleDetectionConfigRequest, SaleReconcileRequest
 from app.core.auth import ensure_user_owns_resource, get_current_user, resolve_user_scope
 from app.core.database import get_db
-from app.models.enums import MarketplaceName
+from app.models.enums import MARKETPLACE_DESTINATION_VALUES, MarketplaceName
 from app.models.models import AutomatedOfferLog, Listing, MarketplaceAccount, OfferAutomationRule, Sale, User
 from app.services.offer_service import OfferService
 from app.services.marketplace_setup import marketplace_status_snapshot
@@ -158,7 +158,7 @@ def sales_dashboard(
     stmt = select(Sale).join(Listing, Listing.id == Sale.listing_id, isouter=True)
     if scoped_user_id is not None:
         stmt = stmt.where(Sale.user_id == scoped_user_id)
-    if marketplace and marketplace in MarketplaceName._value2member_map_:
+    if marketplace and marketplace in MARKETPLACE_DESTINATION_VALUES:
         stmt = stmt.where(Sale.platform == MarketplaceName(marketplace))
     if search:
         term = f"%{search.strip()}%"
@@ -378,7 +378,7 @@ def update_sale_detection_settings(
     user = db.get(User, scoped_user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    invalid = [name for name in payload.marketplaces if name not in MarketplaceName._value2member_map_]
+    invalid = [name for name in payload.marketplaces if name not in MARKETPLACE_DESTINATION_VALUES]
     if invalid:
         raise HTTPException(status_code=400, detail=f"Unsupported marketplaces: {', '.join(invalid)}")
     accounts = {

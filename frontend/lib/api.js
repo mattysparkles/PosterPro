@@ -195,6 +195,33 @@ export async function fetchPublicStorefrontListings(options = {}) {
   return jsonFetch(`${API_BASE}/public/storefront/listings${suffix}`, { timeoutMs: 30000 });
 }
 
+export async function fetchStorefrontSettings() {
+  return jsonFetch(`${API_BASE}/storefront/settings`);
+}
+
+export async function saveStorefrontSettings(body) {
+  return jsonFetch(`${API_BASE}/storefront/settings`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+}
+
+export async function fetchStorefrontOrders(status) {
+  const suffix = status ? `?status=${encodeURIComponent(status)}` : '';
+  return jsonFetch(`${API_BASE}/storefront/orders${suffix}`);
+}
+
+export async function confirmStorefrontOrderPayment(orderId) {
+  return jsonFetch(`${API_BASE}/storefront/orders/${encodeURIComponent(orderId)}/confirm-payment`, { method: 'POST' });
+}
+
+export async function rejectStorefrontOrderPayment(orderId) {
+  return jsonFetch(`${API_BASE}/storefront/orders/${encodeURIComponent(orderId)}/reject-payment`, { method: 'POST' });
+}
+
+export async function updateStorefrontOrderShipment(orderId, body) {
+  return jsonFetch(`${API_BASE}/storefront/orders/${encodeURIComponent(orderId)}/shipment`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+}
+
 export async function fetchIntakeSettings() {
   return jsonFetch(`${API_BASE}/intake/settings`);
 }

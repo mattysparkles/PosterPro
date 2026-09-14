@@ -6,12 +6,21 @@ import pytest
 from app.models.enums import ListingStatus
 from app.models.models import Listing, User
 from app.services.marketplace_routing import MarketplaceRoutingRule, MarketplaceRoutingService
+from app.services.listing_workspace import normalize_marketplace_data
 from app.api import marketplace_jobs
 from app.api.schemas import CrosspostQueueRequest
 from app.api.marketplace_jobs import BulkCrosspostQueueRequest
 from app.core import database as database_module
 from app.models.models import MarketplaceCrosspostJob
 from app.workers import tasks
+
+
+def test_direct_store_sale_source_is_never_a_publish_destination():
+    assert MarketplaceRoutingService.normalize_markets(["storefront_direct", "ebay"]) == ["ebay"]
+    normalized = normalize_marketplace_data({"targets": ["storefront_direct", "facebook"]})
+    assert "storefront_direct" not in normalized["targets"]
+    with pytest.raises(ValueError, match="supported marketplace"):
+        MarketplaceRoutingRule(id="bad-target", match_all=True, include_markets=["storefront_direct"])
 
 
 def test_marketplace_routing_applies_matching_includes_and_global_exclusions(db_session):

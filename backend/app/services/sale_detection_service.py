@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.connectors.registry import get_connector
 from app.core.config import settings
-from app.models.enums import MarketplaceListingStatus, MarketplaceName
+from app.models.enums import MARKETPLACE_DESTINATION_VALUES, MarketplaceListingStatus, MarketplaceName
 from app.models.enums import ListingStatus
 from app.models.models import Listing, MarketplaceCrosspostJob, MarketplaceListing, Sale, User
 from app.services.media_lifecycle import purge_listing_media
@@ -40,7 +40,7 @@ class SaleDetectionService:
 
     def get_enabled_marketplaces(self, user: User) -> list[str]:
         configured = user.sale_detection_platforms or self.DEFAULT_MARKETPLACES
-        return [m for m in configured if m in MarketplaceName._value2member_map_]
+        return [m for m in configured if m in MARKETPLACE_DESTINATION_VALUES]
 
     def _parse_sold_at(self, raw_value: str | None) -> datetime:
         if not raw_value:
@@ -183,6 +183,9 @@ class SaleDetectionService:
 
         for row in listing.marketplace_listings:
             market = row.marketplace.value
+            if row.status not in {MarketplaceListingStatus.PUBLISHED, MarketplaceListingStatus.UPDATED}:
+                outcomes[market] = {"action": "already_inactive", "response": {"status": row.status.value}}
+                continue
             if market == sold_platform:
                 action = "sold_on_marketplace" if sold_out else "quantity_adjust"
                 response = {"status": "DRY_RUN", "action": action, "quantity": new_quantity} if dry_run else {"status": "RECORDED_SOLD_SOURCE" if sold_out else "UPDATED_SOURCE", "action": action, "quantity": new_quantity}
@@ -367,7 +370,7 @@ class SaleDetectionService:
                 )
                 continue
             platform = str(event.get("marketplace") or "").lower()
-            if platform not in MarketplaceName._value2member_map_:
+            if platform not in MARKETPLACE_DESTINATION_VALUES:
                 continue
             event_key = (
                 platform,

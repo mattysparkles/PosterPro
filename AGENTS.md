@@ -1215,3 +1215,57 @@ requirements above. Credentials were not rotated or printed.
 - Notification data cleanup affected only PosterPro `intake_notifications`
   for user `2`. `debug_fb_publish.db`, `ops/snapshots/`, `tmp/`, and all
   non-PosterPro resources remain untouched.
+
+## 2026-09-14 - Tenant storefront and manual commerce foundation
+
+- Added tenant-owned `StorefrontProfile`, affiliate-click, order, order-item,
+  and payment-attempt persistence, plus `storefront_direct` as a sale source
+  that is explicitly excluded from marketplace publish/routing targets. Applied
+  `20260915_tenant_storefront_commerce.sql` to the active PosterPro PostgreSQL
+  schema and ran it a second time to verify idempotence. The database had no
+  prior storefront tables or profiles; no existing storefront data was replaced.
+- Added public routes `/store/{slug}`, `/store/{slug}/products/{id}`, tenant-
+  scoped DB pagination (12/24/48/96), search, category/condition/brand/price/
+  marketplace filters, sorting, public-safe listing/image fields, store-only
+  published products, and product details. Draft, sold, archived, recovery-
+  merged, zero-quantity, and cross-tenant inventory are excluded. External
+  purchase links appear only for active exact listing identities; eBay stored
+  URLs are checked against the identity and otherwise generated from that exact
+  ID. Outbound clicks are tenant-scoped and do not forward stored query secrets.
+  The legacy global `/public/storefront/listings` endpoint now returns `410`
+  instead of exposing an unscoped catalog.
+- Added owner Store settings for tenant branding/publication, manual payment
+  handles/instructions/discounts/limits, encrypted provider-secret storage,
+  crypto wallet/network/memo configuration, and eBay custom attribution gated
+  by server entitlement. Central commerce entitlements fail closed; platform
+  eBay Partner Network tagging is only emitted when all server-side fields are
+  configured, tenant overrides require an entitled active subscription, and
+  unsupported marketplaces retain normal URLs.
+- Added single-item Cash App/Venmo manual-payment checkout behind a paid
+  entitlement and explicit server billing enablement. Checkout creates an
+  expiring stock reservation without decrementing inventory; buyer-reported
+  payment remains unverified; seller confirmation records one canonical
+  `STOREFRONT_DIRECT` Sale, decrements stock once through the existing sale
+  reconciliation/fanout, and queues exact-identity cross-market END work.
+  Failed END notifications identify each affected marketplace. Operator Store
+  Orders page supports manual verification/rejection and shipment tracking.
+- Live Stripe/PayPal provider checkout, automatic payment webhooks, crypto
+  quotes/QR payment, and chain verification are not implemented. They remain
+  unavailable rather than being represented as connected. Production
+  `commerce_billing_enabled` is false and currently has zero storefront
+  profiles, so no direct checkout is active; operators must intentionally
+  configure a store and the platform must enable billing/entitlements before
+  manual checkout is exposed.
+- Validation: storefront/marketplace API, routing, and sale-idempotency suites
+  passed `54 tests`; crosspost worker summary suite passed `7`; focused new
+  marketplace identity/store-only tests passed `2`; Python compile passed;
+  frontend production build passed with existing ESLint/noVNC warnings. A
+  broader run also included one unrelated existing sales-sync contract failure:
+  the test expects Facebook auto sales sync when marked ready, while current
+  `marketplace_setup` explicitly reports non-eBay sales sync as unsupported.
+  Authenticated public-store rendering is unavailable and there are no enabled
+  production stores; visual acceptance is `READY FOR OPERATOR STOREFRONT
+  SCREENSHOT REVIEW`.
+- No external listing mutation or payment was performed. Only the five
+  PosterPro storefront commerce tables/type were added. `debug_fb_publish.db`,
+  `ops/snapshots/`, `tmp/`, and unrelated host resources remain untouched.

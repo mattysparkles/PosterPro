@@ -713,6 +713,110 @@ class MarketplaceMetadataCache(Base, TimestampMixin):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
 
 
+class StorefrontProfile(Base, TimestampMixin):
+    """Tenant-owned public store identity and deliberately separated commerce configuration."""
+    __tablename__ = "storefront_profiles"
+    __table_args__ = (UniqueConstraint("user_id", name="uq_storefront_profiles_user"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    slug: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    store_name: Mapped[str] = mapped_column(String(160))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    logo_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    banner_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    contact_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    accent_color: Mapped[str] = mapped_column(String(16), default="#1d4f7a")
+    public_settings_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    payment_settings_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    provider_secrets_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class StorefrontAffiliateClick(Base):
+    __tablename__ = "storefront_affiliate_clicks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    store_id: Mapped[int] = mapped_column(ForeignKey("storefront_profiles.id", ondelete="CASCADE"), index=True)
+    listing_id: Mapped[int] = mapped_column(ForeignKey("listings.id", ondelete="CASCADE"), index=True)
+    marketplace: Mapped[str] = mapped_column(String(32), index=True)
+    attribution_mode: Mapped[str] = mapped_column(String(32), default="none")
+    referrer_host: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    session_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    clicked_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class StorefrontOrder(Base, TimestampMixin):
+    """Durable direct-store order snapshot; never implies payment until verified."""
+    __tablename__ = "storefront_orders"
+    __table_args__ = (
+        UniqueConstraint("user_id", "idempotency_key", name="uq_storefront_order_idempotency"),
+        UniqueConstraint("user_id", "provider", "provider_transaction_id", name="uq_storefront_provider_transaction"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    order_number: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    store_id: Mapped[int] = mapped_column(ForeignKey("storefront_profiles.id", ondelete="CASCADE"), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    checkout_token: Mapped[str] = mapped_column(EncryptedTokenText())
+    status: Mapped[str] = mapped_column(String(40), default="AWAITING_PAYMENT", index=True)
+    payment_status: Mapped[str] = mapped_column(String(40), default="AWAITING_PAYMENT", index=True)
+    fulfillment_status: Mapped[str] = mapped_column(String(40), default="UNFULFILLED", index=True)
+    tracking_number: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    carrier: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    shipped_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    payment_method: Mapped[str] = mapped_column(String(32))
+    provider: Mapped[str] = mapped_column(String(32), default="manual")
+    provider_transaction_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    customer_name: Mapped[str] = mapped_column(String(255))
+    customer_email: Mapped[str] = mapped_column(String(255), index=True)
+    shipping_address_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    currency: Mapped[str] = mapped_column(String(8), default="USD")
+    subtotal: Mapped[float] = mapped_column(Float, default=0)
+    discount_percent: Mapped[float] = mapped_column(Float, default=0)
+    discount_amount: Mapped[float] = mapped_column(Float, default=0)
+    total: Mapped[float] = mapped_column(Float, default=0)
+    payment_config_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    reservation_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    confirmed_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    confirmation_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    sale_id: Mapped[int | None] = mapped_column(ForeignKey("sales.id"), nullable=True, unique=True)
+    internal_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class StorefrontOrderItem(Base):
+    __tablename__ = "storefront_order_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("storefront_orders.id", ondelete="CASCADE"), index=True)
+    listing_id: Mapped[int | None] = mapped_column(ForeignKey("listings.id", ondelete="SET NULL"), nullable=True, index=True)
+    title_snapshot: Mapped[str] = mapped_column(String(255))
+    sku_snapshot: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    quantity: Mapped[int] = mapped_column(Integer, default=1)
+    unit_price: Mapped[float] = mapped_column(Float, default=0)
+    item_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class StorefrontPaymentAttempt(Base, TimestampMixin):
+    __tablename__ = "storefront_payment_attempts"
+    __table_args__ = (UniqueConstraint("user_id", "provider", "provider_transaction_id", name="uq_storefront_payment_provider_identity"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("storefront_orders.id", ondelete="CASCADE"), index=True)
+    provider: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(40), default="CREATED", index=True)
+    provider_transaction_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    amount: Mapped[float] = mapped_column(Float, default=0)
+    currency: Mapped[str] = mapped_column(String(8), default="USD")
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    safe_result_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
 class MarketplaceExtensionDevice(Base, TimestampMixin):
     """A tenant-scoped browser extension installation; token material is never stored."""
     __tablename__ = "marketplace_extension_devices"

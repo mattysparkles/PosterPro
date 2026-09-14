@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.enums import MarketplaceListingStatus, MarketplaceName
+from app.models.enums import MARKETPLACE_DESTINATION_VALUES, MarketplaceListingStatus, MarketplaceName
 from app.models.models import Listing, MarketplaceListing, User
 from app.services.marketplace_setup import MANUAL_WORKFLOW_READY, load_manual_marketplace_settings
 from app.services.ebay_service import publish_listing_to_ebay
@@ -123,7 +123,7 @@ def get_enabled_platforms(user: User | None) -> list[str]:
     normalized: list[str] = []
     for name in configured:
         lowered = str(name).lower()
-        if lowered in MarketplaceName._value2member_map_ and lowered not in normalized:
+        if lowered in MARKETPLACE_DESTINATION_VALUES and lowered not in normalized:
             normalized.append(lowered)
 
     if normalized:

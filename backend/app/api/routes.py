@@ -654,66 +654,13 @@ def get_public_storefront_listings(
     sort_dir: str | None = Query(default="desc", max_length=4),
     db: Session = Depends(get_db),
 ):
-    filters = []
-    normalized_search = str(search or "").strip()
-    if normalized_search:
-        pattern = f"%{normalized_search}%"
-        filters.append(or_(Listing.title.ilike(pattern), Listing.description.ilike(pattern)))
-
-    published_filters = or_(
-        and_(
-            Listing.ebay_listing_id.is_not(None),
-            func.trim(Listing.ebay_listing_id) != "",
-            or_(Listing.status == ListingStatus.PUBLISHED, Listing.ebay_publish_status == EbayPublishStatus.POSTED),
-        ),
-        exists(
-            select(1).where(
-                and_(
-                    MarketplaceListing.listing_id == Listing.id,
-                    MarketplaceListing.status.in_([MarketplaceListingStatus.PUBLISHED, MarketplaceListingStatus.UPDATED]),
-                    MarketplaceListing.marketplace_listing_id.is_not(None),
-                    func.trim(MarketplaceListing.marketplace_listing_id) != "",
-                )
-            )
-        ),
+    # This pre-tenant endpoint historically exposed published rows across every
+    # account. Keep the path as a clear migration response, never as a global
+    # catalog API. Public catalog access now requires /public/stores/{slug}.
+    raise HTTPException(
+        status_code=410,
+        detail="This catalog link is retired. Use the store owner's tenant-specific public store link.",
     )
-    visibility_filter = _listing_visibility_filter("published")
-    statement = (
-        select(Listing)
-        .options(selectinload(Listing.marketplace_listings))
-        .where(*filters, published_filters, visibility_filter)
-    )
-    sort_map = {
-        "updated": Listing.updated_at,
-        "created": Listing.created_at,
-        "price": Listing.listing_price,
-        "title": Listing.title,
-        "source": Listing.source_type,
-    }
-    resolved_sort_by = str(sort_by or "updated").strip().lower()
-    sort_column = sort_map.get(resolved_sort_by, Listing.updated_at)
-    resolved_sort_dir = str(sort_dir or "desc").strip().lower()
-    sort_expr = asc(sort_column) if resolved_sort_dir == "asc" else desc(sort_column)
-
-    resolved_page_size = page_size or 25
-    resolved_page = page or 1
-    rows = db.execute(statement.order_by(sort_expr, desc(Listing.updated_at))).scalars().all()
-    visible_rows = []
-    for listing in rows:
-        public_listing = _serialize_public_storefront_listing(listing)
-        if public_listing.get("thumbnail_url") or public_listing.get("image_urls"):
-            visible_rows.append(public_listing)
-    total = len(visible_rows)
-    start = (resolved_page - 1) * resolved_page_size
-    end = start + resolved_page_size
-    page_rows = visible_rows[start:end]
-    return {
-        "items": page_rows,
-        "total": total,
-        "page": resolved_page,
-        "page_size": resolved_page_size,
-        "total_pages": max(1, (total + resolved_page_size - 1) // resolved_page_size),
-    }
 
 
 def _apply_listing_review_defaults(listing: Listing) -> None:

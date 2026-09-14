@@ -3,7 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-from app.models.enums import MarketplaceName
+from app.models.enums import MARKETPLACE_DESTINATION_VALUES, MarketplaceName
 
 _DEFAULT_CHANNEL_SETTINGS = {
     MarketplaceName.ebay.value: {
@@ -107,7 +107,7 @@ def normalize_marketplace_data(raw: dict[str, Any] | None) -> dict[str, Any]:
         valid_targets = []
         for target in targets:
             name = str(target or "").strip().lower()
-            if name in MarketplaceName._value2member_map_ and name not in valid_targets:
+            if name in MARKETPLACE_DESTINATION_VALUES and name not in valid_targets:
                 valid_targets.append(name)
         normalized["targets"] = valid_targets or normalized["targets"]
 

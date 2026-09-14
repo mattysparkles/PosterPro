@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.enums import MarketplaceListingStatus, MarketplaceName
+from app.models.enums import MARKETPLACE_DESTINATION_VALUES, MarketplaceListingStatus, MarketplaceName
 from app.models.models import Listing, MarketplaceCrosspostJob, MarketplaceListing, User
 from app.services.multi_platform_publisher import get_enabled_platforms
 from app.services.marketplace_preflight import MarketplacePreflightService
@@ -28,7 +28,7 @@ def list_marketplaces() -> list[dict]:
 
 def _find_pending_marketplace_work(db: Session, listing_id: int, marketplace: str) -> dict[str, object] | None:
     market = str(marketplace or "").strip().lower()
-    if not market or market not in MarketplaceName._value2member_map_:
+    if not market or market not in MARKETPLACE_DESTINATION_VALUES:
         return None
 
     pending_listing = (
@@ -105,7 +105,7 @@ def _queue_single_marketplace_publish(
     skip_already_queued: bool = False,
 ) -> dict:
     market_key = str(marketplace or "").strip().lower()
-    if market_key not in MarketplaceName._value2member_map_:
+    if market_key not in MARKETPLACE_DESTINATION_VALUES:
         return {"marketplace": market_key, "status": "UNSUPPORTED", "task_id": None}
 
     preflight_service = MarketplacePreflightService()
@@ -173,7 +173,7 @@ def enqueue_crosspost_job(
     seen: set[str] = set()
     for market in target_markets:
         market_key = str(market or "").strip().lower()
-        if market_key and market_key in MarketplaceName._value2member_map_ and market_key not in seen:
+        if market_key and market_key in MARKETPLACE_DESTINATION_VALUES and market_key not in seen:
             seen.add(market_key)
             markets.append(market_key)
     if not markets:
@@ -351,7 +351,7 @@ def bulk_publish_ready(
                 "warning_marketplaces": [],
             }
             for market in target_markets:
-                if market not in MarketplaceName._value2member_map_:
+                if market not in MARKETPLACE_DESTINATION_VALUES:
                     listing_item["marketplaces"][market] = {"marketplace": market, "status": "unsupported", "task_id": None, "error": f"Unsupported marketplace: {market}"}
                     summary["skipped_unsupported_marketplace"] += 1
                     continue
@@ -504,7 +504,7 @@ def bulk_publish_ready(
         }
 
         for market in target_markets:
-            if market not in MarketplaceName._value2member_map_:
+            if market not in MARKETPLACE_DESTINATION_VALUES:
                 listing_item["marketplaces"][market] = {"marketplace": market, "status": "unsupported", "task_id": None, "error": f"Unsupported marketplace: {market}"}
                 summary["skipped_unsupported_marketplace"] += 1
                 continue

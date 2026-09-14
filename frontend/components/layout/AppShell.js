@@ -50,7 +50,8 @@ function buildNavGroups(user) {
       label: 'Selling',
       items: [
         { href: '/publishing', label: 'Publishing', icon: Rocket },
-        { href: '/posterpro/storefront', label: 'Storefront', icon: Store },
+        { href: '/settings/store', label: 'My Store', icon: Store },
+        { href: '/storefront/orders', label: 'Store Orders', icon: ShoppingCart },
         { href: '/sales', label: 'Sales', icon: ShoppingCart },
         { href: '/offers', label: 'Offers', icon: Store },
       ],

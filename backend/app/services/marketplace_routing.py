@@ -4,7 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.models.enums import MarketplaceName
+from app.models.enums import MARKETPLACE_DESTINATION_VALUES
 from app.models.models import Listing
 
 
@@ -26,7 +26,7 @@ class MarketplaceRoutingRule(BaseModel):
     def validate_rule(self):
         if self.min_price is not None and self.max_price is not None and self.min_price > self.max_price:
             raise ValueError("min_price cannot exceed max_price")
-        allowed = set(MarketplaceName._value2member_map_)
+        allowed = set(MARKETPLACE_DESTINATION_VALUES)
         normalized_include = {str(value).strip().lower() for value in self.include_markets}
         normalized_exclude = {str(value).strip().lower() for value in self.exclude_markets}
         if not normalized_include or not normalized_include.issubset(allowed) or not normalized_exclude.issubset(allowed):
@@ -42,7 +42,7 @@ class MarketplaceRoutingService:
         result: list[str] = []
         for value in values or []:
             market = str(value or "").strip().lower()
-            if market in MarketplaceName._value2member_map_ and market not in result:
+            if market in MARKETPLACE_DESTINATION_VALUES and market not in result:
                 result.append(market)
         return result
 

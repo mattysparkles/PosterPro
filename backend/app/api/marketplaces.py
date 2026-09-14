@@ -45,7 +45,7 @@ from app.api.schemas import (
 from app.core.auth import ensure_user_owns_resource, get_current_user, get_user_role, is_effective_admin, is_viewing_as_regular, resolve_user_scope, user_has_vine_access
 from app.core.config import reload_settings, settings
 from app.core.database import get_db
-from app.models.enums import MarketplaceName
+from app.models.enums import MARKETPLACE_DESTINATION_VALUES, MarketplaceName
 from app.models.models import Listing, ListingTemplate, MarketplaceAccount, User
 from app.services.google_photos_oauth import google_photos_oauth_ready
 from app.connectors.registry import MARKETPLACE_REGISTRY
@@ -101,6 +101,8 @@ def _build_marketplace_connections(*, user: User, accounts: list[MarketplaceAcco
 
     responses: list[MarketplaceConnectionStatusResponse] = []
     for marketplace in MarketplaceName:
+        if marketplace.value not in MARKETPLACE_DESTINATION_VALUES:
+            continue
         snapshot = marketplace_status_snapshot(
             marketplace=marketplace.value,
             account=accounts_by_market.get(marketplace.value),
@@ -265,7 +267,7 @@ async def connect_marketplace(
 
 @router.get("/marketplaces/{name}/callback")
 def marketplace_callback(name: str, code: str | None = None, state: str | None = None):
-    if name.lower() not in MarketplaceName._value2member_map_:
+    if name.lower() not in MARKETPLACE_DESTINATION_VALUES:
         raise HTTPException(status_code=404, detail="Unsupported marketplace")
     return {"marketplace": name.lower(), "connected": True, "code": code, "state": state}
 
@@ -305,7 +307,7 @@ def get_marketplace_preflight(
     current_user: User = Depends(get_current_user),
 ):
     market = marketplace.lower()
-    if market not in MarketplaceName._value2member_map_:
+    if market not in MARKETPLACE_DESTINATION_VALUES:
         raise HTTPException(status_code=404, detail="Unsupported marketplace")
     listing = db.get(Listing, listing_id)
     if not listing:
@@ -329,7 +331,7 @@ def get_marketplace_payload_preview(
     current_user: User = Depends(get_current_user),
 ):
     market = marketplace.lower()
-    if market not in MarketplaceName._value2member_map_:
+    if market not in MARKETPLACE_DESTINATION_VALUES:
         raise HTTPException(status_code=404, detail="Unsupported marketplace")
     listing = db.get(Listing, listing_id)
     if not listing:
@@ -948,7 +950,7 @@ def update_platform_config(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     requested = [market.lower() for market in (payload.marketplaces or [MarketplaceName.ebay.value])]
-    invalid = [market for market in requested if market not in MarketplaceName._value2member_map_]
+    invalid = [market for market in requested if market not in MARKETPLACE_DESTINATION_VALUES]
     if invalid:
         raise HTTPException(status_code=400, detail=f"Unsupported marketplaces: {', '.join(invalid)}")
     accounts = db.execute(
@@ -970,7 +972,7 @@ def update_marketplace_connection(
     current_user: User = Depends(get_current_user),
 ):
     marketplace = name.lower()
-    if marketplace not in MarketplaceName._value2member_map_:
+    if marketplace not in MARKETPLACE_DESTINATION_VALUES:
         raise HTTPException(status_code=404, detail="Unsupported marketplace")
     if marketplace == MarketplaceName.ebay.value:
         raise HTTPException(status_code=400, detail="Use the eBay OAuth flow for this marketplace")
