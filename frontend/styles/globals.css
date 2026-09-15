@@ -202,6 +202,28 @@ a {
   stroke: currentColor !important;
 }
 
+/* Legacy pages still contain a few semantic buttons while they migrate to the
+   shared Button primitive. Keep those controls visually consistent so the
+   product never falls back to browser-default chrome. Explicit .pp-button
+   variants remain the source of truth for new work. */
+.pp-shell-main-content button:not(.pp-button):not([type='checkbox']):not([type='radio']) {
+  min-height: 40px;
+  border: 1px solid var(--pp-border-strong);
+  border-radius: var(--pp-radius-md);
+  background: var(--pp-surface);
+  color: var(--pp-text-primary);
+  padding: .55rem .85rem;
+  font-size: .9rem;
+  font-weight: 650;
+  line-height: 1.25;
+  transition: background-color .15s ease, border-color .15s ease, box-shadow .15s ease, transform .15s ease;
+}
+.pp-shell-main-content button:not(.pp-button):not([type='checkbox']):not([type='radio']):hover { background: var(--pp-surface-muted); border-color: var(--pp-primary); }
+.pp-shell-main-content button:not(.pp-button):not([type='checkbox']):not([type='radio']):focus-visible { outline: none; box-shadow: 0 0 0 4px var(--pp-focus-ring); }
+.pp-shell-main-content input:not([type='checkbox']):not([type='radio']),
+.pp-shell-main-content select,
+.pp-shell-main-content textarea { max-width: 100%; box-sizing: border-box; border-radius: var(--pp-radius-md); border-color: var(--pp-border-strong); background: var(--pp-surface); color: var(--pp-text-primary); }
+
 .pp-tab-item,
 .pp-shell-chip {
   color: inherit;
@@ -237,7 +259,11 @@ a {
 
 /* The sidebar remains fixed while the grid reserves its one shared width.
    Main content therefore gets only the width left over in the viewport. */
-.pp-shell-main { grid-column: 2; min-width: 0; }
+.pp-shell-main { grid-column: 2; min-width: 0; width: auto; max-width: 100%; overflow: visible; }
+.pp-shell-content-wrap,
+.pp-shell-topbar,
+.pp-shell-main-content,
+.pp-shell-main-content > div { min-width: 0; max-width: 100%; box-sizing: border-box; }
 .pp-sidebar-width { width: var(--pp-sidebar-width) !important; }
 @media (max-width: 639px) {
   .posterpro-app-shell { display: block; }
@@ -295,7 +321,7 @@ a {
 .pp-dashboard-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); align-items: start; gap: .75rem; }
 .pp-dashboard-metric { min-width: 0; min-height: 104px !important; height: auto !important; padding: 1rem !important; border-radius: var(--pp-radius-lg) !important; box-shadow: var(--pp-shadow-sm) !important; background: var(--pp-surface) !important; }
 .pp-dashboard-metric::after { display: none; }
-.pp-dashboard-modules { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 1rem; }
+.pp-dashboard-modules { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); align-items: start; gap: 1rem; }
 .pp-dashboard-card { min-width: 0; min-height: 0; height: auto; align-self: start; padding: 1rem 1.1rem; border: 1px solid var(--pp-border); border-radius: var(--pp-radius-lg); background: var(--pp-surface); box-shadow: var(--pp-shadow-sm); }
 .pp-dashboard-card__header { display: flex; align-items: center; justify-content: space-between; gap: .75rem; min-width: 0; }
 .pp-dashboard-card__title { margin: 0; color: var(--pp-text-primary); font-size: 1rem; font-weight: 680; line-height: 1.35; letter-spacing: -.015em; }

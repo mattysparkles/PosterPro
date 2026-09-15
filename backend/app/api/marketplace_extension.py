@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 from urllib.parse import urlsplit, urlunsplit
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
@@ -371,7 +371,11 @@ def pair_extension(payload: PairRequest, db: Session = Depends(get_db)):
 
 
 @router.get("/browser-extension/devices")
-def list_extension_devices(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def list_extension_devices(
+    current_device_id: int | None = Query(default=None, ge=1),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     devices = db.execute(
         select(MarketplaceExtensionDevice).where(MarketplaceExtensionDevice.user_id == current_user.id)
         .order_by(MarketplaceExtensionDevice.created_at.desc())
@@ -396,6 +400,9 @@ def list_extension_devices(db: Session = Depends(get_db), current_user: User = D
     latest = max(devices, key=lambda device: (device.last_seen_at or datetime.min, device.id or 0), default=None)
     latest_online = max(online_devices, key=lambda device: (device.last_seen_at or datetime.min, device.id or 0), default=None)
     compatible = bool(latest_online and _version_tuple(latest_online.extension_version) >= _version_tuple(MINIMUM_EXTENSION_VERSION))
+    correlated = next((device for device in devices if current_device_id and device.id == current_device_id), None)
+    correlated_online = bool(correlated and correlated in online_devices and not correlated.revoked_at)
+    correlated_compatible = bool(correlated_online and _version_tuple(correlated.extension_version) >= _version_tuple(MINIMUM_EXTENSION_VERSION))
     return {
         "devices": [_device_payload(device) for device in devices],
         "current_version": CURRENT_EXTENSION_VERSION,
@@ -413,11 +420,12 @@ def list_extension_devices(db: Session = Depends(get_db), current_user: User = D
             "device_registration": bool(latest_online and not latest_online.revoked_at),
             "device_token_present": bool(latest_online and latest_online.token_hash),
             "heartbeat_last_seen": _iso(latest_online.last_seen_at) if latest_online else None,
-            "current_browser_recognized": None,
-            "current_user_matched": bool(latest_online and latest_online.user_id == current_user.id),
+            "current_browser_recognized": correlated_online if current_device_id else None,
+            "current_device_id": correlated.id if correlated else None,
+            "current_user_matched": bool(correlated and correlated.user_id == current_user.id) if current_device_id else bool(latest_online and latest_online.user_id == current_user.id),
             "tenant_match": "NOT_MODELED_DEVICE_USER_ONLY",
-            "job_transport_ready": bool(latest_online and compatible),
-            "transport_requirements": {"registered": bool(latest_online), "compatible_version": compatible, "fresh_heartbeat": bool(latest_online), "revoked": bool(latest_online and latest_online.revoked_at)},
+            "job_transport_ready": correlated_compatible if current_device_id else bool(latest_online and compatible),
+            "transport_requirements": {"registered": correlated is not None if current_device_id else bool(latest_online), "compatible_version": correlated_compatible if current_device_id else compatible, "fresh_heartbeat": correlated_online if current_device_id else bool(latest_online), "revoked": bool(correlated and correlated.revoked_at) if current_device_id else bool(latest_online and latest_online.revoked_at)},
         },
     }
 

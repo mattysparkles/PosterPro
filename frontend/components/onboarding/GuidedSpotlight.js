@@ -10,13 +10,20 @@ export default function GuidedSpotlight({ steps = [], onClose }) {
 
   useEffect(() => {
     if (!current || typeof window === 'undefined') return undefined;
-    const element = document.querySelector(current.selector);
-    if (!element) { setRect(null); return undefined; }
-    element.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+    let element = null;
+    let retryTimer = null;
     const update = () => {
+      element = document.querySelector(current.selector);
+      if (!element) { setRect(null); return; }
       const bounds = element.getBoundingClientRect();
       setRect({ top: bounds.top - 7, left: bounds.left - 7, width: bounds.width + 14, height: bounds.height + 14 });
     };
+    element = document.querySelector(current.selector);
+    if (!element) {
+      retryTimer = window.setTimeout(update, 180);
+      return () => { if (retryTimer) window.clearTimeout(retryTimer); };
+    }
+    element.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
     const previousFocus = document.activeElement;
     const hadTabIndex = element.hasAttribute('tabindex');
     if (!hadTabIndex && !element.matches('button,a,input,textarea,select,[tabindex]')) element.setAttribute('tabindex', '-1');
@@ -27,6 +34,7 @@ export default function GuidedSpotlight({ steps = [], onClose }) {
     const escape = (event) => { if (event.key === 'Escape') onClose(); };
     document.addEventListener('keydown', escape);
     return () => {
+      if (retryTimer) window.clearTimeout(retryTimer);
       window.removeEventListener('resize', update);
       window.removeEventListener('scroll', update, true);
       document.removeEventListener('keydown', escape);
@@ -53,10 +61,10 @@ export default function GuidedSpotlight({ steps = [], onClose }) {
       <div aria-hidden="true" style={right} />
       <div aria-hidden="true" style={bottom} />
       <div aria-hidden="true" style={{ position: 'fixed', top: target.top, left: target.left, width: target.width, height: target.height, border: '3px solid #fbbf24', borderRadius: 14, boxShadow: '0 0 0 3px rgba(255,255,255,.95)', zIndex: 120, pointerEvents: 'none' }} />
-      <section role="dialog" aria-modal="true" aria-labelledby="setup-spotlight-title" className="fixed z-[121] w-[min(400px,calc(100vw-32px))] rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl" style={{ top: bubbleTop, left: bubbleLeft }}>
+      <section role="dialog" aria-modal="true" aria-labelledby="setup-spotlight-title" aria-describedby="setup-spotlight-body" className="fixed z-[121] w-[min(400px,calc(100vw-32px))] rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl" style={{ top: bubbleTop, left: bubbleLeft }}>
         <p className="text-xs font-bold uppercase tracking-wide text-blue-700">Guided tour · {index + 1} of {steps.length}</p>
         <h2 id="setup-spotlight-title" className="mt-2 text-lg font-semibold text-slate-950">{current.title}</h2>
-        <p className="mt-2 text-sm leading-6 text-slate-700">{current.body}</p>
+        <p id="setup-spotlight-body" className="mt-2 text-sm leading-6 text-slate-700">{current.body}</p>
         {!rect ? <p className="mt-2 text-xs text-amber-800">This control is not visible on this screen. Close the tour and use the setup button below.</p> : null}
         <div className="mt-4 flex flex-wrap justify-between gap-2">
           <Button type="button" variant="tertiary" size="sm" onClick={onClose}>Skip tour</Button>
