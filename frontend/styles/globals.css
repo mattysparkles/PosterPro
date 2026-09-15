@@ -320,10 +320,13 @@ a {
 }
 
 .pp-shell-sidebar-rail {
-  position: fixed !important;
-  inset: 0 auto 0 0 !important;
+  position: sticky !important;
+  top: 0 !important;
+  height: 100vh !important;
   z-index: 40 !important;
   width: var(--pp-sidebar-width) !important;
+  min-width: 0 !important;
+  box-sizing: border-box !important;
   display: block !important;
   overflow: hidden !important;
 }
