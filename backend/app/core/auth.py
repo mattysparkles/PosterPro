@@ -174,7 +174,7 @@ def user_has_premium_access(user: User | None) -> bool:
 
 
 def ensure_vine_access(current_user: User) -> None:
-    if not settings.amazon_vine_import_enabled:
+    if not settings.amazon_vine_import_enabled and not getattr(current_user, "is_admin", False):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Amazon Vine import is disabled")
     if not user_has_vine_access(current_user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Amazon Vine import is restricted")
