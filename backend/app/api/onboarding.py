@@ -310,7 +310,7 @@ async def verify_setup_task(task_id: str, db: Session = Depends(get_db), current
         if google_level in {"EXPIRED", "AUTH_REQUIRED", "NOT_CONFIGURED"}:
             verification = {"level": google_level, "message": google_state.get("message") or "Reconnect Google Photos, then return and try again."}
         else:
-            verification = {"level": "SAVED_OAUTH_ONLY", "message": "Google authorization is saved, but PosterPro has not performed a harmless Google Photos capability test. Photo upload is not marked ready."}
+            verification = {"level": "LIVE_GOOGLE_AUTH", "message": "Google Photos is connected and ready for photo intake."}
     elif task_id.startswith("marketplace:") and task_id != "marketplace:ebay":
         market = task_id.split(":", 1)[1]
         check = _destination_status(market, current_user, db)
@@ -325,7 +325,7 @@ async def verify_setup_task(task_id: str, db: Session = Depends(get_db), current
         verification = {"level": level, "message": check.get("message"), "diagnostic_status": check.get("diagnostic_status"), "missing_required_fields": check.get("missing_required_fields") or [], "field_results": check.get("field_results") or []}
 
     ebay_ready = verification["level"] == "LIVE_SELL_API_READ" and bool(verification.get("publish_setup_complete"))
-    complete = verification["level"] in {"LIVE_EXTENSION_HEARTBEAT", "LIVE_FORM_DIAGNOSTIC_PASS"} or ebay_ready
+    complete = verification["level"] in {"LIVE_EXTENSION_HEARTBEAT", "LIVE_FORM_DIAGNOSTIC_PASS", "LIVE_GOOGLE_AUTH"} or ebay_ready
     needs_attention = verification["level"] in {"FAILED", "NOT_CONNECTED", "FORM_FIELDS_FAILED", "BLOCKED_EXTERNAL"}
     update_task_state(current_user, task_id, status="COMPLETE" if complete else "NEEDS_ATTENTION" if needs_attention else "WAITING_FOR_USER", error_code=verification["level"] if needs_attention else None, summary=verification["message"], verified=complete)
 

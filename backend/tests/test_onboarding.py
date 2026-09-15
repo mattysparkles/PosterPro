@@ -10,6 +10,7 @@ from app.models.enums import MarketplaceName
 from app.models.models import MarketplaceAccount, MarketplaceExtensionDevice, MarketplaceExtensionJob, User
 from app.services.ai_entitlements import resolve_openai_key, sponsored_ai_entitlement
 from app.services.onboarding_service import onboarding_snapshot
+from app.services.commerce_entitlements import public_commerce_entitlements
 
 
 def test_sponsored_ai_requires_server_enabled_active_subscription_and_explicit_grant(db_session, monkeypatch):
@@ -60,6 +61,38 @@ def test_onboarding_is_resumable_and_marketplace_status_is_not_assumed_ready(db_
     assert by_id["marketplace:facebook"]["guidance"]["open_url"] == "https://www.facebook.com/marketplace/"
     assert any("form test" in step.lower() for step in by_id["marketplace:facebook"]["guidance"]["steps"])
     assert snapshot["completed"] is False
+
+
+def test_platform_admin_receives_all_commerce_entitlements_without_billing(db_session, monkeypatch):
+    user = User(email=f"platform-owner-{uuid4()}@example.com", role="owner", is_admin=True, settings_json={})
+    normal = User(email=f"tenant-owner-{uuid4()}@example.com", role="owner", is_admin=False, settings_json={})
+    db_session.add_all([user, normal]); db_session.flush()
+    monkeypatch.setattr(config_module.settings, "commerce_billing_enabled", False)
+    admin = public_commerce_entitlements(user)
+    regular = public_commerce_entitlements(normal)
+    assert all(item["entitled"] for item in admin.values())
+    assert admin["affiliate.custom_ids"]["platform_admin"] is True
+    assert regular["affiliate.custom_ids"]["entitled"] is False
+
+
+def test_valid_google_connection_is_ready_without_developer_test_copy(db_session, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+    from app.core.secrets import encrypt_secret
+    import app.services.onboarding_service as onboarding_service
+
+    user = User(email=f"google-connected-{uuid4()}@example.com", role="owner", settings_json={
+        "google_photos_oauth": {
+            "connected": True,
+            "access_token_enc": encrypt_secret("saved-access-token", secret_key=config_module.settings.session_secret),
+            "refresh_token_enc": encrypt_secret("saved-refresh-token", secret_key=config_module.settings.session_secret),
+            "token_expires_at": (datetime.now(UTC) + timedelta(hours=1)).replace(tzinfo=None).isoformat(),
+        },
+    })
+    db_session.add(user); db_session.flush()
+    monkeypatch.setattr(onboarding_service, "google_photos_oauth_ready", lambda: True)
+    task = next(task for task in onboarding_service.onboarding_snapshot(user, db_session)["tasks"] if task["id"] == "google_photos")
+    assert task["status"] == "CONNECTED"
+    assert "test" not in task["message"].lower()
 
 
 def test_onboarding_assisted_marketplace_requires_passed_live_diagnostic(db_session):

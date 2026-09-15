@@ -24,12 +24,18 @@ def commerce_entitlement(user: User | None, feature: str) -> dict[str, Any]:
     if requested_grant is None:
         requested_grant = feature in free_features if plan == "FREE" else False
     requires_paid_entitlement = feature not in free_features
-    entitled = bool(requested_grant is True and (not requires_paid_entitlement or (active and billing_ready)))
+    # A platform administrator owns the product and may configure/test every
+    # capability without purchasing a tenant subscription. This is an access
+    # decision only; provider configuration and live verification remain
+    # separate checks throughout the commerce APIs.
+    platform_admin = bool(user and user.is_admin and not bool(getattr(user, "_posterpro_view_as_regular", False)))
+    entitled = platform_admin or bool(requested_grant is True and (not requires_paid_entitlement or (active and billing_ready)))
     return {
         "feature": feature,
         "plan": plan,
         "subscription_active": active,
         "billing_ready": billing_ready,
+        "platform_admin": platform_admin,
         "entitled": entitled,
         "status": "AVAILABLE" if entitled else "COMING_SOON" if plan in {"BASIC", "PREMIUM"} else "LOCKED",
     }

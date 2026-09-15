@@ -287,12 +287,16 @@ def _profile_public(profile: StorefrontProfile, user: User) -> dict:
     manual_entitled = commerce_entitlement(user, "payments.manual_methods")["entitled"]
     checkout_entitled = commerce_entitlement(user, "storefront.direct_checkout")["entitled"]
     payment_methods = []
-    if manual_entitled and checkout_entitled:
+    if settings.commerce_billing_enabled and manual_entitled and checkout_entitled:
         for method in ("cashapp", "venmo"):
             config = (profile.payment_settings_json or {}).get(method, {})
             if isinstance(config, dict) and config.get("enabled") and str(config.get("handle") or "").strip():
                 payment_methods.append({"method": method, "label": str(config.get("label") or method.title()), "discount_percent": float(config.get("discount_percent") or 0)})
     epn_ready = all(str(value or "").strip() for value in (settings.ebay_epn_campaign_id, settings.ebay_epn_channel_id, settings.ebay_epn_rotation_id, settings.ebay_epn_tool_id, settings.ebay_epn_event_type))
+    # Platform administrators may configure and test commerce while billing is
+    # disabled, but the public store must never advertise live direct checkout
+    # until provider execution is enabled for the deployment.
+    direct_checkout_live = bool(settings.commerce_billing_enabled and payment_methods)
     return {
         "slug": profile.slug, "store_name": profile.store_name, "description": profile.description or "",
         "logo_url": _public_url(profile.logo_url), "banner_url": _public_url(profile.banner_url), "accent_color": profile.accent_color,
@@ -301,7 +305,7 @@ def _profile_public(profile: StorefrontProfile, user: User) -> dict:
         "default_sort": public.get("default_sort") if public.get("default_sort") in {"newest", "price", "name", "featured"} else "newest",
         "policies": public.get("policies", {}) if isinstance(public.get("policies"), dict) else {},
         # Provider checkout and verified payment reconciliation are not enabled yet.
-        "direct_checkout_available": bool(payment_methods),
+        "direct_checkout_available": direct_checkout_live,
         "payment_methods": payment_methods,
         "affiliate_status": {"ebay": "CONFIGURED" if epn_ready else "CONFIG_REQUIRED", "facebook": "UNSUPPORTED", "mercari": "UNSUPPORTED", "poshmark": "UNSUPPORTED", "vinted": "UNSUPPORTED", "etsy": "UNSUPPORTED", "offerup": "UNSUPPORTED"},
     }

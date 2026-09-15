@@ -24,6 +24,7 @@ import {
   Puzzle,
   QrCode,
   Film,
+  ExternalLink,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 
@@ -51,6 +52,7 @@ function buildNavGroups(user) {
       items: [
         { href: '/publishing', label: 'Publishing', icon: Rocket },
         { href: '/settings/store', label: 'My Store', icon: Store },
+        { href: '/store', label: 'View Store', icon: ExternalLink },
         { href: '/storefront/orders', label: 'Store Orders', icon: ShoppingCart },
         { href: '/sales', label: 'Sales', icon: ShoppingCart },
         { href: '/offers', label: 'Offers', icon: Store },
@@ -150,6 +152,7 @@ export default function AppShell({
   const [notificationFilter, setNotificationFilter] = useState('all');
   const notificationsSeenRef = useRef(new Set());
   const notificationsInitializedRef = useRef(false);
+  const notificationPopoverRef = useRef(null);
   const navGroups = buildNavGroups(user);
   const activePath = active || router.pathname;
   const activeHref = router.asPath || activePath;
@@ -261,6 +264,17 @@ export default function AppShell({
     const interval = window.setInterval(() => loadProcessNotifications(), 60000);
     return () => window.clearInterval(interval);
   }, [loadProcessNotifications]);
+
+  useEffect(() => {
+    if (!notificationsOpen) return undefined;
+    const closeOnOutside = (event) => {
+      if (notificationPopoverRef.current && !notificationPopoverRef.current.contains(event.target)) setNotificationsOpen(false);
+    };
+    const closeOnEscape = (event) => { if (event.key === 'Escape') setNotificationsOpen(false); };
+    document.addEventListener('mousedown', closeOnOutside);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => { document.removeEventListener('mousedown', closeOnOutside); document.removeEventListener('keydown', closeOnEscape); };
+  }, [notificationsOpen]);
 
   const handleMarkNotificationRead = async (notificationId) => {
     try {
@@ -416,7 +430,7 @@ export default function AppShell({
                   {formatNotificationBadge(notificationUnreadCount) ? <span aria-hidden="true" className="pp-notification-badge">{formatNotificationBadge(notificationUnreadCount)}</span> : null}
                 </Button>
                 {notificationsOpen && typeof document !== 'undefined' ? createPortal((
-                  <div role="dialog" aria-label="Notifications" className="pp-notification-popover overflow-hidden rounded-2xl border border-slate-200 bg-white text-slate-900 shadow-[0_24px_60px_rgba(16,24,40,0.24)]">
+                  <div ref={notificationPopoverRef} role="dialog" aria-label="Notifications" className="pp-notification-popover overflow-hidden rounded-2xl border border-slate-200 bg-white text-slate-900 shadow-[0_24px_60px_rgba(16,24,40,0.24)]">
                     <div className="flex items-start justify-between gap-3 border-b border-slate-200 bg-white px-4 py-4">
                       <div><p className="text-base font-semibold text-slate-950">Notifications</p><p className="mt-1 text-sm text-slate-600">Unread {notificationUnreadCount.toLocaleString()}</p></div>
                       <button type="button" onClick={handleMarkAllNotificationsRead} disabled={!notificationUnreadCount} className="rounded-lg px-2 py-1.5 text-sm font-semibold text-blue-800 hover:bg-blue-50 disabled:cursor-not-allowed disabled:text-slate-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600">Mark all read</button>
