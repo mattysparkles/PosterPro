@@ -132,7 +132,7 @@ export default function OnboardingPage() {
     let active = true;
     const refreshDevices = async () => {
       try {
-        const value = await fetchMarketplaceExtensionDevices();
+        const value = await fetchMarketplaceExtensionDevices(browserExtensionDeviceId);
         if (!active) return;
         const next = value || { devices: [] };
         setExtensionState(next);

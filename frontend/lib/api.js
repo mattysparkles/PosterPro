@@ -684,8 +684,10 @@ export async function fetchBridgeAccounts(marketplace) {
   return jsonFetch(url.toString());
 }
 
-export async function fetchMarketplaceExtensionDevices() {
-  return jsonFetch(`${API_BASE}/browser-extension/devices`);
+export async function fetchMarketplaceExtensionDevices(currentDeviceId) {
+  const url = new URL(`${API_BASE}/browser-extension/devices`);
+  if (currentDeviceId) url.searchParams.set('current_device_id', String(currentDeviceId));
+  return jsonFetch(url.toString());
 }
 
 export async function createMarketplaceExtensionPairingCode(deviceName = 'PosterPro browser') {
