@@ -1269,3 +1269,28 @@ requirements above. Credentials were not rotated or printed.
 - No external listing mutation or payment was performed. Only the five
   PosterPro storefront commerce tables/type were added. `debug_fb_publish.db`,
   `ops/snapshots/`, `tmp/`, and unrelated host resources remain untouched.
+## 2026-09-15 - Platform owner access and onboarding truth pass
+
+- Central commerce entitlement resolution now treats the explicit PosterPro
+  platform administrator (`is_admin`, including the owner account) as entitled
+  to every product capability without requiring a tenant subscription or live
+  billing flag. Provider configuration/verification remains independently
+  truthful and fail-closed; public direct checkout is not advertised while
+  deployment billing is disabled.
+- Google Photos onboarding now treats valid saved OAuth as CONNECTED, removes
+  developer-facing test/setup language from the primary guidance, and presents
+  one connected-state Continue action. Expired authorization still requires a
+  reconnect.
+- Added a `/store` authenticated shortcut that routes to the current tenant's
+  enabled public store or to Store settings when no public profile is enabled.
+  The sidebar exposes this separately from My Store administration.
+- Added currency-aware crypto settings presentation (default discount plus
+  memo/tag only for XLM/XRP) while preserving tenant-scoped wallet storage.
+- Notification popovers close on outside click/Escape; the shared badge remains
+  capped at `99+` with white-on-red contrast.
+- Validation: onboarding suite `15 passed`; storefront entitlement/settings
+  regressions pass; frontend production build passes with existing lint/image
+  warnings. Production owner audit confirms user id 2,
+  `mattysparkles@icloud.com`, `is_admin=true`, role `admin`, all commerce
+  entitlements true, and AI state `CONNECTED` / `PLATFORM_DEFAULT` without
+  exposing credentials. Services were restarted only for PosterPro.
