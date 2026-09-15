@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import AppShell from '../../components/layout/AppShell';
 import Button from '../../components/ui/button';
 import PageHeader from '../../components/ui/page-header';
+import Input from '../../components/ui/input';
 import { fetchStorefrontSettings, saveStorefrontSettings } from '../../lib/api';
 
 const COINS = ['BTC','ETH','XLM','XMR','DOGE','PEP','LTC','RVN','DASH','XRP'];
@@ -28,12 +29,12 @@ export default function StoreSettings() {
   return <AppShell><main className="mx-auto max-w-5xl space-y-6 px-5 py-6">
     <PageHeader title="Store & payments" description="Set up your public store and the payment options you may enable later." />
     {message ? <p role="status" className="rounded-lg border border-slate-200 bg-white p-3 text-sm text-slate-700">{message}</p> : null}
-    {!profile ? <p className="text-slate-600">Loading store settings…</p> : <form onSubmit={save} className="space-y-6">
+    {!profile ? <p className="text-slate-600">Loading store settings…</p> : <form onSubmit={save} className="mx-auto max-w-5xl space-y-6">
       <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
         <h2 className="text-lg font-semibold">Public store</h2><p className="mt-1 text-sm text-slate-600">A unique tenant store link, built from your own eligible inventory.</p>
         <div className="mt-4 grid gap-4 sm:grid-cols-2">
-          <label className="text-sm font-medium">Store name<input required value={profile.store_name || ''} onChange={(e) => updateProfile('store_name', e.target.value)} className="mt-1 h-11 w-full rounded-lg border border-slate-300 px-3" /></label>
-          <label className="text-sm font-medium">Store link<input required value={profile.slug || ''} onChange={(e) => updateProfile('slug', e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '-'))} className="mt-1 h-11 w-full rounded-lg border border-slate-300 px-3" /><span className="text-xs text-slate-500">/store/{profile.slug}</span></label>
+          <label className="text-sm font-medium">Store name<Input required value={profile.store_name || ''} onChange={(e) => updateProfile('store_name', e.target.value)} className="mt-1 w-full" /></label>
+          <label className="text-sm font-medium">Store link<Input required value={profile.slug || ''} onChange={(e) => updateProfile('slug', e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '-'))} className="mt-1 w-full" /><span className="text-xs text-slate-500">/store/{profile.slug}</span></label>
           <label className="text-sm font-medium sm:col-span-2">Short description<textarea rows="3" value={profile.description || ''} onChange={(e) => updateProfile('description', e.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 p-3" /></label>
           <label className="text-sm font-medium">Logo image URL<input value={profile.logo_url || ''} onChange={(e) => updateProfile('logo_url', e.target.value)} className="mt-1 h-11 w-full rounded-lg border border-slate-300 px-3" /></label>
           <label className="text-sm font-medium">Banner image URL<input value={profile.banner_url || ''} onChange={(e) => updateProfile('banner_url', e.target.value)} className="mt-1 h-11 w-full rounded-lg border border-slate-300 px-3" /></label>
