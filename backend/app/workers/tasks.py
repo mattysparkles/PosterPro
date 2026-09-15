@@ -407,15 +407,13 @@ def repair_vine_listing_quality_task(user_id: int | None = None, chunk_size: int
                     quantity_source = str((listing.marketplace_data or {}).get("quantity_source") or "").lower() if isinstance(listing.marketplace_data, dict) else ""
                     if int(listing.quantity or 0) <= 0 and quantity_source not in {"manual", "operator"}:
                         listing.quantity = 1
-                    if listing.listing_images or listing.image_urls:
-                        listing.processing_state = "complete"
-                        listing.processing_blocking_reason = None
-                        listing.processing_error_stage = None
-                        listing.needs_review = True
-                    else:
-                        listing.processing_state = "needs_attention"
-                        listing.processing_blocking_reason = "No usable Amazon/product image is available for the marketplace payload."
-                        listing.processing_error_stage = "images"
+                    # Image enrichment may legitimately lag a successful Vine
+                    # import. Keep the draft reviewable and let publish
+                    # preflight surface image readiness when required.
+                    listing.processing_state = "complete"
+                    listing.processing_blocking_reason = None
+                    listing.processing_error_stage = None
+                    listing.needs_review = True
                 db.commit()
         return totals
     finally:

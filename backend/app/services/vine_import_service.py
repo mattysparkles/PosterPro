@@ -869,14 +869,13 @@ class VineImportService:
             # usable marketplace image are reviewable, while rows genuinely
             # missing media remain explicitly in the attention queue.
             has_images = bool(listing.listing_images or listing.image_urls)
-            if has_images:
-                listing.processing_state = "complete"
-                listing.processing_blocking_reason = None
-                listing.processing_error_stage = None
-            else:
-                listing.processing_state = "needs_attention"
-                listing.processing_blocking_reason = "No usable Amazon/product image is available for the marketplace payload."
-                listing.processing_error_stage = "images"
+            # Missing Amazon images can be enriched after import. A durable
+            # Vine draft with identity/content is still reviewable; image
+            # readiness remains a publish-time warning rather than an import
+            # failure.
+            listing.processing_state = "complete"
+            listing.processing_blocking_reason = None
+            listing.processing_error_stage = None
             db.add(listing)
             updated += 1
         db.commit()
