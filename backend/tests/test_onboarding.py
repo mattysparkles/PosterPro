@@ -11,6 +11,7 @@ from app.models.models import MarketplaceAccount, MarketplaceExtensionDevice, Ma
 from app.services.ai_entitlements import resolve_openai_key, sponsored_ai_entitlement
 from app.services.onboarding_service import onboarding_snapshot
 from app.services.commerce_entitlements import public_commerce_entitlements
+from app.core.auth import user_has_vine_access
 
 
 def test_sponsored_ai_requires_server_enabled_active_subscription_and_explicit_grant(db_session, monkeypatch):
@@ -73,6 +74,10 @@ def test_platform_admin_receives_all_commerce_entitlements_without_billing(db_se
     assert all(item["entitled"] for item in admin.values())
     assert admin["affiliate.custom_ids"]["platform_admin"] is True
     assert regular["affiliate.custom_ids"]["entitled"] is False
+
+
+def test_platform_admin_retains_vine_intake_access():
+    assert user_has_vine_access(User(email="platform@example.com", is_admin=True)) is True
 
 
 def test_valid_google_connection_is_ready_without_developer_test_copy(db_session, monkeypatch):

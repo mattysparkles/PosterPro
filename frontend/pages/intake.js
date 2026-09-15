@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import toast from 'react-hot-toast';
-import { Camera, Download, FolderSync, QrCode, Settings2 } from 'lucide-react';
+import { Camera, Download, FileSpreadsheet, FolderSync, QrCode, Settings2 } from 'lucide-react';
 
 import AppShell from '../components/layout/AppShell';
 import Button from '../components/ui/button';
@@ -117,6 +117,21 @@ export default function IntakeDashboardPage() {
             </>
           )}
         />
+
+        {(user?.is_admin || user?.can_access_vine_import) ? (
+          <section className="rounded-[22px] border border-amber-200 bg-amber-50/70 p-5 shadow-sm" aria-labelledby="vine-intake-title">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <div className="rounded-xl bg-amber-100 p-2 text-amber-800"><FileSpreadsheet size={20} aria-hidden="true" /></div>
+                <div>
+                  <h2 id="vine-intake-title" className="text-base font-semibold text-[var(--pp-text)]">Amazon Vine Report</h2>
+                  <p className="mt-1 max-w-2xl text-sm text-[var(--pp-muted)]">Import items from your Amazon Vine report and create PosterPro intake and listing records.</p>
+                </div>
+              </div>
+              <Button href="/imports/vine" variant="secondary"><FileSpreadsheet size={16} aria-hidden="true" /> Upload Vine report</Button>
+            </div>
+          </section>
+        ) : null}
 
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           <MetricCard label="Active sessions" value={metrics.sessions} helper="Session records available" />
