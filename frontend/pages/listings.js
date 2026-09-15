@@ -1953,7 +1953,7 @@ export default function ListingsPage() {
               <Button variant="outline" onClick={clearAllFilters}>Clear filters</Button>
             </div>
             <div className="mt-4 flex flex-wrap gap-2" aria-label="Listing filters">
-              {LISTING_TABS.map((tab) => <button key={tab.value} type="button" onClick={() => selectTab(tab.value)} className={`rounded-full border px-3 py-2 text-sm font-semibold ${activeTab === tab.value ? 'border-[#2563eb] bg-[#eef4ff] text-[#1d4ed8]' : 'border-[#e5e7eb] bg-white text-[#475467]'}`}>{tab.label}</button>)}
+              {LISTING_TABS.map((tab) => <Button key={tab.value} size="sm" type="button" variant={activeTab === tab.value ? 'subtle' : 'secondary'} onClick={() => selectTab(tab.value)}>{tab.label}</Button>)}
             </div>
             {sourceFilter === 'amazon_vine' ? <div className="mt-3 flex flex-wrap gap-2 rounded-[14px] border border-amber-200 bg-amber-50 p-2" aria-label="Amazon Vine lifecycle filters">
               {[['all','All Vine'],['review','Vine Needs Review'],['attention','Vine Needs Attention'],['drafts','Vine Drafts'],['ready','Vine Ready'],['published','Vine Published'],['sold','Vine Sold'],['archived','Vine Archived'],['failed','Vine Failed']].map(([value,label]) => <button key={value} type="button" onClick={() => selectTab(value)} className={`rounded-full px-2.5 py-1 text-xs font-semibold ${activeTab === value ? 'bg-white text-amber-900 ring-1 ring-amber-400' : 'text-amber-800'}`}>{label}</button>)}

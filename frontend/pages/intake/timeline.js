@@ -301,9 +301,9 @@ export default function IntakeTimeline() {
         <SectionPanel title="Intake filmstrip" description="Canonical image groups are shown as contiguous alternating regions. Green marks a Head Slate; fuchsia marks a Tail Slate.">
           <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
             <span>Zoom</span>
-            <button type="button" aria-label="Zoom out" onClick={() => changeZoom(zoom - 1)}>−</button>
+            <Button size="icon-sm" variant="secondary" type="button" aria-label="Zoom out" onClick={() => changeZoom(zoom - 1)}>−</Button>
             <input aria-label="Timeline zoom" type="range" min="0" max={WIDTHS.length - 1} value={zoom} onChange={(event) => changeZoom(Number(event.target.value))} />
-            <button type="button" aria-label="Zoom in" onClick={() => changeZoom(zoom + 1)}>+</button>
+            <Button size="icon-sm" variant="secondary" type="button" aria-label="Zoom in" onClick={() => changeZoom(zoom + 1)}>+</Button>
             <span className="text-xs text-slate-500">{WIDTHS[zoom]}px</span>
             <select aria-label="Timeline filter" value={filter} onChange={(event) => setFilter(event.target.value)} className="rounded border px-2 py-1 text-xs">
               <option value="ALL">All</option><option value="PHOTOS">Photos</option><option value="SLATES">Slates</option><option value="HEAD">Head Slates</option><option value="TAIL">Tail Slates</option>
