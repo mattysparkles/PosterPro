@@ -19,6 +19,11 @@
     }
   }
 
+  // Keep the authenticated PosterPro page aware of a freshly loaded unpacked
+  // extension. This avoids requiring a manual “check again” after Chrome
+  // reloads the service worker or the user returns from chrome://extensions.
+  if (typeof setInterval === "function") setInterval(() => { void reportPresence(); }, 10000);
+
   document.addEventListener("click", (event) => {
     if (!event.isTrusted) return;
     const button = event.target?.closest?.("[data-posterpro-extension-authorize]");

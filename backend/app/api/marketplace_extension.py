@@ -391,6 +391,9 @@ def list_extension_devices(db: Session = Depends(get_db), current_user: User = D
         )
     ).scalar_one()
     active = [job for job in jobs if job.status in {"CLAIMED", "NAVIGATING", "FORM_FILLING", "AWAITING_OPERATOR_REVIEW", "SUBMITTING"}]
+    latest = devices[0] if devices else None
+    now = datetime.now(UTC).replace(tzinfo=None)
+    recent = bool(latest and latest.last_seen_at and (now - latest.last_seen_at).total_seconds() <= 120 and not latest.revoked_at)
     return {
         "devices": [_device_payload(device) for device in devices],
         "current_version": CURRENT_EXTENSION_VERSION,
@@ -398,6 +401,18 @@ def list_extension_devices(db: Session = Depends(get_db), current_user: User = D
         "pending_jobs": int(pending_jobs or 0),
         "active_jobs": [_job_payload(job) for job in active[:20]],
         "recent_failures": [_job_payload(job) for job in jobs if job.status == "FAILED"][:20],
+        "diagnostics": {
+            "extension_detected": bool(devices),
+            "detected_version": latest.extension_version if latest else None,
+            "minimum_version": MINIMUM_EXTENSION_VERSION,
+            "device_registration": bool(latest and not latest.revoked_at),
+            "device_token_present": bool(latest and latest.token_hash),
+            "heartbeat_last_seen": _iso(latest.last_seen_at) if latest else None,
+            "current_browser_recognized": recent,
+            "current_user_matched": bool(latest and latest.user_id == current_user.id),
+            "current_tenant_matched": bool(latest and latest.user_id == current_user.id),
+            "job_transport_ready": bool(recent),
+        },
     }
 
 

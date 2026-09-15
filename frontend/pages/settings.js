@@ -497,6 +497,10 @@ export default function SettingsPage() {
       if (event.source !== window || event.origin !== window.location.origin) return;
       const message = event.data || {};
       if (message.source !== 'posterpro-extension') return;
+      if (message.type === 'BRIDGE_READY') {
+        setBrowserExtensionAvailable(true);
+        setBrowserExtensionVersion(String(message.version || ''));
+      }
       if (message.type === 'PRESENCE') {
         setBrowserExtensionAvailable(true);
         setBrowserExtensionVersion(String(message.version || ''));
@@ -2824,6 +2828,7 @@ export default function SettingsPage() {
                         <p className="mt-2 text-sm text-[#475467]">PosterPro works with marketplace accounts already signed in to this browser. Your passwords stay in your browser.</p>
                       <details className="mt-3 rounded-lg border border-[#d0d5dd] bg-white p-3">
                         <summary className="cursor-pointer text-sm font-semibold text-[#344054]">Advanced details and recovery pairing</summary>
+                        {user?.is_admin && marketplaceExtensionState.diagnostics ? <div className="mt-3 grid gap-2 rounded-lg border border-blue-100 bg-blue-50 p-3 text-xs text-slate-700 sm:grid-cols-2" aria-label="Browser extension diagnostics"><p className="sm:col-span-2 text-sm font-semibold text-slate-900">Connection diagnostics</p>{[['Extension detected', marketplaceExtensionState.diagnostics.extension_detected], ['Version', marketplaceExtensionState.diagnostics.detected_version || 'Not detected'], ['Device registration', marketplaceExtensionState.diagnostics.device_registration], ['Device token present', marketplaceExtensionState.diagnostics.device_token_present], ['Current browser recognized', marketplaceExtensionState.diagnostics.current_browser_recognized], ['User matched', marketplaceExtensionState.diagnostics.current_user_matched], ['Tenant matched', marketplaceExtensionState.diagnostics.current_tenant_matched], ['Job transport ready', marketplaceExtensionState.diagnostics.job_transport_ready], ['Last heartbeat', marketplaceExtensionState.diagnostics.heartbeat_last_seen || 'Not seen']].map(([label, value]) => <div key={label} className="flex items-center justify-between gap-2"><span>{label}</span><strong className={value === true ? 'text-emerald-700' : value === false ? 'text-amber-700' : 'text-slate-900'}>{value === true ? 'YES' : value === false ? 'NO' : value}</strong></div>)}</div> : null}
                         <p className="mt-2 text-sm text-[#475467]">Use a one-time recovery code only if Connect this browser is unavailable.</p>
                         <Button className="mt-2" type="button" variant="outline" onClick={issueMarketplaceExtensionPairingCode} disabled={loadingExtensionPairing}>{loadingExtensionPairing ? 'Preparing recovery code…' : 'Create recovery code'}</Button>
                         {marketplaceExtensionPairingCode?.pairing_code ? <div className="mt-3 rounded-lg bg-[#f2f4f7] p-3" role="status"><p className="text-sm font-semibold text-[#344054]">Recovery code · expires {formatDateTimeValue(marketplaceExtensionPairingCode.expires_at)}</p><p className="mt-1 select-all font-mono text-lg tracking-widest text-[#101828]">{marketplaceExtensionPairingCode.pairing_code}</p><p className="mt-1 text-sm text-[#475467]">Enter this temporary code in the extension only when automatic connection is unavailable.</p></div> : null}
