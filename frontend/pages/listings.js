@@ -208,7 +208,7 @@ function getListingBucket(listing) {
   if (listing.status === 'archived') return 'archived';
   const preflight = listing?.marketplace_data?.marketplace_preflight;
   const byMarketplace = preflight?.by_marketplace && typeof preflight.by_marketplace === 'object' ? preflight.by_marketplace : {};
-  if (Object.values(byMarketplace).some((entry) => Array.isArray(entry?.blockers) && entry.blockers.length > 0)) return 'attention';
+  if (Object.values(byMarketplace).some((entry) => Array.isArray(entry?.blockers) && entry.blockers.some((blocker) => !(isAmazonVineSource(listing) && /no usable amazon\/product image/i.test(`${blocker?.code || ''} ${blocker?.message || ''} ${blocker?.reason || ''}`))))) return 'attention';
   const isRecovery = listing?.source_type === 'media_inventory_recovery';
   const explicitlyApproved = Boolean(listing?.source_metadata?.operator_approved_at);
   const reviewReady = isCompleteForOperatorReview(listing);

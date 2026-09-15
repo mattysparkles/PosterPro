@@ -153,6 +153,14 @@ def _listing_bucket_expression():
     )
 
 
+def _vine_image_enrichment_warning(entry: dict | None, listing: Listing) -> bool:
+    """Cached image-enrichment warning is non-blocking for reviewable Vine drafts."""
+    if str(listing.source_type or '').strip().lower() != 'amazon_vine' or not isinstance(entry, dict):
+        return False
+    text = ' '.join(str(entry.get(key) or '') for key in ('code', 'message', 'reason')).lower()
+    return 'no usable amazon/product image' in text
+
+
 def _listing_bucket(listing: Listing, remote_ebay_active_ids: set[str] | None = None) -> str:
     labels = {str(value).strip().lower() for value in (listing.custom_labels or [])}
     marketplace_data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}
@@ -207,7 +215,7 @@ def _listing_bucket(listing: Listing, remote_ebay_active_ids: set[str] | None = 
         isinstance(by_marketplace, dict)
         and isinstance(by_marketplace.get(market), dict)
         and not bool((by_marketplace.get(market) or {}).get("stale"))
-        and bool((by_marketplace.get(market) or {}).get("blockers"))
+        and any(not _vine_image_enrichment_warning(blocker, listing) for blocker in ((by_marketplace.get(market) or {}).get("blockers") or []))
         for market in configured_targets
     ):
         return "needs_attention"
