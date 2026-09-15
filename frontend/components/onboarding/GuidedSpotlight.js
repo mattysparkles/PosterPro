@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import Button from '../ui/button';
 
 function clamp(value, min, max) { return Math.max(min, Math.min(value, max)); }
 
@@ -58,10 +59,10 @@ export default function GuidedSpotlight({ steps = [], onClose }) {
         <p className="mt-2 text-sm leading-6 text-slate-700">{current.body}</p>
         {!rect ? <p className="mt-2 text-xs text-amber-800">This control is not visible on this screen. Close the tour and use the setup button below.</p> : null}
         <div className="mt-4 flex flex-wrap justify-between gap-2">
-          <button type="button" onClick={onClose} className="rounded-lg px-3 py-2 text-sm font-medium text-slate-600">Skip tour</button>
+          <Button type="button" variant="tertiary" size="sm" onClick={onClose}>Skip tour</Button>
           <div className="flex gap-2">
-            <button type="button" disabled={index === 0} onClick={() => setIndex((value) => Math.max(0, value - 1))} className="rounded-lg border px-3 py-2 text-sm font-semibold disabled:opacity-40">Back</button>
-            <button type="button" onClick={() => index + 1 >= steps.length ? onClose() : setIndex((value) => value + 1)} className="rounded-lg bg-blue-700 px-3 py-2 text-sm font-semibold text-white">{index + 1 >= steps.length ? 'Done' : 'Next'}</button>
+            <Button type="button" variant="secondary" size="sm" disabled={index === 0} onClick={() => setIndex((value) => Math.max(0, value - 1))}>Back</Button>
+            <Button type="button" size="sm" onClick={() => index + 1 >= steps.length ? onClose() : setIndex((value) => value + 1)}>{index + 1 >= steps.length ? 'Done' : 'Next'}</Button>
           </div>
         </div>
       </section>

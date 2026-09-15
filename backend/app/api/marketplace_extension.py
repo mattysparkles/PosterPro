@@ -391,9 +391,11 @@ def list_extension_devices(db: Session = Depends(get_db), current_user: User = D
         )
     ).scalar_one()
     active = [job for job in jobs if job.status in {"CLAIMED", "NAVIGATING", "FORM_FILLING", "AWAITING_OPERATOR_REVIEW", "SUBMITTING"}]
-    latest = devices[0] if devices else None
     now = datetime.now(UTC).replace(tzinfo=None)
-    recent = bool(latest and latest.last_seen_at and (now - latest.last_seen_at).total_seconds() <= 120 and not latest.revoked_at)
+    online_devices = [device for device in devices if device.last_seen_at and (now - device.last_seen_at).total_seconds() <= 120 and not device.revoked_at]
+    latest = max(devices, key=lambda device: (device.last_seen_at or datetime.min, device.id or 0), default=None)
+    latest_online = max(online_devices, key=lambda device: (device.last_seen_at or datetime.min, device.id or 0), default=None)
+    compatible = bool(latest_online and _version_tuple(latest_online.extension_version) >= _version_tuple(MINIMUM_EXTENSION_VERSION))
     return {
         "devices": [_device_payload(device) for device in devices],
         "current_version": CURRENT_EXTENSION_VERSION,
@@ -402,16 +404,20 @@ def list_extension_devices(db: Session = Depends(get_db), current_user: User = D
         "active_jobs": [_job_payload(job) for job in active[:20]],
         "recent_failures": [_job_payload(job) for job in jobs if job.status == "FAILED"][:20],
         "diagnostics": {
-            "extension_detected": bool(devices),
-            "detected_version": latest.extension_version if latest else None,
+            "page_extension_detected": None,
+            "page_bridge_active": None,
+            "registered_devices": len(devices),
+            "online_registered_devices": len(online_devices),
+            "detected_version": latest_online.extension_version if latest_online else None,
             "minimum_version": MINIMUM_EXTENSION_VERSION,
-            "device_registration": bool(latest and not latest.revoked_at),
-            "device_token_present": bool(latest and latest.token_hash),
-            "heartbeat_last_seen": _iso(latest.last_seen_at) if latest else None,
-            "current_browser_recognized": recent,
-            "current_user_matched": bool(latest and latest.user_id == current_user.id),
-            "current_tenant_matched": bool(latest and latest.user_id == current_user.id),
-            "job_transport_ready": bool(recent),
+            "device_registration": bool(latest_online and not latest_online.revoked_at),
+            "device_token_present": bool(latest_online and latest_online.token_hash),
+            "heartbeat_last_seen": _iso(latest_online.last_seen_at) if latest_online else None,
+            "current_browser_recognized": None,
+            "current_user_matched": bool(latest_online and latest_online.user_id == current_user.id),
+            "tenant_match": "NOT_MODELED_DEVICE_USER_ONLY",
+            "job_transport_ready": bool(latest_online and compatible),
+            "transport_requirements": {"registered": bool(latest_online), "compatible_version": compatible, "fresh_heartbeat": bool(latest_online), "revoked": bool(latest_online and latest_online.revoked_at)},
         },
     }
 
