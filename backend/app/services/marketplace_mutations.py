@@ -122,16 +122,20 @@ def apply_marketplace_operation(
         targets = sorted(SUPPORTED_MARKETS)
     if not targets:
         raise ValueError("At least one marketplace target is required")
-    if field not in {"price", "shipping", "title", "description", "category", "condition", "item_specifics"}:
+    if field not in {"price", "shipping", "title", "description", "category", "condition", "item_specifics", "listing"}:
         raise ValueError(f"Unsupported mutation field: {field}")
-    if action not in {"set", "percentage_change", "clear"}:
+    if action not in {"set", "percentage_change", "clear", "end"}:
         raise ValueError(f"Unsupported mutation action: {action}")
+    if action == "end" and field != "listing":
+        raise ValueError("The end action targets the listing field")
 
     data = dict(listing.marketplace_data or {})
     overrides = dict(data.get("marketplace_overrides") or {})
     changed: list[dict[str, Any]] = []
 
     def calculate(previous: Any) -> Any:
+        if action == "end":
+            return "end"
         if action == "clear":
             return None
         if action == "percentage_change":
@@ -143,6 +147,8 @@ def apply_marketplace_operation(
 
     for target in targets:
         if target == "canonical":
+            if field == "listing":
+                raise ValueError("Listing end actions require a marketplace target")
             attr = {"price": "listing_price", "title": "title", "description": "description", "category": "category_suggestion", "condition": "condition"}.get(field)
             if attr is None:
                 raise ValueError(f"Canonical mutation does not support {field}")
@@ -164,6 +170,14 @@ def apply_marketplace_operation(
             changed.append({"marketplace": "canonical", "field": field, "before": previous, "after": updated})
             continue
         market = dict(overrides.get(target) or {})
+        if field == "listing":
+            previous = market.get("status", "active")
+            updated = calculate(previous)
+            market["status"] = updated
+            market.setdefault("provenance", {})["status"] = "operator_edited"
+            overrides[target] = market
+            changed.append({"marketplace": target, "field": field, "before": previous, "after": updated})
+            continue
         previous = market.get(field)
         if previous is None and field == "price":
             previous = listing.listing_price

@@ -90,3 +90,15 @@ def test_compound_plan_rejects_later_invalid_operation_without_mutation(db_sessi
     else:
         raise AssertionError("invalid compound operation should fail validation")
     assert not (listing.marketplace_data or {}).get("marketplace_overrides")
+
+
+def test_compound_plan_supports_destination_specific_end(db_session):
+    user = User(email="mutation-plan-end@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(user_id=user.id)
+    db_session.add(listing); db_session.flush()
+    result = apply_marketplace_operation_plan([
+        {"listing_id": listing.id, "markets": ["poshmark"], "field": "listing", "action": "end"},
+    ], {listing.id: listing})
+    assert result["changes"][0]["after"] == "end"
+    assert listing.marketplace_data["marketplace_overrides"]["poshmark"]["status"] == "end"
