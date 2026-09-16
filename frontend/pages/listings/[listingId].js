@@ -8,6 +8,7 @@ import Button from "../../components/ui/button";
 import Input from "../../components/ui/input";
 import Select from "../../components/ui/select";
 import Textarea from "../../components/ui/textarea";
+import Checkbox from "../../components/ui/checkbox";
 import PageHeader from "../../components/ui/page-header";
 import SectionPanel from "../../components/ui/section-panel";
 import StatusPill from "../../components/ui/status-pill";
@@ -834,10 +835,10 @@ export default function ListingWorkspacePage() {
           {listing?.source_metadata?.correction_status ? <div className="mb-3 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-800">{String(listing.source_metadata.correction_status).replaceAll('_', ' ')}{listing.source_metadata.correction_job_id ? <span className="ml-2 text-xs font-normal">Job #{listing.source_metadata.correction_job_id}</span> : null}</div> : null}
           <p className="mb-3 text-sm text-[#667085]">Choose only the fields that need work. PosterPro records the request for the next AI revision.</p>
           <div className="flex flex-wrap gap-3">
-            {['title', 'description', 'category', 'price', 'condition', 'photos', 'item specifics', 'shipping'].map((field) => <label key={field} className="flex items-center gap-2 text-sm"><input type="checkbox" checked={revisionFields.includes(field)} onChange={() => setRevisionFields((current) => current.includes(field) ? current.filter((item) => item !== field) : [...current, field])} /> Fix {field}</label>)}
+            {['title', 'description', 'category', 'price', 'condition', 'photos', 'item specifics', 'shipping'].map((field) => <Checkbox key={field} checked={revisionFields.includes(field)} onChange={() => setRevisionFields((current) => current.includes(field) ? current.filter((item) => item !== field) : [...current, field])} label={`Fix ${field}`} />)}
           </div>
           <Textarea value={revisionNote} onChange={(event) => setRevisionNote(event.target.value)} className="mt-3 min-h-20" placeholder="Optional: describe what is wrong or point the AI to a label/photo." />
-          <label className="mt-3 block text-sm font-semibold">Priority <input type="number" min="0" step="1" value={revisionPriority} onChange={(event) => setRevisionPriority(Math.max(0, Number(event.target.value) || 0))} className="ml-2 w-20 rounded border px-2 py-1" /></label><p className="mt-1 text-xs text-[#667085]">0 = immediate / highest priority; newer priority-0 requests run first.</p>
+          <label className="mt-3 block text-sm font-semibold">Priority <Input type="number" min="0" step="1" value={revisionPriority} onChange={(event) => setRevisionPriority(Math.max(0, Number(event.target.value) || 0))} className="ml-2 inline-flex w-20" /></label><p className="mt-1 text-xs text-[#667085]">0 = immediate / highest priority; newer priority-0 requests run first.</p>
           <div className="mt-3"><Button variant="outline" onClick={requestRevision}>Send to Drafts &amp; request AI correction</Button></div>
         </div>
       </details>
