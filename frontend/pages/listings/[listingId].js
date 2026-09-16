@@ -790,6 +790,17 @@ export default function ListingWorkspacePage() {
               ['Remote state', listing.canonical_readiness.remote_state || 'LOCAL'],
             ].map(([label, value]) => <div key={label} className="rounded-[10px] border border-[#eaecf0] bg-[#fcfcfd] p-3"><p className="text-xs font-semibold text-[#667085]">{label}</p><p className="mt-1 text-sm font-semibold text-[#101828]">{value}</p></div>)}
           </div>
+          {listing.canonical_readiness.description_quality ? (
+            <div className="mt-3 rounded-[10px] border border-[#eaecf0] bg-[#f8fafc] p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Description quality</p>
+                <span className="text-sm font-semibold text-[#101828]">{String(listing.canonical_readiness.description_quality.quality || 'unknown').replaceAll('_', ' ')}</span>
+              </div>
+              <p className="mt-1 text-xs text-[#667085]">
+                {listing.canonical_readiness.description_quality.word_count || 0} words · {listing.canonical_readiness.description_quality.source_facts_covered || 0}/{listing.canonical_readiness.description_quality.source_fact_count || 0} verified source facts represented
+              </p>
+            </div>
+          ) : null}
           {listing.canonical_readiness.blocking_reasons?.length ? <div className="mt-3 rounded-[10px] border border-amber-200 bg-amber-50 p-3"><p className="text-xs font-semibold uppercase tracking-[0.08em] text-amber-900">Action needed</p><ul className="mt-1 list-disc pl-5 text-sm text-amber-900">{listing.canonical_readiness.blocking_reasons.slice(0, 5).map((reason) => <li key={reason}>{reason}</li>)}</ul></div> : null}
         </section>
       ) : null}
