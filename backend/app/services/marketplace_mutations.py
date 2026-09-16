@@ -5,6 +5,7 @@ contract without accidentally overwriting destinations that were not targeted.
 """
 from __future__ import annotations
 
+from datetime import datetime, UTC
 from typing import Any
 
 from app.models.models import Listing
@@ -135,8 +136,10 @@ def apply_marketplace_operation(
         raise ValueError("At least one marketplace target is required")
     if field not in {"price", "shipping", "title", "description", "category", "condition", "item_specifics", "listing"}:
         raise ValueError(f"Unsupported mutation field: {field}")
-    if action not in {"set", "percentage_change", "clear", "end"}:
+    if action not in {"set", "percentage_change", "clear", "end", "regenerate"}:
         raise ValueError(f"Unsupported mutation action: {action}")
+    if action == "regenerate" and field != "description":
+        raise ValueError("Regenerate currently targets descriptions only")
     if action == "end" and field != "listing":
         raise ValueError("The end action targets the listing field")
 
@@ -145,6 +148,8 @@ def apply_marketplace_operation(
     changed: list[dict[str, Any]] = []
 
     def calculate(previous: Any) -> Any:
+        if action == "regenerate":
+            return previous
         if action == "end":
             return "end"
         if action == "clear":
@@ -188,6 +193,12 @@ def apply_marketplace_operation(
             market.setdefault("provenance", {})["status"] = "operator_edited"
             overrides[target] = market
             changed.append({"marketplace": target, "field": field, "before": previous, "after": updated})
+            continue
+        if action == "regenerate" and field == "description":
+            requests = list(data.get("description_regeneration_requests") or [])
+            requests.append({"marketplace": target, "requested_by": "operator", "requested_at": datetime.now(UTC).isoformat(), "status": "QUEUED"})
+            data["description_regeneration_requests"] = requests[-50:]
+            changed.append({"marketplace": target, "field": field, "action": action, "before": market.get(field), "after": "queued"})
             continue
         previous = market.get(field)
         if previous is None and field == "price":

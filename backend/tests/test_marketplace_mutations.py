@@ -34,6 +34,17 @@ def test_canonical_description_operation_updates_rich_master_copy(db_session):
     assert listing.canonical_description == "New master copy"
 
 
+def test_destination_description_regeneration_queues_without_overwriting_copy(db_session):
+    user = User(email="mutation-description-regen@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(user_id=user.id, description="Master copy", canonical_description="Master copy", marketplace_data={"marketplace_overrides": {"facebook": {"description": "Human Facebook copy"}}})
+    result = apply_marketplace_operation(listing, marketplaces=["facebook"], field="description", action="regenerate")
+    assert result["changed"][0]["after"] == "queued"
+    assert listing.canonical_description == "Master copy"
+    assert listing.marketplace_data["marketplace_overrides"]["facebook"]["description"] == "Human Facebook copy"
+    assert listing.marketplace_data["description_regeneration_requests"][0]["status"] == "QUEUED"
+
+
 def test_invalid_target_is_rejected(db_session):
     user = User(email="mutation-invalid@example.com")
     db_session.add(user); db_session.flush()
