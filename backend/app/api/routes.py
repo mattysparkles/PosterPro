@@ -2667,6 +2667,25 @@ async def run_dashboard_operator_command(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    # Compound requests are returned as a safe, human-readable preview plan;
+    # execution remains behind the existing confirmation and scoped mutation
+    # services. This prevents a multi-market request from becoming a global
+    # update by accident.
+    operation_plan = operator_command_service.parse_operation_plan(payload.prompt)
+    if len(operation_plan) > 1:
+        return {
+            "prompt": payload.prompt,
+            "parsed": True,
+            "command_type": "compound_operation_plan",
+            "dry_run": True,
+            "apply_live": False,
+            "requires_confirmation": True,
+            "message": "Preview ready. Confirm each targeted field and marketplace before execution.",
+            "operations": [
+                {"items": op.items, "marketplaces": op.marketplaces, "field": op.field, "action": op.action, "value": op.value}
+                for op in operation_plan
+            ],
+        }
     return await operator_command_service.handle_prompt(
         db,
         user=current_user,
