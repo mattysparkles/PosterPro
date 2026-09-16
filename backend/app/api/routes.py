@@ -2790,23 +2790,23 @@ async def run_dashboard_operator_command(
                     "message": "Live compound changes require the exact confirmation phrase.",
                     "operations": [{"items": op.items, "marketplaces": op.marketplaces, "field": op.field, "action": op.action, "value": op.value} for op in operation_plan],
                 }
-            results = []
-            for operation in operation_plan:
-                if operation.action == 'end' or operation.field == 'listing':
-                    results.append({"items": operation.items, "marketplaces": operation.marketplaces, "status": "not_executed", "message": "Ending listings requires an exact-identity marketplace job."})
-                    continue
-                for listing_id in operation.items:
-                    listing = db.get(Listing, listing_id)
-                    if not listing or listing.user_id != current_user.id:
-                        results.append({"listing_id": listing_id, "status": "failed", "message": "Listing not found in this account."})
-                        continue
-                    try:
-                        change = apply_marketplace_operation(listing, marketplaces=operation.marketplaces, field=operation.field, action=operation.action, value=operation.value)
-                        db.add(listing); db.commit()
-                        results.append({"listing_id": listing_id, "status": "updated", "change": change})
-                    except ValueError as exc:
-                        db.rollback()
-                        results.append({"listing_id": listing_id, "status": "failed", "message": str(exc)})
+            if any(operation.action == 'end' or operation.field == 'listing' for operation in operation_plan):
+                results = [{"items": operation.items, "marketplaces": operation.marketplaces, "status": "not_executed", "message": "Ending listings requires an exact-identity marketplace job."} for operation in operation_plan]
+            else:
+                from app.services.marketplace_mutations import apply_marketplace_operation_plan
+                listing_ids = sorted({listing_id for operation in operation_plan for listing_id in operation.items})
+                listings = {listing_id: db.get(Listing, listing_id) for listing_id in listing_ids}
+                if any(not listing or listing.user_id != current_user.id for listing in listings.values()):
+                    raise HTTPException(status_code=404, detail="One or more listings were not found in this account.")
+                plan_payload = [{"listing_ids": operation.items, "marketplaces": operation.marketplaces, "field": operation.field, "action": operation.action, "value": operation.value} for operation in operation_plan]
+                try:
+                    applied = apply_marketplace_operation_plan(plan_payload, listings)
+                    db.add_all(listings.values())
+                    db.commit()
+                    results = [{"listing_id": change["listing_id"], "status": "updated", "change": change} for change in applied["changes"]]
+                except ValueError as exc:
+                    db.rollback()
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
             return {"prompt": payload.prompt, "parsed": True, "command_type": "compound_operation_plan", "dry_run": False, "apply_live": True, "requires_confirmation": True, "message": "Compound operation completed with per-item results.", "operations": [{"items": op.items, "marketplaces": op.marketplaces, "field": op.field, "action": op.action, "value": op.value} for op in operation_plan], "results": results}
         return {
             "prompt": payload.prompt,
