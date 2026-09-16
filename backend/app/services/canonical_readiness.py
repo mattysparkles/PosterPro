@@ -18,6 +18,9 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
     )
     blockers = list(dict.fromkeys([*(stored.get("blockers") or []), *(base.get("blockers") or [])]))
     warnings = list(dict.fromkeys([*(stored.get("warnings") or []), *(base.get("warnings") or [])]))
+    missing_required_aspects = [str(value).strip() for value in (stored.get("missing_required_aspects") or []) if str(value).strip()]
+    if missing_required_aspects:
+        blockers.extend(f"Required marketplace detail missing: {value}" for value in missing_required_aspects)
     description = str(getattr(listing, "canonical_description", None) or getattr(listing, "description", None) or "").strip()
     if not description:
         blockers.append("Description is missing")
@@ -54,7 +57,7 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
         "publishable": publishable and (not marketplace or not blockers),
         "warnings": warnings,
         "blocking_reasons": blockers,
-        "missing_required_aspects": list(stored.get("missing_required_aspects") or []),
+        "missing_required_aspects": missing_required_aspects,
         "marketplace_readiness": dict(base.get("marketplace_readiness") or {}),
         "queue": "NEEDS_ATTENTION" if (attention or blockers) else "NEEDS_REVIEW" if getattr(listing, "needs_review", False) else "PROCESSING" if not processing_complete else "READY",
     }

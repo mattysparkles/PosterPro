@@ -55,3 +55,20 @@ def test_source_draft_with_token_description_requires_enrichment(db_session):
     result = canonical_listing_readiness(listing)
     assert result["attention_required"] is True
     assert "product-specific enrichment" in result["blocking_reasons"][0].lower()
+
+
+def test_missing_required_aspects_are_canonical_blockers(db_session):
+    user = User(email="readiness-aspects@example.com"); db_session.add(user); db_session.flush()
+    listing = Listing(
+        user_id=user.id, processing_state="complete", needs_review=True,
+        title="Quality item", description="A useful, detailed product description with enough facts for review.",
+        category_suggestion="Sporting Goods", listing_price=20,
+        listing_images=[{"storage_path": "/media/item.jpg", "operator_state": "approved", "role": "primary"}],
+        condition_data={"operator_review_required": False}, shipping_profile={"manual_measurement_needed": False},
+    )
+    listing.readiness_summary = {"missing_required_aspects": ["Size Type"], "quality_complete": True}
+    db_session.add(listing); db_session.commit()
+    result = canonical_listing_readiness(listing, marketplace="ebay")
+    assert result["attention_required"] is True
+    assert result["publishable"] is False
+    assert "Size Type" in result["blocking_reasons"][0]
