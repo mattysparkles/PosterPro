@@ -236,7 +236,7 @@ export default function IntakeTimeline() {
       <div key={photo.id || `${entry.image_group_id}-${entryIndex}`} className="flex shrink-0 items-start gap-2">
         <div className="flex flex-col items-center">
           <Checkbox aria-label={`Select timeline asset ${photo.id}`} checked={selectedIds.includes(photo.id)} onChange={() => toggleSelected(photo.id)} className="mb-1 border-0 bg-transparent p-0" />
-          <button
+          <Button
             type="button"
             onClick={() => setSelected(entry)}
             data-timeline-role={state.role}
@@ -244,7 +244,9 @@ export default function IntakeTimeline() {
               width,
               ...(state.slate ? slatePalette(state.role) : {}),
             }}
-            className={`rounded-xl border-2 p-1 text-left shadow-sm ${state.slate ? "font-semibold" : "border-transparent bg-transparent text-inherit"} ${selected?.photo?.id === photo.id ? "ring-2 ring-blue-500" : ""}`}
+            variant="ghost"
+            size="sm"
+            className={`h-auto min-h-0 rounded-xl border-2 p-1 text-left shadow-sm ${state.slate ? "font-semibold" : "border-transparent bg-transparent text-inherit"} ${selected?.photo?.id === photo.id ? "ring-2 ring-blue-500" : ""}`}
           >
             <div className="relative aspect-square overflow-hidden rounded-lg bg-slate-100">
               {thumbnail ? (
@@ -262,7 +264,7 @@ export default function IntakeTimeline() {
               <StatusPill status={state.slate ? "warning" : "default"} label={photo.group_photo_label || state.role} />
               {photo.photo_number && <span className="text-[9px]">Image {photo.photo_number}</span>}
             </div>
-          </button>
+          </Button>
           {state.slate && slateId && (
             <div className="mt-1 flex gap-1">
               <a href={`/intake/slate?slate_id=${slateId}`} className="rounded border border-lime-700 bg-lime-100 px-1 text-[9px] font-semibold text-lime-900">EDIT SLATE</a>
