@@ -1928,18 +1928,18 @@ export default function SettingsPage() {
                   ]}
                   actions={
                     <>
-                      <a href="#ebay-connect" className="rounded-full border border-[#d0d5dd] bg-white px-3 py-2 text-sm font-medium text-[#344054] transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]">
+                      <Button variant="secondary" size="sm" href="#ebay-connect">
                         Connect
-                      </a>
-                      <a href="#ebay-policies" className="rounded-full border border-[#d0d5dd] bg-white px-3 py-2 text-sm font-medium text-[#344054] transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]">
+                      </Button>
+                      <Button variant="secondary" size="sm" href="#ebay-policies">
                         Policies
-                      </a>
-                      <a href="#ebay-location" className="rounded-full border border-[#d0d5dd] bg-white px-3 py-2 text-sm font-medium text-[#344054] transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]">
+                      </Button>
+                      <Button variant="secondary" size="sm" href="#ebay-location">
                         Location
-                      </a>
-                      <a href="#ebay-import" className="rounded-full border border-[#d0d5dd] bg-white px-3 py-2 text-sm font-medium text-[#344054] transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]">
+                      </Button>
+                      <Button variant="secondary" size="sm" href="#ebay-import">
                         Import
-                      </a>
+                      </Button>
                     </>
                   }
                 />

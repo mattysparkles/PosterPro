@@ -1956,7 +1956,7 @@ export default function ListingsPage() {
               {LISTING_TABS.map((tab) => <Button key={tab.value} size="sm" type="button" variant={activeTab === tab.value ? 'subtle' : 'secondary'} onClick={() => selectTab(tab.value)}>{tab.label}</Button>)}
             </div>
             {sourceFilter === 'amazon_vine' ? <div className="mt-3 flex flex-wrap gap-2 rounded-[14px] border border-amber-200 bg-amber-50 p-2" aria-label="Amazon Vine lifecycle filters">
-              {[['all','All Vine'],['review','Vine Needs Review'],['attention','Vine Needs Attention'],['drafts','Vine Drafts'],['ready','Vine Ready'],['published','Vine Published'],['sold','Vine Sold'],['archived','Vine Archived'],['failed','Vine Failed']].map(([value,label]) => <button key={value} type="button" onClick={() => selectTab(value)} className={`rounded-full px-2.5 py-1 text-xs font-semibold ${activeTab === value ? 'bg-white text-amber-900 ring-1 ring-amber-400' : 'text-amber-800'}`}>{label}</button>)}
+              {[['all','All Vine'],['review','Vine Needs Review'],['attention','Vine Needs Attention'],['drafts','Vine Drafts'],['ready','Vine Ready'],['published','Vine Published'],['sold','Vine Sold'],['archived','Vine Archived'],['failed','Vine Failed']].map(([value,label]) => <Button key={value} type="button" variant="tertiary" size="sm" onClick={() => selectTab(value)} className={`rounded-full px-2.5 py-1 text-xs font-semibold ${activeTab === value ? 'bg-white text-amber-900 ring-1 ring-amber-400' : 'text-amber-800'}`}>{label}</Button>)}
             </div> : null}
             <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-[#eaecf0] pt-3">
               <Button

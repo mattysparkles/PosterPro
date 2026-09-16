@@ -12,17 +12,19 @@ export default function GuidedSpotlight({ steps = [], onClose }) {
     if (!current || typeof window === 'undefined') return undefined;
     let element = null;
     let retryTimer = null;
+    let retryCount = 0;
     const update = () => {
       element = document.querySelector(current.selector);
-      if (!element) { setRect(null); return; }
+      if (!element) {
+        setRect(null);
+        if (retryCount < 12) { retryCount += 1; retryTimer = window.setTimeout(update, 160); }
+        return;
+      }
       const bounds = element.getBoundingClientRect();
       setRect({ top: bounds.top - 7, left: bounds.left - 7, width: bounds.width + 14, height: bounds.height + 14 });
     };
     element = document.querySelector(current.selector);
-    if (!element) {
-      retryTimer = window.setTimeout(update, 180);
-      return () => { if (retryTimer) window.clearTimeout(retryTimer); };
-    }
+    if (!element) { retryTimer = window.setTimeout(update, 80); return () => { if (retryTimer) window.clearTimeout(retryTimer); }; }
     element.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
     const previousFocus = document.activeElement;
     const hadTabIndex = element.hasAttribute('tabindex');
@@ -44,11 +46,12 @@ export default function GuidedSpotlight({ steps = [], onClose }) {
   }, [current, onClose]);
 
   if (!current) return null;
-  const target = rect || { top: window.innerHeight * 0.35, left: 24, width: 1, height: 1 };
-  const bubbleWidth = Math.min(400, window.innerWidth - 32);
-  const bubbleLeft = clamp(target.left, 16, Math.max(16, window.innerWidth - bubbleWidth - 16));
+  const viewport = typeof window === 'undefined' ? { innerHeight: 800, innerWidth: 1200 } : window;
+  const target = rect || { top: viewport.innerHeight * 0.35, left: 24, width: 1, height: 1 };
+  const bubbleWidth = Math.min(400, viewport.innerWidth - 32);
+  const bubbleLeft = clamp(target.left, 16, Math.max(16, viewport.innerWidth - bubbleWidth - 16));
   const bubbleTop = target.top + target.height + 16 + 190 > window.innerHeight
-    ? clamp(target.top - 210, 16, window.innerHeight - 210)
+    ? clamp(target.top - 210, 16, viewport.innerHeight - 210)
     : target.top + target.height + 16;
   const top = { position: 'fixed', inset: 0, height: Math.max(0, target.top), background: 'rgba(9,16,28,.68)', zIndex: 119, pointerEvents: 'auto' };
   const left = { position: 'fixed', top: target.top, left: 0, width: Math.max(0, target.left), height: target.height, background: 'rgba(9,16,28,.68)', zIndex: 119, pointerEvents: 'auto' };
@@ -56,10 +59,10 @@ export default function GuidedSpotlight({ steps = [], onClose }) {
   const bottom = { position: 'fixed', top: target.top + target.height, left: 0, right: 0, bottom: 0, background: 'rgba(9,16,28,.68)', zIndex: 119, pointerEvents: 'auto' };
   return (
     <>
-      <div aria-hidden="true" style={top} />
-      <div aria-hidden="true" style={left} />
-      <div aria-hidden="true" style={right} />
-      <div aria-hidden="true" style={bottom} />
+      <div aria-hidden="true" onClick={onClose} style={top} />
+      <div aria-hidden="true" onClick={onClose} style={left} />
+      <div aria-hidden="true" onClick={onClose} style={right} />
+      <div aria-hidden="true" onClick={onClose} style={bottom} />
       <div aria-hidden="true" style={{ position: 'fixed', top: target.top, left: target.left, width: target.width, height: target.height, border: '3px solid #fbbf24', borderRadius: 14, boxShadow: '0 0 0 3px rgba(255,255,255,.95)', zIndex: 120, pointerEvents: 'none' }} />
       <section role="dialog" aria-modal="true" aria-labelledby="setup-spotlight-title" aria-describedby="setup-spotlight-body" className="fixed z-[121] w-[min(400px,calc(100vw-32px))] rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl" style={{ top: bubbleTop, left: bubbleLeft }}>
         <p className="text-xs font-bold uppercase tracking-wide text-blue-700">Guided tour · {index + 1} of {steps.length}</p>

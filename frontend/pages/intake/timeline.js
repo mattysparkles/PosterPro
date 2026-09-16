@@ -289,7 +289,7 @@ export default function IntakeTimeline() {
           </div>
           {!state.slate && <div className="mt-1 flex gap-1"><Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => classifyTimelineAssets([photo.id], "HEAD"), "Marked Head Slate.")} className={`px-1 py-0 text-[9px] ${groupContrastClass}`}>HEAD SLATE</Button><Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => classifyTimelineAssets([photo.id], "TAIL"), "Marked Tail Slate; preceding photos stay in this item group.")} className={`px-1 py-0 text-[9px] ${groupContrastClass}`}>TAIL SLATE</Button></div>}
         </div>
-        {hasNext && nextEntry && <button type="button" disabled={busy} onClick={() => void addSlate(entry, nextEntry)} className="mt-16 shrink-0 rounded-full border border-dashed border-blue-300 bg-white/80 px-2 py-1 text-xs text-blue-700">+ Add Slate</button>}
+        {hasNext && nextEntry && <Button type="button" variant="tertiary" size="sm" disabled={busy} onClick={() => void addSlate(entry, nextEntry)} className="mt-16 shrink-0 rounded-full border-dashed border-blue-300 bg-white/80 px-2 py-1 text-xs text-blue-700">+ Add Slate</Button>}
       </div>
     );
   };
@@ -322,7 +322,7 @@ export default function IntakeTimeline() {
           {loading ? <p className="text-sm text-slate-500">Loading timeline…</p> : (
             <div ref={scrollRef} className="overflow-x-auto pb-3">
               <div className="flex min-w-max items-stretch gap-3">
-                {filter === "ALL" && items[0] && <button type="button" disabled={busy} onClick={() => void addSlate(null, items[0])} className="my-auto shrink-0 rounded-full border border-dashed border-blue-300 bg-white/80 px-3 py-2 text-xs text-blue-700">+ Add Slate at start</button>}
+                {filter === "ALL" && items[0] && <Button type="button" variant="tertiary" size="sm" disabled={busy} onClick={() => void addSlate(null, items[0])} className="my-auto shrink-0 rounded-full border-dashed border-blue-300 bg-white/80 px-3 py-2 text-xs text-blue-700">+ Add Slate at start</Button>}
                 {groups.map((group, groupIndex) => {
               const tone = canonicalGroupTone(group.index);
               const palette = groupPalette(tone);
@@ -333,7 +333,7 @@ export default function IntakeTimeline() {
                     <div className="flex min-w-min items-start gap-2">{group.entries.map((entry, index) => renderEntry(entry, index, group.entries, groupIndex, darkGroup))}</div>
                   </section>;
                 })}
-                {filter === "ALL" && items.length === counts.total && items.length > 0 && <button type="button" disabled={busy} onClick={() => void addSlate(items[items.length - 1], null)} className="my-auto shrink-0 rounded-full border border-dashed border-blue-300 bg-white/80 px-3 py-2 text-xs text-blue-700">+ Add Slate at end</button>}
+                {filter === "ALL" && items.length === counts.total && items.length > 0 && <Button type="button" variant="tertiary" size="sm" disabled={busy} onClick={() => void addSlate(items[items.length - 1], null)} className="my-auto shrink-0 rounded-full border-dashed border-blue-300 bg-white/80 px-3 py-2 text-xs text-blue-700">+ Add Slate at end</Button>}
                 {!groups.length && <p className="p-4 text-sm text-slate-500">No Timeline assets match this filter.</p>}
               </div>
             </div>
