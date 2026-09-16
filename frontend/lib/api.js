@@ -1700,3 +1700,13 @@ export function recordOnboardingEvent(eventName, taskId = null) {
     body: JSON.stringify({ event: eventName, task_id: taskId }),
   });
 }
+
+// Return a safe diff for a field- and marketplace-scoped edit. The server
+// validates ownership and never mutates the listing during this request.
+export function previewMarketplaceOperation(listingId, operation) {
+  return jsonFetch(`${API_BASE}/listings/${encodeURIComponent(listingId)}/marketplace-operation/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(operation || {}),
+  });
+}
