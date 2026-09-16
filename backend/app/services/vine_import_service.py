@@ -61,6 +61,9 @@ def _sanitize_vine_text(value: str | None) -> str:
     raw = re.sub(r"\bvine\s+report\b", "report", raw, flags=re.IGNORECASE)
     raw = re.sub(r"\binternal\s+vine\s+intake\s+workflow\b", "", raw, flags=re.IGNORECASE)
     raw = re.sub(r"\bvine\b", "", raw, flags=re.IGNORECASE)
+    # Source pages often append policy/promotional UI fragments. They are not
+    # product facts and must not leak into titles or generated copy.
+    raw = re.sub(r"\b(?:free\s+shipping|free\s+returns?|\d+[- ]day\s+(?:refund|return|replacement)|sponsored|limited[- ]time(?:\s+deal)?|add\s+to\s+cart|buy\s+now)\b", "", raw, flags=re.IGNORECASE)
     raw = re.sub(r"\s{2,}", " ", raw)
     raw = re.sub(r"\n{3,}", "\n\n", raw)
     return raw.strip(" \t\r\n-")
