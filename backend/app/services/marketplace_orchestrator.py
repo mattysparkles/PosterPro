@@ -9,6 +9,7 @@ from app.models.enums import MARKETPLACE_DESTINATION_VALUES, MarketplaceListingS
 from app.models.models import Listing, MarketplaceCrosspostJob, MarketplaceListing, User
 from app.services.multi_platform_publisher import get_enabled_platforms
 from app.services.marketplace_preflight import MarketplacePreflightService
+from app.services.canonical_readiness import canonical_listing_readiness
 from app.services.marketplace_error_translation import translate_marketplace_error
 from app.workers.tasks import process_marketplace_crosspost_job_task, publish_listing_to_marketplace_task, sync_sold_everywhere_task
 
@@ -112,12 +113,24 @@ def _queue_single_marketplace_publish(
     preflight = preflight or preflight_service.preflight_listing(db, listing, market_key)
     blockers = preflight.get("blockers") or []
     warnings = preflight.get("warnings") or []
+    # Publish must honor the same processing/readiness contract as the queue.
+    # Legacy rows without a processing_state remain governed by marketplace
+    # preflight; explicit in-flight/blocked states may never be queued merely
+    # because a provider preflight happened to return no field errors.
+    processing_state = str(getattr(listing, "processing_state", "") or "").strip().lower()
+    if processing_state and processing_state not in {"complete", "completed", "ready"}:
+        canonical = canonical_listing_readiness(listing, marketplace=market_key)
+        blockers = [*blockers, *(canonical.get("blocking_reasons") or []), "Listing processing is not complete"]
     if blockers:
+        blocker_messages = [
+            str(issue.get("message") or issue.get("code") or "Publish blocked") if isinstance(issue, dict) else str(issue)
+            for issue in blockers
+        ]
         return {
             "marketplace": market_key,
             "status": "BLOCKED",
             "task_id": None,
-            "error": "; ".join(issue.get("message") or "Publish blocked" for issue in blockers),
+            "error": "; ".join(blocker_messages),
             "error_details": blockers,
             "warnings": warnings,
             "preflight": preflight,

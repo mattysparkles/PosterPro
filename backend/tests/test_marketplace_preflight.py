@@ -607,6 +607,23 @@ def test_queue_publish_blocks_when_preflight_reports_blockers(db_session, monkey
     assert results[0]["error_details"][0]["code"] == "TEST_BLOCKER"
 
 
+def test_queue_publish_blocks_explicit_inflight_processing_even_when_preflight_is_clear(db_session, monkeypatch):
+    user, listing = _seed_user_and_listing(db_session)
+    listing.processing_state = "description_generation"
+    db_session.add(listing)
+    db_session.commit()
+
+    monkeypatch.setattr(MarketplacePreflightService, "preflight_listing", lambda self, _db, _listing, _marketplace: {
+        "blockers": [], "warnings": [], "payload_preview": {}, "policy_summary": {}, "category_summary": {},
+    })
+    monkeypatch.setattr(marketplace_orchestrator.publish_listing_to_marketplace_task, "delay", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not queue")))
+
+    results = marketplace_orchestrator.queue_publish(db_session, listing.id, ["facebook"])
+
+    assert results[0]["status"] == "BLOCKED"
+    assert "processing is not complete" in results[0]["error"].lower()
+
+
 def test_launch_repair_queue_excludes_live_rows_and_returns_unpublished_blocked_rows(db_session, monkeypatch):
     user = User(email="repair-queue@example.com")
     db_session.add(user)
