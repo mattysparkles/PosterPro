@@ -1582,8 +1582,8 @@ export default function SettingsPage() {
                         <p className="text-sm font-semibold text-[#101828]">Communication consent</p>
                         <p className="mt-1 text-xs text-[#667085]">Opt-in controls for future operational or marketing messages. Both are off by default and can be changed at any time.</p>
                         <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                          <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={!!profilePreferences.marketing_email_consent} onChange={(event) => setProfilePreferences((current) => ({ ...current, marketing_email_consent: event.target.checked }))} /> Email messages</label>
-                          <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={!!profilePreferences.marketing_sms_consent} onChange={(event) => setProfilePreferences((current) => ({ ...current, marketing_sms_consent: event.target.checked }))} /> SMS messages</label>
+                          <Checkbox className="border-[#e5e7eb]" checked={!!profilePreferences.marketing_email_consent} onChange={(event) => setProfilePreferences((current) => ({ ...current, marketing_email_consent: event.target.checked }))} label="Email messages" />
+                          <Checkbox className="border-[#e5e7eb]" checked={!!profilePreferences.marketing_sms_consent} onChange={(event) => setProfilePreferences((current) => ({ ...current, marketing_sms_consent: event.target.checked }))} label="SMS messages" />
                         </div>
                       </div>
                       <div className="flex flex-wrap items-center gap-3">
@@ -2214,14 +2214,7 @@ export default function SettingsPage() {
                         ['package_weight_required', 'Package weight required'],
                         ['package_dimensions_required', 'Package dimensions required'],
                       ].map(([key, label]) => (
-                        <label key={key} className="flex items-center gap-2 rounded-[10px] border border-[#e5e7eb] bg-white px-3 py-2 text-sm text-[#475467]">
-                          <input
-                            type="checkbox"
-                            checked={Boolean(ebayPolicyForm[key])}
-                            onChange={(event) => setEbayPolicyForm((current) => ({ ...current, [key]: event.target.checked }))}
-                          />
-                          {label}
-                        </label>
+                        <Checkbox key={key} className="rounded-[10px] border-[#e5e7eb] px-3 py-2" checked={Boolean(ebayPolicyForm[key])} onChange={(event) => setEbayPolicyForm((current) => ({ ...current, [key]: event.target.checked }))} label={label} />
                       ))}
                     </div>
                   </section>
