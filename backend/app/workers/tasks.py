@@ -1303,6 +1303,28 @@ def process_marketplace_crosspost_job_task(self, job_id: int) -> dict:
                 # fallback transport; the canonical mapper/job/result handling
                 # remains unchanged.
                 execution_mode = "hosted_browser_assist"
+            # Queue/publish workers must honor the same canonical readiness
+            # contract used by the catalog and editor.  Previously this path
+            # could promote any non-ready row to ``ready`` after marketplace
+            # preflight, allowing incomplete drafts to publish while the UI
+            # correctly labeled them as attention/processing.
+            canonical = canonical_listing_readiness(listing, marketplace=market)
+            # Legacy rows created before processing_state was introduced do not
+            # carry enough state for the canonical service to distinguish an
+            # old, already-preflighted assisted handoff from an in-flight job.
+            # Keep those rows on the established marketplace preflight path;
+            # all current pipeline rows set processing_state and are gated here.
+            has_processing_state = bool(str(getattr(listing, "processing_state", "") or "").strip()) and bool(str(getattr(listing, "source_type", "") or "").strip())
+            if has_processing_state and not canonical.get("publishable"):
+                failed_markets.append(market)
+                response = {
+                    "error": "Listing is not ready for this marketplace.",
+                    "canonical_readiness": canonical,
+                }
+                upsert_marketplace_listing(db, listing_id=listing.id, marketplace=market, status=MarketplaceListingStatus.FAILED, response=response)
+                _force_marketplace_listing_state(db, listing_id=listing.id, marketplace=market, status=MarketplaceListingStatus.FAILED, response=response)
+                results.append({"marketplace": market, "execution_mode": execution_mode, "status": "blocked", "response": response})
+                continue
             preflight = _json_safe(MarketplacePreflightService().preflight_listing(db, listing, market))
             if preflight.get("blockers"):
                 failed_markets.append(market)
@@ -1311,11 +1333,6 @@ def process_marketplace_crosspost_job_task(self, job_id: int) -> dict:
                 _force_marketplace_listing_state(db, listing_id=listing.id, marketplace=market, status=MarketplaceListingStatus.FAILED, response=response)
                 results.append({"marketplace": market, "execution_mode": execution_mode, "status": "blocked", "response": response})
                 continue
-            if listing.status not in {ListingStatus.ready, ListingStatus.posted}:
-                listing.status = ListingStatus.ready
-                listing.needs_review = False
-                db.add(listing)
-                db.commit()
             payload = build_marketplace_payload(listing, market)
             if execution_mode == "direct_api":
                 result = multi_platform_publisher.publish(db, listing, market)

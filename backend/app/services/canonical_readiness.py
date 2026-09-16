@@ -101,7 +101,11 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
             if row_status in {"PUBLISHED", "UPDATED"} and str(getattr(row, "marketplace_listing_id", "") or "").strip():
                 remote_live = True
                 break
-    processing_complete = processing_state in {"complete", "completed", "ready"}
+    # ``processed`` is the legacy terminal state used by older intake workers;
+    # it represents completed machine processing even though newer workers use
+    # ``complete``. Treating it as in-flight makes the publisher disagree with
+    # the queue for otherwise reviewable legacy drafts.
+    processing_complete = processing_state in {"complete", "completed", "processed", "ready"}
     attention = bool(getattr(listing, "processing_blocking_reason", None)) or processing_state in {"needs_attention", "failed", "error"}
     # A listing cannot be publishable while enrichment/processing is still in
     # flight, even when the basic photo/price checks happen to pass.
