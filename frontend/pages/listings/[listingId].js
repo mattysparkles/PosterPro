@@ -1114,7 +1114,7 @@ export default function ListingWorkspacePage() {
             <div className="space-y-4">
               <div className="space-y-2">
                 <label className="text-sm font-medium text-[#101828]">Image URLs or stored media paths</label>
-                <textarea
+                <Textarea
                   value={form.image_urls}
                   onChange={(event) => setForm((current) => ({ ...current, image_urls: event.target.value }))}
                   className="min-h-28 w-full rounded-[10px] border border-[#e5e7eb] bg-white p-3 text-sm text-[#101828] outline-none transition focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
@@ -1124,7 +1124,7 @@ export default function ListingWorkspacePage() {
               <div className="grid gap-4 xl:grid-cols-2">
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-[#101828]">Item specifics JSON</label>
-                  <textarea
+                  <Textarea
                     value={form.item_specifics_json}
                     onChange={(event) => setForm((current) => ({ ...current, item_specifics_json: event.target.value }))}
                     className="min-h-48 w-full rounded-[10px] border border-[#e5e7eb] bg-white p-3 font-mono text-xs text-[#101828] outline-none transition focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
@@ -1132,7 +1132,7 @@ export default function ListingWorkspacePage() {
                 </div>
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-[#101828]">Source metadata JSON</label>
-                  <textarea
+                  <Textarea
                     value={form.source_metadata_json}
                     onChange={(event) => setForm((current) => ({ ...current, source_metadata_json: event.target.value }))}
                     className="min-h-48 w-full rounded-[10px] border border-[#e5e7eb] bg-white p-3 font-mono text-xs text-[#101828] outline-none transition focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
@@ -1183,7 +1183,7 @@ export default function ListingWorkspacePage() {
               </div>
               <div className="mt-4 space-y-2">
                 <label className="text-sm font-medium text-[#101828]">Payload JSON</label>
-                <textarea
+                <Textarea
                   value={importForm.payload_json}
                   onChange={(event) => setImportForm((current) => ({ ...current, payload_json: event.target.value }))}
                   className="min-h-52 w-full rounded-[10px] border border-[#e5e7eb] bg-white p-3 font-mono text-xs text-[#101828] outline-none transition focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
