@@ -70,7 +70,10 @@ class OperatorCommandService:
         plan: list[StructuredOperation] = []
         # Semicolons are the unambiguous operation boundary; conjunctions are
         # common inside item lists and marketplace lists.
-        for clause in re.split(r"\s*;\s*", text):
+        # Accept the sentence-style commands operators naturally type while
+        # keeping semicolons/newlines as the unambiguous preferred separator.
+        clauses = re.split(r"\s*(?:;|\n|\.\s+(?=(?:for\s+items?|give\s+items?|end\s+items?|remove\s+items?|lower\s+items?|reduce\s+items?)))\s*", text)
+        for clause in clauses:
             item_match = re.search(r"(?:items?|listings?)\s+(.+?)(?=\s+(?:by|with|at|on|free|make|reduce|lower|end|remove|delist)\b|$)", clause)
             if not item_match:
                 item_match = re.search(r"^(?:give|end|remove|delist)\s+(.+?)(?=\s+(?:on|free|with)\b|$)", clause)
@@ -84,7 +87,9 @@ class OperatorCommandService:
                 markets = ["canonical"]
             if not items or not markets:
                 continue
-            if re.search(r"(?:lower|reduce|decrease|drop|cut).{0,30}\d+(?:\.\d+)?\s*%", clause):
+            if re.search(r"(?:regenerate|rewrite|refresh).{0,40}\bdescription(?:s)?\b", clause):
+                plan.append(StructuredOperation(items, markets, "description", "regenerate", None))
+            elif re.search(r"(?:lower|reduce|decrease|drop|cut).{0,30}\d+(?:\.\d+)?\s*%", clause):
                 percent = re.search(r"(\d+(?:\.\d+)?)\s*%", clause)
                 if percent:
                     plan.append(StructuredOperation(items, markets, "price", "percentage_change", -float(percent.group(1))))

@@ -26,6 +26,16 @@ def test_compound_operation_plan_supports_canonical_target():
     assert plan == []  # unsupported free-form description edits are not guessed
 
 
+def test_compound_operation_plan_supports_description_regeneration_clause():
+    plan = OperatorCommandService().parse_operation_plan(
+        "Regenerate Facebook descriptions for items 101 and 103; lower items 101 and 103 by 12% on eBay."
+    )
+    assert [(entry.items, entry.marketplaces, entry.field, entry.action) for entry in plan] == [
+        ([101, 103], ["facebook"], "description", "regenerate"),
+        ([101, 103], ["ebay"], "price", "percentage_change"),
+    ]
+
+
 def _seed_live_ebay_listing(db_session, *, user: User, title: str, price: float, posted_days_ago: int) -> Listing:
     listing = Listing(
         user_id=user.id,
