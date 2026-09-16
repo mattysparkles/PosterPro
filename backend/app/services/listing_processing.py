@@ -1086,7 +1086,11 @@ class ListingProcessingService:
             marketplace_data["quality_summary"] = quality
             refreshed.marketplace_data = marketplace_data
 
-            review_blockers = list(current_readiness.get("blockers") or [])
+            # Evaluate the state produced by this pass. Using the pre-repair
+            # snapshot here could strand a successfully enriched item in a
+            # retry/attention state even after category, images, shipping, or
+            # identity were repaired.
+            review_blockers = list(readiness.get("blockers") or [])
             review_blockers.extend(quality.get("specificity_blockers") or [])
             if quality.get("specificity_status") == "trusted_for_draft" and not review_blockers:
                 refreshed.needs_review = True
