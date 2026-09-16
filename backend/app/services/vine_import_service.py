@@ -2452,6 +2452,12 @@ class VineImportService:
         ]
         if feature_lines:
             lines.extend(["", "Key features:", *feature_lines])
+        # Add a useful buyer-facing context section from the verified product
+        # identity.  This keeps deterministic fallback copy helpful when the
+        # AI provider is unavailable without inventing specifications.
+        context = self._vine_buyer_context(name, product_type, facts)
+        if context:
+            lines.extend(["", "Good to know:", context])
         # Do not paste Amazon product-description prose into customer copy.
         # Structured facts above remain usable; the provider rewrite path is
         # responsible for paraphrasing source prose when it is available.
@@ -2463,6 +2469,31 @@ class VineImportService:
             lines.append(f"• MPN: {facts['mpn']}")
         lines.extend(["", "Condition: New. Review package contents and fit before purchase."])
         return "\n".join(lines)[:4000]
+
+    @staticmethod
+    def _vine_buyer_context(name: str, product_type: str, facts: dict) -> str | None:
+        """Return concise, evidence-led use context for fallback copy.
+
+        These are category/use-case descriptions, not new technical claims;
+        they are only emitted when the source title identifies the product
+        family clearly enough to make the context useful.
+        """
+        text = " ".join(str(value or "") for value in (name, product_type)).lower()
+        if "selfie stick" in text or "action camera" in text:
+            return "A practical accessory for extending an action-camera setup when a longer reach or a different shooting angle is useful. Confirm the camera connection and the preferred pole length before ordering."
+        if "varsity jacket" in text or "letterman" in text:
+            size = facts.get("size") or (facts.get("specifications") or {}).get("Brand Size")
+            suffix = f" Available sizing information includes {size}." if size and len(str(size)) < 140 else ""
+            return "A casual outer layer suited to everyday wear and team-inspired outfits. Check the measured size information and the stated fleece fabric before ordering." + suffix
+        if "solder" in text or "hot air" in text:
+            return "Designed for bench-top electronics work such as soldering, rework, and component repair. Confirm the included accessories and power requirements for your workspace."
+        if "pulse ox" in text or "oximeter" in text:
+            return "A compact health-monitoring accessory for spot checks at home or while traveling. Follow the manufacturer’s instructions and do not use a consumer reading as a medical diagnosis."
+        if "portable toilet" in text:
+            return "Useful for camping, road trips, emergency preparedness, and other situations where a nearby restroom is not available. Review the stated capacity and included components before packing it for a trip."
+        if "groin protector" in text or "boxing" in text or "mma" in text:
+            return "Protective training equipment for boxing, MMA, and related sports. Confirm the fit, size, and sport-specific coverage before use."
+        return None
 
     @staticmethod
     def _vine_title_fact_sentence(title: str) -> str | None:
