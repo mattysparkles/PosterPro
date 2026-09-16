@@ -939,6 +939,9 @@ class VineImportService:
             pricing = self._pricing_from_amazon(item, amazon_facts=facts)
             listing.condition = "New"
             listing.category_suggestion = category
+            category_id = str(category).strip() if str(category).strip().isdigit() else verified_category_id(category)
+            if category_id:
+                listing.category_id = category_id
             if pricing["listing_price"] is not None:
                 listing.suggested_price = pricing["listing_price"]
                 listing.listing_price = pricing["listing_price"]
