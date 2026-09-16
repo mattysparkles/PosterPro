@@ -34,6 +34,7 @@ from app.services.marketplace_field_mapper import build_marketplace_payload
 from app.services.marketplace_routing import MarketplaceRoutingRule, MarketplaceRoutingService
 from app.services.customer_description import customer_description_is_safe
 from app.services.listing_specificity import classify_listing_reviewability
+from app.services.canonical_readiness import canonical_listing_readiness
 from app.services.automation_bridge import (
     bridge_browser_submit_policy,
     connect_bridge_account,
@@ -825,6 +826,10 @@ def queue_crosspost_job(
         raise HTTPException(status_code=400, detail="No supported target marketplaces were requested")
     if not customer_description_is_safe(listing.description):
         raise HTTPException(status_code=422, detail="Customer description contains internal review or marketplace guidance; revise before publishing")
+    for market in targets:
+        readiness = canonical_listing_readiness(listing, marketplace=market)
+        if readiness.get("blocking_reasons"):
+            raise HTTPException(status_code=422, detail={"message": "Listing is not ready for this marketplace", "marketplace": market, "blocking_reasons": readiness["blocking_reasons"]})
 
     execution_plan = {
         "targets": [
@@ -917,6 +922,14 @@ def queue_bulk_crosspost_jobs(
         targets = resolution["marketplaces"]
         if not targets:
             outcomes.append({"listing_id": listing.id, "status": "NO_DESTINATIONS", "routing": resolution})
+            continue
+        blocked_targets = {
+            market: canonical_listing_readiness(listing, marketplace=market).get("blocking_reasons") or []
+            for market in targets
+        }
+        blocked_targets = {market: reasons for market, reasons in blocked_targets.items() if reasons}
+        if blocked_targets:
+            outcomes.append({"listing_id": listing.id, "status": "BLOCKED", "marketplace_blockers": blocked_targets})
             continue
 
         existing_job = db.execute(
