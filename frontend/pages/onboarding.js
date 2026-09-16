@@ -279,7 +279,7 @@ export default function OnboardingPage() {
         </section>
       ) : null}
       {confirmSkip ? <div role="dialog" aria-modal="true" className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4"><div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-xl"><h2 className="text-xl font-semibold">Are you sure?</h2><p className="mt-2 text-sm leading-6 text-slate-600">PosterPro works best after connecting the services you plan to use. You can restart setup anytime from Dashboard or Settings.</p><div className="mt-5 flex flex-wrap gap-2"><Button onClick={() => { setConfirmSkip(false); void run(startOnboarding); }}>Continue setup</Button><Button variant="outline" onClick={async () => { setConfirmSkip(false); await run(skipOnboardingForNow); }}>Skip for now</Button></div></div></div> : null}
-      {snapshot?.started && currentTask ? (
+      {snapshot?.started && !snapshot?.completed && currentTask ? (
         <div className="mx-auto max-w-4xl space-y-5">
           <section className="rounded-2xl border bg-white p-5 shadow-sm sm:p-7">
             <div className="flex flex-wrap items-center justify-between gap-3"><p className="text-sm font-medium text-slate-500">Step {stepIndex + 1} of {taskList.length}</p><p className="text-sm font-semibold text-slate-700">{snapshot.progress.completed} of {snapshot.progress.required} required steps verified</p></div>
