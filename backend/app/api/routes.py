@@ -147,6 +147,7 @@ def _listing_bucket_expression():
         # from Published. The failed job remains visible in Jobs/details.
         (or_(Listing.status == ListingStatus.FAILED, Listing.ebay_publish_status == "FAILED"), "failed"),
         (or_(Listing.processing_state == "needs_attention", Listing.processing_state == "blocked"), "needs_attention"),
+        (Listing.processing_state.in_(["processing", "pending", "queued", "enriching", "source_enrichment", "image_enrichment", "category_resolution", "title_generation", "description_generation", "quality_validation"]), "processing"),
         (generic_caption, "needs_attention"),
         (or_(Listing.restricted_review_required.is_(True), Listing.needs_review.is_(True)), "review"),
         (and_(
