@@ -89,4 +89,4 @@ def test_compound_plan_rejects_later_invalid_operation_without_mutation(db_sessi
         pass
     else:
         raise AssertionError("invalid compound operation should fail validation")
-    assert not listing.marketplace_data.get("marketplace_overrides")
+    assert not (listing.marketplace_data or {}).get("marketplace_overrides")
