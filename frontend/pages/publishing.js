@@ -15,6 +15,7 @@ import SectionPanel from '../components/ui/section-panel';
 import StatusPill from '../components/ui/status-pill';
 import { Tabs } from '../components/ui/tabs';
 import Toolbar from '../components/ui/toolbar';
+import Select from '../components/ui/select';
 import { useAuth } from '../contexts/AuthContext';
 import useDashboardData from '../hooks/useDashboardData';
 import { fetchMarketplaceJobsOverview, fetchSettingsPanels, toPublicImageUrl, toggleAutonomousMode } from '../lib/api';
@@ -405,17 +406,17 @@ export default function PublishingPage() {
       <Toolbar
         left={
           <div className="relative w-full sm:w-[220px] md:hidden">
-            <select
+            <Select
               value={activeTab}
               onChange={(event) => setActiveTab(event.target.value)}
-              className="pp-input h-10 w-full appearance-none rounded-[10px] border border-[#e5e7eb] bg-white px-3 pr-10 text-sm text-[#101828] outline-none focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+              className="h-10 w-full"
             >
               {PUBLISHING_TABS.map((tab) => (
                 <option key={tab.value} value={tab.value}>
                   {tab.label}
                 </option>
               ))}
-            </select>
+            </Select>
             <ChevronDown size={16} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[#98a2b3]" />
           </div>
         }
