@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 from app.models.models import Listing, User
 from app.services.canonical_readiness import canonical_listing_readiness
+from app.services.listing_ai import assess_description_quality
 from app.workers.tasks import _apply_vine_quality_lifecycle
 
 
@@ -135,3 +136,15 @@ def test_vine_quality_worker_promotes_reviewable_row():
 def test_vine_quality_worker_does_not_rewrite_live_listing():
     listing = SimpleNamespace(ebay_listing_id="123456", marketplace_listings=[])
     assert _apply_vine_quality_lifecycle(listing) is False
+
+
+def test_description_quality_reports_fact_coverage_and_source_noise():
+    result = assess_description_quality(
+        "Portable charger with USB output. Free 30-day refund/replacement.",
+        title="Example Portable Charger",
+        source_metadata={"amazon_product_facts": {"feature_bullets": ["USB output", "Compact travel design"], "specifications": {"Capacity": "10,000 mAh"}}},
+    )
+    assert result["has_source_noise"] is True
+    assert "Description contains source-page policy or navigation text" in result["blockers"]
+    assert result["source_fact_count"] == 3
+    assert result["source_facts_covered"] >= 1

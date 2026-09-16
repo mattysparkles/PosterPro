@@ -5,6 +5,7 @@ from typing import Any
 import re
 
 from app.services.listing_review import summarize_listing_readiness
+from app.services.listing_ai import assess_description_quality
 
 
 def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None) -> dict[str, Any]:
@@ -31,10 +32,11 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
         blockers.extend(f"Required marketplace detail missing: {value}" for value in missing_required_aspects)
     description = str(getattr(listing, "canonical_description", None) or getattr(listing, "description", None) or "").strip()
     title = str(getattr(listing, "title", None) or "").strip()
+    source_metadata = getattr(listing, "source_metadata", None) if isinstance(getattr(listing, "source_metadata", None), dict) else {}
+    description_quality = assess_description_quality(description, title=title, source_metadata=source_metadata)
     source_type_value = str(getattr(listing, "source_type", None) or "").strip().lower()
     if re.search(r"(?:free\s+shipping|free\s+returns?|\d+[- ]day\s+(?:refund|return|replacement)|add\s+to\s+cart|buy\s+now|return\s+policy)", description, re.IGNORECASE):
         blockers.append("Description contains source-page policy or navigation text")
-    source_metadata = getattr(listing, "source_metadata", None) if isinstance(getattr(listing, "source_metadata", None), dict) else {}
     source_facts = source_metadata.get("amazon_product_facts") if isinstance(source_metadata.get("amazon_product_facts"), dict) else source_metadata.get("source_facts")
     source_fact_count = 0
     source_facts_covered = 0
@@ -126,6 +128,7 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
         "source_fact_count": source_fact_count,
         "source_facts_covered": source_facts_covered,
         "source_fact_coverage": round(source_facts_covered / source_fact_count, 3) if source_fact_count else None,
+        "description_quality": description_quality,
         "marketplace_readiness": dict(base.get("marketplace_readiness") or {}),
         "remote_live": remote_live,
         "remote_state": "PUBLISHED" if remote_live else "LOCAL",

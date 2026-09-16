@@ -343,6 +343,61 @@ def build_listing_description(
     return " ".join(parts).strip()
 
 
+def assess_description_quality(
+    description: str | None,
+    *,
+    title: str | None = None,
+    source_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return an explainable, evidence-based quality assessment for listing copy.
+
+    Length is only one signal.  The assessment also checks source-fact coverage,
+    duplicated title text, and scraped policy/navigation noise.  It never invents
+    facts and is safe to use as a readiness input or an operator-facing summary.
+    """
+    text = _normalize_text(description)
+    title_tokens = set(re.findall(r"[a-z0-9]{4,}", _normalize_text(title).lower()))
+    text_tokens = set(re.findall(r"[a-z0-9]{4,}", text.lower()))
+    metadata = source_metadata if isinstance(source_metadata, dict) else {}
+    facts = metadata.get("amazon_product_facts") if isinstance(metadata.get("amazon_product_facts"), dict) else metadata.get("source_facts")
+    facts = facts if isinstance(facts, dict) else {}
+    bullets = facts.get("feature_bullets") or facts.get("bullets") or []
+    if isinstance(bullets, str):
+        bullets = [bullets]
+    specifications = facts.get("specifications") if isinstance(facts.get("specifications"), dict) else {}
+    fact_values = [str(value).strip() for value in [*bullets, *specifications.values()] if str(value or "").strip()]
+    covered = sum(bool(text_tokens.intersection(set(re.findall(r"[a-z0-9]{4,}", value.lower())))) for value in fact_values)
+    noise_markers = ("free 30-day", "refund", "replacement", "add to cart", "buy now", "return policy", "sponsored", "delivery")
+    has_noise = any(marker in text.lower() for marker in noise_markers)
+    title_overlap = bool(title_tokens) and len(title_tokens.intersection(text_tokens)) / max(1, len(title_tokens))
+    words = text.split()
+    blockers: list[str] = []
+    warnings: list[str] = []
+    if not text:
+        blockers.append("Description is missing")
+    if has_noise:
+        blockers.append("Description contains source-page policy or navigation text")
+    if len(words) < 18:
+        warnings.append("Description is too brief for a finished product draft")
+    if fact_values and covered < min(2, len(fact_values)):
+        warnings.append("Description does not cover enough verified source facts")
+    if title_overlap >= 0.9 and len(words) < 40:
+        warnings.append("Description mostly repeats the product title")
+    quality = "blocked" if blockers else "thin" if len(words) < 18 or (fact_values and covered < min(2, len(fact_values))) else "reviewable"
+    return {
+        "quality": quality,
+        "word_count": len(words),
+        "character_count": len(text),
+        "source_fact_count": len(fact_values),
+        "source_facts_covered": covered,
+        "source_fact_coverage": round(covered / len(fact_values), 3) if fact_values else None,
+        "title_overlap": round(title_overlap, 3),
+        "has_source_noise": has_noise,
+        "blockers": list(dict.fromkeys(blockers)),
+        "warnings": list(dict.fromkeys(warnings)),
+    }
+
+
 class ListingAIService:
     def __init__(self, model: str = "gpt-4o-mini"):
         self.model = model
