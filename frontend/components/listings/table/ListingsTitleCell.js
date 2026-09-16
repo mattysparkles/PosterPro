@@ -35,7 +35,8 @@ export default function ListingsTitleCell({
         <span className="pp-chip">{getListingImageCount(listing)} image{getListingImageCount(listing) === 1 ? '' : 's'}</span>
         {listing?.quality_summary?.score != null ? <span className="pp-chip">Quality {listing.quality_summary.score}</span> : null}
         {listing?.marketplace_data?.pricing_analysis?.price_confidence ? <span className="pp-chip">{Math.round(listing.marketplace_data.pricing_analysis.price_confidence * 100)}% pricing</span> : null}
-        {listing.needs_review ? <span className="pp-chip">Needs Review</span> : null}
+        {getListingBucket(listing) === 'review' ? <span className="pp-chip">Needs Review</span> : null}
+        {getListingBucket(listing) === 'attention' ? <span className="pp-chip border-red-200 bg-red-50 text-red-700">Needs Attention</span> : null}
         {listing.restricted_review_required ? <span className="pp-chip">Restricted Review</span> : null}
         {listing.custom_labels?.includes('needs_photos') ? <span className="pp-chip">Image Missing</span> : null}
       </div>
