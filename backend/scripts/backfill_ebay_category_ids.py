@@ -15,6 +15,7 @@ from sqlalchemy import and_, or_, select
 from app.core.database import SessionLocal
 from app.models.models import Listing
 from app.services.marketplace_preflight import MarketplacePreflightService
+from app.services.category_rules import verified_category_id
 
 
 def _needs_category_resolution(listing: Listing) -> bool:
@@ -48,6 +49,19 @@ def main(limit: int = 25) -> None:
                 skipped.append(listing.id)
                 continue
             try:
+                # Avoid a remote preflight round-trip when the canonical path
+                # is already backed by a verified eBay leaf ID. This keeps the
+                # maintenance job bounded while preserving the same source of
+                # truth used by draft generation.
+                direct_id = verified_category_id(listing.category_suggestion)
+                if direct_id and direct_id.isdigit():
+                    listing.category_id = direct_id
+                    metadata = dict(listing.source_metadata or {}) if isinstance(listing.source_metadata, dict) else {}
+                    metadata.update({"category_path": listing.category_suggestion, "category_provenance": "CORRECTION_VERIFIED_RULE", "leaf_verified": True, "publishable": True})
+                    listing.source_metadata = metadata
+                    resolved.append(listing.id)
+                    print({"listing_id": listing.id, "status": "resolved", "category_id": direct_id, "method": "verified_rule"}, flush=True)
+                    continue
                 result = service.apply_repair_actions(
                     db,
                     listing,
@@ -56,15 +70,15 @@ def main(limit: int = 25) -> None:
                 )
             except Exception as exc:  # noqa: BLE001
                 skipped.append(listing.id)
-                print({"listing_id": listing.id, "status": "failed", "error": type(exc).__name__, "message": str(exc)})
+                print({"listing_id": listing.id, "status": "failed", "error": type(exc).__name__, "message": str(exc)}, flush=True)
                 continue
             db.refresh(listing)
             if str(listing.category_id or "").strip().isdigit():
                 resolved.append(listing.id)
-                print({"listing_id": listing.id, "status": "resolved", "category_id": listing.category_id, "result_status": result.get("status_after")})
+                print({"listing_id": listing.id, "status": "resolved", "category_id": listing.category_id, "result_status": result.get("status_after")}, flush=True)
             else:
                 skipped.append(listing.id)
-                print({"listing_id": listing.id, "status": "unchanged", "category_id": listing.category_id, "result_status": result.get("status_after")})
+                print({"listing_id": listing.id, "status": "unchanged", "category_id": listing.category_id, "result_status": result.get("status_after")}, flush=True)
 
         db.commit()
 
@@ -76,7 +90,7 @@ def main(limit: int = 25) -> None:
             "resolved_ids": resolved,
             "skipped_ids": skipped,
         }
-    )
+    , flush=True)
 
 
 if __name__ == "__main__":
