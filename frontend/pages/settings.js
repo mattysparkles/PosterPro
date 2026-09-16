@@ -1397,37 +1397,41 @@ export default function SettingsPage() {
                     description="Use these first. They map to the real sequence operators need to finish before imports and publishing behave reliably."
                   >
                     <div className="grid gap-4 lg:grid-cols-2">
-                      <button
+                      <Button
                         type="button"
                         onClick={() => selectTab('profile')}
+                        variant="secondary"
                         className="rounded-[18px] border border-[#e5e7eb] bg-white p-5 text-left transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]"
                       >
                         <p className="text-sm font-semibold text-[#101828]">Profile</p>
                         <p className="mt-2 text-sm leading-6 text-[#667085]">Operator identity, password changes, and admin preview controls.</p>
-                      </button>
-                      <button
+                      </Button>
+                      <Button
                         type="button"
                         onClick={() => selectTab('workflow')}
+                        variant="secondary"
                         className="rounded-[18px] border border-[#e5e7eb] bg-white p-5 text-left transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]"
                       >
                         <p className="text-sm font-semibold text-[#101828]">Workflow</p>
                         <p className="mt-2 text-sm leading-6 text-[#667085]">Review gate policy, bulk approvals, and operator defaults.</p>
-                      </button>
-                      <a
+                      </Button>
+                      <Button
                         href="/settings/ebay"
+                        variant="secondary"
                         className="rounded-[18px] border border-[#e5e7eb] bg-white p-5 text-left transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]"
                       >
                         <p className="text-sm font-semibold text-[#101828]">eBay setup</p>
                         <p className="mt-2 text-sm leading-6 text-[#667085]">OAuth, policy sync, merchant location, and import readiness.</p>
-                      </a>
-                      <button
+                      </Button>
+                      <Button
                         type="button"
                         onClick={() => selectTab('marketplaces')}
+                        variant="secondary"
                         className="rounded-[18px] border border-[#e5e7eb] bg-white p-5 text-left transition hover:border-[#b6c8ff] hover:bg-[#f8fbff]"
                       >
                         <p className="text-sm font-semibold text-[#101828]">Marketplace setup</p>
                         <p className="mt-2 text-sm leading-6 text-[#667085]">Assisted channels, bridge identities, and support truth per marketplace.</p>
-                      </button>
+                      </Button>
                     </div>
                   </SectionPanel>
 
@@ -1780,10 +1784,11 @@ export default function SettingsPage() {
                           <p className="mt-1 text-sm text-[#667085]">Choose whether the review drawer opens in marketplace preview or editor mode.</p>
                           <div className="mt-3 flex flex-wrap gap-2">
                             {WORKFLOW_PREVIEW_OPTIONS.map((option) => (
-                              <button
+                              <Button
                                 key={option.value}
                                 type="button"
                                 onClick={() => setWorkflowForm((current) => ({ ...current, listing_preview_mode: option.value }))}
+                                variant="tertiary"
                                 className={`rounded-[10px] border px-3 py-2 text-sm font-medium ${
                                   workflowForm.listing_preview_mode === option.value
                                     ? 'border-[#bfd2ff] bg-[#eef4ff] text-[#2563eb]'
@@ -1791,7 +1796,7 @@ export default function SettingsPage() {
                                 }`}
                               >
                                 {option.label}
-                              </button>
+                              </Button>
                             ))}
                           </div>
                         </div>
@@ -3604,9 +3609,10 @@ export default function SettingsPage() {
                     </form>
                     <div className="space-y-3">
                       {bridgeAccounts.length ? bridgeAccounts.map((account) => (
-                        <button
+                        <Button
                           key={account.account_id}
                           type="button"
+                          variant="tertiary"
                           onClick={() =>
                             setBridgeAccountForm({
                               marketplace: account.marketplace,
@@ -3634,7 +3640,7 @@ export default function SettingsPage() {
                             {account.browser_enabled ? <span className="pp-chip">Browser</span> : null}
                             {account.credential_configured ? <span className="pp-chip">Credential saved</span> : <span className="pp-chip">No credential</span>}
                           </div>
-                        </button>
+                        </Button>
                       )) : (
                         <EmptyState title="No bridge accounts yet" description="Add a Facebook or secondary-marketplace bridge account so provider/browser-assisted jobs have a real runner-side identity." className="border-0 p-0 py-8" />
                       )}
