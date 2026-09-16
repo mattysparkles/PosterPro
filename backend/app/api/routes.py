@@ -3024,19 +3024,18 @@ def get_listing_intelligence(
             "suggested_price": listing.suggested_price,
         },
     )
+    canonical = canonical_listing_readiness(listing, marketplace="ebay")
     readiness = {
         "needs_review": bool(listing.needs_review or listing.restricted_review_required),
         "missing_information_count": len(intelligence.get("missing_information") or []),
-        "ready_for_publish": bool(
-            listing.status == "ready"
-            and not listing.restricted_review_required
-            and bool(listing.title)
-            and bool(listing.description)
-            and not readiness_summary.get("blocked_for_publish")
-        ),
+        # Publish controls and queue diagnostics must use the same canonical
+        # result.  Previously this endpoint had a separate, weaker predicate
+        # that could expose a publishable action while the queue classified a
+        # genuine blocker as Needs Attention.
+        "ready_for_publish": bool(listing.status == "ready" and not listing.restricted_review_required and canonical.get("publishable")),
         "review_summary": readiness_summary,
         "quality_summary": compute_listing_quality_summary(listing, pricing_analysis=pricing_analysis),
-        "canonical": canonical_listing_readiness(listing),
+        "canonical": canonical,
     }
 
     return {
