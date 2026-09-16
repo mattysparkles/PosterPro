@@ -52,6 +52,7 @@ from app.models.models import (
     MarketplaceCrosspostJob,
     MarketplaceImportJob,
     MarketplaceListing,
+    MarketplaceAccount,
     MarketplacePublishAttempt,
     ProductMediaCache,
     Sale,
@@ -60,7 +61,8 @@ from app.models.models import (
     VineImportItem,
 )
 from app.services.ebay import EbayService
-from app.services.ebay_service import revise_ebay_listing
+from app.services.ebay_service import revise_ebay_listing, get_category_tree
+from app.services.category_rules import resolve_taxonomy_leaf
 from app.services.embedding import fake_clip_embedding
 from app.services.google_photos import GooglePhotosService
 from app.services.image_pipeline import ImagePipelineService
@@ -3044,3 +3046,50 @@ def get_listing_intelligence(
         "pricing_analysis": pricing_analysis,
         "readiness": readiness,
     }
+
+
+@router.post("/listings/{listing_id}/resolve-category")
+async def resolve_listing_category(
+    listing_id: int,
+    marketplace: str = Query("ebay"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Resolve one listing against the real marketplace taxonomy.
+
+    This is intentionally bounded to one listing and read-only taxonomy
+    lookups. It never invents IDs and leaves the listing unchanged when
+    confidence is insufficient.
+    """
+    listing = db.get(Listing, listing_id)
+    if not listing or (listing.user_id != current_user.id and not is_effective_admin(current_user)):
+        raise HTTPException(status_code=404, detail="Listing not found")
+    if str(marketplace).lower() != "ebay":
+        raise HTTPException(status_code=400, detail="Taxonomy resolver currently supports eBay only")
+    account = db.execute(
+        select(MarketplaceAccount).where(
+            MarketplaceAccount.user_id == listing.user_id,
+            MarketplaceAccount.marketplace == MarketplaceName.ebay,
+        ).limit(1)
+    ).scalar_one_or_none()
+    if not account or not account.access_token:
+        raise HTTPException(status_code=409, detail="Connect eBay before resolving marketplace taxonomy")
+    tree = await get_category_tree(account.access_token)
+    source = listing.source_metadata if isinstance(listing.source_metadata, dict) else {}
+    facts = source.get("amazon_product_facts") if isinstance(source.get("amazon_product_facts"), dict) else {}
+    result = resolve_taxonomy_leaf(
+        tree,
+        listing.title,
+        listing.category_suggestion,
+        facts.get("product_type"),
+        facts.get("brand"),
+        facts.get("model"),
+        facts.get("feature_bullets"),
+    )
+    if not result:
+        return {"resolved": False, "listing_id": listing.id, "reason": "No sufficiently confident taxonomy leaf match"}
+    listing.category_id = result["category_id"]
+    listing.category_suggestion = result["category_path"]
+    db.add(listing)
+    db.commit()
+    return {"resolved": True, "listing_id": listing.id, **result}
