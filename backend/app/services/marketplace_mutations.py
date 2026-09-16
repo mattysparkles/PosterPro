@@ -6,6 +6,7 @@ contract without accidentally overwriting destinations that were not targeted.
 from __future__ import annotations
 
 from datetime import datetime, UTC
+from copy import deepcopy
 from typing import Any
 
 from app.models.models import Listing
@@ -63,10 +64,10 @@ def validate_marketplace_operation_plan(
             description=source.description,
             category_suggestion=source.category_suggestion,
             condition=source.condition,
-            marketplace_data=dict(source.marketplace_data or {}),
-            source_metadata=dict(source.source_metadata or {}),
+            marketplace_data=deepcopy(source.marketplace_data or {}),
+            source_metadata=deepcopy(source.source_metadata or {}),
             canonical_description=getattr(source, "canonical_description", None),
-            marketplace_descriptions=dict(getattr(source, "marketplace_descriptions", None) or {}),
+            marketplace_descriptions=deepcopy(getattr(source, "marketplace_descriptions", None) or {}),
         )
         apply_marketplace_operation(probe, marketplaces=[str(value) for value in markets], field=field, action=action, value=operation.get("value"))
         # The probe mutation above is rolled back by restoring its original
@@ -93,10 +94,10 @@ def apply_marketplace_operation_plan(
             description=listing.description,
             category_suggestion=listing.category_suggestion,
             condition=listing.condition,
-            marketplace_data=dict(listing.marketplace_data or {}),
-            source_metadata=dict(listing.source_metadata or {}),
+            marketplace_data=deepcopy(listing.marketplace_data or {}),
+            source_metadata=deepcopy(listing.source_metadata or {}),
             canonical_description=getattr(listing, "canonical_description", None),
-            marketplace_descriptions=dict(getattr(listing, "marketplace_descriptions", None) or {}),
+            marketplace_descriptions=deepcopy(getattr(listing, "marketplace_descriptions", None) or {}),
         )
         for listing_id, listing in listings_by_id.items()
     }

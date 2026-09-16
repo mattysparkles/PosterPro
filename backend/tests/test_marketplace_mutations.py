@@ -88,6 +88,18 @@ def test_compound_plan_previews_without_mutating_untargeted_markets(db_session):
     assert len(result["changes"]) == 3
 
 
+def test_compound_plan_preview_does_not_mutate_nested_overrides(db_session):
+    user = User(email="mutation-plan-deep-copy@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(user_id=user.id, listing_price=50, marketplace_data={"marketplace_overrides": {"ebay": {"price": 50}}})
+    db_session.add(listing); db_session.flush()
+    before = {"marketplace_overrides": {"ebay": {"price": 50}}}
+    apply_marketplace_operation_plan([
+        {"listing_id": listing.id, "markets": ["ebay"], "field": "shipping", "value": "free"},
+    ], {listing.id: listing}, preview_only=True)
+    assert listing.marketplace_data == before
+
+
 def test_compound_plan_applies_exact_targets(db_session):
     user = User(email="mutation-plan-apply@example.com")
     db_session.add(user); db_session.flush()
