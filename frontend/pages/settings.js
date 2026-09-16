@@ -30,6 +30,8 @@ import FormSection from '../components/ui/form-section';
 import HealthIndicator from '../components/ui/health-indicator';
 import HelpTip from '../components/ui/help-tip';
 import Input from '../components/ui/input';
+import Select from '../components/ui/select';
+import Checkbox from '../components/ui/checkbox';
 import MetricCard from '../components/ui/metric-card';
 import PageHeader from '../components/ui/page-header';
 import SectionPanel from '../components/ui/section-panel';
@@ -1769,39 +1771,9 @@ export default function SettingsPage() {
                       }}
                     >
                       <div className="grid gap-3">
-                        <label className="flex items-center justify-between rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-4 text-sm text-[#101828]">
-                          <div>
-                            <p className="font-semibold text-[#101828]">Require review before publish</p>
-                            <p className="mt-1 text-sm text-[#667085]">Keep drafts in review until an operator approves them.</p>
-                          </div>
-                          <input
-                            type="checkbox"
-                            checked={workflowForm.review_before_publish}
-                            onChange={(event) => setWorkflowForm((current) => ({ ...current, review_before_publish: event.target.checked }))}
-                          />
-                        </label>
-                        <label className="flex items-center justify-between rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-4 text-sm text-[#101828]">
-                          <div>
-                            <p className="font-semibold text-[#101828]">Allow auto-publish after approval</p>
-                            <p className="mt-1 text-sm text-[#667085]">Use this only if you want approved drafts to queue immediately after confirmation.</p>
-                          </div>
-                          <input
-                            type="checkbox"
-                            checked={workflowForm.auto_publish_after_approval}
-                            onChange={(event) => setWorkflowForm((current) => ({ ...current, auto_publish_after_approval: event.target.checked }))}
-                          />
-                        </label>
-                        <label className="flex items-center justify-between rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-4 text-sm text-[#101828]">
-                          <div>
-                            <p className="font-semibold text-[#101828]">Enable bulk approvals</p>
-                            <p className="mt-1 text-sm text-[#667085]">Select many drafts and approve them together after a queue spot-check.</p>
-                          </div>
-                          <input
-                            type="checkbox"
-                            checked={workflowForm.bulk_approval_enabled}
-                            onChange={(event) => setWorkflowForm((current) => ({ ...current, bulk_approval_enabled: event.target.checked }))}
-                          />
-                        </label>
+                        <Checkbox label="Require review before publish" description="Keep drafts in review until an operator approves them." className="rounded-[12px] border-[#e5e7eb] bg-white px-4 py-4" checked={workflowForm.review_before_publish} onChange={(event) => setWorkflowForm((current) => ({ ...current, review_before_publish: event.target.checked }))} />
+                        <Checkbox label="Allow auto-publish after approval" description="Approved drafts can queue immediately after confirmation." className="rounded-[12px] border-[#e5e7eb] bg-white px-4 py-4" checked={workflowForm.auto_publish_after_approval} onChange={(event) => setWorkflowForm((current) => ({ ...current, auto_publish_after_approval: event.target.checked }))} />
+                        <Checkbox label="Enable bulk approvals" description="Select many drafts and approve them together after a queue spot-check." className="rounded-[12px] border-[#e5e7eb] bg-white px-4 py-4" checked={workflowForm.bulk_approval_enabled} onChange={(event) => setWorkflowForm((current) => ({ ...current, bulk_approval_enabled: event.target.checked }))} />
                         <div className="rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-4">
                           <label className="text-sm font-semibold text-[#101828]">Default review layout</label>
                           <p className="mt-1 text-sm text-[#667085]">Choose whether the review drawer opens in marketplace preview or editor mode.</p>
@@ -1825,11 +1797,11 @@ export default function SettingsPage() {
                         <div className="rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-4">
                           <label className="text-sm font-semibold text-[#101828]" htmlFor="default-preview-marketplace">Default marketplace preview</label>
                           <p className="mt-1 text-sm text-[#667085]">Choose the visual marketplace preview shown first when you open a listing.</p>
-                          <select
+                          <Select
                             id="default-preview-marketplace"
                             value={workflowForm.default_preview_marketplace}
                             onChange={(event) => setWorkflowForm((current) => ({ ...current, default_preview_marketplace: event.target.value }))}
-                            className="mt-3 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828] outline-none focus:border-[#2563eb]"
+                            className="mt-3"
                           >
                             <option value="ebay">eBay</option>
                             <option value="facebook">Facebook Marketplace</option>
@@ -1837,7 +1809,7 @@ export default function SettingsPage() {
                             <option value="poshmark">Poshmark</option>
                             <option value="etsy">Etsy</option>
                             <option value="depop">Depop</option>
-                          </select>
+                          </Select>
                         </div>
                         <div className="rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-4">
                           <p className="text-sm font-semibold text-[#101828]">Shipping default policy</p>
@@ -1845,36 +1817,36 @@ export default function SettingsPage() {
                           <div className="mt-3 grid gap-3 md:grid-cols-3">
                             <div>
                               <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Threshold price</label>
-                              <input
+                              <Input
                                 type="number"
                                 min="0"
                                 step="0.01"
                                 value={workflowForm.shipping_price_threshold}
                                 onChange={(event) => setWorkflowForm((current) => ({ ...current, shipping_price_threshold: Number(event.target.value || 0) }))}
-                                className="mt-1 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828] outline-none focus:border-[#2563eb]"
+                                className="mt-1"
                               />
                             </div>
                             <div>
                               <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Below threshold</label>
-                              <select
+                              <Select
                                 value={workflowForm.shipping_under_threshold_mode}
                                 onChange={(event) => setWorkflowForm((current) => ({ ...current, shipping_under_threshold_mode: event.target.value }))}
-                                className="mt-1 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828] outline-none focus:border-[#2563eb]"
+                                className="mt-1"
                               >
                                 <option value="buyer_pays_shipping">Buyer pays shipping</option>
                                 <option value="free_shipping">Free shipping</option>
-                              </select>
+                              </Select>
                             </div>
                             <div>
                               <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">At / above threshold</label>
-                              <select
+                              <Select
                                 value={workflowForm.shipping_at_or_above_threshold_mode}
                                 onChange={(event) => setWorkflowForm((current) => ({ ...current, shipping_at_or_above_threshold_mode: event.target.value }))}
-                                className="mt-1 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828] outline-none focus:border-[#2563eb]"
+                                className="mt-1"
                               >
                                 <option value="buyer_pays_shipping">Buyer pays shipping</option>
                                 <option value="free_shipping">Free shipping</option>
-                              </select>
+                              </Select>
                             </div>
                           </div>
                         </div>
