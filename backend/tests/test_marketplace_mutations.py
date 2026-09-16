@@ -102,6 +102,25 @@ def test_compound_plan_applies_exact_targets(db_session):
     assert overrides["mercari"]["price"] == 42
 
 
+def test_compound_plan_persists_canonical_and_variant_content_fields(db_session):
+    user = User(email="mutation-plan-content@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(
+        user_id=user.id,
+        description="Master copy",
+        canonical_description="Master copy",
+        marketplace_descriptions={"facebook": "Existing Facebook copy"},
+    )
+    db_session.add(listing); db_session.flush()
+    apply_marketplace_operation_plan([
+        {"listing_id": listing.id, "markets": ["canonical"], "field": "description", "value": "Updated master copy"},
+        {"listing_id": listing.id, "markets": ["ebay"], "field": "description", "value": "Updated eBay copy"},
+    ], {listing.id: listing})
+    assert listing.description == "Updated master copy"
+    assert listing.canonical_description == "Updated master copy"
+    assert listing.marketplace_descriptions == {"facebook": "Existing Facebook copy", "ebay": "Updated eBay copy"}
+
+
 def test_compound_plan_rejects_later_invalid_operation_without_mutation(db_session):
     user = User(email="mutation-plan-invalid@example.com")
     db_session.add(user); db_session.flush()
