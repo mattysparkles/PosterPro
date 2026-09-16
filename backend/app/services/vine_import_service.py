@@ -1000,7 +1000,21 @@ class VineImportService:
                     "item_condition_notes": "Amazon Vine items are listed as New. Confirm packaging, completeness, and condition before publish.",
                 },
             )
-            _promote_vine_listing_to_review(listing)
+            # Metadata refresh is a content mutation, not an approval. Re-run
+            # the canonical readiness contract so a newly repaired draft does
+            # not get promoted blindly while a real blocker remains.
+            readiness = canonical_listing_readiness(listing)
+            blockers = list(readiness.get("blocking_reasons") or [])
+            if blockers:
+                listing.processing_state = "needs_attention"
+                listing.needs_review = False
+                listing.processing_blocking_reason = str(blockers[0])
+                listing.processing_error_stage = "quality_validation"
+            else:
+                listing.processing_state = "complete"
+                _promote_vine_listing_to_review(listing)
+                listing.processing_blocking_reason = None
+                listing.processing_error_stage = None
             db.add(listing)
             updated += 1
         db.commit()

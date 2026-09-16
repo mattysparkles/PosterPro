@@ -1417,6 +1417,9 @@ def test_refresh_batch_drafts_from_stored_amazon_facts_sets_new_condition_and_po
         },
         marketplace_data={},
         condition_data={"condition_bucket": "used", "operator_review_required": False},
+        listing_images=[{"storage_path": "/media/pool-pump.jpg", "operator_state": "approved", "role": "primary"}],
+        listing_price=24.99,
+        shipping_profile={"manual_measurement_needed": False},
     )
     db_session.add_all([batch, listing])
     db_session.flush()
