@@ -89,7 +89,11 @@ def audit(limit: int | None = None, source_type: str | None = None, details: boo
             if details:
                 detail_rows.append({
                     "listing_id": row.id,
-                    "source_title": (row.source_metadata or {}).get("source_title") if isinstance(row.source_metadata, dict) else None,
+                    "source_title": (
+                        (row.source_metadata or {}).get("source_title")
+                        or (row.source_metadata or {}).get("product_name")
+                        or ((row.source_metadata or {}).get("amazon_product_facts") or {}).get("title")
+                    ) if isinstance(row.source_metadata, dict) else None,
                     "title": row.title,
                     "category": category,
                     "category_id": row.category_id,
