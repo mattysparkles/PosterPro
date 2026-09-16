@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import AppShell from '../../components/layout/AppShell';
 import Button from '../../components/ui/button';
 import PageHeader from '../../components/ui/page-header';
+import Input from '../../components/ui/input';
+import Select from '../../components/ui/select';
 import { confirmStorefrontOrderPayment, fetchStorefrontOrders, rejectStorefrontOrderPayment, updateStorefrontOrderShipment } from '../../lib/api';
 
 const money = (value) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(Number(value || 0));
@@ -16,7 +18,7 @@ export default function StoreOrders() {
   const act = async (id, callback, success) => { setBusyId(id); setMessage(''); try { await callback(id); setMessage(success); await reload(); } catch (error) { setMessage(error.message); } finally { setBusyId(null); } };
   return <AppShell><main className="mx-auto max-w-6xl space-y-5 px-5 py-6">
     <PageHeader title="Store orders" description="Review manual payments, fulfill paid orders, and keep direct-store sales in sync with inventory." />
-    <div className="flex flex-wrap items-center justify-between gap-3"><label className="text-sm font-semibold">Payment status<select value={status} onChange={(e) => setStatus(e.target.value)} className="ml-3 h-10 rounded-lg border border-slate-300 bg-white px-3"><option value="">All orders</option><option value="PAYMENT_PENDING_VERIFICATION">Needs payment review</option><option value="PAID">Paid</option><option value="PAYMENT_FAILED">Not received</option><option value="MANUAL_REVIEW">Manual review</option></select></label><span className="text-sm text-slate-500">{orders.length} recent orders</span></div>
+    <div className="flex flex-wrap items-center justify-between gap-3"><label className="text-sm font-semibold">Payment status<Select value={status} onChange={(e) => setStatus(e.target.value)} className="ml-3 inline-flex w-auto"><option value="">All orders</option><option value="PAYMENT_PENDING_VERIFICATION">Needs payment review</option><option value="PAID">Paid</option><option value="PAYMENT_FAILED">Not received</option><option value="MANUAL_REVIEW">Manual review</option></Select></label><span className="text-sm text-slate-500">{orders.length} recent orders</span></div>
     {message ? <p role="status" className="rounded-lg border border-slate-200 bg-white p-3 text-sm text-slate-700">{message}</p> : null}
     {!orders.length ? <div className="rounded-2xl border border-slate-200 bg-white p-10 text-center text-slate-600">No direct store orders yet.</div> : <div className="space-y-4">{orders.map((order) => <article key={order.order_number} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
       <div className="flex flex-wrap items-start justify-between gap-4"><div><h2 className="text-lg font-bold">{order.order_number}</h2><p className="mt-1 text-sm text-slate-600">{order.customer_name} · <a className="text-slate-800 underline" href={`mailto:${order.customer_email}`}>{order.customer_email}</a></p><p className="mt-1 text-sm text-slate-500">{order.payment_method} · {order.payment_status.replaceAll('_', ' ')} · {order.fulfillment_status.replaceAll('_', ' ')}</p></div><p className="text-xl font-bold">{money(order.total)}</p></div>
@@ -34,7 +36,7 @@ export default function StoreOrders() {
 
 function ShipmentForm({ onSave, busy }) {
   const [carrier, setCarrier] = useState('USPS'); const [tracking, setTracking] = useState('');
-  return <form className="flex flex-wrap gap-2" onSubmit={(event) => { event.preventDefault(); if (tracking.trim()) onSave({ carrier, tracking_number: tracking }); }}><input aria-label="Carrier" value={carrier} onChange={(e) => setCarrier(e.target.value)} className="h-10 w-28 rounded-lg border border-slate-300 px-3 text-sm" /><input required aria-label="Tracking number" value={tracking} onChange={(e) => setTracking(e.target.value)} placeholder="Tracking number" className="h-10 w-44 rounded-lg border border-slate-300 px-3 text-sm" /><Button type="submit" variant="secondary" disabled={busy}>Mark shipped</Button></form>;
+  return <form className="flex flex-wrap gap-2" onSubmit={(event) => { event.preventDefault(); if (tracking.trim()) onSave({ carrier, tracking_number: tracking }); }}><Input aria-label="Carrier" value={carrier} onChange={(e) => setCarrier(e.target.value)} className="w-28" /><Input required aria-label="Tracking number" value={tracking} onChange={(e) => setTracking(e.target.value)} placeholder="Tracking number" className="w-44" /><Button type="submit" variant="secondary" disabled={busy}>Mark shipped</Button></form>;
 }
 
 StoreOrders.requireAuth = true;
