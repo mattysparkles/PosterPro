@@ -1382,6 +1382,8 @@ def get_listings(
             queue_filters.append(and_(Listing.status == ListingStatus.draft, Listing.needs_review.is_(False), Listing.restricted_review_required.is_(False)))
         elif normalized_queue == "failed":
             queue_filters.append(or_(Listing.status == ListingStatus.FAILED, Listing.ebay_publish_status == "FAILED"))
+        elif normalized_queue == "processing":
+            queue_filters.append(Listing.processing_state.in_(["processing", "pending", "queued", "enriching", "source_enrichment", "image_enrichment", "category_resolution", "title_generation", "description_generation", "quality_validation"]))
         elif normalized_queue == "needs_attention":
             # Detailed preflight blockers live in JSON and are evaluated by
             # _listing_bucket below; avoid a SQL predicate that would hide
@@ -1442,7 +1444,7 @@ def get_listings(
     needs_python_filtering = (
         (normalized_marketplace and normalized_marketplace != "all")
         or (normalized_readiness and normalized_readiness != "all")
-        or normalized_queue in {"all", "drafts", "ready", "review", "needs_attention", "published", "failed"}
+        or normalized_queue in {"all", "drafts", "ready", "review", "needs_attention", "published", "failed", "processing"}
         or remote_ebay_active_ids is not None
     )
 

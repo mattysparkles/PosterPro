@@ -85,6 +85,7 @@ const LISTING_TABS = [
   { value: 'all', label: 'All Listings' },
   { value: 'review', label: 'Needs Review' },
   { value: 'attention', label: 'Needs Attention' },
+  { value: 'processing', label: 'Processing' },
   { value: 'drafts', label: 'Drafts' },
   { value: 'ready', label: 'Ready' },
   { value: 'published', label: 'Published' },
@@ -280,6 +281,7 @@ function matchesTab(listing, tab) {
   if (tab === 'drafts') return getListingBucket(listing) === 'drafts';
   if (tab === 'review') return getListingBucket(listing) === 'review';
   if (tab === 'attention') return getListingBucket(listing) === 'attention';
+  if (tab === 'processing') return getListingBucket(listing) === 'processing';
   if (tab === 'ready') return getListingBucket(listing) === 'ready';
   if (tab === 'published') return getListingBucket(listing) === 'published';
   if (tab === 'failed') return getListingBucket(listing) === 'failed';
