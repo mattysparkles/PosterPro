@@ -250,6 +250,24 @@ def test_generic_placeholder_titles_block_review_queue(db_session):
     assert any("generic" in blocker.lower() or "specific" in blocker.lower() for blocker in blockers)
 
 
+def test_published_identity_does_not_mask_weak_local_quality(db_session):
+    user = User(email="published-quality@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(
+        user_id=user.id,
+        ebay_listing_id="123456789",
+        title="Item",
+        description="Short copy",
+        item_specifics={},
+        listing_images=[],
+        shipping_profile={"manual_measurement_needed": True},
+    )
+    db_session.add(listing); db_session.commit()
+    quality = compute_listing_quality_summary(listing, pricing_analysis={})
+    assert quality["status"] == "published"
+    assert quality["score"] < 100
+
+
 def test_listing_ai_avoids_unsupported_claims():
     service = ListingAIService()
     generated = service._sanitize_claims(

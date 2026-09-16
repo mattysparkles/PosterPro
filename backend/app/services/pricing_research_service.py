@@ -587,8 +587,10 @@ def compute_listing_quality_summary(listing: Listing, pricing_analysis: dict | N
         score += 8
     if listing.status == "ready":
         score += 5
-    if listing.ebay_listing_id:
-        score = 100
+    # A remote listing identity proves that a listing exists; it does not prove
+    # that its local content is complete or high quality.  Keep the measured
+    # score so diagnostics can surface deficient published records instead of
+    # masking them as perfect.
 
     specificity = _specificity_summary(listing)
     blockers.extend(specificity.get("blockers") or [])
