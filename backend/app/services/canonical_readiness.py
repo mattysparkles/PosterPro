@@ -19,6 +19,9 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
     )
     blockers = list(dict.fromkeys([*(stored.get("blockers") or []), *(base.get("blockers") or [])]))
     warnings = list(dict.fromkeys([*(stored.get("warnings") or []), *(base.get("warnings") or [])]))
+    processing_blocker = str(getattr(listing, "processing_blocking_reason", None) or "").strip()
+    if processing_blocker:
+        blockers.append(processing_blocker)
     missing_required_aspects = [str(value).strip() for value in (stored.get("missing_required_aspects") or []) if str(value).strip()]
     if missing_required_aspects:
         blockers.extend(f"Required marketplace detail missing: {value}" for value in missing_required_aspects)
