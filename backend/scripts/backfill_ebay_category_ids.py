@@ -8,6 +8,8 @@ This maintenance pass is intentionally bounded and idempotent:
 """
 from __future__ import annotations
 
+import argparse
+
 from sqlalchemy import and_, or_, select
 
 from app.core.database import SessionLocal
@@ -78,4 +80,7 @@ def main(limit: int = 25) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Backfill validated eBay category IDs without publishing")
+    parser.add_argument("--limit", type=int, default=25)
+    args = parser.parse_args()
+    main(limit=max(1, min(args.limit, 500)))
