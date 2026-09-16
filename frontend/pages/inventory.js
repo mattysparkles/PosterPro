@@ -13,6 +13,7 @@ import DataTableRowAction from '../components/ui/data-table-row-action';
 import EmptyState from '../components/ui/empty-state';
 import { Tabs } from '../components/ui/tabs';
 import Input from '../components/ui/input';
+import Select from '../components/ui/select';
 import MetricCard from '../components/ui/metric-card';
 import PageHeader from '../components/ui/page-header';
 import SectionPanel from '../components/ui/section-panel';
@@ -277,18 +278,17 @@ export default function InventoryPage() {
               />
             </div>
             <div className="relative w-full sm:w-[220px]">
-              <select
+              <Select
                 value={filter}
                 onChange={(event) => setFilter(event.target.value)}
-                className="pp-input h-10 w-full appearance-none rounded-[10px] border border-[#e5e7eb] bg-white px-3 pr-10 text-sm text-[#101828] outline-none focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                className="h-10 w-full rounded-xl sm:w-[220px]"
               >
                 {FILTER_OPTIONS.map((option) => (
                   <option key={option.value} value={option.value}>
                     {option.label}
                   </option>
                 ))}
-              </select>
-              <ChevronDown size={16} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[#98a2b3]" />
+              </Select>
             </div>
             <Button variant="outline" onClick={loadInventory}>
               <RefreshCcw size={16} />
