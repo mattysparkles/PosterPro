@@ -8,6 +8,7 @@ import { CheckCircle2, ChevronDown, CloudUpload, Download, Expand, FileJson2, Fo
 import AppShell from '../../components/layout/AppShell';
 import GooglePhotosConnectionGuide from '../../components/google/GooglePhotosConnectionGuide';
 import Button from '../../components/ui/button';
+import ActionLink from '../../components/ui/action-link';
 import Input from '../../components/ui/input';
 import PageHeader from '../../components/ui/page-header';
 import SectionPanel from '../../components/ui/section-panel';
@@ -328,7 +329,7 @@ function SlateSuccessModal({ open, onClose, onNext, onWriteOnBox, onPrint, onRet
                 <div className="mt-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
                   <p>{googleStatus.last_upload_error || payload?.bridge_upload?.error}</p>
                   {/403|Photos Library API|photoslibrary\.googleapis\.com/i.test(String(googleStatus.last_upload_error || payload?.bridge_upload?.error)) ? (
-                    <a className="mt-2 inline-flex font-semibold underline" href="https://console.cloud.google.com/apis/library/photoslibrary.googleapis.com?project=996127842854" target="_blank" rel="noreferrer">Enable Google Photos Library API in project 996127842854</a>
+                    <ActionLink className="mt-2" href="https://console.cloud.google.com/apis/library/photoslibrary.googleapis.com?project=996127842854" target="_blank" rel="noreferrer" external>Enable Google Photos Library API</ActionLink>
                   ) : null}
                 </div>
               ) : null}
@@ -1506,7 +1507,7 @@ export default function IntakeSlatePage() {
                     <p>This image is internal only. It marks the start of a new intake item and is excluded from public marketplace photos by default.</p>
                     <p>After photographing this slate, take the product photos, flaw photos, label photos, measurements, and packed-box photos. PosterPro will assign every following photo to this item until the next slate appears.</p>
                     {slateResult?.local_only ? <p className="font-semibold">Offline preview only: this slate is cached client-side and will not exist server-side until you create it online.</p> : null}
-                    {renderedSlateUrl ? <p><a className="font-semibold text-[var(--pp-link)] underline" href={renderedSlateUrl} target="_blank" rel="noreferrer">Open the rendered slate image</a></p> : null}
+                    {renderedSlateUrl ? <p><ActionLink href={renderedSlateUrl} target="_blank" rel="noreferrer" external>Open rendered slate image</ActionLink></p> : null}
                     {bridgeUpload ? (
                       <div className="rounded-2xl border border-[var(--pp-border)] bg-white px-4 py-3 text-xs text-[var(--pp-muted)]">
                         <p className="font-semibold text-[var(--pp-text)]">Google Photos bridge upload</p>
