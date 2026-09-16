@@ -15,7 +15,10 @@ from sqlalchemy import select
 from app.core.database import SessionLocal
 from app.models.models import Listing
 
-NOISE = re.compile(r"amazon|refund|replacement|free return|delivery|seller|return policy|breadcrumb", re.I)
+# ``replacement`` and ``seller`` are legitimate product terms (replacement
+# batteries, seller parts, etc.).  Only policy/navigation language is a
+# reliable source-garbage signal in generated copy.
+SOURCE_POLICY_NOISE = re.compile(r"amazon\s*(?:\.com|>\s*|navigation)|refund|free return|return policy|breadcrumb|free\s+30[- ]day|shipping\s+(?:available|included)|add to cart|buy now", re.I)
 
 
 def _source_fact_values(row: Listing) -> list[str]:
@@ -26,12 +29,12 @@ def _source_fact_values(row: Listing) -> list[str]:
     values: list[str] = []
     for value in facts.get("feature_bullets") or []:
         text = " ".join(str(value or "").split()).strip()
-        if len(text) >= 14 and not NOISE.search(text):
+        if len(text) >= 14 and not SOURCE_POLICY_NOISE.search(text):
             values.append(text)
     specs = facts.get("specifications") if isinstance(facts.get("specifications"), dict) else {}
     for key, value in specs.items():
         text = " ".join(f"{key} {value}".split()).strip()
-        if text and not NOISE.search(text):
+        if text and not SOURCE_POLICY_NOISE.search(text):
             values.append(text)
     return values[:16]
 
@@ -75,13 +78,13 @@ def audit(limit: int | None = None, source_type: str | None = None, details: boo
             covered_facts = sum(1 for fact in source_facts if any(token in description_lower for token in re.findall(r"[a-z0-9]{4,}", fact.lower())[:4]))
             checks = {
                 "missing_category_id": not str(row.category_id or "").strip(),
-                "suspicious_category": bool(NOISE.search(category)) or category.lower() in {"other", "other > needs category review"},
+                "suspicious_category": bool(SOURCE_POLICY_NOISE.search(category)) or category.lower() in {"other", "other > needs category review"},
                 "thin_description": len(description.split()) < 18,
                 "missing_description": not description,
                 "missing_images": image_count == 0,
                 "missing_item_specifics": not bool(specifics),
                 "source_fact_coverage": bool(source_facts) and covered_facts < max(1, min(3, len(source_facts) // 3)),
-                "description_source_noise": bool(NOISE.search(description)),
+                "description_source_noise": bool(SOURCE_POLICY_NOISE.search(description)),
             }
             for name, flagged in checks.items():
                 if flagged:
