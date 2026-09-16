@@ -921,7 +921,7 @@ export default function ListingWorkspacePage() {
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium text-[#101828]">Shipping mode</label>
-                <select
+                <Select
                   value={form.marketplace_data.shipping.mode}
                   onChange={(event) => setForm((current) => ({
                     ...current,
@@ -936,7 +936,7 @@ export default function ListingWorkspacePage() {
                   <option value="flat">Flat rate</option>
                   <option value="local_pickup">Local pickup</option>
                   <option value="manual">Manual</option>
-                </select>
+                </Select>
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium text-[#101828]">Domestic service</label>
@@ -1026,7 +1026,7 @@ export default function ListingWorkspacePage() {
                         {channel === "facebook" ? (
                           <div className="space-y-2">
                             <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Renewal mode</label>
-                            <select
+                            <Select
                               value={channelState.renewal_mode || "manual"}
                               onChange={(event) => setChannelField(channel, "renewal_mode", event.target.value)}
                               className="pp-input h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828] outline-none focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
@@ -1036,7 +1036,7 @@ export default function ListingWorkspacePage() {
                                   {option.label}
                                 </option>
                               ))}
-                            </select>
+                            </Select>
                           </div>
                         ) : null}
                       </div>
@@ -1050,7 +1050,7 @@ export default function ListingWorkspacePage() {
                   <div className="mt-3 grid gap-3 md:grid-cols-2">
                     <div className="space-y-2">
                       <label className="text-sm font-medium text-[#101828]">Shipping scope</label>
-                      <select
+                      <Select
                         value={form.marketplace_data.channels.facebook.shipping_scope || "local_only"}
                         onChange={(event) => setChannelField("facebook", "shipping_scope", event.target.value)}
                         className="pp-input h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828] outline-none focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
@@ -1060,7 +1060,7 @@ export default function ListingWorkspacePage() {
                             {option.label}
                           </option>
                         ))}
-                      </select>
+                      </Select>
                     </div>
                     <div className="space-y-2">
                       <label className="text-sm font-medium text-[#101828]">Source marketplace</label>
@@ -1147,7 +1147,7 @@ export default function ListingWorkspacePage() {
               <div className="grid gap-4 md:grid-cols-3">
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-[#101828]">Source marketplace</label>
-                  <select
+                  <Select
                     value={importForm.source_marketplace}
                     onChange={(event) => setImportForm((current) => ({ ...current, source_marketplace: event.target.value }))}
                     className="pp-input h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828] outline-none focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
@@ -1157,11 +1157,11 @@ export default function ListingWorkspacePage() {
                         {label}
                       </option>
                     ))}
-                  </select>
+                  </Select>
                 </div>
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-[#101828]">Import mode</label>
-                  <select
+                  <Select
                     value={importForm.import_mode}
                     onChange={(event) => setImportForm((current) => ({ ...current, import_mode: event.target.value }))}
                     className="pp-input h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828] outline-none focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
@@ -1170,7 +1170,7 @@ export default function ListingWorkspacePage() {
                     <option value="provider_assist">Provider assist</option>
                     <option value="browser_assist">Browser assist</option>
                     <option value="csv_assist">CSV assist</option>
-                  </select>
+                  </Select>
                 </div>
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-[#101828]">Source reference</label>
