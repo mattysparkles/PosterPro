@@ -703,7 +703,7 @@ def _apply_listing_review_defaults(listing: Listing) -> None:
 
 def _delete_listing_for_user(db: Session, *, listing: Listing, current_user: User) -> dict:
     ensure_user_owns_resource(current_user, listing.user_id)
-    before = {field: getattr(listing, field, None) for field in ("title", "description", "listing_price", "suggested_price", "quantity", "condition", "category_id", "category_suggestion", "item_specifics", "image_urls", "marketplace_data", "platform_quantities", "custom_labels")}
+    before = {field: getattr(listing, field, None) for field in ("title", "description", "canonical_description", "marketplace_descriptions", "listing_price", "suggested_price", "quantity", "condition", "category_id", "category_suggestion", "item_specifics", "image_urls", "marketplace_data", "platform_quantities", "custom_labels")}
     media_cleanup = purge_listing_media(db, listing)
 
     db.execute(delete(MarketplaceListing).where(MarketplaceListing.listing_id == listing.id))
@@ -1975,10 +1975,10 @@ def update_listing(
     if not listing:
         raise HTTPException(status_code=404, detail="Listing not found")
     ensure_user_owns_resource(current_user, listing.user_id)
-    before = {field: getattr(listing, field, None) for field in ("title", "description", "listing_price", "suggested_price", "quantity", "condition", "category_id", "category_suggestion", "item_specifics", "image_urls", "marketplace_data", "platform_quantities", "custom_labels")}
+    before = {field: getattr(listing, field, None) for field in ("title", "description", "canonical_description", "marketplace_descriptions", "listing_price", "suggested_price", "quantity", "condition", "category_id", "category_suggestion", "item_specifics", "image_urls", "marketplace_data", "platform_quantities", "custom_labels")}
     direct_updates = payload.model_dump(
         exclude_none=True,
-        exclude={"quantity", "platform_quantities", "custom_labels", "marketplace_data"},
+        exclude={"quantity", "platform_quantities", "custom_labels", "marketplace_data", "marketplace_descriptions"},
     )
     if "description" in direct_updates and "canonical_description" not in direct_updates:
         direct_updates["canonical_description"] = direct_updates["description"]
@@ -1986,6 +1986,16 @@ def update_listing(
         direct_updates["status"] = ListingStatus(direct_updates["status"])
     for key, value in direct_updates.items():
         setattr(listing, key, value)
+    if payload.marketplace_descriptions is not None:
+        variants = dict(listing.marketplace_descriptions or {}) if isinstance(listing.marketplace_descriptions, dict) else {}
+        provenance = dict(variants.get("_provenance") or {}) if isinstance(variants.get("_provenance"), dict) else {}
+        for market, text in payload.marketplace_descriptions.items():
+            market_key = str(market).strip().lower()
+            if market_key in {"ebay", "facebook", "mercari", "poshmark", "vinted", "etsy", "offerup"} and str(text or "").strip():
+                variants[market_key] = str(text).strip()
+                provenance[market_key] = "operator_edited"
+        variants["_provenance"] = provenance
+        listing.marketplace_descriptions = variants
     # Any material listing edit invalidates cached marketplace readiness. A
     # stale preflight was allowing corrected drafts to keep failing (or hiding
     # the new blocker set) until an unrelated refresh happened.
@@ -2096,11 +2106,23 @@ async def save_publish_listing_changes(
         raise HTTPException(status_code=404, detail="Listing not found")
     ensure_user_owns_resource(current_user, listing.user_id)
     before = {field: getattr(listing, field, None) for field in ("title", "description", "listing_price", "suggested_price", "quantity", "condition", "category_id", "category_suggestion", "item_specifics", "image_urls", "marketplace_data", "platform_quantities", "custom_labels")}
-    direct_updates = payload.model_dump(exclude_none=True, exclude={"quantity", "platform_quantities", "custom_labels", "marketplace_data"})
+    direct_updates = payload.model_dump(exclude_none=True, exclude={"quantity", "platform_quantities", "custom_labels", "marketplace_data", "marketplace_descriptions"})
+    if "description" in direct_updates and "canonical_description" not in direct_updates:
+        direct_updates["canonical_description"] = direct_updates["description"]
     if "status" in direct_updates:
         direct_updates["status"] = ListingStatus(direct_updates["status"])
     for key, value in direct_updates.items():
         setattr(listing, key, value)
+    if payload.marketplace_descriptions is not None:
+        variants = dict(listing.marketplace_descriptions or {}) if isinstance(listing.marketplace_descriptions, dict) else {}
+        provenance = dict(variants.get("_provenance") or {}) if isinstance(variants.get("_provenance"), dict) else {}
+        for market, text in payload.marketplace_descriptions.items():
+            market_key = str(market).strip().lower()
+            if market_key in {"ebay", "facebook", "mercari", "poshmark", "vinted", "etsy", "offerup"} and str(text or "").strip():
+                variants[market_key] = str(text).strip()
+                provenance[market_key] = "operator_edited"
+        variants["_provenance"] = provenance
+        listing.marketplace_descriptions = variants
     if payload.marketplace_data is not None:
         listing.marketplace_data = normalize_marketplace_data(payload.marketplace_data)
     try:
