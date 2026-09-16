@@ -29,7 +29,7 @@ from app.services.listing_review import derive_shipping_profile
 from app.services.vine_import_service import VineImportService, _clean_amazon_facts, _is_unsafe_vine_image, _merge_amazon_fact_evidence, description_source_similarity
 from app.services.vine_parser import calculate_vine_eligibility, parse_vine_csv, parse_vine_pdf, parse_vine_xlsx
 from app.services.vine_policy import review_vine_product
-from app.services.category_rules import is_source_noise_category, suggest_category_from_text, verified_category_id
+from app.services.category_rules import is_source_noise_category, resolve_taxonomy_leaf, suggest_category_from_text, verified_category_id
 
 
 def test_vine_category_paths_reject_source_noise_and_keep_verified_ids():
@@ -38,6 +38,15 @@ def test_vine_category_paths_reject_source_noise_and_keep_verified_ids():
     assert "Portable Toilets" in category
     assert verified_category_id(category) == "181397"
     assert is_source_noise_category("Amazon > FG 1910 > FREE 30-day refund/replacement")
+
+
+def test_taxonomy_leaf_resolver_returns_real_leaf_and_rejects_test_nodes():
+    tree = {"rootCategoryNode": {"category": {"categoryId": "0", "categoryName": "Root"}, "childCategoryTreeNodes": [
+        {"category": {"categoryId": "123", "categoryName": "Camping Toilets"}},
+        {"category": {"categoryId": "999", "categoryName": "Test Category"}},
+    ]}}
+    result = resolve_taxonomy_leaf(tree, "portable camping toilet")
+    assert result == {"category_id": "123", "category_path": "Camping Toilets", "method": "taxonomy_search"}
 
 
 @pytest.mark.parametrize(

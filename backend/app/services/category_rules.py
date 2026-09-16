@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 
 _CATEGORY_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
@@ -90,6 +91,50 @@ _VERIFIED_CATEGORY_IDS: dict[str, str] = {
 def verified_category_id(value: str | None) -> str | None:
     """Return an ID only for a canonical path already validated in taxonomy."""
     return _VERIFIED_CATEGORY_IDS.get(" ".join(str(value or "").split()))
+
+
+def resolve_taxonomy_leaf(tree: dict[str, Any] | None, *facts: str | None) -> dict[str, str] | None:
+    """Choose a likely real leaf from an eBay taxonomy tree without inventing IDs.
+
+    This is deliberately conservative: source/policy noise and eBay test nodes
+    are excluded, and weak matches return ``None`` for an AI/manual fallback.
+    """
+    if not isinstance(tree, dict):
+        return None
+    tokens = set(re.findall(r"[a-z0-9]+", " ".join(str(v or "") for v in facts).lower()))
+    if not tokens:
+        return None
+    candidates: list[tuple[int, int, str, str]] = []
+
+    def walk(node: dict[str, Any], path: str = "") -> None:
+        category = node.get("category") if isinstance(node.get("category"), dict) else {}
+        name = str(category.get("categoryName") or "").strip()
+        category_id = str(category.get("categoryId") or "").strip()
+        current_path = f"{path} > {name}" if path and name else name or path
+        children = node.get("childCategoryTreeNodes") or []
+        if category_id and name and not children:
+            lowered = current_path.lower()
+            if "test category" not in lowered and not is_source_noise_category(current_path):
+                path_tokens = set(re.findall(r"[a-z0-9]+", lowered))
+                overlap = sum(1 for token in tokens if any(
+                    token == candidate or token.rstrip("s") == candidate.rstrip("s")
+                    for candidate in path_tokens
+                ))
+                # Prefer specific leaves, while requiring at least two facts to
+                # agree so a generic word such as "charger" cannot misclassify.
+                if overlap >= 2:
+                    candidates.append((overlap, len(path_tokens), category_id, current_path))
+        for child in children:
+            if isinstance(child, dict):
+                walk(child, current_path)
+
+    root = tree.get("rootCategoryNode") or tree
+    if isinstance(root, dict):
+        walk(root)
+    if not candidates:
+        return None
+    _, _, category_id, path = max(candidates, key=lambda row: (row[0], row[1]))
+    return {"category_id": category_id, "category_path": path.removeprefix("Root > "), "method": "taxonomy_search"}
 
 
 def suggest_category_from_text(*values: str | None) -> tuple[str, str]:
