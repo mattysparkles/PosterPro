@@ -53,6 +53,34 @@ _CATEGORY_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
     (("camera", "camcorder", "lens"), "Cameras & Photo"),
 )
 
+# Verified eBay leaf IDs observed from the active taxonomy cache.  These are
+# intentionally keyed by the canonical path (never by scraped source text),
+# so deterministic Vine repairs can persist a real marketplace category ID
+# without inventing one.  Unknown paths remain unresolved and are escalated to
+# taxonomy search/AI rather than silently using a made-up ID.
+_VERIFIED_CATEGORY_IDS: dict[str, str] = {
+    "Sporting Goods > Camping & Hiking > Camping Hygiene & Sanitation > Portable Toilets": "181397",
+    "Sporting Goods > Boxing & MMA > Protective Gear > Groin Protectors": "179778",
+    "Sporting Goods > Boxing & MMA > Protective Gear": "36317",
+    "Health & Beauty > Health Care > Medical & Mobility > Pulse Oximeters": "31465",
+    "Clothing, Shoes & Accessories > Men's Clothing > Coats, Jackets & Vests": "57988",
+    "Consumer Electronics > Electrical Equipment & Supplies > Soldering Equipment": "258278",
+    "Consumer Electronics > Power Protection > Surge Protectors": "30",
+    "Sporting Goods > Golf > Training Aids": "20580",
+    "Home & Garden > Furniture > Living Room Furniture > Ottomans": "20490",
+    "Home & Garden > Household Supplies & Cleaning > Irons & Garment Steamers": "43513",
+    "Home & Garden > Watering Equipment > Drip Irrigation": "139909",
+    "Computers/Tablets & Networking > KVM Switches": "182096",
+    "Computers/Tablets & Networking > Laptop/Notebook Accessories > Stands & Risers": "116346",
+    "Home & Garden > Yard, Garden & Outdoor Living > Bird Houses": "20502",
+    "Home & Garden > Window Treatments > Blinds & Shades": "20585",
+}
+
+
+def verified_category_id(value: str | None) -> str | None:
+    """Return an ID only for a canonical path already validated in taxonomy."""
+    return _VERIFIED_CATEGORY_IDS.get(" ".join(str(value or "").split()))
+
 
 def suggest_category_from_text(*values: str | None) -> tuple[str, str]:
     searchable = " ".join(str(value or "") for value in values).lower()

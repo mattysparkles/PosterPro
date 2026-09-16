@@ -27,6 +27,7 @@ from app.services.marketplace_field_mapper import build_marketplace_payload, per
 from app.services.vine_parser import ParsedVineRow, parse_vine_csv, parse_vine_pdf, parse_vine_xlsx
 from app.services.vine_parser import parse_date_value
 from app.services.vine_policy import review_vine_product
+from app.services.category_rules import verified_category_id
 
 VINE_IMAGE_BACKFILL_CUTOFF = date(2026, 6, 15)
 
@@ -679,8 +680,9 @@ class VineImportService:
             listing.shipping_profile["estimated_fields"] = shipping_estimate.get("estimated_fields") or []
             listing.shipping_profile["provenance"] = shipping_estimate.get("provenance") or {}
             listing.category_suggestion = category
-            if str(category).strip().isdigit():
-                listing.category_id = str(category).strip()
+            category_id = str(category).strip() if str(category).strip().isdigit() else verified_category_id(category)
+            if category_id:
+                listing.category_id = category_id
             specifics, provenance = self._build_item_specifics(item, listing.title, listing.description, listing.item_specifics)
             _apply_fact_specifics(specifics, provenance, amazon_facts)
             for key, value in (amazon_facts.get("specifications") or {}).items():
@@ -818,8 +820,9 @@ class VineImportService:
             if int(listing.quantity or 0) <= 0 and quantity_source not in {"manual", "operator"}:
                 listing.quantity = 1
             listing.category_suggestion = category
-            if str(category).strip().isdigit():
-                listing.category_id = str(category).strip()
+            category_id = str(category).strip() if str(category).strip().isdigit() else verified_category_id(category)
+            if category_id:
+                listing.category_id = category_id
             if pricing["listing_price"] is not None:
                 listing.suggested_price = pricing["listing_price"]
                 listing.listing_price = pricing["listing_price"]
