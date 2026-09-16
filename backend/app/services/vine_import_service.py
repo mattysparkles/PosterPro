@@ -806,7 +806,10 @@ class VineImportService:
             if not is_human_owned_field(listing.source_metadata or {}, "title"):
                 listing.title = self._generate_title(item.product_name or listing.title, amazon_facts=facts)
             if not is_human_owned_field(listing.source_metadata or {}, "description"):
-                listing.description = self._generate_vine_original_description(db, listing=listing, item=item, facts=facts)
+                # Batch metadata repair must remain bounded and resumable. Use
+                # the deterministic, fact-backed formatter here; the normal
+                # enrichment worker still escalates uncertain copy to AI.
+                listing.description = self._rewrite_amazon_description(item, amazon_facts=facts)
                 listing.canonical_description = str(listing.description or "").strip() or None
             category, category_source = self._resolve_category(item, amazon_facts=facts)
             pricing = self._pricing_from_amazon(item, amazon_facts=facts)
@@ -927,7 +930,7 @@ class VineImportService:
             if not is_human_owned_field(source_metadata, "title"):
                 listing.title = self._generate_title(item.product_name or listing.title, amazon_facts=facts)
             if not is_human_owned_field(source_metadata, "description"):
-                listing.description = self._generate_vine_original_description(db, listing=listing, item=item, facts=facts)
+                listing.description = self._rewrite_amazon_description(item, amazon_facts=facts)
                 listing.canonical_description = str(listing.description or "").strip() or None
             category, category_source = self._resolve_category(item, amazon_facts=facts)
             pricing = self._pricing_from_amazon(item, amazon_facts=facts)
