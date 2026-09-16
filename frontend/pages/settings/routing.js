@@ -3,6 +3,8 @@ import AppShell from '../../components/layout/AppShell';
 import Button from '../../components/ui/button';
 import PageHeader from '../../components/ui/page-header';
 import SectionPanel from '../../components/ui/section-panel';
+import Input from '../../components/ui/input';
+import Checkbox from '../../components/ui/checkbox';
 import { fetchMarketplaceRoutingRules, saveMarketplaceRoutingRules } from '../../lib/api';
 
 const MARKETS = [
@@ -157,16 +159,16 @@ export default function MarketplaceRoutingPage() {
         <SectionPanel title="Add a routing rule" description="When multiple filters are filled, all specified filters must match. Enter multiple terms as comma-separated values.">
           <form onSubmit={createRule} className="space-y-4">
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-              <label className="text-sm">Rule name<input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} className="mt-1 w-full rounded-lg border px-3 py-2" placeholder="Clothing to resale apps" /></label>
-              <label className="text-sm">Priority<input type="number" min="0" max="10000" value={form.priority} onChange={(event) => setForm({ ...form, priority: event.target.value })} className="mt-1 w-full rounded-lg border px-3 py-2" /></label>
-              <label className="text-sm">Category terms<input value={form.category_terms} onChange={(event) => setForm({ ...form, category_terms: event.target.value })} className="mt-1 w-full rounded-lg border px-3 py-2" placeholder="Clothing, Shoes" /></label>
-              <label className="text-sm">Brand terms<input value={form.brand_terms} onChange={(event) => setForm({ ...form, brand_terms: event.target.value })} className="mt-1 w-full rounded-lg border px-3 py-2" placeholder="Nike, Patagonia" /></label>
-              <label className="text-sm">Condition terms<input value={form.condition_terms} onChange={(event) => setForm({ ...form, condition_terms: event.target.value })} className="mt-1 w-full rounded-lg border px-3 py-2" placeholder="New, Used - Excellent" /></label>
-              <label className="text-sm">Source types<input value={form.source_types} onChange={(event) => setForm({ ...form, source_types: event.target.value })} className="mt-1 w-full rounded-lg border px-3 py-2" placeholder="amazon_vine, manual" /></label>
-              <label className="text-sm">Minimum price<input type="number" min="0" step="0.01" value={form.min_price} onChange={(event) => setForm({ ...form, min_price: event.target.value })} className="mt-1 w-full rounded-lg border px-3 py-2" /></label>
-              <label className="text-sm">Maximum price<input type="number" min="0" step="0.01" value={form.max_price} onChange={(event) => setForm({ ...form, max_price: event.target.value })} className="mt-1 w-full rounded-lg border px-3 py-2" /></label>
+              <label className="text-sm">Rule name<Input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Clothing to resale apps" /></label>
+              <label className="text-sm">Priority<Input type="number" min="0" max="10000" value={form.priority} onChange={(event) => setForm({ ...form, priority: event.target.value })} /></label>
+              <label className="text-sm">Category terms<Input value={form.category_terms} onChange={(event) => setForm({ ...form, category_terms: event.target.value })} placeholder="Clothing, Shoes" /></label>
+              <label className="text-sm">Brand terms<Input value={form.brand_terms} onChange={(event) => setForm({ ...form, brand_terms: event.target.value })} placeholder="Nike, Patagonia" /></label>
+              <label className="text-sm">Condition terms<Input value={form.condition_terms} onChange={(event) => setForm({ ...form, condition_terms: event.target.value })} placeholder="New, Used - Excellent" /></label>
+              <label className="text-sm">Source types<Input value={form.source_types} onChange={(event) => setForm({ ...form, source_types: event.target.value })} placeholder="amazon_vine, manual" /></label>
+              <label className="text-sm">Minimum price<Input type="number" min="0" step="0.01" value={form.min_price} onChange={(event) => setForm({ ...form, min_price: event.target.value })} /></label>
+              <label className="text-sm">Maximum price<Input type="number" min="0" step="0.01" value={form.max_price} onChange={(event) => setForm({ ...form, max_price: event.target.value })} /></label>
             </div>
-            <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.match_all} onChange={(event) => setForm({ ...form, match_all: event.target.checked })} />Match all items (use sparingly)</label>
+            <Checkbox checked={form.match_all} onChange={(event) => setForm({ ...form, match_all: event.target.checked })} label="Match all items (use sparingly)" />
             <div className="grid gap-4 md:grid-cols-2">
               {[
                 ['include_markets', 'Include marketplaces'],
@@ -175,7 +177,7 @@ export default function MarketplaceRoutingPage() {
                 <fieldset key={field} className="rounded-lg border p-3">
                   <legend className="px-1 text-sm font-semibold">{label}</legend>
                   <div className="flex flex-wrap gap-x-4 gap-y-2">
-                    {MARKETS.map(([value, name]) => <label key={value} className="flex items-center gap-1.5 text-xs"><input type="checkbox" checked={form[field].includes(value)} onChange={() => setForm({ ...form, [field]: toggleValue(form[field], value) })} />{name}</label>)}
+                    {MARKETS.map(([value, name]) => <Checkbox key={value} className="border-0 bg-transparent p-1" checked={form[field].includes(value)} onChange={() => setForm({ ...form, [field]: toggleValue(form[field], value) })} label={name} />)}
                   </div>
                 </fieldset>
               ))}
