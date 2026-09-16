@@ -3501,12 +3501,12 @@ export default function SettingsPage() {
                             provider_enabled: bridgeAccountForm.provider_enabled,
                             browser_enabled: bridgeAccountForm.browser_enabled,
                             session_state: bridgeAccountForm.session_state,
-                            session_payload: bridgeAccountForm.session_payload_text.trim() ? JSON.parse(bridgeAccountForm.session_payload_text) : {},
+                            ...(bridgeAccountForm.session_payload_text.trim() ? { session_payload: JSON.parse(bridgeAccountForm.session_payload_text) } : {}),
                             expires_at: bridgeAccountForm.expires_at || null,
                           });
                           await updateBridgeAccountSession(bridgeAccountForm.marketplace, bridgeAccountForm.account_key, {
                             session_state: bridgeAccountForm.session_state,
-                            session_payload: bridgeAccountForm.session_payload_text.trim() ? JSON.parse(bridgeAccountForm.session_payload_text) : {},
+                            ...(bridgeAccountForm.session_payload_text.trim() ? { session_payload: JSON.parse(bridgeAccountForm.session_payload_text) } : {}),
                             expires_at: bridgeAccountForm.expires_at || null,
                             last_tested_at: new Date().toISOString(),
                             notes: bridgeAccountForm.notes,
@@ -3578,11 +3578,12 @@ export default function SettingsPage() {
                         </label>
                       </div>
                       <div className="space-y-2">
-                        <label className="text-sm font-medium text-[#101828]">Session payload JSON</label>
+                        <label className="text-sm font-medium text-[#101828]">Advanced session metadata</label>
+                        <p className="text-xs text-[#667085]">Existing session credentials are never shown here. Leave blank to preserve them.</p>
                         <textarea
                           value={bridgeAccountForm.session_payload_text}
                           onChange={(event) => setBridgeAccountForm((current) => ({ ...current, session_payload_text: event.target.value }))}
-                          placeholder='{"cookies":[{"name":"c_user","value":"..."}]}'
+                          placeholder="Optional metadata JSON (leave blank to preserve the saved session)"
                           className="mt-1 h-28 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 py-2 text-sm text-[#101828]"
                         />
                       </div>
@@ -3617,7 +3618,7 @@ export default function SettingsPage() {
                               provider_enabled: !!account.provider_enabled,
                               browser_enabled: !!account.browser_enabled,
                               session_state: account.session_state || 'draft',
-                              session_payload_text: JSON.stringify(account.session_payload || {}, null, 2),
+                              session_payload_text: '',
                               expires_at: account.expires_at || '',
                             })
                           }

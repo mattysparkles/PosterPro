@@ -1,4 +1,5 @@
 import { cn } from '../../lib/utils';
+import Button from '../ui/button';
 
 export default function SettingsNav({ groups = [], activeTab, onSelect }) {
   return (
@@ -16,12 +17,13 @@ export default function SettingsNav({ groups = [], activeTab, onSelect }) {
             {group.tabs.map((tab) => {
               const selected = activeTab === tab.value;
               return (
-                <button
+                <Button
                   key={tab.value}
                   type="button"
                   onClick={() => onSelect(tab.value)}
+                  variant="tertiary"
                   className={cn(
-                    'flex w-full items-center justify-between rounded-2xl border px-3 py-3 text-left transition',
+                    '!flex w-full items-center justify-between rounded-2xl border px-3 py-3 text-left transition',
                     selected
                       ? 'border-[var(--pp-primary-soft)] bg-[var(--pp-shell-active)] text-[var(--pp-primary)] shadow-[0_10px_24px_rgba(23,58,99,0.12)]'
                       : 'border-transparent bg-white text-[var(--pp-text)] hover:border-[var(--pp-border)] hover:bg-[#fcfaf6]'
@@ -34,7 +36,7 @@ export default function SettingsNav({ groups = [], activeTab, onSelect }) {
                   <span className="ml-3 rounded-full border border-[var(--pp-border)] bg-[var(--pp-surface)] px-2 py-0.5 text-[11px] font-semibold text-[var(--pp-muted)]">
                     {selected ? 'Open' : 'Go'}
                   </span>
-                </button>
+                </Button>
               );
             })}
           </div>
