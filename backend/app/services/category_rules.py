@@ -74,6 +74,14 @@ _VERIFIED_CATEGORY_IDS: dict[str, str] = {
     "Computers/Tablets & Networking > Laptop/Notebook Accessories > Stands & Risers": "116346",
     "Home & Garden > Yard, Garden & Outdoor Living > Bird Houses": "20502",
     "Home & Garden > Window Treatments > Blinds & Shades": "20585",
+    # Top-level fallback leaves are also retained only where the live catalog
+    # already has a verified ID for that exact canonical value.
+    "Pet Supplies": "1284",
+    "Home & Garden": "36956",
+    "Computers/Tablets & Networking": "48618",
+    "Health & Beauty": "1277",
+    "Toys & Hobbies": "234",
+    "Automotive": "11808",
 }
 
 
