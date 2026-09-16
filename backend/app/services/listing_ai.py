@@ -244,6 +244,16 @@ def build_listing_description(
     title_text = " ".join(str(title or "").split()).strip() or "Item"
     specifics = item_specifics if isinstance(item_specifics, dict) else {}
     feature_bits: list[str] = []
+    # Source metadata is intentionally treated as structured evidence.  Older
+    # callers only provide item specifics, while Vine/photo recovery callers
+    # can provide normalized facts without making the copy generator parse a
+    # raw marketplace page.
+    evidence = source_metadata if isinstance(source_metadata, dict) else {}
+    nested = evidence.get("amazon_product_facts") if isinstance(evidence.get("amazon_product_facts"), dict) else evidence.get("source_facts")
+    facts = nested if isinstance(nested, dict) else evidence
+    source_bullets = facts.get("feature_bullets") or facts.get("bullets") or []
+    if isinstance(source_bullets, str):
+        source_bullets = [source_bullets]
     for field in ("Brand", "Model", "Type", "Color", "Capacity", "Voltage", "Wattage", "Compatible Capsule/Pad System", "MPN", "UPC"):
         value = specifics.get(field)
         if value is None:
@@ -265,6 +275,41 @@ def build_listing_description(
     parts: list[str] = [f"{title_text} is a marketplace listing built from the item details available for this product."]
     if feature_bits:
         parts.append(f"Key details include {', '.join(feature_bits[:5])}.")
+    # Include useful, source-backed features in a skimmable section.  Filter
+    # policy/navigation boilerplate before it can become sales copy.
+    clean_bullets: list[str] = []
+    for bullet in source_bullets:
+        text = _normalize_text(bullet)
+        lowered = text.lower()
+        if len(text) < 14 or any(marker in lowered for marker in ("free 30-day", "refund", "replacement", "add to cart", "buy now", "shipping", "return policy", "sponsored")):
+            continue
+        if text.lower() in {item.lower() for item in clean_bullets}:
+            continue
+        clean_bullets.append(text[:260])
+        if len(clean_bullets) >= 6:
+            break
+    if clean_bullets:
+        parts.append("Important features: " + " ".join(clean_bullets) + ".")
+    source_specs = facts.get("specifications") if isinstance(facts.get("specifications"), dict) else {}
+    spec_lines: list[str] = []
+    for key, value in source_specs.items():
+        key_text = _normalize_text(key)
+        value_text = _normalize_text(value)
+        if not key_text or not value_text or value_text.lower() in {"unknown", "n/a", "na", "none"}:
+            continue
+        if any(marker in key_text.lower() for marker in ("review", "asin", "refund", "shipping", "return")):
+            continue
+        spec_lines.append(f"{key_text}: {value_text[:180]}")
+        if len(spec_lines) >= 8:
+            break
+    if spec_lines:
+        parts.append("Specifications: " + "; ".join(spec_lines) + ".")
+    source_description = _normalize_text(facts.get("product_description"))
+    if source_description and len(source_description) > 40 and not any(marker in source_description.lower() for marker in ("free 30-day", "refund", "return policy")):
+        # A short, source-backed context sentence helps non-Vine intake while
+        # avoiding wholesale copying of scraped source prose.
+        summary = source_description[:420].rstrip(" ,;:")
+        parts.append(f"About the product: {summary}.")
     if included:
         included_text = " ".join(str(included).split()).strip()
         if included_text:
@@ -338,6 +383,7 @@ class ListingAIService:
             image_signals.get("marketplace_targets") or ["ebay", "facebook"],
         )
         merged["marketplace_rules"] = self._marketplace_rules()
+        merged["_source_metadata"] = image_signals.get("source_metadata") if isinstance(image_signals.get("source_metadata"), dict) else None
         ai_marketplace_drafts = llm.get("marketplace_drafts") if isinstance(llm, dict) and isinstance(llm.get("marketplace_drafts"), dict) else {}
         heuristic_marketplace_drafts = self._build_marketplace_drafts(merged)
         merged["marketplace_drafts"] = {
@@ -785,6 +831,7 @@ class ListingAIService:
         item_specifics = generated.get("item_specifics") if isinstance(generated.get("item_specifics"), dict) else {}
         condition = str(generated.get("condition") or "Needs review").strip()
         category = str(generated.get("category_suggestion") or "").strip()
+        source_metadata = generated.get("_source_metadata") if isinstance(generated.get("_source_metadata"), dict) else None
         sources = {
             "title": title,
             "description": description,
@@ -795,12 +842,12 @@ class ListingAIService:
         return {
             "ebay": {
                 "title": self._marketplace_title(title, item_specifics, category, max_length=_MARKETPLACE_RULES["ebay"]["title_max"]),
-                "description": build_listing_description(title=title, item_specifics=item_specifics, condition_notes=condition, source_label="eBay", source_metadata=None),
+                "description": build_listing_description(title=title, item_specifics=item_specifics, condition_notes=condition, source_label="eBay", source_metadata=source_metadata),
                 "sources": sources,
             },
             "facebook": {
                 "title": self._marketplace_title(title, item_specifics, category, max_length=_MARKETPLACE_RULES["facebook"]["title_max"]),
-                "description": build_listing_description(title=title, item_specifics=item_specifics, condition_notes=condition, source_label="Facebook", source_metadata=None),
+                "description": build_listing_description(title=title, item_specifics=item_specifics, condition_notes=condition, source_label="Facebook", source_metadata=source_metadata),
                 "sources": sources,
             },
             "mercari": {
@@ -810,7 +857,7 @@ class ListingAIService:
             },
             "poshmark": {
                 "title": self._marketplace_title(title, item_specifics, category, max_length=_MARKETPLACE_RULES["poshmark"]["title_max"]),
-                "description": build_listing_description(title=title, item_specifics=item_specifics, condition_notes=condition, source_label="Poshmark", source_metadata=None),
+                "description": build_listing_description(title=title, item_specifics=item_specifics, condition_notes=condition, source_label="Poshmark", source_metadata=source_metadata),
                 "sources": sources,
             },
             "vinted": {

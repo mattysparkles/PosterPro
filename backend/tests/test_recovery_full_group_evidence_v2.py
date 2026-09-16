@@ -232,6 +232,23 @@ def test_recovery_draft_copy_reads_like_product_listing_and_not_recovery_caption
     assert "coffee maker" in lowered
 
 
+def test_listing_description_uses_structured_source_facts_without_policy_garbage():
+    description = build_listing_description(
+        title="Portable Camping Toilet",
+        item_specifics={"Brand": "TrailCo", "Type": "Portable Toilet"},
+        source_metadata={"source_facts": {
+            "feature_bullets": ["Foldable seat with splash-resistant design", "FREE 30-day refund/replacement"],
+            "specifications": {"Material": "HDPE plastic", "Capacity": "5.3 gallons", "ASIN": "B00NOISE"},
+            "product_description": "A compact sanitation option for camping and road trips.",
+        }},
+    )
+    lowered = description.lower()
+    assert "foldable seat" in lowered
+    assert "5.3 gallons" in lowered
+    assert "hdpe plastic" in lowered
+    assert "refund/replacement" not in lowered
+
+
 def test_recovery_draft_excludes_slate_photos_from_listing_gallery(db_session):
     user = User(email="slate-filter@example.com")
     db_session.add(user)
