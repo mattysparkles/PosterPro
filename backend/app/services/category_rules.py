@@ -15,12 +15,12 @@ _CATEGORY_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
     (("rv cover", "travel trailer cover", "motorhome cover"), "Automotive > RV, Trailer & Camper Parts & Accessories > Covers"),
     (("heated vest battery", "heated clothing", "heated jacket battery"), "Consumer Electronics > Multipurpose Batteries & Power > Portable Chargers & Power Banks"),
     (("dog house heater", "chicken coop heater"), "Pet Supplies > Dog Supplies > Other Dog Supplies"),
-    (("posture corrector", "back brace", "shoulder brace"), "Health & Beauty > Health Care > Braces & Supports"),
+    (("posture corrector", "back brace", "shoulder brace"), "Health & Beauty > Medical & Mobility > Orthopedics & Supports > Orthotics, Braces & Sleeves"),
     (("golf simulator impact screen", "golf impact screen"), "Sporting Goods > Golf > Training Aids"),
     (("selfie stick", "selfie pole"), "Cell Phones & Accessories > Cell Phone Accessories > Selfie Sticks"),
     (("windshield curtain", "rv privacy curtain"), "Automotive > RV, Trailer & Camper Parts & Accessories > Interior Accessories"),
-    (("hot water recirculating pump", "water recirculation pump"), "Home & Garden > Plumbing & Fixtures > Pumps"),
-    (("breakaway charger cable", "rocksmith cable"), "Video Game Accessories > Cables & Adapters"),
+    (("hot water recirculating pump", "water recirculation pump"), "Home & Garden > Home Improvement > Plumbing & Fixtures > Pumps & Water Filtration Systems > Pumps"),
+    (("breakaway charger cable", "rocksmith cable"), "Video Games & Consoles > Video Game Accessories > Cables & Adapters"),
     (("misting nozzle", "terrarium misting"), "Pet Supplies > Reptile Supplies > Terrarium Accessories"),
     (("wallet tracker card", "find my tracker"), "Consumer Electronics > GPS & Accessories > GPS Trackers"),
     (("surge protector", "rv surge protector"), "Consumer Electronics > Power Protection > Surge Protectors"),
@@ -85,6 +85,9 @@ _VERIFIED_CATEGORY_IDS: dict[str, str] = {
     "Automotive": "11808",
     "Consumer Electronics > Multipurpose Batteries & Power > Battery Chargers": "48618",
     "Pet Supplies > Dog Supplies > Other Dog Supplies": "1283",
+    "Health & Beauty > Medical & Mobility > Orthopedics & Supports > Orthotics, Braces & Sleeves": "19264",
+    "Home & Garden > Home Improvement > Plumbing & Fixtures > Pumps & Water Filtration Systems > Pumps": "42132",
+    "Video Games & Consoles > Video Game Accessories > Cables & Adapters": "171814",
 }
 
 
