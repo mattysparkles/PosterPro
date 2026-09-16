@@ -2770,7 +2770,7 @@ async def run_dashboard_operator_command(
     # services. This prevents a multi-market request from becoming a global
     # update by accident.
     operation_plan = operator_command_service.parse_operation_plan(payload.prompt)
-    if len(operation_plan) > 1:
+    if operation_plan:
         if payload.apply_live and not payload.dry_run:
             if not payload.confirm_live_apply or str(payload.confirmation_phrase or '').strip() != 'APPLY COMPOUND OPERATIONS':
                 return {
