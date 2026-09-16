@@ -297,7 +297,7 @@ def build_listing_description(
         value_text = _normalize_text(value)
         if not key_text or not value_text or value_text.lower() in {"unknown", "n/a", "na", "none"}:
             continue
-        if any(marker in key_text.lower() for marker in ("review", "asin", "refund", "shipping", "return")):
+        if any(marker in key_text.lower() for marker in ("review", "asin", "refund", "shipping", "return", "best seller", "date first available", "customer rating")):
             continue
         spec_lines.append(f"{key_text}: {value_text[:180]}")
         if len(spec_lines) >= 8:

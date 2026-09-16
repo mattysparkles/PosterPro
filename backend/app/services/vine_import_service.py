@@ -2427,7 +2427,7 @@ class VineImportService:
         # structured attribute/value facts below rather than tokenizing prose
         # into misleading fragments.
         specifications = facts.get("specifications") or {}
-        excluded_spec_keys = {"customer reviews", "reviews", "asin", "model", "brand", "brand name", "type", "item type", "product type"}
+        excluded_spec_keys = {"customer reviews", "reviews", "asin", "model", "brand", "brand name", "type", "item type", "product type", "best sellers rank", "date first available", "publication date", "customer rating", "department"}
         useful_specs = []
         seen_spec_keys: set[str] = set()
         for key, value in specifications.items():
