@@ -852,10 +852,10 @@ export default function ListingWorkspacePage() {
               </div>
               <div className="space-y-2 md:col-span-2">
                 <label className="text-sm font-medium text-[#101828]">Description</label>
-                <textarea
+                <Textarea
                   value={form.description}
                   onChange={(event) => setForm((current) => ({ ...current, description: event.target.value }))}
-                  className="min-h-36 w-full rounded-[10px] border border-[#e5e7eb] bg-white p-3 text-sm text-[#101828] outline-none transition placeholder:text-[#98a2b3] focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                  className="min-h-36"
                   placeholder="Describe condition, accessories, flaws, dimensions, and what is included."
                 />
               </div>
@@ -1071,7 +1071,7 @@ export default function ListingWorkspacePage() {
                   </div>
                   <div className="mt-3 space-y-2">
                     <label className="text-sm font-medium text-[#101828]">Meetup or shipping notes</label>
-                    <textarea
+                    <Textarea
                       value={form.marketplace_data.shipping.facebook_meetup_notes}
                       onChange={(event) => setForm((current) => ({
                         ...current,
@@ -1080,7 +1080,7 @@ export default function ListingWorkspacePage() {
                           shipping: { ...current.marketplace_data.shipping, facebook_meetup_notes: event.target.value },
                         },
                       }))}
-                      className="min-h-28 w-full rounded-[10px] border border-[#e5e7eb] bg-white p-3 text-sm text-[#101828] outline-none transition focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                      className="min-h-28"
                       placeholder="Pickup radius, meetup rules, accepted shipping methods, packaging notes."
                     />
                   </div>
