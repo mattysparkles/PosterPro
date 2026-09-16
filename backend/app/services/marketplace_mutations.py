@@ -65,6 +65,8 @@ def validate_marketplace_operation_plan(
             condition=source.condition,
             marketplace_data=dict(source.marketplace_data or {}),
             source_metadata=dict(source.source_metadata or {}),
+            canonical_description=getattr(source, "canonical_description", None),
+            marketplace_descriptions=dict(getattr(source, "marketplace_descriptions", None) or {}),
         )
         apply_marketplace_operation(probe, marketplaces=[str(value) for value in markets], field=field, action=action, value=operation.get("value"))
         # The probe mutation above is rolled back by restoring its original
@@ -93,6 +95,8 @@ def apply_marketplace_operation_plan(
             condition=listing.condition,
             marketplace_data=dict(listing.marketplace_data or {}),
             source_metadata=dict(listing.source_metadata or {}),
+            canonical_description=getattr(listing, "canonical_description", None),
+            marketplace_descriptions=dict(getattr(listing, "marketplace_descriptions", None) or {}),
         )
         for listing_id, listing in listings_by_id.items()
     }
@@ -107,7 +111,7 @@ def apply_marketplace_operation_plan(
     if not preview_only:
         for listing_id, probe in probes.items():
             original = listings_by_id[listing_id]
-            for attr in ("listing_price", "title", "description", "category_suggestion", "condition", "marketplace_data", "source_metadata"):
+            for attr in ("listing_price", "title", "description", "canonical_description", "marketplace_descriptions", "category_suggestion", "condition", "marketplace_data", "source_metadata"):
                 setattr(original, attr, getattr(probe, attr))
     return {"preview": bool(preview_only), "operations": normalized, "changes": changes}
 
