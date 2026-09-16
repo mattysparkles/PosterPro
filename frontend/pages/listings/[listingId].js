@@ -7,6 +7,7 @@ import AppShell from "../../components/layout/AppShell";
 import Button from "../../components/ui/button";
 import Input from "../../components/ui/input";
 import Select from "../../components/ui/select";
+import Textarea from "../../components/ui/textarea";
 import PageHeader from "../../components/ui/page-header";
 import SectionPanel from "../../components/ui/section-panel";
 import StatusPill from "../../components/ui/status-pill";
@@ -837,11 +838,11 @@ export default function ListingWorkspacePage() {
               {!isNew ? <div className="md:col-span-2 rounded-xl border border-blue-100 bg-blue-50/50 p-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div><h4 className="text-sm font-semibold text-[#101828]">Marketplace description</h4><p className="text-xs text-[#667085]">Edit one destination without changing the canonical description or other channels.</p></div>
-                  <select className="h-9 rounded-lg border border-blue-200 bg-white px-2 text-sm" value={variantMarketplace} onChange={(event) => setVariantMarketplace(event.target.value)} aria-label="Marketplace description destination">
+                  <Select className="h-9 rounded-xl border-blue-200 px-2" value={variantMarketplace} onChange={(event) => setVariantMarketplace(event.target.value)} aria-label="Marketplace description destination">
                     {Object.keys(CHANNEL_LABELS).filter((key) => ['ebay','facebook','mercari','poshmark','vinted','etsy','offerup'].includes(key)).map((key) => <option key={key} value={key}>{CHANNEL_LABELS[key]}</option>)}
-                  </select>
+                  </Select>
                 </div>
-                <textarea value={variantDraft} onChange={(event) => setVariantDraft(event.target.value)} className="mt-3 min-h-28 w-full rounded-lg border border-blue-200 bg-white p-3 text-sm text-[#101828] outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10" maxLength={variantMarketplace === 'mercari' ? 1000 : undefined} />
+                <Textarea value={variantDraft} onChange={(event) => setVariantDraft(event.target.value)} className="mt-3 min-h-28 border-blue-200" maxLength={variantMarketplace === 'mercari' ? 1000 : undefined} />
                 <div className="mt-2 flex items-center justify-between"><span className="text-xs text-[#667085]">{variantMarketplace === 'mercari' ? `${variantDraft.length}/1000 characters` : `${variantDraft.length} characters`} · saved as operator-edited</span><Button type="button" size="sm" onClick={saveMarketplaceVariant} disabled={savingVariant}>{savingVariant ? 'Saving…' : 'Save destination copy'}</Button></div>
               </div> : null}
               <div className="space-y-2">
