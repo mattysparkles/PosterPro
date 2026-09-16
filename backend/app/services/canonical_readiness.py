@@ -109,6 +109,7 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
         "source_fact_coverage": round(source_facts_covered / source_fact_count, 3) if source_fact_count else None,
         "marketplace_readiness": dict(base.get("marketplace_readiness") or {}),
         "remote_live": remote_live,
+        "remote_state": "PUBLISHED" if remote_live else "LOCAL",
         "queue": queue,
     }
     if marketplace:

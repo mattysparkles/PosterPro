@@ -33,6 +33,7 @@ def test_published_remote_listing_keeps_published_queue_identity_with_local_bloc
     )
     result = canonical_listing_readiness(listing)
     assert result["remote_live"] is True
+    assert result["remote_state"] == "PUBLISHED"
     assert result["queue"] == "PUBLISHED"
     assert result["publishable"] is False
     assert "Description needs enrichment" in result["blocking_reasons"]
