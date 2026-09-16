@@ -14,6 +14,21 @@ from app.services.marketplace_error_translation import translate_marketplace_err
 from app.workers.tasks import process_marketplace_crosspost_job_task, publish_listing_to_marketplace_task, sync_sold_everywhere_task
 
 
+def _current_pipeline_readiness_block(listing: Listing, marketplace: str) -> dict | None:
+    """Return a destination blocker for rows produced by the current pipeline.
+
+    Old imported records may not have source/processing metadata and continue
+    through their established preflight compatibility path. New intake rows do
+    carry both fields, so queueing cannot bypass canonical readiness.
+    """
+    if not str(getattr(listing, "source_type", "") or "").strip() or not str(getattr(listing, "processing_state", "") or "").strip():
+        return None
+    readiness = canonical_listing_readiness(listing, marketplace=marketplace)
+    if readiness.get("publishable"):
+        return None
+    return readiness
+
+
 def list_marketplaces() -> list[dict]:
     return [
         {"name": MarketplaceName.ebay.value, "supports_oauth": True},
@@ -368,6 +383,13 @@ def bulk_publish_ready(
                     listing_item["marketplaces"][market] = {"marketplace": market, "status": "unsupported", "task_id": None, "error": f"Unsupported marketplace: {market}"}
                     summary["skipped_unsupported_marketplace"] += 1
                     continue
+                canonical_block = _current_pipeline_readiness_block(listing, market)
+                if canonical_block:
+                    listing_item["blocked_marketplaces"].append(market)
+                    summary["skipped_blocked"] += 1
+                    result = {"marketplace": market, "status": "skipped_blocked", "task_id": None, "error": "Listing is not ready to publish.", "error_details": canonical_block.get("blocking_reasons") or [], "canonical_readiness": canonical_block}
+                    listing_item["marketplaces"][market] = result
+                    continue
                 preflight = None if force_preflight_refresh else preflight_service._cached_marketplace_preflight(listing, market)
                 if preflight is None or force_preflight_refresh:
                     try:
@@ -522,6 +544,13 @@ def bulk_publish_ready(
                 summary["skipped_unsupported_marketplace"] += 1
                 continue
 
+            canonical_block = _current_pipeline_readiness_block(listing, market)
+            if canonical_block:
+                listing_item["blocked_marketplaces"].append(market)
+                summary["skipped_blocked"] += 1
+                result = {"marketplace": market, "status": "dry_run_blocked" if dry_run else "skipped_blocked", "task_id": None, "error": "Listing is not ready to publish.", "error_details": canonical_block.get("blocking_reasons") or [], "canonical_readiness": canonical_block}
+                listing_item["marketplaces"][market] = result
+                continue
             preflight = None if force_preflight_refresh else preflight_service._cached_marketplace_preflight(listing, market)
             if preflight is None or force_preflight_refresh:
                 try:
