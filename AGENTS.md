@@ -1,5 +1,19 @@
 # PosterPro Deployment Log
 
+## 2026-09-16 - Sale polling replay window
+
+### Fixed
+- Sale polling now replays a bounded six-hour window by default (configurable
+  with `SALE_DETECTION_LOOKBACK_MINUTES`) instead of only looking back one poll
+  interval. This covers deploy/provider gaps while retaining existing
+  idempotency by marketplace order/listing identity.
+- The effective lookback is exposed in the automation settings payload.
+
+### Validation and deployment
+- Sale-detection gating test passed (`1 passed`); backend compile passed.
+- Restarted PosterPro backend, worker, and beat; all are active.
+- Commit `b258807` pushed normally. No marketplace mutation was invoked.
+
 ## 2026-09-16 - Jobs layout persistence and readiness contract exposure
 
 ### Implemented
