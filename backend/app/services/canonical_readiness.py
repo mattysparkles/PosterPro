@@ -25,11 +25,15 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
     description = str(getattr(listing, "canonical_description", None) or getattr(listing, "description", None) or "").strip()
     source_metadata = getattr(listing, "source_metadata", None) if isinstance(getattr(listing, "source_metadata", None), dict) else {}
     source_facts = source_metadata.get("amazon_product_facts") if isinstance(source_metadata.get("amazon_product_facts"), dict) else source_metadata.get("source_facts")
+    source_fact_count = 0
+    source_facts_covered = 0
     if isinstance(source_facts, dict) and description:
         fact_values = [*(source_facts.get("feature_bullets") or []), *((source_facts.get("specifications") or {}).values() if isinstance(source_facts.get("specifications"), dict) else [])]
         fact_values = [str(value).strip() for value in fact_values if str(value or "").strip()]
+        source_fact_count = len(fact_values)
         description_tokens = set(re.findall(r"[a-z0-9]{4,}", description.lower()))
         covered = sum(bool(description_tokens.intersection(set(re.findall(r"[a-z0-9]{4,}", value.lower())))) for value in fact_values)
+        source_facts_covered = covered
         if len(fact_values) >= 4 and covered < max(2, min(4, len(fact_values) // 3)):
             blockers.append("Description does not cover enough verified product facts")
     if not description:
@@ -75,6 +79,9 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
         "warnings": warnings,
         "blocking_reasons": blockers,
         "missing_required_aspects": missing_required_aspects,
+        "source_fact_count": source_fact_count,
+        "source_facts_covered": source_facts_covered,
+        "source_fact_coverage": round(source_facts_covered / source_fact_count, 3) if source_fact_count else None,
         "marketplace_readiness": dict(base.get("marketplace_readiness") or {}),
         "queue": queue,
     }
