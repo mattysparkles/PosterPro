@@ -2107,7 +2107,7 @@ export default function ListingsPage() {
                 <Button size="sm" variant="outline" disabled={listingPagination.page <= 1} onClick={() => { commitPageChange(listingPagination.page - 1); }}>Previous</Button>
                 <div className="flex items-center gap-2 rounded-[10px] border border-[#d0d5dd] bg-white px-2 py-1.5">
                   <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]" htmlFor="listings-page-input">Page</label>
-                  <input
+                  <Input
                     id="listings-page-input"
                     type="number"
                     min={1}
@@ -2167,7 +2167,7 @@ export default function ListingsPage() {
                 <Button size="sm" variant="outline" disabled={listingPagination.page <= 1} onClick={() => { commitPageChange(listingPagination.page - 1); }}>Previous</Button>
                 <div className="flex items-center gap-2 rounded-[10px] border border-[#d0d5dd] bg-white px-2 py-1.5">
                   <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]" htmlFor="listings-page-input-bottom">Page</label>
-                  <input
+                  <Input
                     id="listings-page-input-bottom"
                     type="number"
                     min={1}

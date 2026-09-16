@@ -71,13 +71,29 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
         blockers.append("A validated eBay category ID is required before publishing")
         blockers = list(dict.fromkeys(blockers))
     processing_state = str(getattr(listing, "processing_state", "") or "").lower()
+    # A remote publication is a distinct canonical state from a local draft
+    # revision.  Older workers may leave local processing/readiness blockers on
+    # a listing after it was successfully published; those blockers must not
+    # relabel the item itself as a draft/attention row.  Keep the blockers and
+    # publishable=false truth intact, but expose the remote state as the queue
+    # identity so queue, detail, and publish consumers agree.
+    remote_live = bool(str(getattr(listing, "ebay_listing_id", "") or "").strip()) and (
+        str(getattr(getattr(listing, "status", None), "value", getattr(listing, "status", "")) or "").lower() in {"published", "posted"}
+        or str(getattr(getattr(listing, "ebay_publish_status", None), "value", getattr(listing, "ebay_publish_status", "")) or "").upper() == "POSTED"
+    )
+    if not remote_live:
+        for row in (getattr(listing, "marketplace_listings", None) or []):
+            row_status = str(getattr(getattr(row, "status", None), "value", getattr(row, "status", "")) or "").upper()
+            if row_status in {"PUBLISHED", "UPDATED"} and str(getattr(row, "marketplace_listing_id", "") or "").strip():
+                remote_live = True
+                break
     processing_complete = processing_state in {"complete", "completed", "ready"}
     attention = bool(getattr(listing, "processing_blocking_reason", None)) or processing_state in {"needs_attention", "failed", "error"}
     # A listing cannot be publishable while enrichment/processing is still in
     # flight, even when the basic photo/price checks happen to pass.
     publishable = bool(processing_complete and base.get("ready_for_publish")) and not attention and not blockers
     transient_processing = processing_state in {"processing", "pending", "queued", "enriching", "source_enrichment", "image_enrichment", "category_resolution", "title_generation", "description_generation", "quality_validation"}
-    queue = "NEEDS_ATTENTION" if (attention or blockers) else "PROCESSING" if (transient_processing or not processing_complete) else "NEEDS_REVIEW" if getattr(listing, "needs_review", False) else "READY"
+    queue = "PUBLISHED" if remote_live else "NEEDS_ATTENTION" if (attention or blockers) else "PROCESSING" if (transient_processing or not processing_complete) else "NEEDS_REVIEW" if getattr(listing, "needs_review", False) else "READY"
     result = {
         "processing_complete": processing_complete,
         "enrichment_complete": bool(stored.get("enrichment_complete", processing_complete)),
@@ -92,6 +108,7 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
         "source_facts_covered": source_facts_covered,
         "source_fact_coverage": round(source_facts_covered / source_fact_count, 3) if source_fact_count else None,
         "marketplace_readiness": dict(base.get("marketplace_readiness") or {}),
+        "remote_live": remote_live,
         "queue": queue,
     }
     if marketplace:

@@ -22,6 +22,22 @@ def test_blocked_listing_cannot_be_publishable(db_session):
     assert "Missing identity" in result["blocking_reasons"]
 
 
+def test_published_remote_listing_keeps_published_queue_identity_with_local_blocker(db_session):
+    user = User(email="readiness-published@example.com"); db_session.add(user); db_session.flush()
+    listing = Listing(
+        user_id=user.id, ebay_listing_id="EBAY-123", ebay_publish_status="POSTED",
+        status="published", processing_state="needs_attention",
+        processing_blocking_reason="Description needs enrichment", needs_review=False,
+        title="Published item", description="Short", category_suggestion="Sporting Goods",
+        listing_price=20, listing_images=[{"storage_path":"/media/item.jpg", "operator_state":"approved", "role":"primary"}],
+    )
+    result = canonical_listing_readiness(listing)
+    assert result["remote_live"] is True
+    assert result["queue"] == "PUBLISHED"
+    assert result["publishable"] is False
+    assert "Description needs enrichment" in result["blocking_reasons"]
+
+
 def test_processing_listing_is_not_publishable_or_needs_review(db_session):
     user = User(email="readiness-processing@example.com"); db_session.add(user); db_session.flush()
     listing = Listing(
