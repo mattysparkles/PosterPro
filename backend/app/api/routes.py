@@ -1123,6 +1123,10 @@ class MarketplaceOperationRequest(BaseModel):
     value: object | None = None
 
 
+class MarketplaceOperationPreviewRequest(MarketplaceOperationRequest):
+    """Explicit preview contract for field- and destination-scoped edits."""
+
+
 class MarketplaceDescriptionUpdateRequest(BaseModel):
     description: str
     provenance: str = "operator_edited"
@@ -2103,6 +2107,30 @@ def apply_listing_marketplace_operation(
     db.commit()
     db.refresh(listing)
     return _serialize_listing_response(listing)
+
+
+@router.post("/listings/{listing_id}/marketplace-operation/preview")
+def preview_listing_marketplace_operation(
+    listing_id: int,
+    payload: MarketplaceOperationPreviewRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return a non-mutating diff before a marketplace-scoped edit is applied."""
+    listing = db.get(Listing, listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    ensure_user_owns_resource(current_user, listing.user_id)
+    from app.services.marketplace_mutations import apply_marketplace_operation_plan
+    try:
+        result = apply_marketplace_operation_plan(
+            [{"listing_ids": [listing_id], "marketplaces": payload.marketplaces, "field": payload.field, "action": payload.action, "value": payload.value}],
+            {listing_id: listing},
+            preview_only=True,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"listing_id": listing_id, "preview": True, "changes": result["changes"], "untouched_markets": result.get("untouched_markets", [])}
 
 
 @router.post("/listings/{listing_id}/save-publish-changes")
