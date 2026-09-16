@@ -2378,12 +2378,14 @@ export default function ListingsPage() {
             const Icon = mode.icon;
             const active = workspaceMode === mode.key;
             return (
-              <button
+              <Button
                 key={mode.key}
                 type="button"
                 onClick={() => setWorkspaceMode(mode.key)}
+                variant={active ? 'subtle' : 'secondary'}
+                size="sm"
                 className={[
-                  'rounded-[14px] border p-3 text-left transition',
+                  'h-auto min-h-[120px] w-full justify-start rounded-[14px] border p-3 text-left transition',
                   active
                     ? 'border-[#bfd2ff] bg-[#f4f8ff] shadow-[0_14px_40px_rgba(37,99,235,0.12)]'
                     : 'border-[#e5e7eb] bg-white hover:border-[#cdd8ea] hover:bg-[#fbfcff]',
@@ -2397,7 +2399,7 @@ export default function ListingsPage() {
                 </div>
                 <p className="mt-2 text-sm font-semibold text-[#101828]">{mode.label}</p>
                 <p className="mt-1 hidden text-xs leading-5 text-[#667085] xl:block">{mode.description}</p>
-              </button>
+              </Button>
             );
           })}
         </div>
