@@ -19,6 +19,7 @@ import PageHeader from "../components/ui/page-header";
 import SectionPanel from "../components/ui/section-panel";
 import StatusPill from "../components/ui/status-pill";
 import Checkbox from "../components/ui/checkbox";
+import Input from "../components/ui/input";
 import { Tabs } from "../components/ui/tabs";
 import { useAuth } from "../contexts/AuthContext";
 import useDashboardData from "../hooks/useDashboardData";
@@ -965,8 +966,8 @@ export default function JobsPage() {
                     <p className="text-xs text-amber-900">The extension has filled the marketplace form and stopped. Review and submit or end the listing on the marketplace; then record the confirmed result here. PosterPro does not auto-submit this action.</p>
                     {(activeJob.job.result?.page_url || activeJob.job.payload?.marketplace_payload?.start_url) ? <a href={activeJob.job.result?.page_url || activeJob.job.payload?.marketplace_payload?.start_url} target="_blank" rel="noreferrer" className="inline-flex text-sm font-semibold text-[#175cd3] underline">Open marketplace review page</a> : null}
                     {String(activeJob.job.action || "").toUpperCase() !== "END" ? <div className="grid gap-2 md:grid-cols-2">
-                      <label className="text-xs font-medium text-[#344054]">Marketplace listing ID<input value={assistedExternalId} onChange={(event) => setAssistedExternalId(event.target.value)} className="mt-1 w-full rounded border px-2 py-1.5 text-sm" placeholder="Required for a new listing" /></label>
-                      <label className="text-xs font-medium text-[#344054]">Marketplace listing URL<input value={assistedExternalUrl} onChange={(event) => setAssistedExternalUrl(event.target.value)} className="mt-1 w-full rounded border px-2 py-1.5 text-sm" placeholder="https://marketplace.example/…" /></label>
+                      <label className="text-xs font-medium text-[#344054]">Marketplace listing ID<Input value={assistedExternalId} onChange={(event) => setAssistedExternalId(event.target.value)} placeholder="Required for a new listing" /></label>
+                      <label className="text-xs font-medium text-[#344054]">Marketplace listing URL<Input value={assistedExternalUrl} onChange={(event) => setAssistedExternalUrl(event.target.value)} placeholder="https://marketplace.example/…" /></label>
                     </div> : null}
                     <Button size="sm" disabled={confirmingAssisted} onClick={() => void confirmAssistedResult(activeJob.job)}>{confirmingAssisted ? "Recording…" : String(activeJob.job.action || "").toUpperCase() === "END" ? "Confirm listing ended" : "Confirm marketplace submission"}</Button>
                   </div>
