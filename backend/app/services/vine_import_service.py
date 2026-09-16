@@ -2451,7 +2451,10 @@ class VineImportService:
         feature_lines = [
             f"• {_sanitize_vine_text(bullet)[:220].rstrip(' ,;:')}"
             for bullet in (facts.get("feature_bullets") or [])[:6]
-            if len(_sanitize_vine_text(bullet)) > 12 and not is_source_noise_category(_sanitize_vine_text(bullet))
+            if len(_sanitize_vine_text(bullet)) > 12
+            and _sanitize_vine_text(bullet).strip() != _sanitize_vine_text(facts.get("product_description") or "").strip()
+            and not _sanitize_vine_text(bullet).lower().startswith(("choose this", "buy now", "order now", "don't miss"))
+            and not is_source_noise_category(_sanitize_vine_text(bullet))
         ]
         if feature_lines:
             lines.extend(["", "Key features:", *feature_lines])
