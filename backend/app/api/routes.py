@@ -2851,8 +2851,66 @@ async def run_dashboard_operator_command(
                     "operations": serialized_operations,
                     "changes": preview_result["changes"],
                 }
-            if any(operation.action == 'end' or operation.field == 'listing' for operation in operation_plan):
-                results = [{"items": operation.items, "marketplaces": operation.marketplaces, "status": "not_executed", "message": "Ending listings requires an exact-identity marketplace job."} for operation in operation_plan]
+            end_operations = [operation for operation in operation_plan if operation.action == 'end' or operation.field == 'listing']
+            regular_operations = [operation for operation in operation_plan if operation not in end_operations]
+            if end_operations:
+                # End operations are queued as durable, destination-scoped
+                # jobs.  The worker performs exact remote-identity checks and
+                # uses the direct API or browser transport as appropriate.
+                results = []
+                for operation in end_operations:
+                    for listing_id in operation.items:
+                        listing = db.get(Listing, listing_id)
+                        active_rows = db.execute(select(MarketplaceListing).where(
+                            MarketplaceListing.listing_id == listing_id,
+                            MarketplaceListing.status.in_([MarketplaceListingStatus.PUBLISHED, MarketplaceListingStatus.UPDATED]),
+                        )).scalars().all()
+                        active = {str(row.marketplace.value if hasattr(row.marketplace, 'value') else row.marketplace).lower(): row for row in active_rows if row.marketplace_listing_id}
+                        for market in operation.marketplaces:
+                            market_key = str(market).strip().lower()
+                            row = active.get(market_key)
+                            if not row:
+                                results.append({"listing_id": listing_id, "marketplace": market_key, "status": "not_queued", "message": "No active remote listing identity was found."})
+                                continue
+                            pending = db.execute(select(MarketplaceCrosspostJob).where(
+                                MarketplaceCrosspostJob.user_id == current_user.id,
+                                MarketplaceCrosspostJob.listing_id == listing_id,
+                                MarketplaceCrosspostJob.status.in_(["queued", "running"]),
+                            ).order_by(MarketplaceCrosspostJob.id.desc())).scalars().all()
+                            existing = next((job for job in pending if market_key in (job.target_marketplaces or []) and str((job.execution_plan or {}).get("operation") or "").lower() == "end"), None)
+                            if existing:
+                                results.append({"listing_id": listing_id, "marketplace": market_key, "status": "already_queued", "job_id": existing.id})
+                                continue
+                            job = MarketplaceCrosspostJob(
+                                user_id=current_user.id, listing_id=listing_id, source_marketplace="posterpro",
+                                target_marketplaces=[market_key], requested_mode="operator_end", status="queued", priority=0,
+                                requested_by=current_user.id,
+                                execution_plan={"operation": "end", "external_listing_id": str(row.marketplace_listing_id), "reason": "operator_compound_plan"},
+                            )
+                            db.add(job); db.flush()
+                            try:
+                                task = _enqueue_priority(process_marketplace_crosspost_job_task, job.id, 0)
+                                job.task_id = task.id
+                            except Exception as exc:
+                                results.append({"listing_id": listing_id, "marketplace": market_key, "status": "queued", "job_id": job.id, "dispatch_error": type(exc).__name__})
+                            else:
+                                results.append({"listing_id": listing_id, "marketplace": market_key, "status": "queued", "job_id": job.id, "task_id": task.id})
+                db.commit()
+                # A compound request may include both destination end actions
+                # and ordinary field edits. Apply the latter through the same
+                # scoped mutation service instead of silently dropping them.
+                if regular_operations:
+                    listing_ids = sorted({listing_id for operation in regular_operations for listing_id in operation.items})
+                    listings = {listing_id: db.get(Listing, listing_id) for listing_id in listing_ids}
+                    plan_payload = [{"listing_ids": operation.items, "marketplaces": operation.marketplaces, "field": operation.field, "action": operation.action, "value": operation.value} for operation in regular_operations]
+                    try:
+                        applied = apply_marketplace_operation_plan(plan_payload, listings)
+                        db.add_all(listings.values())
+                        db.commit()
+                        results.extend({"listing_id": change["listing_id"], "status": "updated", "change": change} for change in applied["changes"])
+                    except ValueError as exc:
+                        db.rollback()
+                        raise HTTPException(status_code=422, detail=str(exc)) from exc
             else:
                 listing_ids = sorted({listing_id for operation in operation_plan for listing_id in operation.items})
                 listings = {listing_id: db.get(Listing, listing_id) for listing_id in listing_ids}
