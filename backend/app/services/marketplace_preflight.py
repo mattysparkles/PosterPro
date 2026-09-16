@@ -21,6 +21,7 @@ from app.services.listing_review import normalize_listing_images, summarize_list
 from app.services.marketplace_error_translation import translate_marketplace_error
 from app.services.marketplace_field_mapper import build_marketplace_payload
 from app.services.pricing_research_service import compute_listing_quality_summary
+from app.services.canonical_readiness import canonical_listing_readiness
 
 PRELIGHT_CACHE_TTL = timedelta(hours=24)
 PRELIGHT_CACHE_VERSION = "preflight_v2"
@@ -301,6 +302,10 @@ class MarketplacePreflightService:
                 "suggested_price": getattr(listing, "suggested_price", None),
             },
         )
+        # Keep preflight's marketplace-specific diagnostics, but expose the
+        # canonical readiness contract so callers do not have to reconcile a
+        # second, divergent definition of processing/blocking state.
+        canonical = canonical_listing_readiness(listing, marketplace=market)
         quality = compute_listing_quality_summary(listing, pricing_analysis=pricing)
         blockers = self._base_blockers(listing, market, pricing, readiness)
         warnings = self._base_warnings(listing, market, pricing, readiness)
@@ -362,6 +367,7 @@ class MarketplacePreflightService:
             "source_version": "preflight_v1",
             "quality_summary": quality,
             "readiness_summary": readiness,
+            "canonical_readiness": canonical,
         }
 
     def payload_preview(self, db: Session, listing: Listing, marketplace: str) -> dict[str, Any]:
