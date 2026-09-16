@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Button from '../ui/button';
 
 function clamp(value, min, max) { return Math.max(min, Math.min(value, max)); }
@@ -6,6 +6,7 @@ function clamp(value, min, max) { return Math.max(min, Math.min(value, max)); }
 export default function GuidedSpotlight({ steps = [], onClose }) {
   const [index, setIndex] = useState(0);
   const [rect, setRect] = useState(null);
+  const dialogRef = useRef(null);
   const current = steps[index];
 
   useEffect(() => {
@@ -34,12 +35,23 @@ export default function GuidedSpotlight({ steps = [], onClose }) {
     window.addEventListener('resize', update);
     window.addEventListener('scroll', update, true);
     const escape = (event) => { if (event.key === 'Escape') onClose(); };
+    const trapFocus = (event) => {
+      if (event.key !== 'Tab' || !dialogRef.current) return;
+      const focusable = dialogRef.current.querySelectorAll('button, a[href], input, textarea, select, [tabindex]:not([tabindex="-1"])');
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
     document.addEventListener('keydown', escape);
+    document.addEventListener('keydown', trapFocus);
     return () => {
       if (retryTimer) window.clearTimeout(retryTimer);
       window.removeEventListener('resize', update);
       window.removeEventListener('scroll', update, true);
       document.removeEventListener('keydown', escape);
+      document.removeEventListener('keydown', trapFocus);
       if (!hadTabIndex) element.removeAttribute('tabindex');
       if (previousFocus?.isConnected) previousFocus.focus?.({ preventScroll: true });
     };
@@ -50,7 +62,7 @@ export default function GuidedSpotlight({ steps = [], onClose }) {
   const target = rect || { top: viewport.innerHeight * 0.35, left: 24, width: 1, height: 1 };
   const bubbleWidth = Math.min(400, viewport.innerWidth - 32);
   const bubbleLeft = clamp(target.left, 16, Math.max(16, viewport.innerWidth - bubbleWidth - 16));
-  const bubbleTop = target.top + target.height + 16 + 190 > window.innerHeight
+  const bubbleTop = target.top + target.height + 16 + 190 > viewport.innerHeight
     ? clamp(target.top - 210, 16, viewport.innerHeight - 210)
     : target.top + target.height + 16;
   const top = { position: 'fixed', inset: 0, height: Math.max(0, target.top), background: 'rgba(9,16,28,.68)', zIndex: 119, pointerEvents: 'auto' };
@@ -64,7 +76,7 @@ export default function GuidedSpotlight({ steps = [], onClose }) {
       <div aria-hidden="true" onClick={onClose} style={right} />
       <div aria-hidden="true" onClick={onClose} style={bottom} />
       <div aria-hidden="true" style={{ position: 'fixed', top: target.top, left: target.left, width: target.width, height: target.height, border: '3px solid #fbbf24', borderRadius: 14, boxShadow: '0 0 0 3px rgba(255,255,255,.95)', zIndex: 120, pointerEvents: 'none' }} />
-      <section role="dialog" aria-modal="true" aria-labelledby="setup-spotlight-title" aria-describedby="setup-spotlight-body" className="fixed z-[121] w-[min(400px,calc(100vw-32px))] rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl" style={{ top: bubbleTop, left: bubbleLeft }}>
+      <section ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="setup-spotlight-title" aria-describedby="setup-spotlight-body" className="fixed z-[121] w-[min(400px,calc(100vw-32px))] rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl" style={{ top: bubbleTop, left: bubbleLeft }}>
         <p className="text-xs font-bold uppercase tracking-wide text-blue-700">Guided tour · {index + 1} of {steps.length}</p>
         <h2 id="setup-spotlight-title" className="mt-2 text-lg font-semibold text-slate-950">{current.title}</h2>
         <p id="setup-spotlight-body" className="mt-2 text-sm leading-6 text-slate-700">{current.body}</p>
