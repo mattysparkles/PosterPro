@@ -199,9 +199,15 @@ function getListingThumbnail(listing) {
 }
 
 function getListingBucket(listing) {
-  const canonicalBucket = String(listing?.queue_bucket || '').trim().toLowerCase();
+  // Prefer the server's canonical readiness result when present.  The queue
+  // endpoint and listing detail used to derive separate buckets, which could
+  // make the same row appear in Needs Attention in one view and Needs Review
+  // in another.  Keep the explicit queue_bucket as a compatibility fallback
+  // for older responses.
+  const readinessQueue = String(listing?.canonical_readiness?.queue || '').trim().toLowerCase();
+  const canonicalBucket = readinessQueue || String(listing?.queue_bucket || '').trim().toLowerCase();
   if (canonicalBucket) {
-    return canonicalBucket === 'needs_attention' ? 'attention' : canonicalBucket;
+    return ({needs_attention: 'attention', needs_review: 'review', processing: 'processing', ready: 'ready'}[canonicalBucket] || canonicalBucket);
   }
   if (isSoldListing(listing)) return 'sold';
   if (isArchivedListing(listing)) return 'archived';
@@ -239,6 +245,7 @@ function formatListingBucket(bucket) {
     sold: 'Sold',
     archived: 'Archived',
     failed: 'Failed',
+    processing: 'Processing',
   }[bucket] || String(bucket || 'Drafts').replaceAll('_', ' '));
 }
 
