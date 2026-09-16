@@ -3612,30 +3612,9 @@ export default function SettingsPage() {
                     Control delist behavior and optional media cleanup when a one-off item sells out.
                   </p>
                   <div className="mt-4 space-y-3">
-                    <label className="flex items-center justify-between rounded-[10px] border border-[#e5e7eb] bg-white px-4 py-3 text-sm text-[#101828]">
-                      Sold out: delist all marketplaces
-                      <input
-                        type="checkbox"
-                        checked={soldSyncForm.sold_out_delist_everywhere}
-                        onChange={(event) => setSoldSyncForm((current) => ({ ...current, sold_out_delist_everywhere: event.target.checked }))}
-                      />
-                    </label>
-                    <label className="flex items-center justify-between rounded-[10px] border border-[#e5e7eb] bg-white px-4 py-3 text-sm text-[#101828]">
-                      Out of stock: delist all marketplaces
-                      <input
-                        type="checkbox"
-                        checked={soldSyncForm.out_of_stock_delist_everywhere}
-                        onChange={(event) => setSoldSyncForm((current) => ({ ...current, out_of_stock_delist_everywhere: event.target.checked }))}
-                      />
-                    </label>
-                    <label className="flex items-center justify-between rounded-[10px] border border-[#e5e7eb] bg-white px-4 py-3 text-sm text-[#101828]">
-                      Remove media files when sold out
-                      <input
-                        type="checkbox"
-                        checked={soldSyncForm.remove_media_on_sold_out}
-                        onChange={(event) => setSoldSyncForm((current) => ({ ...current, remove_media_on_sold_out: event.target.checked }))}
-                      />
-                    </label>
+                    <Checkbox className="rounded-[10px] border-[#e5e7eb] px-4 py-3" checked={soldSyncForm.sold_out_delist_everywhere} onChange={(event) => setSoldSyncForm((current) => ({ ...current, sold_out_delist_everywhere: event.target.checked }))} label="Sold out: delist all marketplaces" />
+                    <Checkbox className="rounded-[10px] border-[#e5e7eb] px-4 py-3" checked={soldSyncForm.out_of_stock_delist_everywhere} onChange={(event) => setSoldSyncForm((current) => ({ ...current, out_of_stock_delist_everywhere: event.target.checked }))} label="Out of stock: delist all marketplaces" />
+                    <Checkbox className="rounded-[10px] border-[#e5e7eb] px-4 py-3" checked={soldSyncForm.remove_media_on_sold_out} onChange={(event) => setSoldSyncForm((current) => ({ ...current, remove_media_on_sold_out: event.target.checked }))} label="Remove media files when sold out" />
                   </div>
                   <div className="mt-4 flex justify-end">
                     <Button
@@ -3935,10 +3914,7 @@ export default function SettingsPage() {
                             <label className="text-sm font-medium text-[#101828]">SMTP port</label>
                             <Input type="number" value={emailForm.smtp_port} onChange={(event) => setEmailForm((current) => ({ ...current, smtp_port: Number(event.target.value || 587) }))} />
                           </div>
-                          <label className="flex items-center justify-between rounded-[10px] border border-[#e5e7eb] bg-[#fcfcfd] px-4 py-3 text-sm text-[#101828]">
-                            Use TLS
-                            <input type="checkbox" checked={emailForm.smtp_use_tls} onChange={(event) => setEmailForm((current) => ({ ...current, smtp_use_tls: event.target.checked }))} />
-                          </label>
+                          <Checkbox className="rounded-[10px] border-[#e5e7eb] bg-[#fcfcfd] px-4 py-3" checked={emailForm.smtp_use_tls} onChange={(event) => setEmailForm((current) => ({ ...current, smtp_use_tls: event.target.checked }))} label="Use TLS" />
                         </div>
                         <div className="space-y-2">
                           <label className="text-sm font-medium text-[#101828]">SMTP username</label>
