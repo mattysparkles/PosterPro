@@ -2556,16 +2556,17 @@ export default function ListingsPage() {
               </Button>
               <div className="flex items-center gap-2 rounded-lg border border-[#d0d5dd] bg-white px-2 py-1">
                 <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Send selected to</span>
-                <select
+                <Select
                   value={bulkSendTarget}
                   onChange={(event) => setBulkSendTarget(event.target.value)}
-                  className="rounded-md border border-[#d0d5dd] bg-white px-2 py-1 text-sm text-[#101828]"
+                  aria-label="Move selected listings to queue"
+                  className="h-9 min-w-[150px] rounded-lg px-2 py-1 text-sm"
                 >
                   <option value="drafts">Drafts</option>
                   <option value="review">Needs review</option>
                   <option value="ready">Ready</option>
                   <option value="archived">Archived</option>
-                </select>
+                </Select>
                 <Button
                   variant="outline"
                   size="sm"
