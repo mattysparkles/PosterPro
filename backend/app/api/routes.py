@@ -2781,6 +2781,16 @@ async def run_dashboard_operator_command(
     # update by accident.
     operation_plan = operator_command_service.parse_operation_plan(payload.prompt)
     if operation_plan:
+        from app.services.marketplace_mutations import apply_marketplace_operation_plan
+        preview_ids = sorted({listing_id for operation in operation_plan for listing_id in operation.items})
+        preview_listings = {listing_id: db.get(Listing, listing_id) for listing_id in preview_ids}
+        if any(not listing or listing.user_id != current_user.id for listing in preview_listings.values()):
+            raise HTTPException(status_code=404, detail="One or more listings were not found in this account.")
+        preview_payload = [{"listing_ids": operation.items, "marketplaces": operation.marketplaces, "field": operation.field, "action": operation.action, "value": operation.value} for operation in operation_plan]
+        try:
+            preview_result = apply_marketplace_operation_plan(preview_payload, preview_listings, preview_only=True)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         if payload.apply_live and not payload.dry_run:
             if not payload.confirm_live_apply or str(payload.confirmation_phrase or '').strip() != 'APPLY COMPOUND OPERATIONS':
                 return {
@@ -2789,11 +2799,11 @@ async def run_dashboard_operator_command(
                     "confirmation_phrase": "APPLY COMPOUND OPERATIONS",
                     "message": "Live compound changes require the exact confirmation phrase.",
                     "operations": [{"items": op.items, "marketplaces": op.marketplaces, "field": op.field, "action": op.action, "value": op.value} for op in operation_plan],
+                    "changes": preview_result["changes"],
                 }
             if any(operation.action == 'end' or operation.field == 'listing' for operation in operation_plan):
                 results = [{"items": operation.items, "marketplaces": operation.marketplaces, "status": "not_executed", "message": "Ending listings requires an exact-identity marketplace job."} for operation in operation_plan]
             else:
-                from app.services.marketplace_mutations import apply_marketplace_operation_plan
                 listing_ids = sorted({listing_id for operation in operation_plan for listing_id in operation.items})
                 listings = {listing_id: db.get(Listing, listing_id) for listing_id in listing_ids}
                 if any(not listing or listing.user_id != current_user.id for listing in listings.values()):
@@ -2820,6 +2830,7 @@ async def run_dashboard_operator_command(
                 {"items": op.items, "marketplaces": op.marketplaces, "field": op.field, "action": op.action, "value": op.value}
                 for op in operation_plan
             ],
+            "changes": preview_result["changes"],
         }
     return await operator_command_service.handle_prompt(
         db,
