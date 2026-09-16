@@ -23,6 +23,7 @@ import {
 import { SettingsGuideCard as GuideCard, SettingsInstructionTable as InstructionTable } from '../components/settings/SettingsGuideCard';
 import AppCard from '../components/ui/app-card';
 import Button from '../components/ui/button';
+import ActionLink from '../components/ui/action-link';
 import CollapsiblePanel from '../components/ui/collapsible-panel';
 import Drawer from '../components/ui/drawer';
 import EmptyState from '../components/ui/empty-state';
@@ -3267,7 +3268,7 @@ export default function SettingsPage() {
                       </div>
                       {marketplace.support_url ? (
                         <p className="mt-3 text-sm text-[#475467]">
-                          Runbook: <a href={marketplace.support_url} target="_blank" rel="noreferrer" className="font-medium text-[#2563eb]">{marketplace.support_url}</a>
+                          Runbook: <ActionLink href={marketplace.support_url} external target="_blank">Open support guide</ActionLink>
                         </p>
                       ) : null}
                       {guide?.steps?.length ? (
