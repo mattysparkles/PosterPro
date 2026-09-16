@@ -36,6 +36,13 @@ def test_compound_operation_plan_supports_description_regeneration_clause():
     ]
 
 
+def test_compound_operation_plan_supports_destination_absolute_price():
+    plan = OperatorCommandService().parse_operation_plan("Set items 8 and 9 price to $39.99 on eBay and Facebook")
+    assert [(entry.items, entry.marketplaces, entry.field, entry.action, entry.value) for entry in plan] == [
+        ([8, 9], ["ebay", "facebook"], "price", "set", 39.99),
+    ]
+
+
 def _seed_live_ebay_listing(db_session, *, user: User, title: str, price: float, posted_days_ago: int) -> Listing:
     listing = Listing(
         user_id=user.id,
