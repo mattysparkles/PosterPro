@@ -832,7 +832,7 @@ export default function SettingsPage() {
       return {
         ...current,
         bridge_session_state: selectedBridgeAccount.session_state || current.bridge_session_state,
-        bridge_session_payload_text: JSON.stringify(selectedBridgeAccount.session_payload || {}, null, 2),
+        bridge_session_payload_text: '',
       };
     });
   }, [configuredMarketplace?.marketplace, selectedBridgeAccount]);
@@ -873,11 +873,11 @@ export default function SettingsPage() {
       toast.error('Bridge account key is required.');
       return;
     }
-    let sessionPayload = {};
+    let sessionPayload;
     try {
-      sessionPayload = marketplaceForm.bridge_session_payload_text.trim()
-        ? JSON.parse(marketplaceForm.bridge_session_payload_text)
-        : {};
+      if (marketplaceForm.bridge_session_payload_text.trim()) {
+        sessionPayload = JSON.parse(marketplaceForm.bridge_session_payload_text);
+      }
     } catch (error) {
       toast.error('Session payload JSON is invalid.');
       return;
@@ -896,11 +896,11 @@ export default function SettingsPage() {
         provider_enabled: false,
         browser_enabled: true,
         session_state: marketplaceForm.bridge_session_state,
-        session_payload: sessionPayload,
+        ...(sessionPayload ? { session_payload: sessionPayload } : {}),
       });
       await updateBridgeAccountSession(marketplaceName, accountKey, {
         session_state: sessionState || 'draft',
-        session_payload: sessionPayload,
+        ...(sessionPayload ? { session_payload: sessionPayload } : {}),
         last_tested_at: new Date().toISOString(),
         notes: marketplaceForm.notes,
       });
@@ -2687,15 +2687,15 @@ export default function SettingsPage() {
                   </div>
                   <div className="space-y-2">
                     <label className="text-sm font-medium text-[#101828]">Fetch mode</label>
-                    <select
+                    <Select
                       value={amazonForm.amazon_media_fetch_mode}
                       onChange={(event) => setAmazonForm((current) => ({ ...current, amazon_media_fetch_mode: event.target.value }))}
-                      className="pp-input h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828] outline-none focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                      className="h-10 rounded-[10px] border-[#e5e7eb] px-3 text-[#101828]"
                     >
                       <option value="api_only">API only</option>
                       <option value="api_then_page_fallback">API then page metadata fallback</option>
                       <option value="manual_only">Manual only</option>
-                    </select>
+                    </Select>
                   </div>
                   <div className="space-y-2">
                     <label className="text-sm font-medium text-[#101828]">Rate limit / minute</label>
@@ -4282,25 +4282,26 @@ export default function SettingsPage() {
                 </div>
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-[#101828]">Bridge session state</label>
-                  <select
+                  <Select
                     value={marketplaceForm.bridge_session_state}
                     onChange={(event) => setMarketplaceForm((current) => ({ ...current, bridge_session_state: event.target.value }))}
-                    className="pp-input h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828] outline-none focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                    className="h-10 rounded-[10px] border-[#e5e7eb] px-3 text-[#101828]"
                   >
                     <option value="draft">Draft</option>
                     <option value="ready">Ready</option>
                     <option value="active">Active</option>
                     <option value="expired">Expired</option>
                     <option value="invalid">Invalid</option>
-                  </select>
+                  </Select>
                 </div>
                 <div className="space-y-2">
-                  <label className="text-sm font-medium text-[#101828]">{`${MARKETPLACE_LABELS[configuredMarketplace.marketplace] || configuredMarketplace.marketplace} storage-state JSON`}</label>
-                  <textarea
+                  <label className="text-sm font-medium text-[#101828]">Advanced session metadata</label>
+                  <p className="text-xs text-[#667085]">Saved browser credentials are never displayed. Leave this blank to preserve the existing session.</p>
+                  <Textarea
                     value={marketplaceForm.bridge_session_payload_text}
                     onChange={(event) => setMarketplaceForm((current) => ({ ...current, bridge_session_payload_text: event.target.value }))}
-                    placeholder='{"cookies":[{"name":"session","value":"..."}],"origins":[]}'
-                    className="min-h-40 w-full rounded-[10px] border border-[#e5e7eb] bg-white p-3 font-mono text-xs text-[#101828] outline-none transition placeholder:text-[#98a2b3] focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                    placeholder="Optional advanced metadata (leave blank to preserve the saved session)"
+                    className="min-h-40 rounded-[10px] border-[#e5e7eb] p-3 font-mono text-xs text-[#101828]"
                   />
                 </div>
                 <div className="rounded-[12px] border border-white/80 bg-white p-3 text-sm text-[#475467]">
