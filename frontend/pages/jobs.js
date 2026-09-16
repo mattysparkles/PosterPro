@@ -735,10 +735,10 @@ export default function JobsPage() {
           </p>
           <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
             {(processingHealth?.backlog?.blocker_breakdown || []).slice(0, 6).map((entry) => (
-              <button type="button" key={entry.reason} onClick={() => openBlocker(entry)} className="rounded-[10px] border border-[#eaecf0] bg-[#f8fafc] p-3 text-left transition hover:border-[var(--pp-accent)] hover:shadow-sm">
+              <Button type="button" variant="secondary" key={entry.reason} onClick={() => openBlocker(entry)} className="h-auto min-h-0 rounded-[10px] border-[#eaecf0] bg-[#f8fafc] p-3 text-left transition hover:border-[var(--pp-accent)] hover:shadow-sm">
                 <p className="text-sm font-medium text-[#101828]">{entry.reason}</p>
                 <p className="mt-1 text-xs text-[#667085]">{entry.count} listings · Click to inspect and repair</p>
-              </button>
+              </Button>
             ))}
           </div>
           {activeBlocker ? (
