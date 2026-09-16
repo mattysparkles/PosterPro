@@ -44,6 +44,9 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
             warnings.extend(str(item.get("message") or item.get("code") or item) for item in (row.get("warnings") or []) if item)
             blockers = list(dict.fromkeys(blockers))
             warnings = list(dict.fromkeys(warnings))
+    if str(marketplace or "").lower() == "ebay" and not str(getattr(listing, "category_id", None) or "").strip():
+        blockers.append("A validated eBay category ID is required before publishing")
+        blockers = list(dict.fromkeys(blockers))
     processing_state = str(getattr(listing, "processing_state", "") or "").lower()
     processing_complete = processing_state in {"complete", "completed", "ready"}
     attention = bool(getattr(listing, "processing_blocking_reason", None)) or processing_state in {"needs_attention", "failed", "error"}
