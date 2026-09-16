@@ -19,6 +19,7 @@ from app.services.photo_enrichment import PhotoEnrichmentService
 from app.services.pricing_research_service import compute_listing_quality_summary
 from app.services.process_notifications import create_process_notification
 from app.services.vine_import_service import VineImportService
+from app.services.canonical_readiness import canonical_listing_readiness
 from scripts.repair_recovery_draft_copy import _needs_category_refresh, _product_listing_description
 
 TARGET_SOURCE_TYPES = {"amazon_vine", "media_inventory_recovery"}
@@ -1669,7 +1670,8 @@ class ListingProcessingService:
         if isinstance(fresh.marketplace_data, dict):
             pricing = fresh.marketplace_data.get("pricing_analysis") if isinstance(fresh.marketplace_data.get("pricing_analysis"), dict) else {}
         quality = compute_listing_quality_summary(fresh, pricing_analysis=pricing)
-        blockers = list(current_readiness.get("blockers") or [])
+        canonical = canonical_listing_readiness(fresh)
+        blockers = list(canonical.get("blocking_reasons") or [])
         blockers.extend(quality.get("specificity_blockers") or [])
         if quality.get("specificity_status") != "trusted_for_draft" or blockers:
             return
