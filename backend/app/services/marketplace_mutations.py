@@ -145,6 +145,8 @@ def apply_marketplace_operation(
 
     data = dict(listing.marketplace_data or {})
     overrides = dict(data.get("marketplace_overrides") or {})
+    descriptions = dict(getattr(listing, "marketplace_descriptions", None) or {})
+    description_provenance = dict(data.get("marketplace_description_provenance") or {})
     changed: list[dict[str, Any]] = []
 
     def calculate(previous: Any) -> Any:
@@ -201,14 +203,23 @@ def apply_marketplace_operation(
             changed.append({"marketplace": target, "field": field, "action": action, "before": market.get(field), "after": "queued"})
             continue
         previous = market.get(field)
+        if field == "description" and target in descriptions:
+            previous = descriptions.get(target)
         if previous is None and field == "price":
             previous = listing.listing_price
         updated = calculate(previous)
         market[field] = updated
         market.setdefault("provenance", {})[field] = "operator_edited"
+        if field == "description":
+            descriptions[target] = updated
+            description_provenance[target] = "operator_edited"
         overrides[target] = market
         changed.append({"marketplace": target, "field": field, "before": previous, "after": updated})
 
     data["marketplace_overrides"] = overrides
+    if descriptions:
+        listing.marketplace_descriptions = descriptions
+    if description_provenance:
+        data["marketplace_description_provenance"] = description_provenance
     listing.marketplace_data = data
     return {"changed": changed, "untouched_markets": sorted(SUPPORTED_MARKETS - set(targets))}

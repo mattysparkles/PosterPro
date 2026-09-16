@@ -45,6 +45,22 @@ def test_destination_description_regeneration_queues_without_overwriting_copy(db
     assert listing.marketplace_data["description_regeneration_requests"][0]["status"] == "QUEUED"
 
 
+def test_destination_description_edit_is_scoped_and_preserves_canonical_and_other_variants(db_session):
+    user = User(email="mutation-description-scope@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(
+        user_id=user.id,
+        description="Rich master copy",
+        canonical_description="Rich master copy",
+        marketplace_descriptions={"ebay": "eBay generated copy", "mercari": "Mercari copy"},
+    )
+    apply_marketplace_operation(listing, marketplaces=["ebay"], field="description", value="Operator eBay copy")
+    assert listing.canonical_description == "Rich master copy"
+    assert listing.marketplace_descriptions["ebay"] == "Operator eBay copy"
+    assert listing.marketplace_descriptions["mercari"] == "Mercari copy"
+    assert listing.marketplace_data["marketplace_description_provenance"]["ebay"] == "operator_edited"
+
+
 def test_invalid_target_is_rejected(db_session):
     user = User(email="mutation-invalid@example.com")
     db_session.add(user); db_session.flush()
