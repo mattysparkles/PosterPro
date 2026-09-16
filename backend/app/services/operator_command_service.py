@@ -78,6 +78,10 @@ class OperatorCommandService:
                 continue
             items = [int(value) for value in re.findall(r"\d+", item_match.group(1))]
             markets = [name for name in ("ebay", "facebook", "mercari", "vinted", "poshmark", "etsy", "offerup") if name in clause]
+            if "all marketplaces" in clause or "every marketplace" in clause:
+                markets = ["all"]
+            if "canonical" in clause and not markets:
+                markets = ["canonical"]
             if not items or not markets:
                 continue
             if re.search(r"(?:lower|reduce|decrease|drop|cut).{0,30}\d+(?:\.\d+)?\s*%", clause):
