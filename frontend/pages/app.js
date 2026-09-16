@@ -737,15 +737,12 @@ export default function Dashboard() {
                             <p className="text-sm font-semibold text-[#912018]">Live eBay changes require explicit confirmation.</p>
                             <p className="mt-1 text-sm text-[#7a271a]">Confirm the checkbox below, then apply the live price changes.</p>
                             <div className="mt-3 flex flex-col gap-3 lg:flex-row lg:items-center">
-                              <label className="flex flex-1 cursor-pointer items-start gap-2 text-sm text-[#344054]">
-                                <input
-                                  type="checkbox"
-                                  checked={operatorConfirmationAcknowledged}
-                                  onChange={(event) => setOperatorConfirmationAcknowledged(event.target.checked)}
-                                  className="mt-1 h-4 w-4"
-                                />
-                                <span>I understand this will queue real live eBay price changes for the eligible listings.</span>
-                              </label>
+                              <Checkbox
+                                className="flex-1"
+                                checked={operatorConfirmationAcknowledged}
+                                onChange={(event) => setOperatorConfirmationAcknowledged(event.target.checked)}
+                                label="I understand this will queue real live eBay price changes for the eligible listings."
+                              />
                               <Button
                                 onClick={() => runOperatorCommand({ applyLive: true })}
                                 disabled={operatorCommandRunning || !operatorCommandResult.summary?.eligible_count || !operatorConfirmationAcknowledged}
