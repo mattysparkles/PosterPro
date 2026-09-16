@@ -20,6 +20,8 @@ def test_canonical_operation_is_explicit_and_records_operator_provenance(db_sess
     apply_marketplace_operation(listing, marketplaces=["canonical"], field="price", value=39.99)
     assert listing.listing_price == 39.99
     assert not listing.marketplace_data.get("marketplace_overrides")
+    assert listing.source_metadata["recovery"]["field_provenance"]["price"] == "human_operator"
+    assert "price" in listing.source_metadata["recovery"]["operator_locked_fields"]
 
 
 def test_invalid_target_is_rejected(db_session):

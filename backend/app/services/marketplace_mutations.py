@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.models.models import Listing
+from app.services.listing_provenance import mark_field_provenance
 
 
 SUPPORTED_MARKETS = {"ebay", "facebook", "mercari", "poshmark", "vinted", "etsy", "offerup"}
@@ -62,6 +63,12 @@ def apply_marketplace_operation(
             previous = getattr(listing, attr, None)
             updated = calculate(previous)
             setattr(listing, attr, updated)
+            listing.source_metadata = mark_field_provenance(
+                listing.source_metadata,
+                field=field,
+                provenance="human_operator",
+                lock=True,
+            )
             changed.append({"marketplace": "canonical", "field": field, "before": previous, "after": updated})
             continue
         market = dict(overrides.get(target) or {})
