@@ -33,7 +33,7 @@ def _bucket(row: Listing) -> str:
     return "DRAFT"
 
 
-def audit(limit: int | None = None, source_type: str | None = None) -> dict:
+def audit(limit: int | None = None, source_type: str | None = None, details: bool = False) -> dict:
     with SessionLocal() as db:
         query = select(Listing).order_by(Listing.id.desc())
         if source_type:
@@ -44,6 +44,7 @@ def audit(limit: int | None = None, source_type: str | None = None) -> dict:
 
         totals: dict[str, int] = {}
         flags: dict[str, dict[str, int]] = {}
+        detail_rows: list[dict] = []
         for row in rows:
             bucket = _bucket(row)
             totals[bucket] = totals.get(bucket, 0) + 1
@@ -62,12 +63,32 @@ def audit(limit: int | None = None, source_type: str | None = None) -> dict:
             for name, flagged in checks.items():
                 if flagged:
                     flags.setdefault(name, {})[bucket] = flags.setdefault(name, {}).get(bucket, 0) + 1
-        return {"read_only": True, "rows_audited": len(rows), "by_state": totals, "flags": flags}
+            if details:
+                detail_rows.append({
+                    "listing_id": row.id,
+                    "source_title": (row.source_metadata or {}).get("source_title") if isinstance(row.source_metadata, dict) else None,
+                    "title": row.title,
+                    "category": category,
+                    "category_id": row.category_id,
+                    "description_chars": len(description),
+                    "description_words": len(description.split()),
+                    "image_count": image_count,
+                    "processing_state": row.processing_state,
+                    "needs_review": bool(row.needs_review),
+                    "queue": bucket,
+                    "published": bool(row.ebay_listing_id or str(row.ebay_publish_status or "").upper() == "POSTED"),
+                    "flags": [name for name, flagged in checks.items() if flagged],
+                })
+        result = {"read_only": True, "rows_audited": len(rows), "by_state": totals, "flags": flags}
+        if details:
+            result["items"] = detail_rows
+        return result
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int)
     parser.add_argument("--source-type")
+    parser.add_argument("--details", action="store_true", help="Include item-level fields and quality flags")
     args = parser.parse_args()
-    print(json.dumps(audit(limit=args.limit, source_type=args.source_type), indent=2, sort_keys=True))
+    print(json.dumps(audit(limit=args.limit, source_type=args.source_type, details=args.details), indent=2, sort_keys=True))
