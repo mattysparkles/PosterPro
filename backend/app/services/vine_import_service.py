@@ -2383,10 +2383,9 @@ class VineImportService:
         )
         if candidate and not contradictory and not is_source_noise_category(candidate):
             return candidate, "vine_export"
-        breadcrumbs = facts.get("breadcrumbs") or []
-        breadcrumb_hint = " > ".join(breadcrumbs[-3:]).strip()
-        if breadcrumb_hint and not is_source_noise_category(breadcrumb_hint):
-            return breadcrumb_hint, "amazon_breadcrumb"
+        # Source breadcrumbs are navigation hints, not marketplace taxonomy.
+        # Never persist them as a category path; a later verified taxonomy
+        # lookup may replace the unresolved result with a real leaf ID.
         return "Other > Needs category review", "needs_review"
 
     def _pricing_from_amazon(self, item: VineImportItem, *, amazon_facts: dict | None = None) -> dict:
