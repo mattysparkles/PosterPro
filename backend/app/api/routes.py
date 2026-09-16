@@ -76,6 +76,7 @@ from app.services.listing_review import (
     sync_listing_review_state,
 )
 from app.services.listing_specificity import GENERIC_CAPTION_TITLES, classify_listing_reviewability
+from app.services.canonical_readiness import canonical_listing_readiness
 from app.services.media_lifecycle import purge_listing_media
 from app.services.listing_workspace import normalize_marketplace_data
 from app.services.marketplace_orchestrator import enqueue_crosspost_job, queue_publish
@@ -520,6 +521,7 @@ def _serialize_listing_response(listing: Listing) -> dict:
             "suggested_price": listing.suggested_price,
         },
     )
+    base["canonical_readiness"] = canonical_listing_readiness(listing)
     pricing_analysis = ((listing.marketplace_data or {}).get("pricing_analysis") or {}) if isinstance(listing.marketplace_data, dict) else {}
     base["quality_summary"] = compute_listing_quality_summary(listing, pricing_analysis=pricing_analysis)
     marketplace_data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}
