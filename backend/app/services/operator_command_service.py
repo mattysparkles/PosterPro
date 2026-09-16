@@ -48,7 +48,48 @@ class ParsedOperatorCommand:
     price_filter_mode: str = "all"
 
 
+@dataclass
+class StructuredOperation:
+    """One independently targeted operation from a compound request."""
+    items: list[int]
+    marketplaces: list[str]
+    field: str
+    action: str
+    value: Any = None
+
+
 class OperatorCommandService:
+    def parse_operation_plan(self, prompt: str) -> list[StructuredOperation]:
+        """Parse safe, explicit compound mutations for preview generation.
+
+        This deliberately returns a plan only; execution still goes through
+        the scoped mutation/publish services and explicit confirmation gates.
+        Unsupported clauses are ignored rather than guessed.
+        """
+        text = " ".join(str(prompt or "").lower().split())
+        plan: list[StructuredOperation] = []
+        # Semicolons are the unambiguous operation boundary; conjunctions are
+        # common inside item lists and marketplace lists.
+        for clause in re.split(r"\s*;\s*", text):
+            item_match = re.search(r"(?:items?|listings?)\s+(.+?)(?=\s+(?:by|with|at|on|free|make|reduce|lower|end|remove|delist)\b|$)", clause)
+            if not item_match:
+                item_match = re.search(r"^(?:give|end|remove|delist)\s+(.+?)(?=\s+(?:on|free|with)\b|$)", clause)
+            if not item_match:
+                continue
+            items = [int(value) for value in re.findall(r"\d+", item_match.group(1))]
+            markets = [name for name in ("ebay", "facebook", "mercari", "vinted", "poshmark", "etsy", "offerup") if name in clause]
+            if not items or not markets:
+                continue
+            if re.search(r"(?:lower|reduce|decrease|drop|cut).{0,30}\d+(?:\.\d+)?\s*%", clause):
+                percent = re.search(r"(\d+(?:\.\d+)?)\s*%", clause)
+                if percent:
+                    plan.append(StructuredOperation(items, markets, "price", "percentage_change", -float(percent.group(1))))
+            elif re.search(r"(?:free|no[- ]cost)\s+(?:ebay\s+)?shipping", clause):
+                plan.append(StructuredOperation(items, markets, "shipping", "set", "free"))
+            elif re.search(r"\bend\b|\bremove\b|\bdelist\b", clause):
+                plan.append(StructuredOperation(items, markets, "listing", "end", None))
+        return plan
+
     def _build_bulk_action_signature(self, parsed: ParsedOperatorCommand) -> str:
         minimum_age = "none" if parsed.minimum_age_days is None else str(int(parsed.minimum_age_days))
         minimum_price = "none" if parsed.minimum_price is None else f"{float(parsed.minimum_price):.2f}"

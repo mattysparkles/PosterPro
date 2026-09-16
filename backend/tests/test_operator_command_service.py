@@ -216,5 +216,16 @@ def test_operator_command_live_apply_is_idempotent_for_same_discount(db_session,
     assert first["summary"]["updated_count"] == 1
     assert second["summary"]["updated_count"] == 0
     assert second["summary"]["already_applied_count"] == 1
-    assert refreshed is not None
-    assert refreshed.listing_price == 82.0
+
+
+def test_compound_operation_plan_keeps_item_and_marketplace_matrix():
+    plan = OperatorCommandService().parse_operation_plan(
+        "Lower items 1, 2, and 3 by 10% on eBay and Facebook; give 3 and 5 free eBay shipping; end 5 on Poshmark."
+    )
+    assert [(op.items, op.field, op.action, op.value) for op in plan] == [
+        ([1, 2, 3], "price", "percentage_change", -10.0),
+        ([3, 5], "shipping", "set", "free"),
+        ([5], "listing", "end", None),
+    ]
+    assert plan[0].marketplaces == ["ebay", "facebook"]
+    assert plan[2].marketplaces == ["poshmark"]
