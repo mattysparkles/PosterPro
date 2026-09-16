@@ -10,6 +10,7 @@ import ListingEditor from '../components/ListingEditor';
 import Button from '../components/ui/button';
 import Input from '../components/ui/input';
 import Select from '../components/ui/select';
+import Checkbox from '../components/ui/checkbox';
 import MetricCard from '../components/ui/metric-card';
 import DataTable from '../components/ui/data-table';
 import Drawer from '../components/ui/drawer';
@@ -1995,16 +1996,7 @@ export default function ListingsPage() {
                 </div>
                 <div className="flex flex-wrap gap-x-4 gap-y-2">
                   {CROSSPOST_DESTINATIONS.map(([value, label]) => (
-                    <label key={value} className="inline-flex items-center gap-1.5 text-xs text-[#344054]">
-                      <input
-                        type="checkbox"
-                        checked={crosspostDestinations.includes(value)}
-                        onChange={(event) => setCrosspostDestinations((current) => event.target.checked
-                          ? [...current, value]
-                          : current.filter((item) => item !== value))}
-                      />
-                      {label}
-                    </label>
+                    <Checkbox key={value} label={label} checked={crosspostDestinations.includes(value)} onChange={(event) => setCrosspostDestinations((current) => event.target.checked ? [...current, value] : current.filter((item) => item !== value))} className="border-0 bg-transparent p-0 text-xs" />
                   ))}
                 </div>
                 {selectedIds.length > 500 && <p className="mt-2 text-xs font-medium text-amber-800">Select 500 or fewer listings for one request.</p>}
@@ -2015,16 +2007,16 @@ export default function ListingsPage() {
                 <Button variant="outline" size="sm" onClick={() => runBulkMarketplacePreflight(['ebay'])} disabled={bulkPreflightLoading}>Run eBay preflight</Button>
                 <div className="flex items-center gap-2 rounded-lg border border-[#d0d5dd] bg-white px-2 py-1">
                   <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Send selected to</span>
-                  <select
+                  <Select
                     value={bulkSendTarget}
                     onChange={(event) => setBulkSendTarget(event.target.value)}
-                    className="rounded-md border border-[#d0d5dd] bg-white px-2 py-1 text-sm text-[#101828]"
+                    className="h-9 w-auto py-1 text-sm"
                   >
                     <option value="drafts">Drafts</option>
                     <option value="review">Needs review</option>
                     <option value="ready">Ready</option>
                     <option value="archived">Archived</option>
-                  </select>
+                  </Select>
                   <Button variant="outline" size="sm" onClick={() => sendSelectedTo(bulkSendTarget)}>
                     Send
                   </Button>
@@ -2212,15 +2204,15 @@ export default function ListingsPage() {
           <div className="flex flex-wrap gap-2">
             <label className="flex items-center gap-2 rounded-[10px] border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-xs font-semibold text-amber-900">
               <span>Source</span>
-              <select aria-label="Listings source modifier" value={sourceFilter} onChange={(event) => { setSourceFilter(event.target.value); setCatalogPage(1); }} className="rounded-md border border-amber-200 bg-white px-2 py-1 text-xs text-slate-900">
+              <Select aria-label="Listings source modifier" value={sourceFilter} onChange={(event) => { setSourceFilter(event.target.value); setCatalogPage(1); }} className="h-8 w-auto py-1 text-xs">
                 {SOURCE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-              </select>
+              </Select>
             </label>
             <label className="flex items-center gap-2 rounded-[10px] border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700">
               <span>Sort</span>
-              <select aria-label="Listings sort" value={sortBy} onChange={(event) => setSortBy(event.target.value)} className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-900">
+              <Select aria-label="Listings sort" value={sortBy} onChange={(event) => setSortBy(event.target.value)} className="h-8 w-auto py-1 text-xs">
                 <option value="updated">Date updated</option><option value="created">Date created</option><option value="price">Price</option><option value="title">Title</option><option value="source">Source</option><option value="status">Status</option>
-              </select>
+              </Select>
             </label>
             <Button href="/listings/new" variant="outline">
               New item
