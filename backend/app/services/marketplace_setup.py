@@ -213,18 +213,20 @@ def _import_support_contract(*, marketplace: str, import_mode: str) -> tuple[str
     )
 
 
-def _sales_sync_support_contract(*, marketplace: str) -> tuple[str, str, str]:
+def _sales_sync_support_contract(*, marketplace: str, workflow_state: str = "draft", publish_mode: str = "") -> tuple[str, str, str]:
     if marketplace == MarketplaceName.ebay.value:
         return (
             "direct_api",
             SALES_SYNC_SUPPORT_LABELS["direct_api"],
             "PosterPro can poll eBay sold-order activity for connected operator accounts.",
         )
-    return (
-        "unsupported",
-        SALES_SYNC_SUPPORT_LABELS["unsupported"],
-        "PosterPro does not currently provide real sold-order detection for this marketplace in this deployment.",
-    )
+    if marketplace == MarketplaceName.facebook.value and str(workflow_state).lower() == MANUAL_WORKFLOW_READY and str(publish_mode).lower() in {"browser_assist", "hosted_browser_assist"}:
+        return (
+            "browser_assist",
+            "Browser-assisted sales sync",
+            "PosterPro can monitor this ready browser-assisted marketplace through the connected extension workflow; marketplace login must remain active in that browser.",
+        )
+    return ("unsupported", SALES_SYNC_SUPPORT_LABELS["unsupported"], "PosterPro does not currently provide real sold-order detection for this marketplace in this deployment.")
 
 
 def load_manual_marketplace_settings(user: User | None) -> dict[str, dict[str, Any]]:
@@ -395,7 +397,7 @@ def marketplace_status_snapshot(
     connected = is_manual and workflow_state == MANUAL_WORKFLOW_READY and has_profile
     publish_support_level, publish_support_label, publish_support_note = _publish_support_contract(marketplace=name, publish_mode=publish_mode)
     import_support_level, import_support_label, import_support_note = _import_support_contract(marketplace=name, import_mode=import_mode)
-    sales_sync_support_level, sales_sync_support_label, sales_sync_support_note = _sales_sync_support_contract(marketplace=name)
+    sales_sync_support_level, sales_sync_support_label, sales_sync_support_note = _sales_sync_support_contract(marketplace=name, workflow_state=workflow_state, publish_mode=publish_mode)
     return {
         "marketplace": name,
         "supports_oauth": False,
@@ -432,7 +434,7 @@ def marketplace_status_snapshot(
         "bridge_account_key": bridge_account_key,
         "import_listing_limit": import_listing_limit,
         "can_publish": connected,
-        "can_sync_sales": False,
+        "can_sync_sales": connected and sales_sync_support_level != "unsupported",
         "ui_priority": ui_priority,
         "ui_state_tone": "success" if connected else "warning" if has_profile else "default",
         "ui_primary_action": "Run assisted workflow" if connected else "Mark ready" if has_profile else "Complete setup",
