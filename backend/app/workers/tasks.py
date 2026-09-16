@@ -56,6 +56,7 @@ from app.services.process_notifications import create_process_notification
 from app.services.intake_slate import IntakeSlateService
 from app.services.ai_guard import release_waiting_for_reset, recover_stale_reservations
 from app.services.vine_import_service import VineImportService, VINE_IMAGE_BACKFILL_CUTOFF
+from app.services.canonical_readiness import canonical_listing_readiness
 from app.services.ebay_service import EbayIntegrationError, end_ebay_listing, get_active_ebay_listings, sync_ebay_active_listings, revise_ebay_listing
 from app.services.ebay_service import search_ebay_categories, get_or_refresh_account, build_ebay_item_specifics, get_required_item_specifics, verify_ebay_category
 from app.workers.celery_app import celery_app
@@ -407,13 +408,28 @@ def repair_vine_listing_quality_task(user_id: int | None = None, chunk_size: int
                     quantity_source = str((listing.marketplace_data or {}).get("quantity_source") or "").lower() if isinstance(listing.marketplace_data, dict) else ""
                     if int(listing.quantity or 0) <= 0 and quantity_source not in {"manual", "operator"}:
                         listing.quantity = 1
-                    # Image enrichment may legitimately lag a successful Vine
-                    # import. Keep the draft reviewable and let publish
-                    # preflight surface image readiness when required.
-                    listing.processing_state = "complete"
-                    listing.processing_blocking_reason = None
-                    listing.processing_error_stage = None
-                    listing.needs_review = True
+                    # Derive lifecycle from canonical readiness instead of
+                    # forcing every refreshed row into review. Live remote
+                    # identities are never rewritten by this repair worker.
+                    remote_live = bool(str(listing.ebay_listing_id or '').strip()) or any(
+                        str(getattr(row, 'marketplace_listing_id', '') or '').strip()
+                        and str(getattr(getattr(row, 'status', None), 'value', getattr(row, 'status', None)) or '').upper() in {'PUBLISHED', 'UPDATED'}
+                        for row in (getattr(listing, 'marketplace_listings', None) or [])
+                    )
+                    if remote_live:
+                        continue
+                    readiness = canonical_listing_readiness(listing)
+                    blockers = [str(reason).strip() for reason in (readiness.get('blocking_reasons') or []) if str(reason).strip()]
+                    if blockers:
+                        listing.processing_state = 'needs_attention'
+                        listing.processing_blocking_reason = blockers[0]
+                        listing.processing_error_stage = listing.processing_error_stage or 'quality_validation'
+                        listing.needs_review = False
+                    else:
+                        listing.processing_state = 'complete'
+                        listing.processing_blocking_reason = None
+                        listing.processing_error_stage = None
+                        listing.needs_review = True
                 db.commit()
         return totals
     finally:
