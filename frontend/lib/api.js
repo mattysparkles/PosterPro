@@ -772,6 +772,14 @@ export async function updateListing(id, body) {
   });
 }
 
+export async function updateMarketplaceDescription(id, marketplace, description) {
+  return jsonFetch(`${API_BASE}/listings/${encodeURIComponent(id)}/marketplace-descriptions/${encodeURIComponent(marketplace)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ description, provenance: "operator_edited" }),
+  });
+}
+
 export async function savePublishListingChanges(id, body) {
   return jsonFetch(`${API_BASE}/listings/${id}/save-publish-changes`, {
     method: "POST",

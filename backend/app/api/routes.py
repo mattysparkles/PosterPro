@@ -1113,6 +1113,11 @@ class MarketplaceOperationRequest(BaseModel):
     value: object | None = None
 
 
+class MarketplaceDescriptionUpdateRequest(BaseModel):
+    description: str
+    provenance: str = "operator_edited"
+
+
 @router.get("/listing-templates", response_model=list[ListingTemplateResponse])
 def get_listing_templates(
     user_id: int | None = None,
@@ -1913,6 +1918,8 @@ def create_listing(
         storage_unit_name=payload.storage_unit_name,
         title=payload.title,
         description=payload.description,
+        canonical_description=payload.canonical_description or payload.description,
+        marketplace_descriptions=payload.marketplace_descriptions or {},
         category_id=payload.category_id,
         category_suggestion=payload.category_suggestion,
         item_specifics=payload.item_specifics or {},
@@ -1973,6 +1980,8 @@ def update_listing(
         exclude_none=True,
         exclude={"quantity", "platform_quantities", "custom_labels", "marketplace_data"},
     )
+    if "description" in direct_updates and "canonical_description" not in direct_updates:
+        direct_updates["canonical_description"] = direct_updates["description"]
     if "status" in direct_updates:
         direct_updates["status"] = ListingStatus(direct_updates["status"])
     for key, value in direct_updates.items():
@@ -2012,6 +2021,41 @@ def update_listing(
         md["sync_state"] = "local_changes_not_published" if active_exists else md.get("sync_state", "local")
         listing.marketplace_data = md
         db.add(ListingRevision(listing_id=listing.id, user_id=current_user.id, revision=revision, operation="save", changed_fields={f: {"before": before[f], "after": getattr(listing, f, None)} for f in changed_fields}, marketplaces_targeted=[], sync_state=md.get("sync_state", "local"), status="recorded"))
+    db.commit()
+    db.refresh(listing)
+    return _serialize_listing_response(listing)
+
+
+@router.patch("/listings/{listing_id}/marketplace-descriptions/{marketplace}", response_model=ListingResponse)
+def update_marketplace_description(
+    listing_id: int,
+    marketplace: str,
+    payload: MarketplaceDescriptionUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Edit one destination description without changing canonical copy.
+
+    Explicit operator edits are provenance-marked so later enrichment can
+    regenerate only generated variants and leave human copy untouched.
+    """
+    market = str(marketplace or "").strip().lower()
+    if market not in {"ebay", "facebook", "mercari", "poshmark", "vinted", "etsy", "offerup"}:
+        raise HTTPException(status_code=422, detail="Unsupported marketplace")
+    text = str(payload.description or "").strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="Description cannot be empty")
+    listing = db.get(Listing, listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    ensure_user_owns_resource(current_user, listing.user_id)
+    variants = dict(listing.marketplace_descriptions or {}) if isinstance(listing.marketplace_descriptions, dict) else {}
+    variants[market] = text
+    provenance = dict(variants.get("_provenance") or {}) if isinstance(variants.get("_provenance"), dict) else {}
+    provenance[market] = "operator_edited" if payload.provenance != "generated" else "generated"
+    variants["_provenance"] = provenance
+    listing.marketplace_descriptions = variants
+    db.add(listing)
     db.commit()
     db.refresh(listing)
     return _serialize_listing_response(listing)

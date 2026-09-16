@@ -23,6 +23,7 @@ import {
   queueCrosspostJob,
   generateListing,
   requestListingRevision,
+  updateMarketplaceDescription,
   savePublishListingChanges,
   toggleAutonomousMode,
   updateListing,
@@ -218,6 +219,9 @@ export default function ListingWorkspacePage() {
   });
   const [previewMarketplace, setPreviewMarketplace] = useState('ebay');
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
+  const [variantMarketplace, setVariantMarketplace] = useState('ebay');
+  const [variantDraft, setVariantDraft] = useState('');
+  const [savingVariant, setSavingVariant] = useState(false);
   const [form, setForm] = useState(() => normalizeListingForm(null));
   const [ebayCategoryRoots, setEbayCategoryRoots] = useState([]);
   const [categoryBrowseNodes, setCategoryBrowseNodes] = useState([]);
@@ -277,6 +281,7 @@ export default function ListingWorkspacePage() {
         setPreviewMarketplace(String(panels?.workflow?.default_preview_marketplace || 'ebay').toLowerCase());
         setListing(fetchedListing);
         setForm(normalizeListingForm(fetchedListing));
+        setVariantDraft(String(fetchedListing?.marketplace_descriptions?.[variantMarketplace] || fetchedListing?.canonical_description || fetchedListing?.description || ''));
         setSelectedImageIndex(0);
         if (fetchedListing?.id) {
           const targets = (fetchedListing.marketplace_data?.targets || []).filter(Boolean);
@@ -305,6 +310,25 @@ export default function ListingWorkspacePage() {
       cancelled = true;
     };
   }, [isNew, listingId, router.isReady, user?.id]);
+
+  useEffect(() => {
+    if (!listing) return;
+    setVariantDraft(String(listing.marketplace_descriptions?.[variantMarketplace] || listing.canonical_description || listing.description || ''));
+  }, [listing, variantMarketplace]);
+
+  const saveMarketplaceVariant = async () => {
+    if (!listing?.id || !variantDraft.trim()) return;
+    setSavingVariant(true);
+    try {
+      const saved = await updateMarketplaceDescription(listing.id, variantMarketplace, variantDraft.trim());
+      setListing(saved);
+      toast.success(`${CHANNEL_LABELS[variantMarketplace] || variantMarketplace} description saved.`);
+    } catch (error) {
+      toast.error(error.message || 'Could not save marketplace description.');
+    } finally {
+      setSavingVariant(false);
+    }
+  };
 
   useEffect(() => {
     if (!crosspostPreview.length) return;
@@ -787,6 +811,16 @@ export default function ListingWorkspacePage() {
                   placeholder="Describe condition, accessories, flaws, dimensions, and what is included."
                 />
               </div>
+              {!isNew ? <div className="md:col-span-2 rounded-xl border border-blue-100 bg-blue-50/50 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div><h4 className="text-sm font-semibold text-[#101828]">Marketplace description</h4><p className="text-xs text-[#667085]">Edit one destination without changing the canonical description or other channels.</p></div>
+                  <select className="h-9 rounded-lg border border-blue-200 bg-white px-2 text-sm" value={variantMarketplace} onChange={(event) => setVariantMarketplace(event.target.value)} aria-label="Marketplace description destination">
+                    {Object.keys(CHANNEL_LABELS).filter((key) => ['ebay','facebook','mercari','poshmark','vinted','etsy','offerup'].includes(key)).map((key) => <option key={key} value={key}>{CHANNEL_LABELS[key]}</option>)}
+                  </select>
+                </div>
+                <textarea value={variantDraft} onChange={(event) => setVariantDraft(event.target.value)} className="mt-3 min-h-28 w-full rounded-lg border border-blue-200 bg-white p-3 text-sm text-[#101828] outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10" maxLength={variantMarketplace === 'mercari' ? 1000 : undefined} />
+                <div className="mt-2 flex items-center justify-between"><span className="text-xs text-[#667085]">{variantMarketplace === 'mercari' ? `${variantDraft.length}/1000 characters` : `${variantDraft.length} characters`} · saved as operator-edited</span><Button type="button" size="sm" onClick={saveMarketplaceVariant} disabled={savingVariant}>{savingVariant ? 'Saving…' : 'Save destination copy'}</Button></div>
+              </div> : null}
               <div className="space-y-2">
                 <label className="text-sm font-medium text-[#101828]">Marketplace category ID</label>
                 <select className="h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm" value={form.category_id} onChange={(event) => autosaveListingField("category_id", event.target.value)}>

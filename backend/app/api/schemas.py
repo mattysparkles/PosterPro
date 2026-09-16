@@ -301,6 +301,8 @@ class ListingCreateRequest(BaseModel):
     storage_unit_name: str | None = None
     title: str | None = None
     description: str | None = None
+    canonical_description: str | None = None
+    marketplace_descriptions: dict[str, str] | None = None
     category_id: str | None = None
     category_suggestion: str | None = None
     item_specifics: dict | None = None
@@ -356,6 +358,8 @@ class ListingResponse(BaseModel):
     storage_unit_name: str | None = None
     title: str | None
     description: str | None
+    canonical_description: str | None = None
+    marketplace_descriptions: dict | None = None
     category_id: str | None = None
     category_suggestion: str | None = None
     item_specifics: dict | None = None
