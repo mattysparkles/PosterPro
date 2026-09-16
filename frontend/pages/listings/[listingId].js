@@ -994,8 +994,8 @@ export default function ListingWorkspacePage() {
 
           {!isNew && !listing?.sold_at ? <SectionPanel title="Record a sale" description="Sold this item in person or through another channel? Record it once and PosterPro will update inventory and reconcile active destinations.">
             <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_140px_auto] sm:items-end">
-              <label className="space-y-1 text-sm font-medium text-[#101828]">Sale amount<input type="number" min="0.01" step="0.01" value={manualSaleAmount} onChange={(event) => setManualSaleAmount(event.target.value)} className="pp-input mt-1 h-10 w-full rounded-[10px] border border-[#e5e7eb] px-3" placeholder="0.00" /></label>
-              <label className="space-y-1 text-sm font-medium text-[#101828]">Units<input type="number" min="1" step="1" value={manualSaleQuantity} onChange={(event) => setManualSaleQuantity(event.target.value)} className="pp-input mt-1 h-10 w-full rounded-[10px] border border-[#e5e7eb] px-3" /></label>
+              <label className="space-y-1 text-sm font-medium text-[#101828]">Sale amount<Input type="number" min="0.01" step="0.01" value={manualSaleAmount} onChange={(event) => setManualSaleAmount(event.target.value)} placeholder="0.00" /></label>
+              <label className="space-y-1 text-sm font-medium text-[#101828]">Units<Input type="number" min="1" step="1" value={manualSaleQuantity} onChange={(event) => setManualSaleQuantity(event.target.value)} /></label>
               <Button type="button" disabled={recordingSale || !Number(manualSaleAmount)} onClick={recordSale}>{recordingSale ? 'Recording…' : 'Record sale'}</Button>
             </div>
           </SectionPanel> : null}
@@ -1012,7 +1012,7 @@ export default function ListingWorkspacePage() {
                           <p className="text-sm font-semibold text-[#101828]">{label}</p>
                           <p className="mt-1 text-xs text-[#667085]">{channel === "facebook" ? "Manual/provider-first workflow" : "Connected or planned publish target"}</p>
                         </div>
-                        <input type="checkbox" checked={!!channelState.enabled} onChange={() => toggleChannel(channel)} />
+                        <Checkbox aria-label={`Enable ${label}`} checked={!!channelState.enabled} onChange={() => toggleChannel(channel)} className="border-0 bg-transparent p-0" />
                       </div>
                       <div className="mt-3 space-y-3">
                         <div className="space-y-2">

@@ -2058,10 +2058,7 @@ export default function ListingsPage() {
           {pendingBulkPublish ? (
             <SectionPanel title="Confirm live eBay queue" tone="warning" description={`${pendingBulkPublish.listingIds.length} selected listing${pendingBulkPublish.listingIds.length === 1 ? '' : 's'} will be approved where needed, then sent to the eBay publishing worker. This is a real marketplace action; the result panel and Jobs page will show the actual outcome.`}>
               <div className="flex max-w-xl flex-col gap-3 sm:flex-row sm:items-end">
-                <label className="flex flex-1 cursor-pointer items-start gap-2 text-sm text-[#344054]">
-                  <input type="checkbox" checked={bulkPublishAcknowledged} onChange={(event) => setBulkPublishAcknowledged(event.target.checked)} className="mt-1 h-4 w-4" />
-                  <span>I understand this queues real eBay publication work for these listings. I will review the resulting job statuses before assuming any listing is live.</span>
-                </label>
+                <Checkbox className="flex-1 border-0 bg-transparent p-0" checked={bulkPublishAcknowledged} onChange={(event) => setBulkPublishAcknowledged(event.target.checked)} label="Confirm live eBay queue" description="I understand this queues real eBay publication work. I will review resulting job statuses before assuming any listing is live." />
                 <Button
                   size="sm"
                   disabled={!bulkPublishAcknowledged || bulkPublishSubmitting}
@@ -2132,15 +2129,7 @@ export default function ListingsPage() {
               {filteredListings.map((listing) => (
                 <article key={listing.id} className={`rounded-[16px] border bg-white p-3 transition ${selectedIds.includes(listing.id) ? 'border-[#2563eb] ring-2 ring-[#dbeafe]' : 'border-[#e5e7eb] hover:border-[#a9c5ff] hover:shadow-[0_10px_24px_rgba(37,99,235,0.08)]'}`}>
                   <div className="flex gap-2">
-                    <label className="flex w-5 shrink-0 cursor-pointer items-start pt-1" title={`Select ${getListingTitle(listing)}`}>
-                      <input
-                        type="checkbox"
-                        checked={selectedIds.includes(listing.id)}
-                        onChange={() => toggleRow(listing.id)}
-                        aria-label={`Select ${getListingTitle(listing)}`}
-                        className="h-4 w-4 rounded border-[#98a2b3] text-[#2563eb]"
-                      />
-                    </label>
+                    <Checkbox className="w-5 shrink-0 border-0 bg-transparent p-0" checked={selectedIds.includes(listing.id)} onChange={() => toggleRow(listing.id)} aria-label={`Select ${getListingTitle(listing)}`} />
                     <Link href={`/listings/${listing.id}?mode=preview`} className="group min-w-0 flex-1">
                   <div className="flex gap-3">
                     <div className="h-20 w-20 shrink-0 overflow-hidden rounded-[10px] bg-[#f2f4f7]">

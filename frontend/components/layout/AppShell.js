@@ -433,10 +433,10 @@ export default function AppShell({
                   <div ref={notificationPopoverRef} role="dialog" aria-label="Notifications" className="pp-notification-popover overflow-hidden rounded-2xl border border-slate-200 bg-white text-slate-900 shadow-[0_24px_60px_rgba(16,24,40,0.24)]">
                     <div className="flex items-start justify-between gap-3 border-b border-slate-200 bg-white px-4 py-4">
                       <div><p className="text-base font-semibold text-slate-950">Notifications</p><p className="mt-1 text-sm text-slate-600">Unread {notificationUnreadCount.toLocaleString()}</p></div>
-                      <button type="button" onClick={handleMarkAllNotificationsRead} disabled={!notificationUnreadCount} className="rounded-lg px-2 py-1.5 text-sm font-semibold text-blue-800 hover:bg-blue-50 disabled:cursor-not-allowed disabled:text-slate-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600">Mark all read</button>
+                      <Button type="button" variant="tertiary" size="sm" onClick={handleMarkAllNotificationsRead} disabled={!notificationUnreadCount}>Mark all read</Button>
                     </div>
                     <div className="flex items-center justify-between gap-2 border-b border-slate-200 bg-slate-50 px-4 py-2">
-                      <div className="flex gap-1" role="group" aria-label="Filter notifications">{[['all', 'All'], ['unread', 'Unread'], ['errors', 'Errors']].map(([value, label]) => <button key={value} type="button" aria-pressed={notificationFilter === value} onClick={() => setNotificationFilter(value)} className={`min-h-9 rounded-lg px-3 text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 ${notificationFilter === value ? 'bg-blue-800 text-white' : 'bg-transparent text-slate-700 hover:bg-white'}`}>{label}</button>)}</div>
+                      <div className="flex gap-1" role="group" aria-label="Filter notifications">{[['all', 'All'], ['unread', 'Unread'], ['errors', 'Errors']].map(([value, label]) => <Button key={value} type="button" variant={notificationFilter === value ? 'primary' : 'tertiary'} size="sm" aria-pressed={notificationFilter === value} onClick={() => setNotificationFilter(value)}>{label}</Button>)}</div>
                       <Link href="/notices" onClick={() => setNotificationsOpen(false)} className="rounded-lg px-2 py-1.5 text-sm font-semibold text-blue-800 hover:bg-blue-50">View all notifications</Link>
                     </div>
                     <div className="pp-notification-list max-h-[min(52vh,440px)] overflow-y-auto bg-white p-3">
@@ -482,7 +482,7 @@ export default function AppShell({
                         </div>
                       )}
                     </div>
-                    <div className="flex items-center justify-between gap-3 border-t border-slate-200 bg-white px-4 py-3"><span className="text-xs text-slate-600">Showing {processNotifications.length} of {notificationTotal.toLocaleString()}</span>{processNotifications.length < notificationTotal ? <button type="button" disabled={notificationLoading} onClick={() => void loadProcessNotifications({ offset: notificationOffset, append: true })} className="min-h-10 rounded-lg bg-blue-800 px-4 text-sm font-semibold text-white hover:bg-blue-900 disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600">{notificationLoading ? 'Loading…' : 'Load more'}</button> : null}</div>
+                    <div className="flex items-center justify-between gap-3 border-t border-slate-200 bg-white px-4 py-3"><span className="text-xs text-slate-600">Showing {processNotifications.length} of {notificationTotal.toLocaleString()}</span>{processNotifications.length < notificationTotal ? <Button type="button" variant="primary" size="sm" disabled={notificationLoading} onClick={() => void loadProcessNotifications({ offset: notificationOffset, append: true })}>{notificationLoading ? 'Loading…' : 'Load more'}</Button> : null}</div>
                   </div>
                 ), document.body) : null}
               </div>
