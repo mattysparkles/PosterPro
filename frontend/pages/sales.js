@@ -9,6 +9,8 @@ import DataTableCard from '../components/ui/data-table-card';
 import EmptyState from '../components/ui/empty-state';
 import FormSection from '../components/ui/form-section';
 import Input from '../components/ui/input';
+import Select from '../components/ui/select';
+import Textarea from '../components/ui/textarea';
 import MetricCard from '../components/ui/metric-card';
 import PageHeader from '../components/ui/page-header';
 import SectionPanel from '../components/ui/section-panel';
@@ -260,10 +262,10 @@ export default function SalesPage() {
               placeholder="Search listing, platform, order..."
               className="w-full md:w-72"
             />
-            <select
+            <Select
               value={sortBy}
               onChange={(event) => setSortBy(event.target.value)}
-              className="h-10 rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]"
+              className="h-10 w-auto"
             >
               <option value="sold_at">Sold at</option>
               <option value="amount">Amount</option>
@@ -271,15 +273,15 @@ export default function SalesPage() {
               <option value="fees_actual">Fees</option>
               <option value="shipping_cost">Shipping</option>
               <option value="platform">Marketplace</option>
-            </select>
-            <select
+            </Select>
+            <Select
               value={sortDir}
               onChange={(event) => setSortDir(event.target.value)}
-              className="h-10 rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]"
+              className="h-10 w-auto"
             >
               <option value="desc">Descending</option>
               <option value="asc">Ascending</option>
-            </select>
+            </Select>
           </div>
         }
         columns={[
@@ -407,25 +409,25 @@ export default function SalesPage() {
                 <FormSection title="Settlement" description="Record true platform fees and shipping cost.">
                   <label className="block text-sm font-medium text-[#101828]">
                     Platform fees
-                    <input name="fees_actual" type="number" step="0.01" placeholder="0.00" defaultValue={activeSale.fees_actual ?? ''} className="mt-2 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]" />
+                    <Input name="fees_actual" type="number" step="0.01" placeholder="0.00" defaultValue={activeSale.fees_actual ?? ''} className="mt-2" />
                   </label>
                   <label className="block text-sm font-medium text-[#101828]">
                     Shipping cost
-                    <input name="shipping_cost" type="number" step="0.01" placeholder="0.00" defaultValue={activeSale.shipping_cost ?? ''} className="mt-2 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]" />
+                    <Input name="shipping_cost" type="number" step="0.01" placeholder="0.00" defaultValue={activeSale.shipping_cost ?? ''} className="mt-2" />
                   </label>
                   <label className="block text-sm font-medium text-[#101828]">
                     Promotional fees
-                    <input name="promotional_fees" type="number" step="0.01" placeholder="0.00" defaultValue={activeSale.promotional_fees ?? ''} className="mt-2 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]" />
+                    <Input name="promotional_fees" type="number" step="0.01" placeholder="0.00" defaultValue={activeSale.promotional_fees ?? ''} className="mt-2" />
                   </label>
                   <label className="block text-sm font-medium text-[#101828]">
                     Marketplace fees
-                    <input name="marketplace_fees" type="number" step="0.01" placeholder="0.00" defaultValue={activeSale.marketplace_fees ?? ''} className="mt-2 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]" />
+                    <Input name="marketplace_fees" type="number" step="0.01" placeholder="0.00" defaultValue={activeSale.marketplace_fees ?? ''} className="mt-2" />
                   </label>
                 </FormSection>
                 <FormSection title="Notes" description="Keep any order-specific context with the sale.">
                   <label className="block text-sm font-medium text-[#101828]">
                     Internal notes
-                    <textarea name="notes" placeholder="Carrier issue, partial refund, combined shipment, etc." className="mt-2 h-40 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 py-2 text-sm text-[#101828]" />
+                    <Textarea name="notes" placeholder="Carrier issue, partial refund, combined shipment, etc." className="mt-2 h-40" />
                   </label>
                 </FormSection>
               </div>
