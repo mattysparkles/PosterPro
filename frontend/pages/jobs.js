@@ -17,6 +17,7 @@ import MetricCard from "../components/ui/metric-card";
 import PageHeader from "../components/ui/page-header";
 import SectionPanel from "../components/ui/section-panel";
 import StatusPill from "../components/ui/status-pill";
+import Checkbox from "../components/ui/checkbox";
 import { Tabs } from "../components/ui/tabs";
 import { useAuth } from "../contexts/AuthContext";
 import useDashboardData from "../hooks/useDashboardData";
@@ -784,10 +785,7 @@ export default function JobsPage() {
 
       <SectionPanel title="Operator controls" description="Use auto-refresh, bridge checks, and job detail inspection from the same console.">
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          <label className="flex items-center justify-between rounded-[12px] border border-[#e5e7eb] bg-white p-4 text-sm font-medium text-[#101828]">
-            Auto-refresh every 10s
-            <input type="checkbox" checked={autoRefresh} onChange={(event) => setAutoRefresh(event.target.checked)} />
-          </label>
+          <Checkbox label="Auto-refresh every 10s" checked={autoRefresh} onChange={(event) => setAutoRefresh(event.target.checked)} className="rounded-[12px] border-[#e5e7eb] bg-white p-4 text-sm font-medium text-[#101828]" />
           <div className="rounded-[12px] border border-[#e5e7eb] bg-white p-4">
             <p className="text-sm font-semibold text-[#101828]">Bridge smoke test</p>
             <p className="mt-1 text-sm text-[#667085]">
