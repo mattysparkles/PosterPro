@@ -2157,10 +2157,10 @@ export default function SettingsPage() {
                       ].map(({ label, key, listKey }) => (
                         <div key={key} className="space-y-2">
                           <label className="text-sm font-medium text-[#101828]">{label}</label>
-                          <select
+                          <Select
                             value={ebayPolicyForm[key]}
                             onChange={(event) => setEbayPolicyForm((current) => ({ ...current, [key]: event.target.value }))}
-                            className="w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 py-2 text-sm text-[#101828] outline-none transition focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                            className="rounded-[10px] border-[#e5e7eb] px-3 py-2 text-[#101828]"
                           >
                             <option value="">Select a synced policy</option>
                             {(ebayPolicyLists?.[listKey] || []).map((policy) => (
@@ -2169,7 +2169,7 @@ export default function SettingsPage() {
                                 {policy.is_default ? ' (default)' : ''}
                               </option>
                             ))}
-                          </select>
+                          </Select>
                           <Input
                             value={ebayPolicyForm[key]}
                             onChange={(event) => setEbayPolicyForm((current) => ({ ...current, [key]: event.target.value }))}
@@ -2285,20 +2285,20 @@ export default function SettingsPage() {
                         <p className="text-sm text-[#667085]">Only use this if you intentionally generated a user token outside PosterPro.</p>
                         <div className="space-y-2">
                           <label className="text-sm font-medium text-[#101828]">Access token</label>
-                          <textarea
+                          <Textarea
                             value={ebayTokenForm.access_token}
                             onChange={(event) => setEbayTokenForm((current) => ({ ...current, access_token: event.target.value }))}
                             placeholder="Paste the eBay user access token if you need a manual import."
-                            className="min-h-24 w-full rounded-[10px] border border-[#e5e7eb] bg-white p-3 text-sm text-[#101828] outline-none transition placeholder:text-[#98a2b3] focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                            className="min-h-24 rounded-[10px] border-[#e5e7eb] p-3 text-[#101828]"
                           />
                         </div>
                         <div className="space-y-2">
                           <label className="text-sm font-medium text-[#101828]">Refresh token</label>
-                          <textarea
+                          <Textarea
                             value={ebayTokenForm.refresh_token}
                             onChange={(event) => setEbayTokenForm((current) => ({ ...current, refresh_token: event.target.value }))}
                             placeholder="Paste the refresh token when available."
-                            className="min-h-24 w-full rounded-[10px] border border-[#e5e7eb] bg-white p-3 text-sm text-[#101828] outline-none transition placeholder:text-[#98a2b3] focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                            className="min-h-24 rounded-[10px] border-[#e5e7eb] p-3 text-[#101828]"
                           />
                         </div>
                         <div className="grid gap-3 md:grid-cols-2">
