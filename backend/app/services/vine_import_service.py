@@ -2416,10 +2416,20 @@ class VineImportService:
         # into misleading fragments.
         specifications = facts.get("specifications") or {}
         excluded_spec_keys = {"customer reviews", "reviews", "asin", "model", "brand", "brand name", "type", "item type", "product type"}
-        useful_specs = [
-            (key, value) for key, value in specifications.items()
-            if str(key).strip().lower() not in excluded_spec_keys and self._usable_vine_fact(value)
-        ][:8]
+        useful_specs = []
+        seen_spec_keys: set[str] = set()
+        for key, value in specifications.items():
+            normalized_key = re.sub(r"\s+", " ", str(key).strip().lower())
+            if normalized_key in excluded_spec_keys or normalized_key in seen_spec_keys or not self._usable_vine_fact(value):
+                continue
+            # Scalar facts are rendered in their dedicated sections below;
+            # avoid repeating Capacity/Color/Material in both places.
+            if normalized_key in {"capacity", "tank capacity", "supported capacity", "material", "color", "colour", "size", "item weight", "weight"}:
+                continue
+            seen_spec_keys.add(normalized_key)
+            useful_specs.append((key, value))
+            if len(useful_specs) >= 8:
+                break
         if useful_specs:
             lines.extend(["", "Product details:", *[f"• {key}: {value}" for key, value in useful_specs]])
         for label, key in (("Material", "material"), ("Color", "color"), ("Size", "size"), ("Capacity", "capacity")):
