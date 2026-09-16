@@ -124,7 +124,13 @@ export default function OnboardingPage() {
     };
     window.addEventListener('message', receiveExtensionPresence);
     window.postMessage({ source: 'posterpro-settings', type: 'CHECK_EXTENSION' }, window.location.origin);
-    return () => window.removeEventListener('message', receiveExtensionPresence);
+    const presenceTimer = window.setInterval(() => {
+      window.postMessage({ source: 'posterpro-settings', type: 'CHECK_EXTENSION' }, window.location.origin);
+    }, 3000);
+    return () => {
+      window.removeEventListener('message', receiveExtensionPresence);
+      window.clearInterval(presenceTimer);
+    };
   }, []);
 
   const taskList = useMemo(() => snapshot?.tasks || [], [snapshot]);
@@ -183,7 +189,7 @@ export default function OnboardingPage() {
     if (currentTask.id === 'ai') return aiMode === 'BYO_OPENAI'
       ? [{ selector: '[data-setup-spotlight="ai-mode-choice"]', title: 'Choose your AI connection', body: 'Your own OpenAI account is available today. PosterPro Managed AI is visible as Coming Soon and cannot be activated here.' }, { selector: '[data-setup-spotlight="ai-key"]', title: 'Paste your private key', body: 'Paste the OpenAI key you just created. PosterPro stores it encrypted and does not show it again.' }, { selector: '[data-setup-spotlight="ai-test"]', title: 'Test the connection', body: 'Choose this button to send a small test request. Setup advances only after OpenAI answers successfully.' }]
       : [{ selector: '[data-setup-spotlight="ai-mode-choice"]', title: 'Choose how PosterPro uses AI', body: 'Choose your own OpenAI key for setup available today, or review the truthful Managed AI coming-soon option.' }];
-    if (currentTask.id === 'google_photos') return [{ selector: '[data-setup-spotlight="google-connect"]', title: 'Authorize Google Photos', body: 'PosterPro opens Google sign-in. Choose your account and approve the request, then return here and check status. This does not upload a test photo.' }];
+    if (currentTask.id === 'google_photos') return [{ selector: '[data-setup-spotlight="google-connect"]', title: 'Authorize Google Photos', body: 'PosterPro opens Google sign-in. Choose your account and approve the request. PosterPro verifies the connection automatically when you return.' }];
     if (currentTask.id === 'browser_extension') return [{ selector: '[data-setup-spotlight="browser-primary-action"]', title: 'Connect your browser', body: 'PosterPro checks for this connection automatically. If the extension is not installed yet, use the install button and follow the short Chrome or Edge steps.' }];
     return [{ selector: '[data-setup-spotlight="task-open-button"]', title: 'Open the service', body: 'Use this button to open the correct setup page. Sign in there normally; do not paste marketplace passwords into PosterPro.' }, { selector: '[data-setup-spotlight="task-guidance"]', title: 'Follow the exact steps', body: 'This panel explains what to click, what you should see, and how to recover. A saved login is not the same as a verified listing-form test.' }];
   }, [currentTask, aiMode]);
