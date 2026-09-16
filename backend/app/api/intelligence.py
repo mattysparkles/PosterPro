@@ -331,9 +331,14 @@ def get_listing_readiness(
         raise HTTPException(status_code=404, detail="Listing not found")
     ensure_user_owns_resource(current_user, listing.user_id)
     pricing = ((listing.marketplace_data or {}).get("pricing_analysis") or {}) if isinstance(listing.marketplace_data, dict) else {}
+    targets = sorted({str(value).strip().lower() for value in ((listing.marketplace_data or {}).get("targets") or []) if str(value).strip()}) if isinstance(listing.marketplace_data, dict) else []
+    targets = targets or ["ebay"]
+    canonical = canonical_listing_readiness(listing)
+    destination_readiness = {market: canonical_listing_readiness(listing, marketplace=market) for market in targets}
     return {
         "listing_id": listing.id,
-        "canonical": canonical_listing_readiness(listing),
+        "canonical": canonical,
+        "destinations": destination_readiness,
         "quality_summary": compute_listing_quality_summary(listing, pricing_analysis=pricing),
         "ebay_blockers": validate_marketplace_readiness(listing=listing, marketplace="ebay", pricing_analysis=pricing),
         "facebook_blockers": validate_marketplace_readiness(listing=listing, marketplace="facebook", pricing_analysis=pricing),

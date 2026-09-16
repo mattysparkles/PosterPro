@@ -18,6 +18,14 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
     )
     blockers = list(dict.fromkeys([*(stored.get("blockers") or []), *(base.get("blockers") or [])]))
     warnings = list(dict.fromkeys([*(stored.get("warnings") or []), *(base.get("warnings") or [])]))
+    preflight = (getattr(listing, "marketplace_data", None) or {}).get("marketplace_preflight") if isinstance(getattr(listing, "marketplace_data", None), dict) else None
+    if marketplace and isinstance(preflight, dict):
+        row = (preflight.get("by_marketplace") or {}).get(str(marketplace).lower()) if isinstance(preflight.get("by_marketplace"), dict) else None
+        if isinstance(row, dict):
+            blockers.extend(str(item.get("message") or item.get("code") or item) for item in (row.get("blockers") or []) if item)
+            warnings.extend(str(item.get("message") or item.get("code") or item) for item in (row.get("warnings") or []) if item)
+            blockers = list(dict.fromkeys(blockers))
+            warnings = list(dict.fromkeys(warnings))
     processing_state = str(getattr(listing, "processing_state", "") or "").lower()
     processing_complete = processing_state in {"complete", "completed", "ready"}
     attention = bool(getattr(listing, "processing_blocking_reason", None)) or processing_state in {"needs_attention", "failed", "error"}
@@ -28,7 +36,7 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
         "quality_complete": bool(stored.get("quality_complete", bool(getattr(listing, "description", None)))),
         "review_required": bool(getattr(listing, "needs_review", False)) and not attention,
         "attention_required": attention or bool(blockers),
-        "publishable": publishable,
+        "publishable": publishable and (not marketplace or not blockers),
         "warnings": warnings,
         "blocking_reasons": blockers,
         "missing_required_aspects": list(stored.get("missing_required_aspects") or []),
