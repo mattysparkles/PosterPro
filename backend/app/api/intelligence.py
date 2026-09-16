@@ -14,6 +14,7 @@ from app.services.listing_optimizer_service import ListingOptimizerService
 from app.services.prediction_service import PredictionService
 from app.services.pricing_intelligence_service import PricingIntelligenceService
 from app.services.pricing_research_service import STALE_PRICING_DAYS, compute_listing_quality_summary, validate_marketplace_readiness
+from app.services.canonical_readiness import canonical_listing_readiness
 
 router = APIRouter()
 
@@ -332,6 +333,7 @@ def get_listing_readiness(
     pricing = ((listing.marketplace_data or {}).get("pricing_analysis") or {}) if isinstance(listing.marketplace_data, dict) else {}
     return {
         "listing_id": listing.id,
+        "canonical": canonical_listing_readiness(listing),
         "quality_summary": compute_listing_quality_summary(listing, pricing_analysis=pricing),
         "ebay_blockers": validate_marketplace_readiness(listing=listing, marketplace="ebay", pricing_analysis=pricing),
         "facebook_blockers": validate_marketplace_readiness(listing=listing, marketplace="facebook", pricing_analysis=pricing),
