@@ -1684,7 +1684,7 @@ class VineImportService:
             from app.services.listing_ai import ListingAIService
             generated = ListingAIService().generate(ai_signals, db=db, user_id=listing.user_id, listing_id=listing.id)
             ai_description = str(generated.get("description") or "").strip()
-            if generated.get("generation_source") == "openai" and self._vine_description_is_usable(ai_description, listing.title, facts) and not self._description_source_copy(ai_description, facts):
+            if generated.get("generation_source") == "openai" and self._vine_description_is_usable(ai_description, listing.title, facts) and not self._description_source_copy(ai_description, facts) and not self._description_contains_source_noise(ai_description):
                 return ai_description
         except Exception:
             pass
@@ -1702,6 +1702,12 @@ class VineImportService:
             if needle in candidate or any(" ".join(tokens[i:i + 16]) in candidate for i in range(max(1, len(tokens) - 15))):
                 return True
         return description_source_similarity(description, source) >= 0.82
+
+    @staticmethod
+    def _description_contains_source_noise(description: str) -> bool:
+        """Reject cached/provider copy that leaked marketplace UI metadata."""
+        text = " ".join(str(description or "").split()).lower()
+        return any(marker in text for marker in ("best sellers rank", "free 30-day refund", "return policy", "add to cart", "sponsored", "secure transaction"))
 
     @staticmethod
     def _vine_description_is_usable(description: str, title: str | None, facts: dict) -> bool:

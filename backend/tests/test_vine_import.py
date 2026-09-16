@@ -2388,3 +2388,7 @@ def test_upload_vine_report_returns_400_for_unexpected_parse_errors(monkeypatch,
         asyncio.run(upload_vine_report(file=upload, db=db_session, current_user=owner))
     assert exc_info.value.status_code == 400
     assert "Vine report upload failed: parser exploded" in str(exc_info.value.detail)
+def test_generated_description_rejects_marketplace_metadata_noise():
+    from app.services.vine_import_service import VineImportService
+    assert VineImportService._description_contains_source_noise("Useful product. Best Sellers Rank: #10")
+    assert not VineImportService._description_contains_source_noise("Useful product with verified features and specifications.")
