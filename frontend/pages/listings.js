@@ -8,6 +8,8 @@ import AppShell from '../components/layout/AppShell';
 import { PageAside, PageBand, PageFrame, PageMain, PageSplit } from '../components/layout/PageFrame';
 import ListingEditor from '../components/ListingEditor';
 import Button from '../components/ui/button';
+import Input from '../components/ui/input';
+import Select from '../components/ui/select';
 import MetricCard from '../components/ui/metric-card';
 import DataTable from '../components/ui/data-table';
 import Drawer from '../components/ui/drawer';
@@ -1935,21 +1937,21 @@ export default function ListingsPage() {
         <PageFrame>
           <SectionPanel title="Find listings" description={`${listingPagination.total.toLocaleString()} records · ${catalogPageSize} per page`}>
             <div className="grid gap-3 lg:grid-cols-[minmax(220px,1fr)_190px_190px_190px_auto] lg:items-center">
-              <input
+              <Input
                 value={search}
                 onChange={(event) => { setSearch(event.target.value); setCatalogPage(1); }}
                 placeholder="Search title or description"
-                className="h-10 rounded-[10px] border border-[#d0d5dd] bg-white px-3 text-sm text-[#101828] outline-none focus:border-[#2563eb]"
+                className="h-10"
               />
-              <select value={catalogPageSize} onChange={(event) => { setCatalogPageSize(Number(event.target.value)); setCatalogPage(1); }} className="h-10 rounded-[10px] border border-[#d0d5dd] bg-white px-3 text-sm text-[#101828]">
+              <Select value={catalogPageSize} onChange={(event) => { setCatalogPageSize(Number(event.target.value)); setCatalogPage(1); }} className="h-10 rounded-xl">
                 {[25, 50, 100, 250].map((size) => <option key={size} value={size}>{size} per page</option>)}
-              </select>
-              <select aria-label="Listings source modifier" value={sourceFilter} onChange={(event) => { setSourceFilter(event.target.value); setCatalogPage(1); }} className="h-10 rounded-[10px] border border-amber-300 bg-amber-50 px-3 text-sm font-semibold text-amber-900">
+              </Select>
+              <Select aria-label="Listings source modifier" value={sourceFilter} onChange={(event) => { setSourceFilter(event.target.value); setCatalogPage(1); }} className="h-10 rounded-xl border-amber-300 bg-amber-50 font-semibold text-amber-900">
                 {SOURCE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-              </select>
-              <select aria-label="Listings sort" value={sortBy} onChange={(event) => { setSortBy(event.target.value); setCatalogPage(1); }} className="h-10 rounded-[10px] border border-[#d0d5dd] bg-white px-3 text-sm text-[#101828]">
+              </Select>
+              <Select aria-label="Listings sort" value={sortBy} onChange={(event) => { setSortBy(event.target.value); setCatalogPage(1); }} className="h-10 rounded-xl">
                 <option value="updated">Sort: Date updated</option><option value="created">Sort: Date created</option><option value="price">Sort: Price</option><option value="title">Sort: Title</option><option value="source">Sort: Source</option><option value="status">Sort: Status</option>
-              </select>
+              </Select>
               <Button variant="outline" onClick={clearAllFilters}>Clear filters</Button>
             </div>
             <div className="mt-4 flex flex-wrap gap-2" aria-label="Listing filters">
