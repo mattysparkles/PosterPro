@@ -4087,9 +4087,9 @@ export default function SettingsPage() {
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
-            <a className="inline-flex items-center rounded-[10px] bg-[#2563eb] px-3 py-2 text-sm font-semibold text-white hover:bg-[#1d4ed8]" href="/api/browser-extension/download" download>
+            <Button href="/api/browser-extension/download" download>
               Download latest extension ZIP
-            </a>
+            </Button>
             <Button
               type="button"
               variant="outline"
