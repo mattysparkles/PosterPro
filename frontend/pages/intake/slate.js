@@ -12,6 +12,9 @@ import Input from '../../components/ui/input';
 import PageHeader from '../../components/ui/page-header';
 import SectionPanel from '../../components/ui/section-panel';
 import StatusPill from '../../components/ui/status-pill';
+import Textarea from '../../components/ui/textarea';
+import Select from '../../components/ui/select';
+import Checkbox from '../../components/ui/checkbox';
 import { useAuth } from '../../contexts/AuthContext';
 import {
   analyzeVoiceIntake,
@@ -1407,8 +1410,8 @@ export default function IntakeSlatePage() {
                 <Button onClick={syncGoogleStatus} variant="outline"><RefreshCcw size={16} /> Google sync / status</Button>
               </div>
               <Field label="Transcript" hint="Automatic speech recognition if available, or paste the transcript manually.">
-                <textarea
-                  className="min-h-[160px] rounded-2xl border border-[var(--pp-border)] bg-white px-4 py-3 text-sm text-[var(--pp-text)]"
+                <Textarea
+                  className="min-h-[160px]"
                   value={voiceTranscript}
                   onChange={(event) => {
                     transcriptRef.current = event.target.value;
@@ -1418,8 +1421,8 @@ export default function IntakeSlatePage() {
                 />
               </Field>
               <Field label="AI intent / research notes" hint="PosterPro keeps the structured interpretation and lets you edit the result before saving the slate.">
-                <textarea
-                  className="min-h-[120px] rounded-2xl border border-[var(--pp-border)] bg-white px-4 py-3 text-sm text-[var(--pp-text)]"
+                <Textarea
+                  className="min-h-[120px]"
                   value={aiStructured?.canonical_listing?.master_description || voiceAnalysis?.voice_intelligence?.description || voiceAnalysis?.suggested_fields?.notes || ''}
                   readOnly
                   placeholder="AI suggestions will appear here after analysis."
@@ -1573,10 +1576,10 @@ export default function IntakeSlatePage() {
                 <Input value={form.condition} onChange={(event) => onChange('condition', event.target.value)} placeholder="Used" />
               </Field>
               <Field label="Boundary marker">
-                <select className="rounded-2xl border border-[var(--pp-border)] bg-white px-4 py-3 text-sm text-[var(--pp-text)]" value={form.boundary_position} onChange={(event) => onChange('boundary_position', event.target.value)}>
+                <Select value={form.boundary_position} onChange={(event) => onChange('boundary_position', event.target.value)}>
                   <option value="start">Start of item</option>
                   <option value="tail">Tail slate taken after photos</option>
-                </select>
+                </Select>
               </Field>
               <Field label="Brand" badge={isAiPopulatedValue(form.brand, aiFieldSuggestions.brand) ? <StatusPill status="success" label="AI populated" /> : null}>
                 <Input value={form.brand} onChange={(event) => onChange('brand', event.target.value)} placeholder="Ryobi" />
@@ -1595,13 +1598,13 @@ export default function IntakeSlatePage() {
                 </div>
               </Field>
               <Field label="Notes">
-                <textarea className="min-h-[108px] rounded-2xl border border-[var(--pp-border)] bg-white px-4 py-3 text-sm text-[var(--pp-text)]" value={form.notes} onChange={(event) => onChange('notes', event.target.value)} placeholder="Accessories, known history, or notes for the draft description" />
+                <Textarea className="min-h-[108px]" value={form.notes} onChange={(event) => onChange('notes', event.target.value)} placeholder="Accessories, known history, or notes for the draft description" />
               </Field>
               <Field label="Flaws / defects">
-                <textarea className="min-h-[108px] rounded-2xl border border-[var(--pp-border)] bg-white px-4 py-3 text-sm text-[var(--pp-text)]" value={form.flaws} onChange={(event) => onChange('flaws', event.target.value)} placeholder="Scratches, cracks, wear, missing pieces" />
+                <Textarea className="min-h-[108px]" value={form.flaws} onChange={(event) => onChange('flaws', event.target.value)} placeholder="Scratches, cracks, wear, missing pieces" />
               </Field>
               <Field label="Internal-only notes">
-                <textarea className="min-h-[108px] rounded-2xl border border-[var(--pp-border)] bg-white px-4 py-3 text-sm text-[var(--pp-text)]" value={form.internal_notes} onChange={(event) => onChange('internal_notes', event.target.value)} placeholder="Packing notes or operator-only reminders" />
+                <Textarea className="min-h-[108px]" value={form.internal_notes} onChange={(event) => onChange('internal_notes', event.target.value)} placeholder="Packing notes or operator-only reminders" />
               </Field>
               <div className="grid gap-3 rounded-[22px] border border-[var(--pp-border)] bg-[var(--pp-surface-muted)] p-4 md:col-span-2">
                 {[
@@ -1609,10 +1612,7 @@ export default function IntakeSlatePage() {
                   ['increment_box', 'Increment box ID on next item'],
                   ['packed', 'Mark packed on slate'],
                 ].map(([key, label]) => (
-                  <label key={key} className="flex items-center gap-3 text-sm text-[var(--pp-text)]">
-                    <input type="checkbox" checked={Boolean(form[key])} onChange={(event) => onChange(key, event.target.checked)} />
-                    <span>{label}</span>
-                  </label>
+                  <Checkbox key={key} label={label} checked={Boolean(form[key])} onChange={(event) => onChange(key, event.target.checked)} />
                 ))}
               </div>
             </div>
