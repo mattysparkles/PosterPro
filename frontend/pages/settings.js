@@ -31,6 +31,7 @@ import FormSection from '../components/ui/form-section';
 import HealthIndicator from '../components/ui/health-indicator';
 import HelpTip from '../components/ui/help-tip';
 import Input from '../components/ui/input';
+import Textarea from '../components/ui/textarea';
 import Select from '../components/ui/select';
 import Checkbox from '../components/ui/checkbox';
 import MetricCard from '../components/ui/metric-card';
@@ -3529,15 +3530,15 @@ export default function SettingsPage() {
                       <div className="grid gap-4 md:grid-cols-2">
                         <div className="space-y-2">
                           <label className="text-sm font-medium text-[#101828]">Marketplace</label>
-                          <select
+                          <Select
                             value={bridgeAccountForm.marketplace}
                             onChange={(event) => setBridgeAccountForm((current) => ({ ...current, marketplace: event.target.value }))}
-                            className="pp-input h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]"
+                            className="h-10 rounded-[10px] border-[#e5e7eb] px-3 text-[#101828]"
                           >
                             {BRIDGE_MARKETPLACE_OPTIONS.map((name) => (
                               <option key={name} value={name}>{MARKETPLACE_LABELS[name] || name}</option>
                             ))}
-                          </select>
+                          </Select>
                         </div>
                         <div className="space-y-2">
                           <label className="text-sm font-medium text-[#101828]">Account key</label>
@@ -3559,17 +3560,17 @@ export default function SettingsPage() {
                         </div>
                         <div className="space-y-2">
                           <label className="text-sm font-medium text-[#101828]">Session state</label>
-                          <select
+                          <Select
                             value={bridgeAccountForm.session_state}
                             onChange={(event) => setBridgeAccountForm((current) => ({ ...current, session_state: event.target.value }))}
-                            className="pp-input h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]"
+                            className="h-10 rounded-[10px] border-[#e5e7eb] px-3 text-[#101828]"
                           >
                             <option value="draft">Draft</option>
                             <option value="ready">Ready</option>
                             <option value="active">Active</option>
                             <option value="expired">Expired</option>
                             <option value="invalid">Invalid</option>
-                          </select>
+                          </Select>
                         </div>
                       </div>
                       <div className="grid gap-4 md:grid-cols-2">
@@ -3585,20 +3586,20 @@ export default function SettingsPage() {
                       <div className="space-y-2">
                         <label className="text-sm font-medium text-[#101828]">Advanced session metadata</label>
                         <p className="text-xs text-[#667085]">Existing session credentials are never shown here. Leave blank to preserve them.</p>
-                        <textarea
+                        <Textarea
                           value={bridgeAccountForm.session_payload_text}
                           onChange={(event) => setBridgeAccountForm((current) => ({ ...current, session_payload_text: event.target.value }))}
                           placeholder="Optional metadata JSON (leave blank to preserve the saved session)"
-                          className="mt-1 h-28 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 py-2 text-sm text-[#101828]"
+                          className="mt-1 h-28 rounded-[10px] border-[#e5e7eb] text-[#101828]"
                         />
                       </div>
                       <div className="space-y-2">
                         <label className="text-sm font-medium text-[#101828]">Notes</label>
-                        <textarea
+                        <Textarea
                           value={bridgeAccountForm.notes}
                           onChange={(event) => setBridgeAccountForm((current) => ({ ...current, notes: event.target.value }))}
                           placeholder="Browser profile notes, MFA expectations, proxy requirements, etc."
-                          className="mt-1 h-20 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 py-2 text-sm text-[#101828]"
+                          className="mt-1 h-20 rounded-[10px] border-[#e5e7eb] text-[#101828]"
                         />
                       </div>
                       <div className="flex justify-end">
