@@ -1016,6 +1016,13 @@ def test_vine_title_limit_clips_on_word_boundary():
     assert title.split()[-1] != "Descriptiv"
 
 
+def test_vine_title_sanitizes_source_promotional_fragments():
+    title = VineImportService()._generate_title("Portable Toilet - Free Shipping - 30-day refund")
+    lowered = title.lower()
+    assert "free shipping" not in lowered
+    assert "refund" not in lowered
+
+
 @pytest.mark.parametrize(
     ("product_name", "expected_category"),
     [
