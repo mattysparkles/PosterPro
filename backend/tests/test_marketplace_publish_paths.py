@@ -1,7 +1,7 @@
 from app.models.enums import ListingStatus, MarketplaceListingStatus
 from app.models.models import Listing, MarketplaceListing, User
 from app.services.marketplace_preflight import MarketplacePreflightService
-from app.services.marketplace_field_mapper import build_marketplace_payload, marketplace_description_variants
+from app.services.marketplace_field_mapper import build_marketplace_payload, marketplace_description_variants, persist_marketplace_description_variants
 from app.workers import tasks
 from app.workers.tasks import publish_listing_to_marketplace_task
 
@@ -121,6 +121,16 @@ def test_marketplace_descriptions_keep_rich_canonical_copy_separate(db_session):
     assert build_marketplace_payload(listing, "ebay")["description"] == variants["ebay"]
     assert build_marketplace_payload(listing, "facebook")["description"] == variants["facebook"]
     assert build_marketplace_payload(listing, "mercari")["description"] == variants["mercari"]
+
+
+def test_marketplace_variant_persistence_preserves_operator_override(db_session):
+    user = User(email="marketplace-description-override@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(user_id=user.id, title="Test product", description="Rich canonical copy with supported product facts and buyer context.", marketplace_descriptions={"mercari": "Operator edited Mercari copy."})
+    rendered = persist_marketplace_description_variants(listing)
+    assert rendered["mercari"] == "Operator edited Mercari copy."
+    assert rendered["ebay"] == listing.description
+    assert rendered["facebook"] == listing.description
 
 
 def test_non_ebay_payload_does_not_reuse_ebay_category_id(db_session):

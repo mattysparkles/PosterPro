@@ -54,6 +54,20 @@ def marketplace_description_variants(listing: Listing) -> dict[str, str]:
     }
 
 
+def persist_marketplace_description_variants(listing: Listing) -> dict[str, str]:
+    """Materialize channel copy while preserving canonical/operator overrides."""
+    variants = marketplace_description_variants(listing)
+    existing = getattr(listing, "marketplace_descriptions", None)
+    existing = existing if isinstance(existing, dict) else {}
+    # Only fill generated slots; an operator-edited variant remains untouched.
+    rendered = dict(existing)
+    rendered.setdefault("ebay", variants["canonical"])
+    rendered.setdefault("facebook", variants["canonical"])
+    rendered.setdefault("mercari", variants["mercari"])
+    listing.marketplace_descriptions = rendered
+    return {"canonical": variants["canonical"], **{key: str(value or "") for key, value in rendered.items()}}
+
+
 def _trim_to_word_limit(value: str | None, limit: int) -> str | None:
     text = " ".join(str(value or "").split())
     if not text:
