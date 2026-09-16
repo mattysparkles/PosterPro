@@ -2420,22 +2420,8 @@ export default function SettingsPage() {
                       description="Import a JSON theme pack so the hosted CMS can switch visual systems without custom code changes."
                     >
                       <div className="grid gap-3 md:grid-cols-2">
-                        <label className="flex items-center justify-between rounded-[10px] border border-[#e5e7eb] bg-white px-4 py-3 text-sm text-[#101828]">
-                          Replace existing themes
-                          <input
-                            type="checkbox"
-                            checked={themeImportForm.replace_existing}
-                            onChange={(event) => setThemeImportForm((current) => ({ ...current, replace_existing: event.target.checked }))}
-                          />
-                        </label>
-                        <label className="flex items-center justify-between rounded-[10px] border border-[#e5e7eb] bg-white px-4 py-3 text-sm text-[#101828]">
-                          Activate imported theme
-                          <input
-                            type="checkbox"
-                            checked={themeImportForm.activate_imported}
-                            onChange={(event) => setThemeImportForm((current) => ({ ...current, activate_imported: event.target.checked }))}
-                          />
-                        </label>
+                        <Checkbox className="rounded-[10px] border-[#e5e7eb] px-4 py-3" checked={themeImportForm.replace_existing} onChange={(event) => setThemeImportForm((current) => ({ ...current, replace_existing: event.target.checked }))} label="Replace existing themes" />
+                        <Checkbox className="rounded-[10px] border-[#e5e7eb] px-4 py-3" checked={themeImportForm.activate_imported} onChange={(event) => setThemeImportForm((current) => ({ ...current, activate_imported: event.target.checked }))} label="Activate imported theme" />
                       </div>
                       <div className="space-y-2">
                         <label className="text-sm font-medium text-[#101828]">Theme pack JSON</label>
@@ -2640,38 +2626,10 @@ export default function SettingsPage() {
                 />
                 <InstructionTable title="Amazon PA-API credentials" rows={CREDENTIAL_INSTRUCTIONS.amazon} />
                 <div className="grid gap-3 md:grid-cols-2">
-                  <label className="flex items-center justify-between rounded-[10px] border border-[#e5e7eb] bg-white px-4 py-3 text-sm text-[#101828]">
-                    Enable Vine importer
-                    <input
-                      type="checkbox"
-                      checked={amazonForm.amazon_vine_import_enabled}
-                      onChange={(event) => setAmazonForm((current) => ({ ...current, amazon_vine_import_enabled: event.target.checked }))}
-                    />
-                  </label>
-                  <label className="flex items-center justify-between rounded-[10px] border border-[#e5e7eb] bg-white px-4 py-3 text-sm text-[#101828]">
-                    Premium-only gate
-                    <input
-                      type="checkbox"
-                      checked={amazonForm.amazon_vine_import_premium_only}
-                      onChange={(event) => setAmazonForm((current) => ({ ...current, amazon_vine_import_premium_only: event.target.checked }))}
-                    />
-                  </label>
-                  <label className="flex items-center justify-between rounded-[10px] border border-[#e5e7eb] bg-white px-4 py-3 text-sm text-[#101828]">
-                    Enable Amazon media lookup
-                    <input
-                      type="checkbox"
-                      checked={amazonForm.amazon_media_lookup_enabled}
-                      onChange={(event) => setAmazonForm((current) => ({ ...current, amazon_media_lookup_enabled: event.target.checked }))}
-                    />
-                  </label>
-                  <label className="flex items-center justify-between rounded-[10px] border border-[#e5e7eb] bg-white px-4 py-3 text-sm text-[#101828]">
-                    Page metadata fallback
-                    <input
-                      type="checkbox"
-                      checked={amazonForm.amazon_media_page_fallback_enabled}
-                      onChange={(event) => setAmazonForm((current) => ({ ...current, amazon_media_page_fallback_enabled: event.target.checked }))}
-                    />
-                  </label>
+                  <Checkbox className="rounded-[10px] border-[#e5e7eb] px-4 py-3" checked={amazonForm.amazon_vine_import_enabled} onChange={(event) => setAmazonForm((current) => ({ ...current, amazon_vine_import_enabled: event.target.checked }))} label="Enable Vine importer" />
+                  <Checkbox className="rounded-[10px] border-[#e5e7eb] px-4 py-3" checked={amazonForm.amazon_vine_import_premium_only} onChange={(event) => setAmazonForm((current) => ({ ...current, amazon_vine_import_premium_only: event.target.checked }))} label="Premium-only gate" />
+                  <Checkbox className="rounded-[10px] border-[#e5e7eb] px-4 py-3" checked={amazonForm.amazon_media_lookup_enabled} onChange={(event) => setAmazonForm((current) => ({ ...current, amazon_media_lookup_enabled: event.target.checked }))} label="Enable Amazon media lookup" />
+                  <Checkbox className="rounded-[10px] border-[#e5e7eb] px-4 py-3" checked={amazonForm.amazon_media_page_fallback_enabled} onChange={(event) => setAmazonForm((current) => ({ ...current, amazon_media_page_fallback_enabled: event.target.checked }))} label="Page metadata fallback" />
                 </div>
                 <div className="grid gap-4 md:grid-cols-3">
                   <div className="space-y-2">
@@ -3358,14 +3316,7 @@ export default function SettingsPage() {
                     />
                   </div>
                   <div className="mt-4 grid gap-4 md:grid-cols-2">
-                    <label className="flex items-center justify-between rounded-[10px] border border-white/80 bg-white px-4 py-3 text-sm text-[#101828]">
-                      Bridge enabled
-                      <input
-                        type="checkbox"
-                        checked={automationForm.automation_bridge_enabled}
-                        onChange={(event) => setAutomationForm((current) => ({ ...current, automation_bridge_enabled: event.target.checked }))}
-                      />
-                    </label>
+                    <Checkbox className="rounded-[10px] border-white/80 px-4 py-3" checked={automationForm.automation_bridge_enabled} onChange={(event) => setAutomationForm((current) => ({ ...current, automation_bridge_enabled: event.target.checked }))} label="Bridge enabled" />
                     <div className="space-y-2 rounded-[10px] border border-white/80 bg-white p-3">
                       <label className="text-sm font-medium text-[#101828]">Bridge timeout (seconds)</label>
                       <Input
@@ -3567,14 +3518,8 @@ export default function SettingsPage() {
                         </div>
                       </div>
                       <div className="grid gap-4 md:grid-cols-2">
-                        <label className="flex items-center justify-between rounded-[10px] border border-[#e5e7eb] bg-[#f9fafb] px-4 py-3 text-sm text-[#101828]">
-                          Provider assist enabled
-                          <input type="checkbox" checked={bridgeAccountForm.provider_enabled} onChange={(event) => setBridgeAccountForm((current) => ({ ...current, provider_enabled: event.target.checked }))} />
-                        </label>
-                        <label className="flex items-center justify-between rounded-[10px] border border-[#e5e7eb] bg-[#f9fafb] px-4 py-3 text-sm text-[#101828]">
-                          Browser assist enabled
-                          <input type="checkbox" checked={bridgeAccountForm.browser_enabled} onChange={(event) => setBridgeAccountForm((current) => ({ ...current, browser_enabled: event.target.checked }))} />
-                        </label>
+                        <Checkbox className="rounded-[10px] border-[#e5e7eb] px-4 py-3" checked={bridgeAccountForm.provider_enabled} onChange={(event) => setBridgeAccountForm((current) => ({ ...current, provider_enabled: event.target.checked }))} label="Provider assist enabled" />
+                        <Checkbox className="rounded-[10px] border-[#e5e7eb] px-4 py-3" checked={bridgeAccountForm.browser_enabled} onChange={(event) => setBridgeAccountForm((current) => ({ ...current, browser_enabled: event.target.checked }))} label="Browser assist enabled" />
                       </div>
                       <div className="space-y-2">
                         <label className="text-sm font-medium text-[#101828]">Advanced session metadata</label>
@@ -3648,38 +3593,10 @@ export default function SettingsPage() {
                   description="Global automation switches and delist behavior after sales."
                   defaultOpen={false}
                 >
-                <label className="flex items-center justify-between rounded-[10px] border border-[#e5e7eb] bg-white px-4 py-3 text-sm text-[#101828]">
-                  Dry run mode
-                  <input
-                    type="checkbox"
-                    checked={automationForm.autonomous_dry_run}
-                    onChange={(event) => setAutomationForm((current) => ({ ...current, autonomous_dry_run: event.target.checked }))}
-                  />
-                </label>
-                <label className="flex items-center justify-between rounded-[10px] border border-[#e5e7eb] bg-white px-4 py-3 text-sm text-[#101828]">
-                  Crosspost automation
-                  <input
-                    type="checkbox"
-                    checked={automationForm.autonomous_crosspost_enabled}
-                    onChange={(event) => setAutomationForm((current) => ({ ...current, autonomous_crosspost_enabled: event.target.checked }))}
-                  />
-                </label>
-                <label className="flex items-center justify-between rounded-[10px] border border-[#e5e7eb] bg-white px-4 py-3 text-sm text-[#101828]">
-                  Sale detection enabled
-                  <input
-                    type="checkbox"
-                    checked={automationForm.sale_detection_enabled}
-                    onChange={(event) => setAutomationForm((current) => ({ ...current, sale_detection_enabled: event.target.checked }))}
-                  />
-                </label>
-                <label className="flex items-center justify-between rounded-[10px] border border-[#e5e7eb] bg-white px-4 py-3 text-sm text-[#101828]">
-                  Sale detection dry run
-                  <input
-                    type="checkbox"
-                    checked={automationForm.sale_detection_dry_run}
-                    onChange={(event) => setAutomationForm((current) => ({ ...current, sale_detection_dry_run: event.target.checked }))}
-                  />
-                </label>
+                <Checkbox className="rounded-[10px] border-[#e5e7eb] px-4 py-3" checked={automationForm.autonomous_dry_run} onChange={(event) => setAutomationForm((current) => ({ ...current, autonomous_dry_run: event.target.checked }))} label="Dry run mode" />
+                <Checkbox className="rounded-[10px] border-[#e5e7eb] px-4 py-3" checked={automationForm.autonomous_crosspost_enabled} onChange={(event) => setAutomationForm((current) => ({ ...current, autonomous_crosspost_enabled: event.target.checked }))} label="Crosspost automation" />
+                <Checkbox className="rounded-[10px] border-[#e5e7eb] px-4 py-3" checked={automationForm.sale_detection_enabled} onChange={(event) => setAutomationForm((current) => ({ ...current, sale_detection_enabled: event.target.checked }))} label="Sale detection enabled" />
+                <Checkbox className="rounded-[10px] border-[#e5e7eb] px-4 py-3" checked={automationForm.sale_detection_dry_run} onChange={(event) => setAutomationForm((current) => ({ ...current, sale_detection_dry_run: event.target.checked }))} label="Sale detection dry run" />
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-[#101828]">Sale polling interval (minutes)</label>
                   <Input
