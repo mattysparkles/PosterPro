@@ -82,6 +82,8 @@ _VERIFIED_CATEGORY_IDS: dict[str, str] = {
     "Health & Beauty": "1277",
     "Toys & Hobbies": "234",
     "Automotive": "11808",
+    "Consumer Electronics > Multipurpose Batteries & Power > Battery Chargers": "48618",
+    "Pet Supplies > Dog Supplies > Other Dog Supplies": "1283",
 }
 
 
