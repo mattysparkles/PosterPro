@@ -133,6 +133,16 @@ def test_marketplace_variant_persistence_preserves_operator_override(db_session)
     assert rendered["facebook"] == listing.description
 
 
+def test_destination_overrides_are_used_by_payload_without_changing_canonical(db_session):
+    user = User(email="marketplace-override-payload@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(user_id=user.id, title="Original", description="Canonical copy", listing_price=50, marketplace_data={"marketplace_overrides": {"ebay": {"price": 42, "title": "eBay-specific title", "provenance": {"price": "operator_edited"}}}})
+    payload = build_marketplace_payload(listing, "ebay")
+    assert payload["price"] == 42
+    assert payload["title"] == "eBay-specific title"
+    assert listing.listing_price == 50
+
+
 def test_non_ebay_payload_does_not_reuse_ebay_category_id(db_session):
     user = User(email="marketplace-category-map@example.com")
     db_session.add(user)
