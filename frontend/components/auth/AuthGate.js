@@ -2,6 +2,7 @@ import { useRouter } from 'next/router';
 import { useEffect, useState } from 'react';
 
 import { useAuth } from '../../contexts/AuthContext';
+import Button from '../ui/button';
 
 export default function AuthGate({ children }) {
   const router = useRouter();
@@ -39,39 +40,38 @@ export default function AuthGate({ children }) {
               <p className="mt-3 text-sm text-muted-foreground">
                 {bootError || 'Session check is taking longer than expected. You can retry the workspace check or go straight to login.'}
               </p>
-              <button
-                className="mt-5 inline-flex items-center justify-center rounded-[12px] bg-primary px-4 py-2 text-sm font-semibold text-white"
-                type="button"
+              <Button
+                className="mt-5"
                 onClick={() => refreshUser()}
               >
                 Retry
-              </button>
-              <button
-                className="mt-3 inline-flex items-center justify-center rounded-[12px] border border-border/70 bg-transparent px-4 py-2 text-sm font-semibold text-foreground"
-                type="button"
+              </Button>
+              <Button
+                className="mt-3"
+                variant="secondary"
                 onClick={() => {
                   const next = encodeURIComponent(router.asPath || '/app');
                   router.replace(`/login?next=${next}`);
                 }}
               >
                 Go to login
-              </button>
+              </Button>
             </>
           ) : (
             <>
               <p className="mt-3 text-sm text-muted-foreground">
                 Loading your account and routing you into the reseller dashboard.
               </p>
-              <button
-                className="mt-5 inline-flex items-center justify-center rounded-[12px] border border-border/70 bg-transparent px-4 py-2 text-sm font-semibold text-foreground"
-                type="button"
+              <Button
+                className="mt-5"
+                variant="secondary"
                 onClick={() => {
                   const next = encodeURIComponent(router.asPath || '/app');
                   router.replace(`/login?next=${next}`);
                 }}
               >
                 Return to login
-              </button>
+              </Button>
             </>
           )}
         </div>
