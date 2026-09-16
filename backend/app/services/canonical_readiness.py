@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import Any
+import re
 
 from app.services.listing_review import summarize_listing_readiness
 
@@ -22,6 +23,15 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
     if missing_required_aspects:
         blockers.extend(f"Required marketplace detail missing: {value}" for value in missing_required_aspects)
     description = str(getattr(listing, "canonical_description", None) or getattr(listing, "description", None) or "").strip()
+    source_metadata = getattr(listing, "source_metadata", None) if isinstance(getattr(listing, "source_metadata", None), dict) else {}
+    source_facts = source_metadata.get("amazon_product_facts") if isinstance(source_metadata.get("amazon_product_facts"), dict) else source_metadata.get("source_facts")
+    if isinstance(source_facts, dict) and description:
+        fact_values = [*(source_facts.get("feature_bullets") or []), *((source_facts.get("specifications") or {}).values() if isinstance(source_facts.get("specifications"), dict) else [])]
+        fact_values = [str(value).strip() for value in fact_values if str(value or "").strip()]
+        description_tokens = set(re.findall(r"[a-z0-9]{4,}", description.lower()))
+        covered = sum(bool(description_tokens.intersection(set(re.findall(r"[a-z0-9]{4,}", value.lower())))) for value in fact_values)
+        if len(fact_values) >= 4 and covered < max(2, min(4, len(fact_values) // 3)):
+            blockers.append("Description does not cover enough verified product facts")
     if not description:
         blockers.append("Description is missing")
     elif len(description) < 180:
