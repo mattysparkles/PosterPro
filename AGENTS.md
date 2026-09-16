@@ -1,5 +1,27 @@
 # PosterPro Deployment Log
 
+## 2026-09-16 - Jobs layout persistence and readiness contract exposure
+
+### Implemented
+- Jobs correction priority now uses the shared `Input` primitive instead of a
+  legacy browser control.
+- Jobs metric-card order is now sanitized and persisted in the authenticated
+  user's `profile_preferences.jobs_layout` for processing, overview, and
+  system metric groups. Browser local storage remains only a compatibility
+  fallback for older sessions.
+- Marketplace preflight responses now include the canonical listing-readiness
+  result alongside marketplace-specific diagnostics, keeping queue/publish
+  consumers on one explainable readiness contract.
+
+### Validation and deployment
+- Auth layout persistence tests: `2 passed`.
+- Marketplace preflight tests: `21 passed`.
+- Frontend production build passed with existing lint/image warnings.
+- Restarted PosterPro backend/frontend; both active.
+- Backend health `200`, `database_ready=true`; `/jobs`, `/settings`, and
+  `/listings` returned `200`.
+- Commits: `d7fb91a`, `131f5ad`, `35ac410` (pushed normally).
+
 ## 2026-09-14 - Assisted marketplace diagnostics and exact-target browser actions
 
 ### Implemented
