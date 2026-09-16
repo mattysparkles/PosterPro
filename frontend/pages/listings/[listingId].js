@@ -28,6 +28,7 @@ import {
   toggleAutonomousMode,
   updateListing,
   recordManualSale,
+  resolveListingCategory,
 } from "../../lib/api";
 
 const CHANNEL_LABELS = {
@@ -843,7 +844,7 @@ export default function ListingWorkspacePage() {
                 <div className="mt-2 flex items-center justify-between"><span className="text-xs text-[#667085]">{variantMarketplace === 'mercari' ? `${variantDraft.length}/1000 characters` : `${variantDraft.length} characters`} · saved as operator-edited</span><Button type="button" size="sm" onClick={saveMarketplaceVariant} disabled={savingVariant}>{savingVariant ? 'Saving…' : 'Save destination copy'}</Button></div>
               </div> : null}
               <div className="space-y-2">
-                <label className="text-sm font-medium text-[#101828]">Marketplace category ID</label>
+                <div className="flex items-center justify-between gap-3"><label className="text-sm font-medium text-[#101828]">Marketplace category ID</label><Button type="button" size="sm" variant="outline" onClick={async () => { try { const result = await resolveListingCategory(listing.id); if (result?.resolved) { toast.success(`Category resolved: ${result.category_path}`); const saved = await fetchListing(listing.id); setListing(saved); setForm((current) => ({ ...current, category_id: String(saved?.category_id || result.category_id), category_suggestion: saved?.category_suggestion || result.category_path })); } else toast.error(result?.reason || "No confident taxonomy match yet."); } catch (error) { toast.error(error.message || "Could not resolve category."); } }}>Resolve from taxonomy</Button></div>
                 <select className="h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm" value={form.category_id} onChange={(event) => autosaveListingField("category_id", event.target.value)}>
                   <option value="">Select eBay category</option>
                   {categoryChoices.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}

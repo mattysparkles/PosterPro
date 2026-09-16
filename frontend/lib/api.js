@@ -1168,6 +1168,10 @@ export async function fetchListingIntelligence(id) {
   return jsonFetch(`${API_BASE}/listings/${id}/intelligence`);
 }
 
+export async function resolveListingCategory(id, marketplace = "ebay") {
+  return jsonFetch(`${API_BASE}/listings/${encodeURIComponent(id)}/resolve-category?marketplace=${encodeURIComponent(marketplace)}`, { method: "POST" });
+}
+
 export async function fetchAutonomousConfig() {
   return jsonFetch(`${API_BASE}/config/autonomous`);
 }
