@@ -6,6 +6,7 @@ import { Bot, ExternalLink, Save, Sparkles, Truck } from "lucide-react";
 import AppShell from "../../components/layout/AppShell";
 import Button from "../../components/ui/button";
 import Input from "../../components/ui/input";
+import Select from "../../components/ui/select";
 import PageHeader from "../../components/ui/page-header";
 import SectionPanel from "../../components/ui/section-panel";
 import StatusPill from "../../components/ui/status-pill";
@@ -845,11 +846,11 @@ export default function ListingWorkspacePage() {
               </div> : null}
               <div className="space-y-2">
                 <div className="flex items-center justify-between gap-3"><label className="text-sm font-medium text-[#101828]">Marketplace category ID</label><Button type="button" size="sm" variant="outline" onClick={async () => { try { const result = await resolveListingCategory(listing.id); if (result?.resolved) { toast.success(`Category resolved: ${result.category_path}`); const saved = await fetchListing(listing.id); setListing(saved); setForm((current) => ({ ...current, category_id: String(saved?.category_id || result.category_id), category_suggestion: saved?.category_suggestion || result.category_path })); } else toast.error(result?.reason || "No confident taxonomy match yet."); } catch (error) { toast.error(error.message || "Could not resolve category."); } }}>Resolve from taxonomy</Button></div>
-                <select className="h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm" value={form.category_id} onChange={(event) => autosaveListingField("category_id", event.target.value)}>
+                <Select className="h-10 w-full rounded-xl" value={form.category_id} onChange={(event) => autosaveListingField("category_id", event.target.value)}>
                   <option value="">Select eBay category</option>
                   {categoryChoices.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                   {ebayCategoryRoots.filter((node) => node.category_id && !categoryChoices.some((option) => option.value === String(node.category_id)) && node.leaf && node.publishable).map((node) => <option key={node.category_id} value={String(node.category_id)}>{node.category_name}</option>)}
-                </select>
+                </Select>
                 <Button type="button" variant="outline" className="mt-2" onClick={() => loadCategoryChildren()}>Browse eBay categories</Button>
                 {categoryBrowseNodes.length ? <div className="mt-2 max-h-64 space-y-1 overflow-y-auto rounded-lg border border-[#e5e7eb] bg-slate-50 p-2"><div className="mb-1 flex flex-wrap items-center gap-1 text-xs text-slate-600"><Button type="button" size="sm" variant="outline" onClick={() => loadCategoryChildren()}>All Categories</Button>{categoryBrowseTrail.map((entry, index) => <Button key={entry.id} type="button" size="sm" variant="outline" onClick={() => loadCategoryChildren(entry.id, entry.label, categoryBrowseTrail.slice(0, index))}>{entry.label}</Button>)}</div>{categoryBrowseNodes.map((node) => <div key={node.category_id} className="flex items-center justify-between gap-2 rounded border bg-white px-2 py-1 text-xs"><span>{node.category_name} <span className="text-slate-500">({node.category_id})</span></span>{node.has_children ? <Button type="button" size="sm" variant="outline" onClick={() => loadCategoryChildren(node.category_id, node.category_name, categoryBrowseTrail)}>Open</Button> : node.leaf && node.publishable ? <Button type="button" size="sm" onClick={() => selectBrowseCategory(node)}>Select</Button> : <span className="text-amber-700">Unverified</span>}</div>)}</div> : null}
                 <Input className="mt-2" value={form.category_id} onChange={(event) => setForm((current) => ({ ...current, category_id: event.target.value }))} placeholder="Or enter verified eBay category ID" />
