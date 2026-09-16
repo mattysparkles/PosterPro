@@ -18,6 +18,21 @@ def test_blocked_listing_cannot_be_publishable(db_session):
     assert result["publishable"] is False
 
 
+def test_processing_listing_is_not_publishable_or_needs_review(db_session):
+    user = User(email="readiness-processing@example.com"); db_session.add(user); db_session.flush()
+    listing = Listing(
+        user_id=user.id, processing_state="description_generation", needs_review=True,
+        title="Product", description="A detailed product description with supported facts.",
+        category_suggestion="Sporting Goods", listing_price=20,
+        listing_images=[{"storage_path": "/media/item.jpg", "operator_state": "approved", "role": "primary"}],
+        condition_data={"operator_review_required": False}, shipping_profile={"manual_measurement_needed": False},
+    )
+    result = canonical_listing_readiness(listing, marketplace="facebook")
+    assert result["processing_complete"] is False
+    assert result["publishable"] is False
+    assert result["queue"] == "PROCESSING"
+
+
 def test_destination_preflight_blocker_is_scoped_to_destination(db_session):
     user = User(email="readiness-destination@example.com"); db_session.add(user); db_session.flush()
     listing = Listing(user_id=user.id, processing_state="complete", needs_review=True, description="Useful product description", category_suggestion="Sporting Goods", listing_price=20, listing_images=[{"storage_path":"/media/item.jpg","operator_state":"approved","role":"primary"}], condition_data={"operator_review_required": False}, shipping_profile={"manual_measurement_needed": False}, marketplace_data={"targets":["ebay","facebook"],"marketplace_preflight":{"by_marketplace":{"ebay":{"status":"blocked","blockers":[{"code":"REQUIRED_ASPECT","message":"Size is required"}]},"facebook":{"status":"ready","blockers":[],"warnings":[]}}}})

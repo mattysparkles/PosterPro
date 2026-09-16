@@ -50,7 +50,11 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
     processing_state = str(getattr(listing, "processing_state", "") or "").lower()
     processing_complete = processing_state in {"complete", "completed", "ready"}
     attention = bool(getattr(listing, "processing_blocking_reason", None)) or processing_state in {"needs_attention", "failed", "error"}
-    publishable = bool(base.get("ready_for_publish")) and not attention and not blockers
+    # A listing cannot be publishable while enrichment/processing is still in
+    # flight, even when the basic photo/price checks happen to pass.
+    publishable = bool(processing_complete and base.get("ready_for_publish")) and not attention and not blockers
+    transient_processing = processing_state in {"processing", "pending", "queued", "enriching", "source_enrichment", "image_enrichment", "category_resolution", "title_generation", "description_generation", "quality_validation"}
+    queue = "NEEDS_ATTENTION" if (attention or blockers) else "PROCESSING" if (transient_processing or not processing_complete) else "NEEDS_REVIEW" if getattr(listing, "needs_review", False) else "READY"
     result = {
         "processing_complete": processing_complete,
         "enrichment_complete": bool(stored.get("enrichment_complete", processing_complete)),
@@ -62,7 +66,7 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
         "blocking_reasons": blockers,
         "missing_required_aspects": missing_required_aspects,
         "marketplace_readiness": dict(base.get("marketplace_readiness") or {}),
-        "queue": "NEEDS_ATTENTION" if (attention or blockers) else "NEEDS_REVIEW" if getattr(listing, "needs_review", False) else "PROCESSING" if not processing_complete else "READY",
+        "queue": queue,
     }
     if marketplace:
         result["marketplace"] = str(marketplace).lower()
