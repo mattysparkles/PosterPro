@@ -370,7 +370,7 @@ class ListingAIService:
         merged["photo_notes"] = self._normalize_string_list(merged.get("photo_notes"), fallback["photo_notes"])
         merged["research_queries"] = self._normalize_string_list(merged.get("research_queries"), fallback["research_queries"])
         merged["estimated_value"] = self._safe_float(merged.get("estimated_value"), fallback["estimated_value"])
-        merged["draft_quality"] = self._draft_quality(merged)
+        merged["draft_quality"] = self._draft_quality(merged, image_signals=image_signals)
         merged["title"] = self._sanitize_claims(merged["title"], image_signals)
         merged["description"] = self._sanitize_claims(merged["description"], image_signals)
         merged["prompt_used"] = LISTING_PROMPT_TEMPLATE
@@ -1048,7 +1048,8 @@ class ListingAIService:
         return normalized or fallback
 
     @staticmethod
-    def _draft_quality(generated: dict[str, Any]) -> str:
+    def _draft_quality(generated: dict[str, Any], *, image_signals: dict[str, Any] | None = None) -> str:
+        """Score draft completeness using evidence coverage, not length alone."""
         score = 0
         if generated.get("title"):
             score += 1
@@ -1059,6 +1060,20 @@ class ListingAIService:
         missing = generated.get("missing_information") or []
         if len(missing) <= 1:
             score += 1
+        evidence = image_signals if isinstance(image_signals, dict) else {}
+        nested = evidence.get("source_facts") if isinstance(evidence.get("source_facts"), dict) else evidence.get("amazon_product_facts")
+        facts = nested if isinstance(nested, dict) else {}
+        description = str(generated.get("description") or "").lower()
+        if facts and description:
+            values = [*(facts.get("feature_bullets") or []), *((facts.get("specifications") or {}).values() if isinstance(facts.get("specifications"), dict) else [])]
+            values = [str(value).strip().lower() for value in values if str(value or '').strip()]
+            covered = sum(bool(set(re.findall(r"[a-z0-9]{4,}", value)) & set(re.findall(r"[a-z0-9]{4,}", description))) for value in values)
+            if values and covered >= max(2, round(len(values) * 0.45)):
+                score += 1
+            elif values:
+                score -= 1
+        if re.search(r"(?:free 30-day|refund|return policy|add to cart|buy now|select delivery)", description):
+            score -= 3
         if score >= 4:
             return "strong"
         if score >= 2:
