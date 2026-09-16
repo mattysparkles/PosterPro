@@ -812,7 +812,7 @@ export default function ListingWorkspacePage() {
           <div className="flex flex-wrap gap-3">
             {['title', 'description', 'category', 'price', 'condition', 'photos', 'item specifics', 'shipping'].map((field) => <label key={field} className="flex items-center gap-2 text-sm"><input type="checkbox" checked={revisionFields.includes(field)} onChange={() => setRevisionFields((current) => current.includes(field) ? current.filter((item) => item !== field) : [...current, field])} /> Fix {field}</label>)}
           </div>
-          <textarea value={revisionNote} onChange={(event) => setRevisionNote(event.target.value)} className="mt-3 min-h-20 w-full rounded-[10px] border border-[#e5e7eb] p-3 text-sm" placeholder="Optional: describe what is wrong or point the AI to a label/photo." />
+          <Textarea value={revisionNote} onChange={(event) => setRevisionNote(event.target.value)} className="mt-3 min-h-20" placeholder="Optional: describe what is wrong or point the AI to a label/photo." />
           <label className="mt-3 block text-sm font-semibold">Priority <input type="number" min="0" step="1" value={revisionPriority} onChange={(event) => setRevisionPriority(Math.max(0, Number(event.target.value) || 0))} className="ml-2 w-20 rounded border px-2 py-1" /></label><p className="mt-1 text-xs text-[#667085]">0 = immediate / highest priority; newer priority-0 requests run first.</p>
           <div className="mt-3"><Button variant="outline" onClick={requestRevision}>Send to Drafts &amp; request AI correction</Button></div>
         </div>
@@ -862,7 +862,7 @@ export default function ListingWorkspacePage() {
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium text-[#101828]">Condition</label>
-                <select className="h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm" value={form.condition} onChange={(event) => autosaveListingField("condition", event.target.value)}><option value="">Select condition</option>{CONDITION_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}</select>
+                <Select className="h-10 w-full rounded-xl" value={form.condition} onChange={(event) => autosaveListingField("condition", event.target.value)}><option value="">Select condition</option>{CONDITION_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}</Select>
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium text-[#101828]">Tags</label>
