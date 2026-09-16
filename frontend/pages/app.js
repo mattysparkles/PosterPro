@@ -28,6 +28,9 @@ import DataTableCard from '../components/ui/data-table-card';
 import EmptyState from '../components/ui/empty-state';
 import MetricCard from '../components/ui/metric-card';
 import PageHeader from '../components/ui/page-header';
+import Input from '../components/ui/input';
+import Textarea from '../components/ui/textarea';
+import Checkbox from '../components/ui/checkbox';
 import QuickActionCard from '../components/ui/quick-action-card';
 import StatusPill from '../components/ui/status-pill';
 import HealthIndicator from '../components/ui/health-indicator';
@@ -574,16 +577,16 @@ export default function Dashboard() {
             <label className="mt-4 block">
               <span className="text-sm font-semibold text-[#101828]">Google Photos album URL</span>
               <div className="mt-2 grid gap-3">
-              <input
+              <Input
                 value={intakeAlbumUrl}
                 onChange={(event) => setIntakeAlbumUrl(event.target.value)}
-                className="w-full rounded-[14px] border border-[#d0d5dd] bg-[#fcfcfd] px-4 py-3 text-sm text-[#101828] outline-none focus:border-[#2563eb] focus:ring-2 focus:ring-[#dbeafe]"
+                className="w-full"
                   placeholder="https://photos.app.goo.gl/... or a shared Drive link"
                 />
-                <input
+                <Input
                   value={intakeFolderId}
                   onChange={(event) => setIntakeFolderId(event.target.value)}
-                  className="w-full rounded-[14px] border border-[#d0d5dd] bg-[#fcfcfd] px-4 py-3 text-sm text-[#101828] outline-none focus:border-[#2563eb] focus:ring-2 focus:ring-[#dbeafe]"
+                  className="w-full"
                   placeholder="Optional Google Drive folder URL or shared link"
                 />
               </div>
@@ -678,11 +681,11 @@ export default function Dashboard() {
                 <StatusPill status={setupSummary?.server_readiness?.openai_configured ? 'success' : 'default'} label={setupSummary?.server_readiness?.openai_configured ? 'OpenAI configured' : 'Rule-backed command mode'} />
               </div>
               <div className="mt-4 space-y-3">
-                <textarea
+                <Textarea
                   value={operatorPrompt}
                   onChange={(event) => setOperatorPrompt(event.target.value)}
                   rows={4}
-                  className="w-full rounded-[14px] border border-[#bfcce8] bg-white px-4 py-3 text-sm text-[#101828] shadow-sm outline-none transition focus:border-[#2563eb] focus:ring-2 focus:ring-[#bfdbfe]"
+                  className="w-full"
                   placeholder={DEFAULT_OPERATOR_PROMPT}
                 />
                 <div className="flex flex-wrap gap-2">
