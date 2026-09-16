@@ -9,6 +9,7 @@ import PhotoEditorModal from "./PhotoEditorModal";
 import Input from "./ui/input";
 import Select from "./ui/select";
 import Textarea from "./ui/textarea";
+import Checkbox from "./ui/checkbox";
 import { toPublicImageUrl, searchEbayCategories, browseEbayCategories } from "../lib/api";
 
 const PLATFORM_OPTIONS = [
@@ -1046,17 +1047,14 @@ export default function ListingEditor({
               ["parts_only", "Parts only"],
               ["missing_accessories", "Missing accessories"],
             ].map(([key, label]) => (
-              <label key={key} className="flex items-center gap-2 rounded-[10px] border border-[#e5e7eb] bg-[#fcfcfd] px-3 py-2 text-sm text-[#475467]">
-                <input type="checkbox" checked={Boolean(conditionData[key])} onChange={(e) => updateConditionField(key, e.target.checked)} />
-                {label}
-              </label>
+              <Checkbox key={key} checked={Boolean(conditionData[key])} onChange={(e) => updateConditionField(key, e.target.checked)} label={label} className="rounded-[10px] border border-[#e5e7eb] bg-[#fcfcfd] px-3 py-2" />
             ))}
           </div>
           <div className="mt-3">
             <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Condition notes</label>
-            <textarea
+            <Textarea
               defaultValue={conditionData.item_condition_notes || ""}
-              className="mt-1 min-h-24 w-full rounded-[10px] border border-[#e5e7eb] bg-white p-3 text-sm text-[#101828]"
+              className="mt-1 min-h-24"
               placeholder="Describe wear, testing status, packaging condition, and included accessories."
               onBlur={(e) => updateConditionField("item_condition_notes", e.target.value)}
             />
@@ -1121,10 +1119,7 @@ export default function ListingEditor({
               ["hazmat", "Hazmat review"],
               ["local_pickup_recommended", "Local pickup recommended"],
             ].map(([key, label]) => (
-              <label key={key} className="flex items-center gap-2 rounded-[10px] border border-[#e5e7eb] bg-[#fcfcfd] px-3 py-2 text-sm text-[#475467]">
-                <input type="checkbox" checked={Boolean(shippingProfile[key])} onChange={(e) => updateShippingField(key, e.target.checked)} />
-                {label}
-              </label>
+              <Checkbox key={key} checked={Boolean(shippingProfile[key])} onChange={(e) => updateShippingField(key, e.target.checked)} label={label} className="rounded-[10px] border border-[#e5e7eb] bg-[#fcfcfd] px-3 py-2" />
             ))}
           </div>
           <div className="mt-4 grid gap-2">
