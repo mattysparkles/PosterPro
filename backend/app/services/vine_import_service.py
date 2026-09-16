@@ -2598,7 +2598,13 @@ class VineImportService:
         base = _sanitize_vine_text(facts.get("title") or product_name or "Amazon item")
         cleaned = " ".join(word for word in base.split() if word.lower() not in {"amazon", "vine"})
         cleaned = _sanitize_vine_text(cleaned)
-        return cleaned[:80] or "Amazon item"
+        # eBay's title limit is 80 characters.  Clip on a word boundary so a
+        # buyer never sees a mangled final token (and avoid carrying source
+        # promotional/policy fragments into the title).
+        if len(cleaned) > 80:
+            clipped = cleaned[:80].rsplit(" ", 1)[0].rstrip(" ,;:-")
+            cleaned = clipped or cleaned[:80].rstrip()
+        return cleaned or "Amazon item"
 
     def _generate_description(self, item: VineImportItem, *, amazon_description: str | None = None, amazon_facts: dict | None = None) -> str:
         # Never copy Amazon source prose into a marketplace listing.  Even when

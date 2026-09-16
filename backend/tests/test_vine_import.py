@@ -1009,6 +1009,13 @@ def test_vine_category_resolver_maps_boxing_protection_without_source_noise():
     assert source == "keyword_rules"
 
 
+def test_vine_title_limit_clips_on_word_boundary():
+    title = VineImportService()._generate_title("Brand Portable Product With A Very Long Descriptive Name That Must Stay Searchable And Readable For Buyers")
+    assert len(title) <= 80
+    assert not title.endswith(("-", ",", ":"))
+    assert title.split()[-1] != "Descriptiv"
+
+
 @pytest.mark.parametrize(
     ("product_name", "expected_category"),
     [
