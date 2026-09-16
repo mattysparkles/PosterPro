@@ -6,6 +6,7 @@ import Button from '../../components/ui/button';
 import Input from '../../components/ui/input';
 import PageHeader from '../../components/ui/page-header';
 import SectionPanel from '../../components/ui/section-panel';
+import Select from '../../components/ui/select';
 import StatusPill from '../../components/ui/status-pill';
 import { useAuth } from '../../contexts/AuthContext';
 import { createIntakeSession, fetchIntakeSessions, fetchIntakeSettings } from '../../lib/api';
@@ -91,11 +92,11 @@ export default function IntakeSessionsPage() {
               </label>
               <label className="grid gap-2 text-sm">
                 <span className="font-semibold text-[var(--pp-text)]">Status</span>
-                <select className="rounded-2xl border border-[var(--pp-border)] bg-white px-4 py-3 text-sm" value={form.status} onChange={(event) => setForm((current) => ({ ...current, status: event.target.value }))}>
+                <Select value={form.status} onChange={(event) => setForm((current) => ({ ...current, status: event.target.value }))}>
                   <option value="active">active</option>
                   <option value="paused">paused</option>
                   <option value="closed">closed</option>
-                </select>
+                </Select>
               </label>
               <label className="grid gap-2 text-sm">
                 <span className="font-semibold text-[var(--pp-text)]">Item prefix</span>

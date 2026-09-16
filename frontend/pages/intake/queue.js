@@ -7,6 +7,8 @@ import Button from '../../components/ui/button';
 import PageHeader from '../../components/ui/page-header';
 import SectionPanel from '../../components/ui/section-panel';
 import StatusPill from '../../components/ui/status-pill';
+import Input from '../../components/ui/input';
+import Select from '../../components/ui/select';
 import { useAuth } from '../../contexts/AuthContext';
 import {
   applyIntakePhotoBoundaries,
@@ -186,19 +188,19 @@ function BatchCard({ batch, onRefresh }) {
           <div className="grid gap-3 text-sm md:grid-cols-2 xl:grid-cols-1">
             <label className="grid gap-2">
               <span className="font-semibold text-[var(--pp-text)]">Box ID</span>
-              <input className="rounded-2xl border border-[var(--pp-border)] px-4 py-3" value={slateForm.box_id} onChange={(event) => setSlateForm((current) => ({ ...current, box_id: event.target.value }))} />
+              <Input value={slateForm.box_id} onChange={(event) => setSlateForm((current) => ({ ...current, box_id: event.target.value }))} />
             </label>
             <label className="grid gap-2">
               <span className="font-semibold text-[var(--pp-text)]">Location</span>
-              <input className="rounded-2xl border border-[var(--pp-border)] px-4 py-3" value={slateForm.location} onChange={(event) => setSlateForm((current) => ({ ...current, location: event.target.value }))} />
+              <Input value={slateForm.location} onChange={(event) => setSlateForm((current) => ({ ...current, location: event.target.value }))} />
             </label>
             <label className="grid gap-2 md:col-span-2 xl:col-span-1">
               <span className="font-semibold text-[var(--pp-text)]">Title</span>
-              <input className="rounded-2xl border border-[var(--pp-border)] px-4 py-3" value={slateForm.title} onChange={(event) => setSlateForm((current) => ({ ...current, title: event.target.value }))} />
+              <Input value={slateForm.title} onChange={(event) => setSlateForm((current) => ({ ...current, title: event.target.value }))} />
             </label>
             <label className="grid gap-2 md:col-span-2 xl:col-span-1">
               <span className="font-semibold text-[var(--pp-text)]">Condition</span>
-              <input className="rounded-2xl border border-[var(--pp-border)] px-4 py-3" value={slateForm.condition} onChange={(event) => setSlateForm((current) => ({ ...current, condition: event.target.value }))} />
+              <Input value={slateForm.condition} onChange={(event) => setSlateForm((current) => ({ ...current, condition: event.target.value }))} />
             </label>
           </div>
           <Button onClick={saveSlate} variant="outline" disabled={saving}>Save slate edits</Button>
@@ -503,8 +505,8 @@ export default function IntakeQueuePage() {
                 <p className="mt-1 text-sm text-amber-800">Pick a saved PosterPro slate, then mark the photographed slate thumbnail as the boundary for that item. PosterPro will regroup every following photo under that item until the next marked boundary and auto-draft the listing once a complete batch exists.</p>
               </div>
               <div className="flex flex-col gap-2 lg:min-w-[280px]">
-                <select
-                  className="rounded-2xl border border-amber-200 bg-white px-4 py-3 text-sm text-[#101828]"
+                <Select
+                  className="border-amber-200"
                   value={selectedSlate}
                   onChange={(event) => setSelectedSlate(event.target.value)}
                 >
@@ -514,7 +516,7 @@ export default function IntakeQueuePage() {
                       {slate.item_id} - {slate.title || slate.location || 'Untitled slate'}
                     </option>
                   ))}
-                </select>
+                </Select>
                 <Button onClick={assignUnassigned} disabled={assigning || !selectedSlate}>
                   {assigning ? 'Assigning…' : `Assign ${selectedPhotoIds.length || 0} selected product photos`}
                 </Button>
