@@ -26,6 +26,11 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
         # not evidence of a hard blocker by itself. Keep it visible as a
         # quality warning while preserving the operator-review flow.
         warnings.append("Description is brief; review product details before publishing")
+        if str(getattr(listing, "source_type", "") or "").lower() in {"amazon_vine", "google_photos_album", "photo_intake"}:
+            words = [word for word in description.split() if word.strip()]
+            unique_words = {word.strip(".,:;!?()[]{}\"'").lower() for word in words}
+            if len(words) < 18 or len(unique_words) < 12:
+                blockers.append("Listing description needs product-specific enrichment")
     blockers = list(dict.fromkeys(blockers))
     warnings = list(dict.fromkeys(warnings))
     preflight = (getattr(listing, "marketplace_data", None) or {}).get("marketplace_preflight") if isinstance(getattr(listing, "marketplace_data", None), dict) else None

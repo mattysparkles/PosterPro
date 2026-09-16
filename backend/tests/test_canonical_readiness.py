@@ -36,3 +36,22 @@ def test_missing_description_is_a_real_readiness_blocker(db_session):
     assert result["attention_required"] is True
     assert result["publishable"] is False
     assert "Description is missing" in result["blocking_reasons"]
+
+
+def test_source_draft_with_token_description_requires_enrichment(db_session):
+    user = User(email="readiness-thin-vine@example.com"); db_session.add(user); db_session.flush()
+    listing = Listing(
+        user_id=user.id,
+        source_type="amazon_vine",
+        processing_state="complete",
+        needs_review=True,
+        description="Great product for everyday use.",
+        category_suggestion="Sporting Goods",
+        listing_price=20,
+        listing_images=[{"storage_path": "/media/item.jpg", "operator_state": "approved", "role": "primary"}],
+        condition_data={"operator_review_required": False},
+        shipping_profile={"manual_measurement_needed": False},
+    )
+    result = canonical_listing_readiness(listing)
+    assert result["attention_required"] is True
+    assert "product-specific enrichment" in result["blocking_reasons"][0].lower()
