@@ -16,6 +16,7 @@ def test_blocked_listing_cannot_be_publishable(db_session):
     result = canonical_listing_readiness(listing)
     assert result["queue"] == "NEEDS_ATTENTION"
     assert result["publishable"] is False
+    assert "Missing identity" in result["blocking_reasons"]
 
 
 def test_processing_listing_is_not_publishable_or_needs_review(db_session):
