@@ -79,7 +79,7 @@ from app.services.listing_review import (
 )
 from app.services.listing_specificity import GENERIC_CAPTION_TITLES, classify_listing_reviewability
 from app.services.canonical_readiness import canonical_listing_readiness
-from app.services.marketplace_mutations import apply_marketplace_operation
+from app.services.marketplace_mutations import SUPPORTED_MARKETS, apply_marketplace_operation
 from app.services.media_lifecycle import purge_listing_media
 from app.services.listing_workspace import normalize_marketplace_data
 from app.services.marketplace_orchestrator import enqueue_crosspost_job, queue_publish
@@ -2791,6 +2791,17 @@ async def run_dashboard_operator_command(
             preview_result = apply_marketplace_operation_plan(preview_payload, preview_listings, preview_only=True)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        serialized_operations = [
+            {
+                "items": operation.items,
+                "marketplaces": operation.marketplaces,
+                "field": operation.field,
+                "action": operation.action,
+                "value": operation.value,
+                "untouched_markets": sorted(SUPPORTED_MARKETS - set(operation.marketplaces)) if "all" not in operation.marketplaces else [],
+            }
+            for operation in operation_plan
+        ]
         if payload.apply_live and not payload.dry_run:
             if not payload.confirm_live_apply or str(payload.confirmation_phrase or '').strip() != 'APPLY COMPOUND OPERATIONS':
                 return {
@@ -2798,7 +2809,7 @@ async def run_dashboard_operator_command(
                     "dry_run": True, "apply_live": False, "requires_confirmation": True,
                     "confirmation_phrase": "APPLY COMPOUND OPERATIONS",
                     "message": "Live compound changes require the exact confirmation phrase.",
-                    "operations": [{"items": op.items, "marketplaces": op.marketplaces, "field": op.field, "action": op.action, "value": op.value} for op in operation_plan],
+                    "operations": serialized_operations,
                     "changes": preview_result["changes"],
                 }
             if any(operation.action == 'end' or operation.field == 'listing' for operation in operation_plan):
@@ -2817,7 +2828,7 @@ async def run_dashboard_operator_command(
                 except ValueError as exc:
                     db.rollback()
                     raise HTTPException(status_code=422, detail=str(exc)) from exc
-            return {"prompt": payload.prompt, "parsed": True, "command_type": "compound_operation_plan", "dry_run": False, "apply_live": True, "requires_confirmation": True, "message": "Compound operation completed with per-item results.", "operations": [{"items": op.items, "marketplaces": op.marketplaces, "field": op.field, "action": op.action, "value": op.value} for op in operation_plan], "results": results}
+            return {"prompt": payload.prompt, "parsed": True, "command_type": "compound_operation_plan", "dry_run": False, "apply_live": True, "requires_confirmation": True, "message": "Compound operation completed with per-item results.", "operations": serialized_operations, "results": results}
         return {
             "prompt": payload.prompt,
             "parsed": True,
@@ -2826,10 +2837,7 @@ async def run_dashboard_operator_command(
             "apply_live": False,
             "requires_confirmation": True,
             "message": "Preview ready. Confirm each targeted field and marketplace before execution.",
-            "operations": [
-                {"items": op.items, "marketplaces": op.marketplaces, "field": op.field, "action": op.action, "value": op.value}
-                for op in operation_plan
-            ],
+            "operations": serialized_operations,
             "changes": preview_result["changes"],
         }
     return await operator_command_service.handle_prompt(
