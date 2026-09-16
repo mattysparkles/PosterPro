@@ -1535,17 +1535,18 @@ export default function ListingEditor({
                 const selected = activePreviewMarket === market;
                 const mode = previewMap[market]?.execution_mode || null;
                 return (
-                  <button
+                  <Button
                     key={`preview-${market}`}
                     type="button"
                     onClick={() => setActivePreviewMarket(market)}
+                    variant="tertiary"
                     className={`rounded-full border px-3 py-1 text-xs font-semibold capitalize transition ${
-                      selected ? 'border-[#2563eb] bg-[#eef4ff] text-[#2563eb]' : 'border-[#e5e7eb] bg-white text-[#475467]'
+                      selected ? 'border-[#2563eb] !bg-[#eef4ff] !text-[#2563eb]' : 'border-[#e5e7eb] !bg-white !text-[#475467]'
                     }`}
                   >
                     {market}
                     {mode ? ` · ${String(mode).replace('_', ' ')}` : ''}
-                  </button>
+                  </Button>
                 );
               })}
             </div>

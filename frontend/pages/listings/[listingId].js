@@ -1194,10 +1194,10 @@ export default function ListingWorkspacePage() {
               <div className="rounded-[12px] border border-[#e5e7eb] bg-white p-4">
                 For cross-posting, this listing stores the shared source data first. Channel-specific adapters can then either publish directly, open a draft-first workflow, or hand off to a supported provider without duplicating item data.
               </div>
-              <button type="button" onClick={() => router.push("/settings?tab=marketplaces")} className="inline-flex items-center gap-2 text-sm font-medium text-[#2563eb]">
+              <Button type="button" variant="tertiary" onClick={() => router.push("/settings?tab=marketplaces")} className="!h-auto !min-h-0 !px-0 text-sm font-medium">
                 Open marketplace connection settings
                 <ExternalLink size={14} />
-              </button>
+              </Button>
             </div>
           </SectionPanel>
 
@@ -1209,7 +1209,7 @@ export default function ListingWorkspacePage() {
                     {crosspostPreview.map((entry) => {
                       const marketplace = String(entry.marketplace || 'ebay').toLowerCase();
                       const selected = marketplace === previewMarketplace;
-                      return <button key={marketplace} type="button" onClick={() => setPreviewMarketplace(marketplace)} className={`rounded-full border px-3 py-2 text-sm font-semibold transition ${selected ? 'border-[#2563eb] bg-[#eef4ff] text-[#1d4ed8]' : 'border-[#e5e7eb] bg-white text-[#475467]'}`}>{CHANNEL_LABELS[marketplace] || marketplace}</button>;
+                      return <Button key={marketplace} type="button" variant="tertiary" onClick={() => setPreviewMarketplace(marketplace)} className={`!min-h-0 rounded-full border px-3 py-2 text-sm font-semibold transition ${selected ? 'border-[#2563eb] !bg-[#eef4ff] !text-[#1d4ed8]' : 'border-[#e5e7eb] !bg-white !text-[#475467]'}`}>{CHANNEL_LABELS[marketplace] || marketplace}</Button>;
                     })}
                   </div>
                   {crosspostPreview.filter((entry) => String(entry.marketplace).toLowerCase() === previewMarketplace).map((entry) => (
