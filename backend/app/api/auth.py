@@ -823,7 +823,11 @@ def login(
         raise HTTPException(status_code=400, detail="Invalid email or password")
 
     set_session_cookie(response, user.id)
-    return AuthSessionResponse(user=_serialize_user(user), is_bootstrap_admin=False)
+    # Keep the session response truthful for the bootstrap/platform owner.
+    # The frontend uses this flag during initial routing and onboarding; always
+    # returning ``False`` made an existing platform owner look like a new
+    # tenant immediately after signing in.
+    return AuthSessionResponse(user=_serialize_user(user), is_bootstrap_admin=bool(user.is_admin))
 
 
 @router.post("/logout")

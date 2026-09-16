@@ -58,6 +58,7 @@ async def test_register_login_password_change_reset_and_view_mode(async_client):
         },
     )
     assert login_response.status_code == 200
+    assert login_response.json()["is_bootstrap_admin"] is True
 
     change_password_response = await async_client.post(
         "/auth/password/change",
