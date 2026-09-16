@@ -411,29 +411,56 @@ def repair_vine_listing_quality_task(user_id: int | None = None, chunk_size: int
                     # Derive lifecycle from canonical readiness instead of
                     # forcing every refreshed row into review. Live remote
                     # identities are never rewritten by this repair worker.
-                    remote_live = bool(str(listing.ebay_listing_id or '').strip()) or any(
-                        str(getattr(row, 'marketplace_listing_id', '') or '').strip()
-                        and str(getattr(getattr(row, 'status', None), 'value', getattr(row, 'status', None)) or '').upper() in {'PUBLISHED', 'UPDATED'}
-                        for row in (getattr(listing, 'marketplace_listings', None) or [])
-                    )
-                    if remote_live:
+                    if not _apply_vine_quality_lifecycle(listing):
                         continue
-                    readiness = canonical_listing_readiness(listing)
-                    blockers = [str(reason).strip() for reason in (readiness.get('blocking_reasons') or []) if str(reason).strip()]
-                    if blockers:
-                        listing.processing_state = 'needs_attention'
-                        listing.processing_blocking_reason = blockers[0]
-                        listing.processing_error_stage = listing.processing_error_stage or 'quality_validation'
-                        listing.needs_review = False
-                    else:
-                        listing.processing_state = 'complete'
-                        listing.processing_blocking_reason = None
-                        listing.processing_error_stage = None
-                        listing.needs_review = True
                 db.commit()
         return totals
     finally:
         db.close()
+
+
+def _apply_vine_quality_lifecycle(listing: Listing) -> bool:
+    """Apply canonical queue state to one Vine listing.
+
+    Returns False when a live marketplace identity makes the row immutable for
+    this repair pass. Keeping this decision pure and item-scoped prevents one
+    bad draft from poisoning the rest of a scheduled batch.
+    """
+    remote_live = bool(str(listing.ebay_listing_id or '').strip()) or any(
+        str(getattr(row, 'marketplace_listing_id', '') or '').strip()
+        and str(getattr(getattr(row, 'status', None), 'value', getattr(row, 'status', None)) or '').upper() in {'PUBLISHED', 'UPDATED'}
+        for row in (getattr(listing, 'marketplace_listings', None) or [])
+    )
+    if remote_live:
+        return False
+    transient_reasons = {
+        'image_retrying', 'image_enrichment_pending', 'category_lookup_pending',
+        'ai_timeout_retryable', 'enrichment_provider_timeout',
+    }
+    original_processing_blocker = getattr(listing, 'processing_blocking_reason', None)
+    if str(original_processing_blocker or '').strip().lower() in transient_reasons:
+        # Retryable provider work is not a terminal blocker. Exclude the
+        # marker while evaluating the durable listing fields, then restore it
+        # only if another genuine blocker is found.
+        listing.processing_blocking_reason = None
+        if str(getattr(listing, 'processing_state', '') or '').lower() in {'needs_attention', 'processing', 'queued', 'enriching'}:
+            listing.processing_state = 'complete'
+    readiness = canonical_listing_readiness(listing)
+    blockers = [
+        str(reason).strip() for reason in (readiness.get('blocking_reasons') or [])
+        if str(reason).strip() and str(reason).strip().lower() not in transient_reasons
+    ]
+    if blockers:
+        listing.processing_state = 'needs_attention'
+        listing.processing_blocking_reason = blockers[0]
+        listing.processing_error_stage = listing.processing_error_stage or 'quality_validation'
+        listing.needs_review = False
+    else:
+        listing.processing_state = 'complete'
+        listing.processing_blocking_reason = None
+        listing.processing_error_stage = None
+        listing.needs_review = True
+    return True
 
 
 @celery_app.task(name="resume_incomplete_listings", bind=True, max_retries=None)

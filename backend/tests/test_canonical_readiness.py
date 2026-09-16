@@ -1,5 +1,8 @@
+from types import SimpleNamespace
+
 from app.models.models import Listing, User
 from app.services.canonical_readiness import canonical_listing_readiness
+from app.workers.tasks import _apply_vine_quality_lifecycle
 
 
 def test_reviewable_complete_listing_is_not_attention(db_session):
@@ -88,3 +91,27 @@ def test_missing_required_aspects_are_canonical_blockers(db_session):
     assert result["attention_required"] is True
     assert result["publishable"] is False
     assert "Size Type" in result["blocking_reasons"][0]
+
+
+def test_vine_quality_worker_promotes_reviewable_row():
+    description = "A portable charging accessory with USB output for everyday travel and backup power. The compact design is easy to pack and the included cable keeps setup simple."
+    listing = SimpleNamespace(
+        ebay_listing_id=None, marketplace_listings=[], readiness_summary={},
+        listing_images=[{"storage_path": "/media/item.jpg", "operator_state": "approved", "role": "primary"}],
+        condition_data={"operator_review_required": False},
+        shipping_profile={"package_weight": "1 lb", "package_dimensions": {"length": 8, "width": 6, "height": 4}, "manual_measurement_needed": False},
+        category_id="123", category_suggestion="Consumer Electronics", listing_price=25, suggested_price=25,
+        marketplace_data={"quality_summary": {"ready_for_publish": True}}, source_type="amazon_vine",
+        source_metadata={"amazon_product_facts": {"feature_bullets": ["Portable charging accessory", "USB output"], "specifications": {"Brand": "Example", "Type": "Charger"}}},
+        canonical_description=description, description=description, title="Example Portable Charger",
+        processing_state="needs_attention", processing_blocking_reason="image_retrying", processing_error_stage="image_enrichment", needs_review=False,
+    )
+    assert _apply_vine_quality_lifecycle(listing) is True
+    assert listing.processing_state == "complete"
+    assert listing.needs_review is True
+    assert listing.processing_blocking_reason is None
+
+
+def test_vine_quality_worker_does_not_rewrite_live_listing():
+    listing = SimpleNamespace(ebay_listing_id="123456", marketplace_listings=[])
+    assert _apply_vine_quality_lifecycle(listing) is False
