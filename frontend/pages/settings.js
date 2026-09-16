@@ -4406,54 +4406,54 @@ export default function SettingsPage() {
             <div className="grid gap-3 md:grid-cols-2">
               <div className="space-y-2">
                 <label className="text-sm font-medium text-[#101828]">Import mode</label>
-                <select
+                <Select
                   value={marketplaceForm.import_mode}
                   onChange={(event) => setMarketplaceForm((current) => ({ ...current, import_mode: event.target.value }))}
-                  className="pp-input h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828] outline-none focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                  className="h-10 rounded-[10px] border-[#e5e7eb] px-3 text-[#101828]"
                 >
                   <option value="manual">Manual import</option>
                   <option value="csv_assist">CSV assist</option>
                   <option value="provider_assist">Provider assist</option>
                   <option value="browser_assist">Browser assist</option>
-                </select>
+                </Select>
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium text-[#101828]">Publish mode</label>
-                <select
+                <Select
                   value={marketplaceForm.publish_mode}
                   onChange={(event) => setMarketplaceForm((current) => ({ ...current, publish_mode: event.target.value }))}
-                  className="pp-input h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828] outline-none focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                  className="h-10 rounded-[10px] border-[#e5e7eb] px-3 text-[#101828]"
                 >
                   <option value="manual_review">Manual review</option>
                   <option value="draft_only">Draft only</option>
                   <option value="provider_assist">Provider assist</option>
                   <option value="browser_assist">Browser assist</option>
                   <option value="hosted_browser_assist">Hosted browser fallback only</option>
-                </select>
+                </Select>
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium text-[#101828]">Shipping scope</label>
-                <select
+                <Select
                   value={marketplaceForm.shipping_scope}
                   onChange={(event) => setMarketplaceForm((current) => ({ ...current, shipping_scope: event.target.value }))}
-                  className="pp-input h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828] outline-none focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                  className="h-10 rounded-[10px] border-[#e5e7eb] px-3 text-[#101828]"
                 >
                   <option value="local_only">Local only</option>
                   <option value="shipping_only">Shipping only</option>
                   <option value="local_and_shipping">Local and shipping</option>
-                </select>
+                </Select>
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium text-[#101828]">Renewal mode</label>
-                <select
+                <Select
                   value={marketplaceForm.renewal_mode}
                   onChange={(event) => setMarketplaceForm((current) => ({ ...current, renewal_mode: event.target.value }))}
-                  className="pp-input h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828] outline-none focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                  className="h-10 rounded-[10px] border-[#e5e7eb] px-3 text-[#101828]"
                 >
                   <option value="manual">Manual</option>
                   <option value="daily">Daily plan</option>
                   <option value="scheduled">Scheduled plan</option>
-                </select>
+                </Select>
               </div>
             </div>
             <div className="space-y-2">
@@ -4466,14 +4466,14 @@ export default function SettingsPage() {
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium text-[#101828]">Workflow state</label>
-              <select
+              <Select
                 value={marketplaceForm.workflow_state}
                 onChange={(event) => setMarketplaceForm((current) => ({ ...current, workflow_state: event.target.value }))}
-                className="pp-input h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828] outline-none focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                className="h-10 rounded-[10px] border-[#e5e7eb] px-3 text-[#101828]"
               >
                 <option value="draft">Save only</option>
                 <option value="ready">Ready for operator workflow</option>
-              </select>
+              </Select>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <StatusPill status={configuredMarketplace.connected ? 'success' : 'default'} label={configuredMarketplace.connected ? 'Ready now' : 'Not ready'} />
