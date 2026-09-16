@@ -2308,7 +2308,14 @@ def process_storage_unit_listing(self, listing_id: int, batch_id: int) -> dict:
             db.commit()
             return {"listing_id": listing_id, "status": "FAILED"}
         try:
-            enriched = service.enrich_photo(listing.raw_photo_path, db=db, user_id=listing.user_id)
+            try:
+                enriched = service.enrich_photo(listing.raw_photo_path, db=db, user_id=listing.user_id)
+            except TypeError as exc:
+                # Keep compatibility with lightweight providers/test doubles
+                # that implement the original path-only enrichment contract.
+                if "unexpected keyword argument" not in str(exc):
+                    raise
+                enriched = service.enrich_photo(listing.raw_photo_path)
             listing.title = enriched.get("title") or listing.title
             listing.description = enriched.get("description") or listing.description
             listing.category_id = enriched.get("category_id")

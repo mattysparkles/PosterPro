@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 from datetime import datetime, timedelta, timezone
@@ -9,7 +10,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.orm import Session
 
-from app.api.schemas import SaleDetailsUpdateRequest, SaleDetectionConfigRequest, SaleReconcileRequest
+from app.api.schemas import ManualSaleRequest, SaleDetailsUpdateRequest, SaleDetectionConfigRequest, SaleReconcileRequest
 from app.core.auth import ensure_user_owns_resource, get_current_user, resolve_user_scope
 from app.core.database import get_db
 from app.models.enums import MARKETPLACE_DESTINATION_VALUES, MarketplaceName
@@ -22,6 +23,50 @@ from app.services.ebay_service import EbayAPIClient, EbayIntegrationError, get_o
 router = APIRouter(prefix="/sales", tags=["sales"])
 offer_service = OfferService()
 sale_detection_service = SaleDetectionService()
+
+
+@router.post("/manual")
+def record_manual_sale(
+    payload: ManualSaleRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Record an offline/storefront sale and reconcile inventory once.
+
+    The sale is created with a stable local identity and the same quantity
+    fan-out used by marketplace detection, so partial-quantity sales do not
+    incorrectly end every destination.
+    """
+    listing = db.get(Listing, payload.listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    ensure_user_owns_resource(current_user, listing.user_id)
+    sold_at = payload.sold_at or datetime.now(timezone.utc).replace(tzinfo=None)
+    manual_order_id = f"MANUAL-{listing.id}-{int(sold_at.timestamp())}"
+    existing = db.execute(select(Sale).where(Sale.user_id == current_user.id, Sale.marketplace_order_id == manual_order_id)).scalar_one_or_none()
+    if existing:
+        return {"sale_id": existing.id, "listing_id": listing.id, "status": existing.status, "idempotent": True}
+    sale = Sale(
+        user_id=current_user.id,
+        listing_id=listing.id,
+        platform=MarketplaceName.storefront_direct,
+        marketplace_order_id=manual_order_id,
+        marketplace_listing_id=None,
+        quantity=payload.quantity,
+        amount=payload.amount,
+        currency="USD",
+        sold_at=sold_at,
+        status="DETECTED",
+        details={"source": "MANUAL", "channel": payload.channel, "notes": payload.notes} if payload.notes else {"source": "MANUAL", "channel": payload.channel},
+    )
+    db.add(sale)
+    db.flush()
+    outcome = asyncio.run(sale_detection_service._fanout_quantity_adjustment(db, listing, current_user, sold_platform=MarketplaceName.storefront_direct.value, quantity_sold=payload.quantity, dry_run=False, sale_amount=payload.amount))
+    sale.status = "SYNCED"
+    sale.details = {**(sale.details or {}), "reconciled": {"fanout": outcome}}
+    db.add(sale)
+    db.commit()
+    return {"sale_id": sale.id, "listing_id": listing.id, "status": sale.status, "fanout": outcome}
 
 
 def _ebay_fulfillment_counts(orders: list[dict], *, now: datetime | None = None) -> dict:

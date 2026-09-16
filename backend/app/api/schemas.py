@@ -944,6 +944,15 @@ class SaleReconcileRequest(BaseModel):
     listing_id: int | None = None
     notes: str | None = None
 
+
+class ManualSaleRequest(BaseModel):
+    listing_id: int
+    channel: str = "manual"
+    amount: float = Field(gt=0)
+    quantity: int = Field(default=1, ge=1)
+    sold_at: datetime | None = None
+    notes: str | None = None
+
 class PhotoEditRequest(BaseModel):
     brightness: float = 1.0
     contrast: float = 1.0

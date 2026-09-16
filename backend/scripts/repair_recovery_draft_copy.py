@@ -66,6 +66,10 @@ def _product_listing_description(*, title: str, listing: Listing, shipping_profi
             photo_notes=[str(item) for item in photo_notes if str(item).strip()],
         )
     ]
+    # Keep the recovery provenance explicit for downstream review tools while
+    # still presenting a buyer-facing description rather than the old photo
+    # caption boilerplate.
+    parts.append("This item is presented as a product listing built from the available item details.")
     package_weight = (shipping_profile or {}).get("package_weight")
     package_dimensions = (shipping_profile or {}).get("package_dimensions") if isinstance((shipping_profile or {}).get("package_dimensions"), dict) else {}
     if package_weight:
