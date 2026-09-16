@@ -578,6 +578,10 @@ def _serialize_listing_summary(listing: Listing) -> dict:
     sync_listing_review_state(listing=listing)
     base = ListingResponse.model_validate(listing).model_dump()
     base["queue_bucket"] = _listing_bucket(listing)
+    base["canonical_readiness"] = canonical_listing_readiness(listing)
+    canonical = base["canonical_readiness"] if isinstance(base["canonical_readiness"], dict) else {}
+    base["attention_reasons"] = [str(reason) for reason in (canonical.get("blocking_reasons") or []) if str(reason).strip()]
+    base["processing_stage"] = listing.processing_stage
     base.pop("marketplace_statuses", None)
     base.pop("latest_publish_attempt", None)
     return base
