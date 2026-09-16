@@ -28,6 +28,7 @@ from app.services.vine_parser import ParsedVineRow, parse_vine_csv, parse_vine_p
 from app.services.vine_parser import parse_date_value
 from app.services.vine_policy import review_vine_product
 from app.services.category_rules import verified_category_id
+from app.services.canonical_readiness import canonical_listing_readiness
 
 VINE_IMAGE_BACKFILL_CUTOFF = date(2026, 6, 15)
 
@@ -879,19 +880,22 @@ class VineImportService:
                 },
             )
             _promote_vine_listing_to_review(listing)
-            # Metadata reconciliation is the final step of Vine draft
-            # preparation.  Do not leave a row in the transient ``queued``
-            # state after all durable evidence has been applied: rows with a
-            # usable marketplace image are reviewable, while rows genuinely
-            # missing media remain explicitly in the attention queue.
-            has_images = bool(listing.listing_images or listing.image_urls)
-            # Missing Amazon images can be enriched after import. A durable
-            # Vine draft with identity/content is still reviewable; image
-            # readiness remains a publish-time warning rather than an import
-            # failure.
-            listing.processing_state = "complete"
-            listing.processing_blocking_reason = None
-            listing.processing_error_stage = None
+            # Finalize from the canonical readiness contract. Never mark a
+            # newly-created row complete merely because a Listing record was
+            # inserted; unresolved identity/content/category blockers must be
+            # visible and retryable instead of masquerading as review-ready.
+            readiness = canonical_listing_readiness(listing)
+            blockers = [str(reason).strip() for reason in (readiness.get("blocking_reasons") or []) if str(reason).strip()]
+            if blockers:
+                listing.processing_state = "needs_attention"
+                listing.processing_blocking_reason = blockers[0]
+                listing.processing_error_stage = "quality_validation"
+                listing.needs_review = False
+            else:
+                listing.processing_state = "complete"
+                listing.processing_blocking_reason = None
+                listing.processing_error_stage = None
+                listing.needs_review = True
             db.add(listing)
             updated += 1
         db.commit()
