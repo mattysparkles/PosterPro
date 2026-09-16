@@ -88,6 +88,7 @@ _VERIFIED_CATEGORY_IDS: dict[str, str] = {
     "Health & Beauty > Medical & Mobility > Orthopedics & Supports > Orthotics, Braces & Sleeves": "19264",
     "Home & Garden > Home Improvement > Plumbing & Fixtures > Pumps & Water Filtration Systems > Pumps": "42132",
     "Video Games & Consoles > Video Game Accessories > Cables & Adapters": "171814",
+    "Cell Phones & Accessories > Cell Phone Accessories > Other Cell Phone Accessories": "42425",
 }
 
 
