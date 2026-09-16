@@ -4,6 +4,26 @@ import re
 
 
 _CATEGORY_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("portable toilet", "camping toilet", "rv toilet", "waste tank"), "Sporting Goods > Camping & Hiking > Camping Hygiene & Sanitation > Portable Toilets"),
+    (("groin protector", "boxing cup", "boxing protective", "mma cup"), "Sporting Goods > Boxing & MMA > Protective Gear > Groin Protectors"),
+    (("boxing headgear", "boxing gloves", "chest protector", "body protector", "shin guards"), "Sporting Goods > Boxing & MMA > Protective Gear"),
+    (("pulse oximeter", "oxygen monitor", "spo2 monitor"), "Health & Beauty > Health Care > Medical & Mobility > Pulse Oximeters"),
+    (("soldering station", "soldering iron", "hot air rework"), "Consumer Electronics > Electrical Equipment & Supplies > Soldering Equipment"),
+    (("varsity jacket", "letterman jacket", "bomber jacket"), "Clothing, Shoes & Accessories > Men's Clothing > Coats, Jackets & Vests"),
+    (("power bank", "portable charger", "battery pack"), "Consumer Electronics > Multipurpose Batteries & Power > Portable Chargers & Power Banks"),
+    (("rv cover", "travel trailer cover", "motorhome cover"), "Automotive > RV, Trailer & Camper Parts & Accessories > Covers"),
+    (("heated vest battery", "heated clothing", "heated jacket battery"), "Consumer Electronics > Multipurpose Batteries & Power > Portable Chargers & Power Banks"),
+    (("dog house heater", "chicken coop heater"), "Pet Supplies > Dog Supplies > Other Dog Supplies"),
+    (("posture corrector", "back brace", "shoulder brace"), "Health & Beauty > Health Care > Braces & Supports"),
+    (("golf simulator impact screen", "golf impact screen"), "Sporting Goods > Golf > Training Aids"),
+    (("selfie stick", "selfie pole"), "Cell Phones & Accessories > Cell Phone Accessories > Selfie Sticks"),
+    (("windshield curtain", "rv privacy curtain"), "Automotive > RV, Trailer & Camper Parts & Accessories > Interior Accessories"),
+    (("hot water recirculating pump", "water recirculation pump"), "Home & Garden > Plumbing & Fixtures > Pumps"),
+    (("breakaway charger cable", "rocksmith cable"), "Video Game Accessories > Cables & Adapters"),
+    (("misting nozzle", "terrarium misting"), "Pet Supplies > Reptile Supplies > Terrarium Accessories"),
+    (("wallet tracker card", "find my tracker"), "Consumer Electronics > GPS & Accessories > GPS Trackers"),
+    (("surge protector", "rv surge protector"), "Consumer Electronics > Power Protection > Surge Protectors"),
+    (("cold therapy machine", "ice compression therapy"), "Health & Beauty > Health Care > Other Health Care"),
     (("laptop stand", "laptop riser", "notebook stand"), "Computers/Tablets & Networking > Laptop/Notebook Accessories > Stands & Risers"),
     (("motorized roller shade", "roller shades", "roller shade", "window shade"), "Home & Garden > Window Treatments > Blinds & Shades"),
     (("poe splitter", "ethernet poe", "gigabit poe"), "Computers/Tablets & Networking > Enterprise Networking, Servers > Power over Ethernet"),
@@ -42,3 +62,12 @@ def suggest_category_from_text(*values: str | None) -> tuple[str, str]:
         if any(re.search(rf"\b{re.escape(keyword.strip())}\b", searchable) for keyword in keywords):
             return category, "keyword_rules"
     return "Other > Needs category review", "needs_review"
+
+
+def is_source_noise_category(value: str | None) -> bool:
+    """Reject scraped navigation/policy text as a marketplace category hint."""
+    text = " ".join(str(value or "").split()).lower()
+    if not text:
+        return True
+    markers = ("amazon", "refund", "replacement", "free return", "delivery", "seller", "return policy", "read full", "update location", "see exceptions", "report an issue", "secure transaction")
+    return any(marker in text for marker in markers) or text.startswith(("other", "read the full"))

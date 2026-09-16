@@ -964,6 +964,23 @@ def test_vine_category_and_pricing_policy_uses_product_facts_without_etv():
     assert pricing["price_source"] == "amazon_current_price"
 
 
+def test_vine_category_resolver_rejects_amazon_policy_breadcrumbs():
+    service = VineImportService()
+    toilet = VineImportItem(product_name="Portable Toilet for Adults 6.6 Gal Camping RV Toilet", category="Amazon > FG 1910 > FREE 30-day refund/replacement")
+    category, source = service._resolve_category(toilet, amazon_facts={"title": toilet.product_name, "breadcrumbs": ["Amazon", "FG 1910", "FREE 30-day refund/replacement"]})
+    assert category.endswith("Portable Toilets")
+    assert source == "keyword_rules"
+
+
+def test_vine_category_resolver_maps_boxing_protection_without_source_noise():
+    service = VineImportService()
+    item = VineImportItem(product_name="Boxing Groin Protector Cup Protective Gear", category="Read the full returns policy > Report an issue with this product")
+    category, source = service._resolve_category(item, amazon_facts={"title": item.product_name})
+    assert "Boxing & MMA" in category
+    assert "refund" not in category.lower()
+    assert source == "keyword_rules"
+
+
 @pytest.mark.parametrize(
     ("product_name", "expected_category"),
     [

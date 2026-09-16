@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models.enums import ListingStatus, MarketplaceName
 from app.models.models import Listing, ListingProcessingEvent, ProductMediaCache, VineImportBatch, VineImportItem, User
-from app.services.category_rules import suggest_category_from_text
+from app.services.category_rules import is_source_noise_category, suggest_category_from_text
 from app.services.automation_bridge import submit_bridge_job, wait_for_bridge_job
 from app.services.amazon_media import AmazonProductMediaProvider, _normalize_dimension_facts
 from app.services.amazon_product_discovery import AmazonProductDiscoveryService
@@ -1256,6 +1256,17 @@ class VineImportService:
                 ))
                 results.append({"listing_id": listing.id, "status": preflight.get("status"), "blockers": blockers})
             except Exception as exc:  # keep import durable; expose exact retry state
+                # A failed provider/database operation aborts the current
+                # PostgreSQL transaction. Roll it back before recording the
+                # item-level failure; otherwise every later Vine row inherits
+                # ``InFailedSqlTransaction`` and is falsely classified as a
+                # generic attention item.
+                listing_id = int(getattr(listing, "id", 0) or 0)
+                db.rollback()
+                listing = db.get(Listing, listing_id) if listing_id else None
+                if listing is None:
+                    results.append({"listing_id": listing_id, "status": "blocked", "blockers": [{"code": "LISTING_RELOAD_FAILED", "message": str(exc)}]})
+                    continue
                 listing.processing_state = "needs_attention"
                 listing.needs_review = False
                 listing.processing_blocking_reason = f"Fresh eBay preflight failed: {exc}"
@@ -2325,11 +2336,12 @@ class VineImportService:
         contradictory = any(word in searchable_lower for word in ("pool", "pump", "filter", "spa")) and any(
             word in candidate.lower() for word in ("camera", "collectible")
         )
-        if candidate and not contradictory:
+        if candidate and not contradictory and not is_source_noise_category(candidate):
             return candidate, "vine_export"
         breadcrumbs = facts.get("breadcrumbs") or []
-        if breadcrumbs:
-            return " > ".join(breadcrumbs[-3:]), "amazon_breadcrumb"
+        breadcrumb_hint = " > ".join(breadcrumbs[-3:]).strip()
+        if breadcrumb_hint and not is_source_noise_category(breadcrumb_hint):
+            return breadcrumb_hint, "amazon_breadcrumb"
         return "Other > Needs category review", "needs_review"
 
     def _pricing_from_amazon(self, item: VineImportItem, *, amazon_facts: dict | None = None) -> dict:
