@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.models.enums import MarketplaceListingStatus, MarketplaceName
 from app.models.models import Listing, MarketplaceListing, User
 from app.services.ebay_service import revise_ebay_listing
+from app.services.marketplace_mutations import apply_marketplace_operation
 
 LIVE_EBAY_REPRICE_CONFIRMATION_PHRASE = "APPLY LIVE EBAY PRICE CHANGES"
 
@@ -300,6 +301,10 @@ class OperatorCommandService:
                 continue
             row = live_rows_by_listing.get(listing_id)
             try:
+                # Keep the remote destination change explicit while retaining
+                # compatibility with the canonical price used by the eBay
+                # adapter. Other marketplace overrides remain untouched.
+                apply_marketplace_operation(listing, marketplaces=["ebay"], field="price", value=row["new_price"])
                 listing.listing_price = row["new_price"]
                 listing.suggested_price = row["new_price"]
                 marketplace_data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}

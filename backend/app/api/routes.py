@@ -2892,6 +2892,7 @@ def get_listing_intelligence(
         ),
         "review_summary": readiness_summary,
         "quality_summary": compute_listing_quality_summary(listing, pricing_analysis=pricing_analysis),
+        "canonical": canonical_listing_readiness(listing),
     }
 
     return {
