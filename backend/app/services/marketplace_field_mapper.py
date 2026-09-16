@@ -54,16 +54,26 @@ def marketplace_description_variants(listing: Listing) -> dict[str, str]:
     }
 
 
-def persist_marketplace_description_variants(listing: Listing) -> dict[str, str]:
-    """Materialize channel copy while preserving canonical/operator overrides."""
+def persist_marketplace_description_variants(listing: Listing, *, regenerate_generated: bool = False) -> dict[str, str]:
+    """Materialize channel copy while preserving explicit operator overrides.
+
+    ``regenerate_generated`` is used by controlled enrichment/reprocessing. A
+    variant marked ``operator_edited`` is never replaced; unmarked legacy
+    variants are treated as generated during that explicit refresh.
+    """
     variants = marketplace_description_variants(listing)
     existing = getattr(listing, "marketplace_descriptions", None)
     existing = existing if isinstance(existing, dict) else {}
-    # Only fill generated slots; an operator-edited variant remains untouched.
+    provenance = dict(existing.get("_provenance") or {}) if isinstance(existing.get("_provenance"), dict) else {}
     rendered = dict(existing)
-    rendered.setdefault("ebay", variants["canonical"])
-    rendered.setdefault("facebook", variants["canonical"])
-    rendered.setdefault("mercari", variants["mercari"])
+    for channel, value in (("ebay", variants["canonical"]), ("facebook", variants["canonical"]), ("mercari", variants["mercari"])):
+        if provenance.get(channel) == "operator_edited":
+            continue
+        if regenerate_generated or not rendered.get(channel):
+            rendered[channel] = value
+            provenance[channel] = "generated"
+    if provenance:
+        rendered["_provenance"] = provenance
     listing.marketplace_descriptions = rendered
     return {"canonical": variants["canonical"], **{key: str(value or "") for key, value in rendered.items()}}
 

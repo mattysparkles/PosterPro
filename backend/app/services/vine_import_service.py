@@ -23,7 +23,7 @@ from app.services.ebay_service import _clip_specific_value, _derive_color, _deri
 from app.services.listing_review import derive_condition_data, derive_shipping_profile, normalize_listing_images, shipping_policy_for_user
 from app.services.listing_workspace import normalize_marketplace_data
 from app.services.listing_provenance import is_human_owned_field
-from app.services.marketplace_field_mapper import build_marketplace_payload
+from app.services.marketplace_field_mapper import build_marketplace_payload, persist_marketplace_description_variants
 from app.services.vine_parser import ParsedVineRow, parse_vine_csv, parse_vine_pdf, parse_vine_xlsx
 from app.services.vine_parser import parse_date_value
 from app.services.vine_policy import review_vine_product
@@ -803,8 +803,11 @@ class VineImportService:
             if not facts:
                 missing_facts += 1
                 continue
-            listing.title = self._generate_title(item.product_name or listing.title, amazon_facts=facts)
-            listing.description = self._generate_description(item, amazon_facts=facts)
+            if not is_human_owned_field(listing.source_metadata or {}, "title"):
+                listing.title = self._generate_title(item.product_name or listing.title, amazon_facts=facts)
+            if not is_human_owned_field(listing.source_metadata or {}, "description"):
+                listing.description = self._generate_vine_original_description(db, listing=listing, item=item, facts=facts)
+                listing.canonical_description = str(listing.description or "").strip() or None
             category, category_source = self._resolve_category(item, amazon_facts=facts)
             pricing = self._pricing_from_amazon(item, amazon_facts=facts)
             listing.condition = "New"
@@ -826,6 +829,7 @@ class VineImportService:
                     provenance[key] = "amazon_product_page"
             _merge_dimension_specifics(specifics, provenance, facts)
             listing.item_specifics = specifics
+            persist_marketplace_description_variants(listing, regenerate_generated=True)
             marketplace_data = normalize_marketplace_data(dict(listing.marketplace_data or {}))
             buyer_pays_shipping = bool(pricing["listing_price"] is not None and pricing["listing_price"] < 10)
             marketplace_data["vine_category"] = {"value": category, "source": category_source}
@@ -920,8 +924,11 @@ class VineImportService:
             if not facts:
                 missing_facts += 1
                 continue
-            listing.title = self._generate_title(item.product_name or listing.title, amazon_facts=facts)
-            listing.description = self._generate_description(item, amazon_facts=facts)
+            if not is_human_owned_field(source_metadata, "title"):
+                listing.title = self._generate_title(item.product_name or listing.title, amazon_facts=facts)
+            if not is_human_owned_field(source_metadata, "description"):
+                listing.description = self._generate_vine_original_description(db, listing=listing, item=item, facts=facts)
+                listing.canonical_description = str(listing.description or "").strip() or None
             category, category_source = self._resolve_category(item, amazon_facts=facts)
             pricing = self._pricing_from_amazon(item, amazon_facts=facts)
             listing.condition = "New"
@@ -937,6 +944,7 @@ class VineImportService:
                     provenance[key] = "amazon_product_page"
             _merge_dimension_specifics(specifics, provenance, facts)
             listing.item_specifics = specifics
+            persist_marketplace_description_variants(listing, regenerate_generated=True)
             marketplace_data = normalize_marketplace_data(dict(listing.marketplace_data or {}))
             buyer_pays_shipping = bool(pricing["listing_price"] is not None and pricing["listing_price"] < 10)
             marketplace_data["vine_category"] = {"value": category, "source": category_source}
@@ -1400,6 +1408,12 @@ class VineImportService:
             if generated and not self._description_source_copy(generated, facts):
                 listing.description = generated
 
+        # Keep a rich canonical source and materialize independent channel
+        # variants. Mercari's limit must never truncate the master/eBay copy.
+        if not is_human_owned_field(source, "description"):
+            listing.canonical_description = str(listing.description or "").strip() or None
+        elif not listing.canonical_description:
+            listing.canonical_description = str(listing.description or "").strip() or None
         category, category_source = self._resolve_category(item, amazon_facts=facts)
         if category and category != "Other > Needs category review" and not is_human_owned_field(source, "category_suggestion"):
             listing.category_suggestion = category
@@ -1433,6 +1447,9 @@ class VineImportService:
                 specifics["Item Width"] = f"{width:g} {unit}"
                 provenance["Item Width"] = "amazon_product_dimensions_category_mapping"
         listing.item_specifics = specifics
+        # Materialize channel variants only after category and structured facts
+        # are finalized so adapters receive the complete canonical evidence.
+        persist_marketplace_description_variants(listing)
         listing.condition_data = derive_condition_data(
             listing={"condition": "New", "source_type": "amazon_vine"},
             source_type="amazon_vine",
@@ -1715,12 +1732,22 @@ class VineImportService:
             return {"code": "DESCRIPTION_INADEQUATE", "field": "description", "message": "Vine description lacks sufficient product-specific buyer-facing content."}
         if self._description_source_copy(text, facts):
             return {"code": "DESCRIPTION_SOURCE_COPY_TOO_SIMILAR", "field": "description", "message": "Vine description substantially repeats Amazon source prose."}
+        # A long description that omits nearly all known product evidence is
+        # still not finished listing intelligence. Use token overlap only as a
+        # conservative signal; unknown/opaque source facts do not become a
+        # blocker and the operator can still review the draft.
+        evidence_values = [facts.get("brand"), facts.get("model"), facts.get("product_type"), facts.get("material"), facts.get("color"), facts.get("size"), facts.get("capacity"), facts.get("weight")]
+        evidence_values.extend((facts.get("specifications") or {}).values())
+        evidence_tokens = set(re.findall(r"[a-z0-9]+", " ".join(str(value) for value in evidence_values if self._usable_vine_fact(value)).lower()))
+        description_tokens = set(re.findall(r"[a-z0-9]+", text.lower()))
+        if len(evidence_tokens) >= 3 and len(description_tokens & evidence_tokens) < 2:
+            return {"code": "DESCRIPTION_FACT_COVERAGE_LOW", "field": "description", "message": "Vine description does not reflect enough of the verified product facts."}
         return None
 
     def _repair_vine_blockers(self, *, listing: Listing, item: VineImportItem, blockers: list[dict]) -> None:
         codes = {str(b.get("code") or "").upper() for b in blockers if isinstance(b, dict)}
         facts = _clean_amazon_facts((listing.source_metadata or {}).get("amazon_product_facts"))
-        if codes & {"DESCRIPTION_MISSING", "DESCRIPTION_INADEQUATE", "DESCRIPTION_SOURCE_COPY_TOO_SIMILAR"}:
+        if codes & {"DESCRIPTION_MISSING", "DESCRIPTION_INADEQUATE", "DESCRIPTION_SOURCE_COPY_TOO_SIMILAR", "DESCRIPTION_FACT_COVERAGE_LOW"}:
             listing.description = self._rewrite_amazon_description(item, amazon_facts=facts)
         if "PRICE_MISSING" in codes:
             price = _positive_price(facts.get("current_price")) or _positive_price(item.estimated_tax_value)
@@ -2399,6 +2426,13 @@ class VineImportService:
             if facts.get(key): lines.append(f"• {label}: {facts[key]}")
         if facts.get("included_components"):
             lines.extend(["", f"Included components: {', '.join(facts['included_components'][:5])}."])
+        feature_lines = [
+            f"• {_sanitize_vine_text(bullet)[:220].rstrip(' ,;:')}"
+            for bullet in (facts.get("feature_bullets") or [])[:6]
+            if len(_sanitize_vine_text(bullet)) > 12 and not is_source_noise_category(_sanitize_vine_text(bullet))
+        ]
+        if feature_lines:
+            lines.extend(["", "Key features:", *feature_lines])
         # Do not paste Amazon product-description prose into customer copy.
         # Structured facts above remain usable; the provider rewrite path is
         # responsible for paraphrasing source prose when it is available.
