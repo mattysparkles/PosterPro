@@ -18,6 +18,16 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
     )
     blockers = list(dict.fromkeys([*(stored.get("blockers") or []), *(base.get("blockers") or [])]))
     warnings = list(dict.fromkeys([*(stored.get("warnings") or []), *(base.get("warnings") or [])]))
+    description = str(getattr(listing, "canonical_description", None) or getattr(listing, "description", None) or "").strip()
+    if not description:
+        blockers.append("Description is missing")
+    elif len(description) < 180:
+        # A short description may still be valid for a simple item, but it is
+        # not evidence of a hard blocker by itself. Keep it visible as a
+        # quality warning while preserving the operator-review flow.
+        warnings.append("Description is brief; review product details before publishing")
+    blockers = list(dict.fromkeys(blockers))
+    warnings = list(dict.fromkeys(warnings))
     preflight = (getattr(listing, "marketplace_data", None) or {}).get("marketplace_preflight") if isinstance(getattr(listing, "marketplace_data", None), dict) else None
     if marketplace and isinstance(preflight, dict):
         row = (preflight.get("by_marketplace") or {}).get(str(marketplace).lower()) if isinstance(preflight.get("by_marketplace"), dict) else None
@@ -33,7 +43,7 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
     result = {
         "processing_complete": processing_complete,
         "enrichment_complete": bool(stored.get("enrichment_complete", processing_complete)),
-        "quality_complete": bool(stored.get("quality_complete", bool(getattr(listing, "description", None)))),
+        "quality_complete": bool(stored.get("quality_complete", bool(description))),
         "review_required": bool(getattr(listing, "needs_review", False)) and not attention,
         "attention_required": attention or bool(blockers),
         "publishable": publishable and (not marketplace or not blockers),

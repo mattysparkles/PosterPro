@@ -27,3 +27,12 @@ def test_destination_preflight_blocker_is_scoped_to_destination(db_session):
     assert ebay["attention_required"] is True
     assert ebay["publishable"] is False
     assert facebook["attention_required"] is False
+
+
+def test_missing_description_is_a_real_readiness_blocker(db_session):
+    user = User(email="readiness-description@example.com"); db_session.add(user); db_session.flush()
+    listing = Listing(user_id=user.id, processing_state="complete", needs_review=True, category_suggestion="Sporting Goods", listing_price=20, listing_images=[{"storage_path":"/media/item.jpg", "operator_state":"approved", "role":"primary"}], condition_data={"operator_review_required": False}, shipping_profile={"manual_measurement_needed": False})
+    result = canonical_listing_readiness(listing)
+    assert result["attention_required"] is True
+    assert result["publishable"] is False
+    assert "Description is missing" in result["blocking_reasons"]
