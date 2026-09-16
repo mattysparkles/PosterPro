@@ -2813,9 +2813,9 @@ export default function SettingsPage() {
                         <p className="text-sm font-semibold text-[#101828]">Start a real marketplace form test</p>
                         <p className="mt-1 text-xs leading-5 text-[#475467]">Choose a destination and start its test. The extension opens that marketplace in this browser profile, uses clearly marked synthetic content, records only safe form structure/results, and never submits.</p>
                         <div className="mt-3 flex flex-wrap items-center gap-2">
-                          <select aria-label="Marketplace to test" value={marketplaceDiagnosticTarget} onChange={(event) => setMarketplaceDiagnosticTarget(event.target.value)} className="rounded-lg border border-[#d0d5dd] bg-white px-3 py-2 text-sm">
+                          <Select aria-label="Marketplace to test" value={marketplaceDiagnosticTarget} onChange={(event) => setMarketplaceDiagnosticTarget(event.target.value)} className="h-10 w-auto">
                             {['facebook', 'mercari', 'poshmark', 'vinted', 'offerup'].map((market) => <option key={market} value={market}>{market[0].toUpperCase() + market.slice(1)}</option>)}
-                          </select>
+                          </Select>
                           <Button type="button" disabled={startingMarketplaceDiagnostic || ['QUEUED', 'CLAIMED', 'NAVIGATING', 'FORM_DETECTED', 'TESTING_FIELDS'].includes(String(marketplaceDiagnostic?.status || '').toUpperCase())} onClick={() => startMarketplaceFormDiagnostic(marketplaceDiagnosticTarget)}>
                             {startingMarketplaceDiagnostic ? 'Starting…' : `START ${marketplaceDiagnosticTarget.toUpperCase()} REAL FORM TEST`}
                           </Button>
