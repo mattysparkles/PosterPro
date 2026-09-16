@@ -4,6 +4,7 @@ import toast from 'react-hot-toast';
 
 import AppShell from '../components/layout/AppShell';
 import Button from '../components/ui/button';
+import Checkbox from '../components/ui/checkbox';
 import DataTableCard from '../components/ui/data-table-card';
 import EmptyState from '../components/ui/empty-state';
 import FormSection from '../components/ui/form-section';
@@ -192,24 +193,17 @@ export default function SalesPage() {
             {MARKETPLACES.map((marketplace) => {
               const enabled = platformSettings.includes(marketplace);
               return (
-                <button
+                <Checkbox
                   key={marketplace}
-                  type="button"
-                  className={`rounded-[14px] border p-4 text-left transition ${
-                    enabled ? 'border-[#bfd2ff] bg-[#f8fbff]' : 'border-[#e5e7eb] bg-white hover:bg-[#f9fafb]'
-                  }`}
-                  onClick={async () => {
+                  checked={enabled}
+                  onChange={async () => {
                     const next = enabled ? platformSettings.filter((name) => name !== marketplace) : [...platformSettings, marketplace];
                     setPlatformSettings(next);
                     await updateSaleDetectionSettings(user.id, next);
                   }}
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <p className="text-sm font-semibold capitalize text-[#101828]">{marketplace}</p>
-                    <StatusPill status={enabled ? 'success' : 'default'} label={enabled ? 'Enabled' : 'Off'} />
-                  </div>
-                  <p className="mt-2 text-sm text-[#667085]">Sale polling and cross-channel delist logic {enabled ? 'will' : 'will not'} include this marketplace.</p>
-                </button>
+                  label={marketplace}
+                  description={`Sale polling and cross-channel delist logic ${enabled ? 'will' : 'will not'} include this marketplace.`}
+                />
               );
             })}
           </div>
