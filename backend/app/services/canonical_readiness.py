@@ -92,6 +92,11 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
     # A listing cannot be publishable while enrichment/processing is still in
     # flight, even when the basic photo/price checks happen to pass.
     publishable = bool(processing_complete and base.get("ready_for_publish")) and not attention and not blockers
+    destination_publishable = publishable
+    if marketplace and isinstance(preflight, dict):
+        destination = (preflight.get("by_marketplace") or {}).get(str(marketplace).lower()) if isinstance(preflight.get("by_marketplace"), dict) else None
+        if isinstance(destination, dict):
+            destination_publishable = destination_publishable and str(destination.get("status") or "").lower() in {"ready", "ready_with_warnings", "published"} and not bool(destination.get("blockers"))
     transient_processing = processing_state in {"processing", "pending", "queued", "enriching", "source_enrichment", "image_enrichment", "category_resolution", "title_generation", "description_generation", "quality_validation"}
     queue = "PUBLISHED" if remote_live else "NEEDS_ATTENTION" if (attention or blockers) else "PROCESSING" if (transient_processing or not processing_complete) else "NEEDS_REVIEW" if getattr(listing, "needs_review", False) else "READY"
     result = {
@@ -101,6 +106,8 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
         "review_required": bool(getattr(listing, "needs_review", False)) and not attention,
         "attention_required": attention or bool(blockers),
         "publishable": publishable and (not marketplace or not blockers),
+        "destination_publishable": destination_publishable if marketplace else None,
+        "processing_stage": str(getattr(listing, "processing_stage", None) or processing_state or "unknown"),
         "warnings": warnings,
         "blocking_reasons": blockers,
         "missing_required_aspects": missing_required_aspects,

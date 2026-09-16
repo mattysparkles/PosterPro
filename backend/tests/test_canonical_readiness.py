@@ -11,6 +11,8 @@ def test_reviewable_complete_listing_is_not_attention(db_session):
     result = canonical_listing_readiness(listing)
     assert result["queue"] == "NEEDS_REVIEW"
     assert result["attention_required"] is False
+    assert result["destination_publishable"] is None
+    assert result["processing_stage"] == "complete"
 
 
 def test_blocked_listing_cannot_be_publishable(db_session):
@@ -62,6 +64,7 @@ def test_destination_preflight_blocker_is_scoped_to_destination(db_session):
     facebook = canonical_listing_readiness(listing, marketplace="facebook")
     assert ebay["attention_required"] is True
     assert ebay["publishable"] is False
+    assert ebay["destination_publishable"] is False
     assert facebook["attention_required"] is False
 
 
