@@ -1318,7 +1318,15 @@ class ListingProcessingService:
                 if image_identity:
                     updated["image_identity"] = image_identity
         if not dry_run:
-            generated = self.listing_ai.generate(image_signals, db=db, user_id=listing.user_id, listing_id=listing.id)
+            try:
+                generated = self.listing_ai.generate(image_signals, db=db, user_id=listing.user_id, listing_id=listing.id)
+            except TypeError as exc:
+                # Keep lightweight/test providers and older integrations
+                # compatible while the production provider receives durable
+                # ownership context.
+                if "unexpected keyword argument" not in str(exc):
+                    raise
+                generated = self.listing_ai.generate(image_signals)
             base_title = build_marketplace_title(
                 title=recovery_identity.get("title") or listing.title or "",
                 item_specifics=listing.item_specifics if isinstance(listing.item_specifics, dict) else {},
@@ -1464,15 +1472,19 @@ class ListingProcessingService:
         if dry_run:
             return updated
         if _generic_placeholder(listing.title) or _generic_placeholder(listing.description):
-            generated = self.listing_ai.generate(
-                {
+            payload = {
                     "title_hint": listing.title or (listing.source_metadata or {}).get("product_name") or "Recovered inventory item",
                     "source_type": listing.source_type,
                     "image_count": len(listing.image_urls or []),
                     "existing_specifics": listing.item_specifics or {},
                     "photo_keywords": [str(listing.category_suggestion or ""), str(listing.source_type or "")],
-                }, db=db, user_id=listing.user_id, listing_id=listing.id
-            )
+                }
+            try:
+                generated = self.listing_ai.generate(payload, db=db, user_id=listing.user_id, listing_id=listing.id)
+            except TypeError as exc:
+                if "unexpected keyword argument" not in str(exc):
+                    raise
+                generated = self.listing_ai.generate(payload)
             if _generic_placeholder(listing.title):
                 listing.title = generated.get("title") or listing.title
             if _generic_placeholder(listing.description):
