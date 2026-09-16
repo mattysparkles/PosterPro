@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     sale_detection_enabled: bool = True
     sale_detection_dry_run: bool = True
     sale_detection_poll_minutes: int = 15
+    # Replay a bounded window so deploys/provider outages do not permanently
+    # skip sales; reconciliation is idempotent by remote order/listing ID.
+    sale_detection_lookback_minutes: int = 360
     sold_sync_enabled: bool = False
     intake_monitor_enabled: bool = False
     historical_backlog_auto_resume_enabled: bool = False

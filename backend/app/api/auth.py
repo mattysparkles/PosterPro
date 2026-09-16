@@ -91,6 +91,7 @@ _BOOL_SETTING_FIELDS = {
 _INT_SETTING_FIELDS = {
     "automation_bridge_timeout_seconds": "AUTOMATION_BRIDGE_TIMEOUT_SECONDS",
     "sale_detection_poll_minutes": "SALE_DETECTION_POLL_MINUTES",
+    "sale_detection_lookback_minutes": "SALE_DETECTION_LOOKBACK_MINUTES",
     "amazon_media_rate_limit_per_minute": "AMAZON_MEDIA_RATE_LIMIT_PER_MINUTE",
     "smtp_port": "SMTP_PORT",
 }
@@ -452,6 +453,7 @@ def _build_settings_panel_response(current_user: User, *, ebay_account: Marketpl
             "sale_detection_enabled": settings.sale_detection_enabled,
             "sale_detection_dry_run": settings.sale_detection_dry_run,
             "sale_detection_poll_minutes": settings.sale_detection_poll_minutes,
+            "sale_detection_lookback_minutes": settings.sale_detection_lookback_minutes,
             "sold_sync_enabled": settings.sold_sync_enabled,
         },
         "server": {

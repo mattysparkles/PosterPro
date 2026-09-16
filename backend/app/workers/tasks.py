@@ -1873,7 +1873,11 @@ def poll_for_sales_task(self, dry_run: bool | None = None) -> dict:
         result = sale_detection_service.poll_all_users(
             db,
             dry_run=resolved_dry_run,
-            lookback_minutes=max(10, settings.sale_detection_poll_minutes + 5),
+            lookback_minutes=max(
+                10,
+                settings.sale_detection_poll_minutes + 5,
+                settings.sale_detection_lookback_minutes,
+            ),
         )
         logger.info("Sale detection polling task completed", extra=result)
         return result
