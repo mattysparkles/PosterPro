@@ -262,6 +262,21 @@ def build_listing_description(
         if not value_text or value_text.lower() in {"needs review", "unknown", "n/a", "na", "tbd"}:
             continue
         feature_bits.append(f"{field.lower()}: {value_text}")
+    # Promote additional structured facts into buyer-useful context without
+    # asking the copy generator to infer unsupported specifications.
+    for label, keys in (
+        ("material", ("material", "materials")),
+        ("dimensions", ("dimensions", "size")),
+        ("compatibility", ("compatibility", "compatible_with", "compatible_models")),
+        ("included", ("included_items", "included_components", "whats_included")),
+        ("use case", ("use_case", "recommended_use", "application")),
+    ):
+        value = next((facts.get(key) for key in keys if facts.get(key)), None)
+        if isinstance(value, (list, tuple)):
+            value = ", ".join(str(item).strip() for item in value if str(item).strip())
+        value_text = _normalize_text(value)
+        if value_text and value_text.lower() not in {"unknown", "n/a", "none"} and not any(label in bit.lower() for bit in feature_bits):
+            feature_bits.append(f"{label}: {value_text[:180]}")
     recovery_identity = _best_recovery_identity(source_metadata)
     if recovery_identity:
         for field in ("brand", "model", "mpn", "identifier", "product_name", "product_type", "packaging_identity"):
