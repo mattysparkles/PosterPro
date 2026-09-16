@@ -3,6 +3,7 @@ import AppShell from "../../components/layout/AppShell";
 import PageHeader from "../../components/ui/page-header";
 import SectionPanel from "../../components/ui/section-panel";
 import Button from "../../components/ui/button";
+import ActionLink from "../../components/ui/action-link";
 import StatusPill from "../../components/ui/status-pill";
 import Select from "../../components/ui/select";
 import Checkbox from "../../components/ui/checkbox";
@@ -267,9 +268,9 @@ export default function IntakeTimeline() {
           </Button>
           {state.slate && slateId && (
             <div className="mt-1 flex gap-1">
-              <a href={`/intake/slate?slate_id=${slateId}`} className="rounded border border-lime-700 bg-lime-100 px-1 text-[9px] font-semibold text-lime-900">EDIT SLATE</a>
-              <a href={`/intake/slate?slate_id=${slateId}#voice`} className="rounded border border-lime-700 bg-lime-100 px-1 text-[9px] text-lime-900">VOICE NOTE</a>
-              {slateMetadata.legacy_source_image_url && <a href={slateMetadata.legacy_source_image_url} target="_blank" rel="noreferrer" className="rounded border border-slate-500 bg-white px-1 text-[9px] text-slate-800">VIEW LEGACY SOURCE</a>}
+              <ActionLink href={`/intake/slate?slate_id=${slateId}`} size="icon-sm" className="!h-7 !min-h-7 !rounded-md !px-2 text-[9px] font-semibold">Edit slate</ActionLink>
+              <ActionLink href={`/intake/slate?slate_id=${slateId}#voice`} size="icon-sm" className="!h-7 !min-h-7 !rounded-md !px-2 text-[9px]">Voice note</ActionLink>
+              {slateMetadata.legacy_source_image_url && <ActionLink href={slateMetadata.legacy_source_image_url} target="_blank" rel="noreferrer" external size="icon-sm" className="!h-7 !min-h-7 !rounded-md !px-2 text-[9px]">View source</ActionLink>}
             </div>
           )}
           <div className="mt-1 flex max-w-[190px] flex-wrap justify-center gap-1">
