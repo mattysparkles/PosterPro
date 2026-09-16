@@ -6,6 +6,54 @@ from app.models.models import Listing
 from app.services.customer_description import sanitize_customer_description
 
 
+MARKETPLACE_DESCRIPTION_LIMITS = {"mercari": 1000}
+
+
+def _condense_description(text: str, limit: int = 1000) -> str:
+    """Condense by complete sentences/sections, never by a blind substring."""
+    clean = " ".join(str(text or "").split())
+    if len(clean) <= limit:
+        return clean
+    sentences = [part.strip() for part in __import__("re").split(r"(?<=[.!?])\s+", clean) if part.strip()]
+    selected: list[str] = []
+    for sentence in sentences:
+        candidate = " ".join([*selected, sentence])
+        if len(candidate) > limit:
+            break
+        selected.append(sentence)
+    result = " ".join(selected).strip()
+    if not result and clean:
+        words: list[str] = []
+        for word in clean.split():
+            candidate = " ".join([*words, word])
+            if len(candidate) > limit:
+                break
+            words.append(word)
+        result = " ".join(words)
+    if len(result) < min(320, limit) and result != clean:
+        # Preserve the most useful tail sections when the opening is unusually
+        # long, still respecting sentence boundaries.
+        for sentence in reversed(sentences):
+            candidate = " ".join([sentence, *selected])
+            if len(candidate) <= limit:
+                result = candidate
+    return result[:limit].rstrip(" ,;:-")
+
+
+def marketplace_description_variants(listing: Listing) -> dict[str, str]:
+    """Return canonical and channel-specific copy without mutating the listing."""
+    canonical = str(getattr(listing, "canonical_description", None) or listing.description or "").strip()
+    safe, _ = sanitize_customer_description(canonical)
+    stored = getattr(listing, "marketplace_descriptions", None)
+    stored = stored if isinstance(stored, dict) else {}
+    return {
+        "canonical": safe,
+        "ebay": str(stored.get("ebay") or safe).strip(),
+        "facebook": str(stored.get("facebook") or safe).strip(),
+        "mercari": _condense_description(str(stored.get("mercari") or safe), 1000),
+    }
+
+
 def _trim_to_word_limit(value: str | None, limit: int) -> str | None:
     text = " ".join(str(value or "").split())
     if not text:
@@ -79,12 +127,14 @@ def _shared_payload(listing: Listing) -> dict[str, Any]:
         **shipping_profile,
         **marketplace_shipping,
     }
-    customer_description, removed_internal = sanitize_customer_description(listing.description)
+    variants = marketplace_description_variants(listing)
+    customer_description, removed_internal = sanitize_customer_description(variants["canonical"])
     specifics = listing.item_specifics if isinstance(listing.item_specifics, dict) else {}
     source_metadata = listing.source_metadata if isinstance(listing.source_metadata, dict) else {}
     return {
         "title": listing.title,
         "description": customer_description,
+        "description_variants": variants,
         "description_sanitized": bool(removed_internal),
         "price": _price(listing),
         "condition": listing.condition,
@@ -144,7 +194,7 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
         return {
             "marketplace": market,
             "title": shared["title"],
-            "description": shared["description"],
+            "description": shared["description_variants"]["ebay"],
             "price": shared["price"],
             "condition": shared["condition"],
             "quantity": shared["quantity"],
@@ -174,7 +224,7 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
         return {
             "marketplace": market,
             "title": shared["title"],
-            "description": shared["description"],
+            "description": shared["description_variants"]["facebook"],
             "price": shared["price"],
             "condition": shared["condition"],
             "availability": "in stock" if (shared["quantity"] or 0) > 0 else "out of stock",
@@ -199,7 +249,7 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
         return {
             "marketplace": market,
             "title": shared["title"],
-            "description": shared["description"],
+            "description": shared["description_variants"].get("etsy") or shared["description"],
             "price": shared["price"],
             "quantity": shared["quantity"],
             "category_hint": shared["category"],
@@ -228,7 +278,7 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
         return {
             "marketplace": market,
             "title": shared["title"],
-            "description": _trim_to_word_limit(shared["description"], 1000),
+            "description": shared["description_variants"]["mercari"],
             "price": shared["price"],
             "condition": shared["condition"],
             "category_hint": shared["category"],

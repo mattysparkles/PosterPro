@@ -87,6 +87,10 @@ class Listing(Base, TimestampMixin):
     storage_unit_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Rich source-of-truth copy plus destination-specific rendered variants.
+    # ``description`` remains the compatibility fallback for legacy rows.
+    canonical_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    marketplace_descriptions: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     category_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     category_suggestion: Mapped[str | None] = mapped_column(String(255), nullable=True)
     item_specifics: Mapped[dict | None] = mapped_column(JSON, nullable=True)

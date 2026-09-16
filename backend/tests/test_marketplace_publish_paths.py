@@ -1,7 +1,7 @@
 from app.models.enums import ListingStatus, MarketplaceListingStatus
 from app.models.models import Listing, MarketplaceListing, User
 from app.services.marketplace_preflight import MarketplacePreflightService
-from app.services.marketplace_field_mapper import build_marketplace_payload
+from app.services.marketplace_field_mapper import build_marketplace_payload, marketplace_description_variants
 from app.workers import tasks
 from app.workers.tasks import publish_listing_to_marketplace_task
 
@@ -104,7 +104,23 @@ def test_mercari_payload_trims_description_to_word_limit(db_session):
     payload = build_marketplace_payload(listing, "mercari")
     assert payload["marketplace"] == "mercari"
     assert payload["description"] is not None
-    assert len(str(payload["description"]).split()) == 1000
+    assert len(str(payload["description"])) <= 1000
+
+
+def test_marketplace_descriptions_keep_rich_canonical_copy_separate(db_session):
+    user = User(email="marketplace-description-variants@example.com")
+    db_session.add(user); db_session.flush()
+    canonical = "Portable camping toilet with a sealed waste tank, fresh-water flush reservoir, level indicators, rotating spout, carry handle, and removable components for RV travel. " * 8
+    listing = Listing(user_id=user.id, title="Portable Camping Toilet", description=canonical, canonical_description=canonical, listing_price=89, quantity=1)
+    variants = marketplace_description_variants(listing)
+    assert len(variants["canonical"]) > 1000
+    assert len(variants["ebay"]) > 1000
+    assert len(variants["facebook"]) > 1000
+    assert len(variants["mercari"]) <= 1000
+    assert "sealed waste tank" in variants["mercari"]
+    assert build_marketplace_payload(listing, "ebay")["description"] == variants["ebay"]
+    assert build_marketplace_payload(listing, "facebook")["description"] == variants["facebook"]
+    assert build_marketplace_payload(listing, "mercari")["description"] == variants["mercari"]
 
 
 def test_non_ebay_payload_does_not_reuse_ebay_category_id(db_session):
