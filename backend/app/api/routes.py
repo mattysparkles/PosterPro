@@ -77,6 +77,7 @@ from app.services.listing_review import (
 )
 from app.services.listing_specificity import GENERIC_CAPTION_TITLES, classify_listing_reviewability
 from app.services.canonical_readiness import canonical_listing_readiness
+from app.services.marketplace_mutations import apply_marketplace_operation
 from app.services.media_lifecycle import purge_listing_media
 from app.services.listing_workspace import normalize_marketplace_data
 from app.services.marketplace_orchestrator import enqueue_crosspost_job, queue_publish
@@ -2702,6 +2703,33 @@ async def run_dashboard_operator_command(
     # update by accident.
     operation_plan = operator_command_service.parse_operation_plan(payload.prompt)
     if len(operation_plan) > 1:
+        if payload.apply_live and not payload.dry_run:
+            if not payload.confirm_live_apply or str(payload.confirmation_phrase or '').strip() != 'APPLY COMPOUND OPERATIONS':
+                return {
+                    "prompt": payload.prompt, "parsed": True, "command_type": "compound_operation_plan",
+                    "dry_run": True, "apply_live": False, "requires_confirmation": True,
+                    "confirmation_phrase": "APPLY COMPOUND OPERATIONS",
+                    "message": "Live compound changes require the exact confirmation phrase.",
+                    "operations": [{"items": op.items, "marketplaces": op.marketplaces, "field": op.field, "action": op.action, "value": op.value} for op in operation_plan],
+                }
+            results = []
+            for operation in operation_plan:
+                if operation.action == 'end' or operation.field == 'listing':
+                    results.append({"items": operation.items, "marketplaces": operation.marketplaces, "status": "not_executed", "message": "Ending listings requires an exact-identity marketplace job."})
+                    continue
+                for listing_id in operation.items:
+                    listing = db.get(Listing, listing_id)
+                    if not listing or listing.user_id != current_user.id:
+                        results.append({"listing_id": listing_id, "status": "failed", "message": "Listing not found in this account."})
+                        continue
+                    try:
+                        change = apply_marketplace_operation(listing, marketplaces=operation.marketplaces, field=operation.field, action=operation.action, value=operation.value)
+                        db.add(listing); db.commit()
+                        results.append({"listing_id": listing_id, "status": "updated", "change": change})
+                    except ValueError as exc:
+                        db.rollback()
+                        results.append({"listing_id": listing_id, "status": "failed", "message": str(exc)})
+            return {"prompt": payload.prompt, "parsed": True, "command_type": "compound_operation_plan", "dry_run": False, "apply_live": True, "requires_confirmation": True, "message": "Compound operation completed with per-item results.", "operations": [{"items": op.items, "marketplaces": op.marketplaces, "field": op.field, "action": op.action, "value": op.value} for op in operation_plan], "results": results}
         return {
             "prompt": payload.prompt,
             "parsed": True,
