@@ -160,3 +160,18 @@ async def test_dashboard_metric_layout_is_persisted_per_user_and_sanitized(async
     second = await async_client.post("/auth/register", json={"full_name": "Separate Layout Owner", "email": f"dashboard-layout-{uuid4()}@example.com", "password": "supersecret123"})
     assert second.status_code == 201
     assert second.json()["user"]["profile_preferences"].get("dashboard_metrics") is None
+
+
+@pytest.mark.anyio
+async def test_jobs_metric_layout_is_persisted_and_sanitized(async_client):
+    register = await async_client.post("/auth/register", json={"full_name": "Jobs Layout Owner", "email": f"jobs-layout-{uuid4()}@example.com", "password": "supersecret123"})
+    assert register.status_code == 201
+    saved = await async_client.patch("/auth/me", json={"profile_preferences": {"jobs_layout": {"overview": ["failed", "failed", "unknown"], "system": ["sold"], "processing": ["attention", "worker"]}}})
+    assert saved.status_code == 200
+    layout = saved.json()["profile_preferences"]["jobs_layout"]
+    assert layout["overview"] == ["failed", "crosspost", "imports", "queued"]
+    assert layout["system"][0] == "sold"
+    assert set(layout["system"]) == {"catalog", "drafts", "review", "published", "sold", "intake", "queued_work", "failed_work", "notices"}
+    assert layout["processing"][:2] == ["attention", "worker"]
+    reread = await async_client.get("/auth/me")
+    assert reread.json()["profile_preferences"]["jobs_layout"] == layout

@@ -303,6 +303,11 @@ def _persist_sold_sync_preferences(user: User, updates: dict) -> None:
 
 
 _DASHBOARD_METRIC_IDS = ("ready", "review", "live", "draft")
+_JOBS_LAYOUT_IDS = {
+    "processing": ("worker", "queued", "processing", "retrying", "attention", "review", "complete", "stalled", "queue_summary"),
+    "overview": ("crosspost", "imports", "queued", "failed"),
+    "system": ("catalog", "drafts", "review", "published", "sold", "intake", "queued_work", "failed_work", "notices"),
+}
 
 
 def _normalize_dashboard_metric_preferences(value: object) -> dict:
@@ -312,6 +317,17 @@ def _normalize_dashboard_metric_preferences(value: object) -> dict:
     order.extend(item for item in _DASHBOARD_METRIC_IDS if item not in order)
     visible = raw.get("visible") if isinstance(raw.get("visible"), dict) else {}
     return {"order": order, "visible": {item: bool(visible.get(item, True)) for item in _DASHBOARD_METRIC_IDS}}
+
+
+def _normalize_jobs_layout(value: object) -> dict:
+    raw = value if isinstance(value, dict) else {}
+    normalized = {}
+    for section, defaults in _JOBS_LAYOUT_IDS.items():
+        proposed = raw.get(section) if isinstance(raw.get(section), list) else []
+        order = list(dict.fromkeys(item for item in proposed if item in defaults))
+        order.extend(item for item in defaults if item not in order)
+        normalized[section] = order
+    return normalized
 
 
 def _serialize_user(user: User) -> dict:
@@ -530,6 +546,9 @@ def update_me(
         submitted_metrics = payload.profile_preferences.get("dashboard_metrics")
         if submitted_metrics is not None:
             profile_updates["dashboard_metrics"] = _normalize_dashboard_metric_preferences(submitted_metrics)
+        submitted_jobs_layout = payload.profile_preferences.get("jobs_layout")
+        if submitted_jobs_layout is not None:
+            profile_updates["jobs_layout"] = _normalize_jobs_layout(submitted_jobs_layout)
     if profile_updates:
         settings_json = current_user.settings_json if isinstance(current_user.settings_json, dict) else {}
         profile = settings_json.get("profile_preferences") if isinstance(settings_json.get("profile_preferences"), dict) else {}

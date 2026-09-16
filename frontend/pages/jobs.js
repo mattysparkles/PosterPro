@@ -40,6 +40,7 @@ import {
   runAutomationBridgeSmokeTest,
   toggleAutonomousMode,
   reprioritizeCorrectionJob,
+  updateCurrentUser,
 } from "../lib/api";
 
 const JOB_TABS = [
@@ -242,11 +243,21 @@ export default function JobsPage() {
   useEffect(() => {
     if (!user?.id) return;
     try {
+      const serverLayout = user?.profile_preferences?.jobs_layout;
+      if (serverLayout && typeof serverLayout === "object") {
+        const applyServer = (value, defaults, setter) => {
+          if (!Array.isArray(value)) return;
+          setter([...value.filter((key) => defaults.includes(key)), ...defaults.filter((key) => !value.includes(key))]);
+        };
+        applyServer(serverLayout.processing, defaultProcessingOrder, setProcessingOrder);
+        applyServer(serverLayout.overview, overviewMetricOrder, setOverviewOrder);
+        applyServer(serverLayout.system, systemMetricOrder, setSystemOrder);
+      }
       const saved = JSON.parse(window.localStorage.getItem(`posterpro.jobs.processing-order.${user.id}`) || "null");
-      if (Array.isArray(saved) && saved.length === defaultProcessingOrder.length && saved.every((key) => defaultProcessingOrder.includes(key))) setProcessingOrder(saved);
+      if (!Array.isArray(serverLayout?.processing) && Array.isArray(saved) && saved.length === defaultProcessingOrder.length && saved.every((key) => defaultProcessingOrder.includes(key))) setProcessingOrder(saved);
       const loadOrder = (section, defaults, setter) => {
         const value = JSON.parse(window.localStorage.getItem(`posterpro.jobs.${section}-order.${user.id}`) || "null");
-        if (Array.isArray(value)) { const merged = [...value.filter((key) => defaults.includes(key)), ...defaults.filter((key) => !value.includes(key))]; setter(merged); }
+        if (!Array.isArray(serverLayout?.[section]) && Array.isArray(value)) { const merged = [...value.filter((key) => defaults.includes(key)), ...defaults.filter((key) => !value.includes(key))]; setter(merged); }
       };
       loadOrder("overview", overviewMetricOrder, setOverviewOrder);
       loadOrder("system", systemMetricOrder, setSystemOrder);
@@ -261,6 +272,7 @@ export default function JobsPage() {
       if (fromIndex < 0 || toIndex < 0) return current;
       next.splice(fromIndex, 1); next.splice(toIndex, 0, from);
       try { if (user?.id) window.localStorage.setItem(`posterpro.jobs.processing-order.${user.id}`, JSON.stringify(next)); } catch { /* optional */ }
+      void updateCurrentUser({ profile_preferences: { jobs_layout: { ...(user?.profile_preferences?.jobs_layout || {}), processing: next } } }).catch(() => {});
       return next;
     });
   };
@@ -273,6 +285,7 @@ export default function JobsPage() {
       if (a < 0 || b < 0) return current;
       next.splice(a, 1); next.splice(b, 0, from);
       try { if (user?.id) window.localStorage.setItem(`posterpro.jobs.${section}-order.${user.id}`, JSON.stringify(next)); } catch {}
+      void updateCurrentUser({ profile_preferences: { jobs_layout: { ...(user?.profile_preferences?.jobs_layout || {}), [section]: next } } }).catch(() => {});
       return next;
     });
   };
@@ -286,6 +299,7 @@ export default function JobsPage() {
         ["overview", "system", "processing"].forEach((section) => window.localStorage.removeItem(`posterpro.jobs.${section}-order.${user.id}`));
       }
     } catch {}
+    void updateCurrentUser({ profile_preferences: { jobs_layout: { processing: defaultProcessingOrder, overview: overviewMetricOrder, system: systemMetricOrder } } }).catch(() => {});
   };
 
   const draggableMetric = (section, key, node) => (
