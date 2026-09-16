@@ -852,7 +852,7 @@ class ListingAIService:
             },
             "mercari": {
                 "title": self._marketplace_title(title, item_specifics, category, max_length=_MARKETPLACE_RULES["mercari"]["title_max"]),
-                "description": self._mercari_description(title, item_specifics, condition, category),
+                "description": self._mercari_description(title, item_specifics, condition, category, source_metadata=source_metadata, canonical_description=description),
                 "sources": sources,
             },
             "poshmark": {
@@ -884,7 +884,7 @@ class ListingAIService:
         return " ".join(output.split())[:max_length].strip() or "Marketplace listing"
 
     @staticmethod
-    def _mercari_description(title: str, item_specifics: dict[str, Any], condition: str, category: str) -> str:
+    def _mercari_description(title: str, item_specifics: dict[str, Any], condition: str, category: str, *, source_metadata: dict[str, Any] | None = None, canonical_description: str = "") -> str:
         details = []
         for field in ("Brand", "Model", "MPN", "UPC", "Type"):
             value = item_specifics.get(field)
@@ -895,8 +895,37 @@ class ListingAIService:
             parts.append(f"Category: {category}")
         if details:
             parts.append(" ".join(details[:5]))
+        evidence = source_metadata if isinstance(source_metadata, dict) else {}
+        nested = evidence.get("amazon_product_facts") if isinstance(evidence.get("amazon_product_facts"), dict) else evidence.get("source_facts")
+        facts = nested if isinstance(nested, dict) else evidence
+        bullets = facts.get("feature_bullets") or []
+        if isinstance(bullets, str):
+            bullets = [bullets]
+        clean = []
+        for bullet in bullets:
+            candidate = _normalize_text(bullet)
+            if len(candidate) >= 14 and not any(marker in candidate.lower() for marker in ("refund", "replacement", "shipping", "return policy", "buy now")):
+                clean.append(candidate.rstrip(" ."))
+            if len(clean) >= 3:
+                break
+        if clean:
+            parts.append("Features: " + "; ".join(clean))
+        specs = facts.get("specifications") if isinstance(facts.get("specifications"), dict) else {}
+        spec_bits = []
+        for key, value in specs.items():
+            key_text, value_text = _normalize_text(key), _normalize_text(value)
+            if key_text and value_text and not any(marker in key_text.lower() for marker in ("asin", "review", "refund", "shipping", "return")):
+                spec_bits.append(f"{key_text}: {value_text}")
+            if len(spec_bits) >= 3:
+                break
+        if spec_bits:
+            parts.append("Specs: " + "; ".join(spec_bits))
+        if canonical_description and len(canonical_description) > 120 and not clean and not spec_bits:
+            # Sentence-aware fallback when structured facts are unavailable.
+            sentences = re.split(r"(?<=[.!?])\s+", _normalize_text(canonical_description))
+            parts.extend(sentence for sentence in sentences[:2] if sentence)
         text = " | ".join(parts)
-        return text[:1000].strip()
+        return text[:1000].rstrip(" ,;:|.").strip() + "."
 
     @staticmethod
     def _vinted_description(title: str, item_specifics: dict[str, Any], condition: str, category: str) -> str:
