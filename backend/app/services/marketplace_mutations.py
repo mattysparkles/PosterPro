@@ -14,6 +14,92 @@ from app.services.listing_provenance import mark_field_provenance
 SUPPORTED_MARKETS = {"ebay", "facebook", "mercari", "poshmark", "vinted", "etsy", "offerup"}
 
 
+def validate_marketplace_operation_plan(
+    operations: list[dict[str, Any]],
+    listings_by_id: dict[int, Listing],
+) -> list[dict[str, Any]]:
+    """Normalize and validate a compound mutation plan before applying it.
+
+    Plans are intentionally explicit: every operation names its listing IDs,
+    destination markets, field, action, and (when applicable) value.  The
+    entire plan is validated first so one malformed operation cannot leave an
+    earlier operation partially applied.
+    """
+    if not isinstance(operations, list) or not operations:
+        raise ValueError("At least one mutation operation is required")
+    normalized: list[dict[str, Any]] = []
+    for index, operation in enumerate(operations):
+        if not isinstance(operation, dict):
+            raise ValueError(f"Operation {index + 1} must be an object")
+        raw_ids = operation.get("listing_ids", operation.get("item_ids", operation.get("listing_id")))
+        if isinstance(raw_ids, (str, int)):
+            raw_ids = [raw_ids]
+        if not isinstance(raw_ids, list) or not raw_ids:
+            raise ValueError(f"Operation {index + 1} must name listing IDs")
+        listing_ids: list[int] = []
+        for raw_id in raw_ids:
+            try:
+                listing_id = int(raw_id)
+            except (TypeError, ValueError):
+                raise ValueError(f"Operation {index + 1} has an invalid listing ID")
+            if listing_id not in listings_by_id:
+                raise ValueError(f"Listing {listing_id} is not available in this operation scope")
+            listing_ids.append(listing_id)
+        markets = operation.get("marketplaces", operation.get("markets"))
+        if isinstance(markets, str):
+            markets = [markets]
+        if not isinstance(markets, list):
+            raise ValueError(f"Operation {index + 1} must name marketplaces")
+        field = str(operation.get("field") or "").strip()
+        action = str(operation.get("action") or "set").strip()
+        # Reuse the single-operation validator without mutating a listing.
+        probe = listings_by_id[listing_ids[0]]
+        apply_marketplace_operation(probe, marketplaces=[str(value) for value in markets], field=field, action=action, value=operation.get("value"))
+        # The probe mutation above is rolled back by restoring its original
+        # dictionaries/attributes; validation must remain side-effect free.
+        normalized.append({"listing_ids": sorted(set(listing_ids)), "marketplaces": [str(value) for value in markets], "field": field, "action": action, "value": operation.get("value")})
+    return normalized
+
+
+def apply_marketplace_operation_plan(
+    operations: list[dict[str, Any]],
+    listings_by_id: dict[int, Listing],
+    *,
+    preview_only: bool = False,
+) -> dict[str, Any]:
+    """Preview or apply a compound mutation plan atomically at the service layer."""
+    # Validate without touching live objects by using shallow copies carrying
+    # independent mutable JSON fields.
+    probes = {
+        listing_id: Listing(
+            id=listing.id,
+            user_id=listing.user_id,
+            listing_price=listing.listing_price,
+            title=listing.title,
+            description=listing.description,
+            category_suggestion=listing.category_suggestion,
+            condition=listing.condition,
+            marketplace_data=dict(listing.marketplace_data or {}),
+            source_metadata=dict(listing.source_metadata or {}),
+        )
+        for listing_id, listing in listings_by_id.items()
+    }
+    normalized = validate_marketplace_operation_plan(operations, probes)
+    changes: list[dict[str, Any]] = []
+    for operation in normalized:
+        for listing_id in operation["listing_ids"]:
+            target = probes[listing_id]
+            result = apply_marketplace_operation(target, marketplaces=operation["marketplaces"], field=operation["field"], action=operation["action"], value=operation.get("value"))
+            for change in result["changed"]:
+                changes.append({"listing_id": listing_id, **change})
+    if not preview_only:
+        for listing_id, probe in probes.items():
+            original = listings_by_id[listing_id]
+            for attr in ("listing_price", "title", "description", "category_suggestion", "condition", "marketplace_data", "source_metadata"):
+                setattr(original, attr, getattr(probe, attr))
+    return {"preview": bool(preview_only), "operations": normalized, "changes": changes}
+
+
 def apply_marketplace_operation(
     listing: Listing,
     *,

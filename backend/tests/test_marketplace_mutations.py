@@ -1,5 +1,5 @@
 from app.models.models import Listing, User
-from app.services.marketplace_mutations import apply_marketplace_operation
+from app.services.marketplace_mutations import apply_marketplace_operation, apply_marketplace_operation_plan
 
 
 def test_marketplace_operation_changes_only_requested_destinations(db_session):
@@ -19,7 +19,7 @@ def test_canonical_operation_is_explicit_and_records_operator_provenance(db_sess
     listing = Listing(user_id=user.id, listing_price=40)
     apply_marketplace_operation(listing, marketplaces=["canonical"], field="price", value=39.99)
     assert listing.listing_price == 39.99
-    assert not listing.marketplace_data.get("marketplace_overrides")
+    assert not (listing.marketplace_data or {}).get("marketplace_overrides")
     assert listing.source_metadata["recovery"]["field_provenance"]["price"] == "human_operator"
     assert "price" in listing.source_metadata["recovery"]["operator_locked_fields"]
 
@@ -44,3 +44,49 @@ def test_invalid_target_is_rejected(db_session):
         assert "Unsupported marketplace" in str(exc)
     else:
         raise AssertionError("invalid marketplace target should fail")
+
+
+def test_compound_plan_previews_without_mutating_untargeted_markets(db_session):
+    user = User(email="mutation-plan@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(user_id=user.id, listing_price=50, marketplace_data={"marketplace_overrides": {"mercari": {"price": 55}}})
+    db_session.add(listing); db_session.flush()
+    before = dict(listing.marketplace_data)
+    result = apply_marketplace_operation_plan([
+        {"listing_ids": [listing.id], "markets": ["ebay", "facebook"], "field": "price", "action": "percentage_change", "value": -10},
+        {"listing_ids": [listing.id], "markets": ["ebay"], "field": "shipping", "action": "set", "value": "free"},
+    ], {listing.id: listing}, preview_only=True)
+    assert result["preview"] is True
+    assert listing.marketplace_data == before
+    assert len(result["changes"]) == 3
+
+
+def test_compound_plan_applies_exact_targets(db_session):
+    user = User(email="mutation-plan-apply@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(user_id=user.id, listing_price=40, marketplace_data={"marketplace_overrides": {"mercari": {"price": 42}}})
+    db_session.add(listing); db_session.flush()
+    apply_marketplace_operation_plan([
+        {"listing_id": listing.id, "marketplaces": ["ebay", "facebook"], "field": "price", "value": 35},
+    ], {listing.id: listing})
+    overrides = listing.marketplace_data["marketplace_overrides"]
+    assert overrides["ebay"]["price"] == 35
+    assert overrides["facebook"]["price"] == 35
+    assert overrides["mercari"]["price"] == 42
+
+
+def test_compound_plan_rejects_later_invalid_operation_without_mutation(db_session):
+    user = User(email="mutation-plan-invalid@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(user_id=user.id, listing_price=40)
+    db_session.add(listing); db_session.flush()
+    try:
+        apply_marketplace_operation_plan([
+            {"listing_id": listing.id, "marketplaces": ["ebay"], "field": "price", "value": 35},
+            {"listing_id": listing.id, "marketplaces": ["unknown"], "field": "price", "value": 30},
+        ], {listing.id: listing})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("invalid compound operation should fail validation")
+    assert not listing.marketplace_data.get("marketplace_overrides")
