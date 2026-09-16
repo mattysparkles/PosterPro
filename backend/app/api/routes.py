@@ -1105,6 +1105,13 @@ class DashboardOperatorCommandRequest(BaseModel):
     confirmation_phrase: str | None = None
 
 
+class MarketplaceOperationRequest(BaseModel):
+    marketplaces: list[str]
+    field: str
+    action: str = "set"
+    value: object | None = None
+
+
 @router.get("/listing-templates", response_model=list[ListingTemplateResponse])
 def get_listing_templates(
     user_id: int | None = None,
@@ -2004,6 +2011,28 @@ def update_listing(
         md["sync_state"] = "local_changes_not_published" if active_exists else md.get("sync_state", "local")
         listing.marketplace_data = md
         db.add(ListingRevision(listing_id=listing.id, user_id=current_user.id, revision=revision, operation="save", changed_fields={f: {"before": before[f], "after": getattr(listing, f, None)} for f in changed_fields}, marketplaces_targeted=[], sync_state=md.get("sync_state", "local"), status="recorded"))
+    db.commit()
+    db.refresh(listing)
+    return _serialize_listing_response(listing)
+
+
+@router.post("/listings/{listing_id}/marketplace-operation", response_model=ListingResponse)
+def apply_listing_marketplace_operation(
+    listing_id: int,
+    payload: MarketplaceOperationRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    listing = db.get(Listing, listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    ensure_user_owns_resource(current_user, listing.user_id)
+    from app.services.marketplace_mutations import apply_marketplace_operation
+    try:
+        apply_marketplace_operation(listing, marketplaces=payload.marketplaces, field=payload.field, action=payload.action, value=payload.value)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    db.add(listing)
     db.commit()
     db.refresh(listing)
     return _serialize_listing_response(listing)
