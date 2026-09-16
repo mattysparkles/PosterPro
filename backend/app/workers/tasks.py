@@ -2116,6 +2116,16 @@ def autonomous_publish(self, listing_id: int, dry_run: bool | None = None) -> di
         if listing.status != ListingStatus.PROCESSED:
             raise ValueError(f"Listing must be PROCESSED before autonomous publish (got {listing.status})")
 
+        readiness = canonical_listing_readiness(listing, marketplace=MarketplaceName.ebay.value)
+        if not readiness.get("publishable"):
+            logger.warning("Autonomous publish blocked by canonical readiness", extra={"listing_id": listing_id, "blocking_reasons": readiness.get("blocking_reasons")})
+            return {
+                "listing_id": listing_id,
+                "status": "BLOCKED_READINESS",
+                "blocking_reasons": readiness.get("blocking_reasons") or [],
+                "canonical_readiness": readiness,
+            }
+
         resolved_dry_run = settings.autonomous_dry_run if dry_run is None else dry_run
         logger.info(
             "Autonomous publish start",
