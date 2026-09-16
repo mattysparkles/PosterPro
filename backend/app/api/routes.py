@@ -69,7 +69,7 @@ from app.services.image_pipeline import ImagePipelineService
 from app.services.inventory_service import InventorySafetyError, InventoryService
 from app.services.intake_slate import IntakeSlateService
 from app.services.listing_ai import ListingAIService
-from app.services.listing_provenance import mark_manual_field_provenance
+from app.services.listing_provenance import is_human_owned_field, mark_manual_field_provenance
 from app.services.listing_review import (
     derive_condition_data,
     derive_shipping_profile,
@@ -2986,12 +2986,22 @@ def generate_listing(
         "model_used": generated.get("model_used"),
     }
 
-    listing.title = generated["title"]
-    listing.description = generated["description"]
-    listing.category_suggestion = generated["category_suggestion"]
-    listing.condition = generated.get("condition") or listing.condition
-    listing.item_specifics = generated.get("item_specifics") or listing.item_specifics
-    listing.tags = generated["tags"]
+    # Explicit generation may refresh machine-owned fields, but it must never
+    # overwrite an operator correction.  Human provenance is field-scoped and
+    # remains authoritative across later regeneration requests.
+    if not is_human_owned_field(source_metadata, "title"):
+        listing.title = generated["title"]
+    if not is_human_owned_field(source_metadata, "description"):
+        listing.description = generated["description"]
+        listing.canonical_description = generated["description"]
+    if not is_human_owned_field(source_metadata, "category_suggestion"):
+        listing.category_suggestion = generated["category_suggestion"]
+    if generated.get("condition") and not is_human_owned_field(source_metadata, "condition"):
+        listing.condition = generated["condition"]
+    if generated.get("item_specifics") and not is_human_owned_field(source_metadata, "item_specifics"):
+        listing.item_specifics = generated["item_specifics"]
+    if not is_human_owned_field(source_metadata, "tags"):
+        listing.tags = generated["tags"]
     listing.estimated_value = generated.get("estimated_value") or listing.estimated_value
     listing.suggested_price = pricing_analysis["recommended_price"]
     listing.listing_price = pricing_analysis["recommended_price"]
