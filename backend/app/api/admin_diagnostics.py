@@ -15,6 +15,7 @@ from app.models.enums import MarketplaceName
 from app.models.models import Listing, ListingCorrectionJob, MarketplaceListing, MarketplacePublishAttempt, MarketplaceCrosspostJob, User
 from app.services.marketplace_preflight import MarketplacePreflightService
 from app.services.pricing_research_service import compute_listing_quality_summary
+from app.services.canonical_readiness import canonical_listing_readiness
 
 router = APIRouter(prefix="/admin", tags=["admin-diagnostics"])
 
@@ -71,6 +72,7 @@ def listing_diagnostics(payload: ListingDiagnosticsRequest, db: Session = Depend
         blockers = preflight.get("blockers", []) if preflight else cached.get("blockers", [])
         safe_blockers = [_safe_issue(i) for i in blockers if isinstance(i, dict)]
         quality = compute_listing_quality_summary(listing, pricing_analysis=((listing.marketplace_data or {}).get("pricing_analysis") or {}))
+        canonical = canonical_listing_readiness(listing, marketplace=market)
         attempts = db.execute(select(MarketplacePublishAttempt).where(MarketplacePublishAttempt.listing_id == listing.id).order_by(MarketplacePublishAttempt.created_at.desc()).limit(1)).scalars().all()
         attempt = attempts[0] if attempts else None
         external = db.execute(select(MarketplaceListing).where(MarketplaceListing.listing_id == listing.id, MarketplaceListing.marketplace == market).order_by(MarketplaceListing.id.desc()).limit(1)).scalars().first()
@@ -87,7 +89,7 @@ def listing_diagnostics(payload: ListingDiagnosticsRequest, db: Session = Depend
             "description": {"character_count": len(listing.description or ""), "quality": quality.get("status")},
             "images": {"total": len(listing.image_urls or []), "eligible": len(listing.listing_images or []), "summary": (preflight or {}).get("image_summary")},
             "aspects": {"populated": listing.item_specifics or {}, "missing_required": [b.get("field") for b in blockers if isinstance(b, dict) and b.get("code") == "EBAY_REQUIRED_ASPECT_MISSING"]},
-            "readiness": (preflight or {}).get("readiness_summary"), "ebay_preflight": {"status": (preflight or cached).get("status"), "blocker_codes": [b.get("code") for b in safe_blockers], "blocker_messages": [b.get("message") for b in safe_blockers], "blockers": safe_blockers, "timestamp": _iso((preflight or cached).get("last_checked_at"))},
+            "readiness": canonical, "ebay_preflight": {"status": (preflight or cached).get("status"), "blocker_codes": [b.get("code") for b in safe_blockers], "blocker_messages": [b.get("message") for b in safe_blockers], "blockers": safe_blockers, "timestamp": _iso((preflight or cached).get("last_checked_at"))},
             "marketplace_listing": {"exists": bool(external), "marketplace": market, "external_listing_id": getattr(external, "marketplace_listing_id", None), "status": getattr(external, "status", None)} if external else {"exists": False, "marketplace": market},
             "latest_publish_job": ({"id": attempt.job_id, "status": attempt.marketplace_status or attempt.preflight_status, "failure_reason": attempt.raw_error or (attempt.translated_error or {}).get("message")} if attempt else None),
             "marketplace_jobs": [{"id": j.id, "status": j.status, "priority": j.priority, "attempts": j.attempt_count, "target_marketplaces": j.target_marketplaces, "requested_mode": j.requested_mode, "created_at": _iso(j.created_at), "last_error": j.last_error, "result_summary": j.result_summary, "execution_plan": j.execution_plan} for j in crosspost_jobs],
