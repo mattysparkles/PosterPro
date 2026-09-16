@@ -11,6 +11,9 @@ import PageHeader from '../components/ui/page-header';
 import SectionPanel from '../components/ui/section-panel';
 import StatusPill from '../components/ui/status-pill';
 import HealthIndicator from '../components/ui/health-indicator';
+import Checkbox from '../components/ui/checkbox';
+import Input from '../components/ui/input';
+import Textarea from '../components/ui/textarea';
 import { useAuth } from '../contexts/AuthContext';
 import {
   fetchAutonomousConfig,
@@ -149,24 +152,18 @@ export default function OffersPage() {
           >
             <div className="grid gap-4 md:grid-cols-2">
               <FormSection title="Automation toggles" description="Turn offer automation on only when the message and thresholds are ready.">
-                <label className="flex items-center justify-between rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-3 text-sm font-medium text-[#101828]">
-                  Auto-send enabled
-                  <input type="checkbox" name="is_enabled" defaultChecked={offerRule.is_enabled} />
-                </label>
-                <label className="flex items-center justify-between rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-3 text-sm font-medium text-[#101828]">
-                  Auto-send to new watchers
-                  <input type="checkbox" name="auto_send_to_new_watchers" defaultChecked={rules.auto_send_to_new_watchers ?? true} />
-                </label>
+                <Checkbox label="Auto-send enabled" className="rounded-[12px] border-[#e5e7eb] bg-white px-4 py-3" name="is_enabled" defaultChecked={offerRule.is_enabled} />
+                <Checkbox label="Auto-send to new watchers" className="rounded-[12px] border-[#e5e7eb] bg-white px-4 py-3" name="auto_send_to_new_watchers" defaultChecked={rules.auto_send_to_new_watchers ?? true} />
               </FormSection>
 
               <FormSection title="Pricing thresholds" description="Keep the automation profitable instead of sending blanket discounts.">
                 <label className="block text-sm font-medium text-[#101828]">
                   Discount percent
-                  <input name="discount_percent" type="number" min="1" max="80" step="1" defaultValue={rules.discount_percent ?? 10} className="mt-2 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]" />
+                  <Input name="discount_percent" type="number" min="1" max="80" step="1" defaultValue={rules.discount_percent ?? 10} className="mt-2" />
                 </label>
                 <label className="block text-sm font-medium text-[#101828]">
                   Minimum listing price
-                  <input name="minimum_listing_price" type="number" min="0" step="0.01" defaultValue={rules.minimum_listing_price ?? 25} className="mt-2 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]" />
+                  <Input name="minimum_listing_price" type="number" min="0" step="0.01" defaultValue={rules.minimum_listing_price ?? 25} className="mt-2" />
                 </label>
               </FormSection>
             </div>
@@ -175,7 +172,7 @@ export default function OffersPage() {
               <FormSection title="Scope" description="Exclude listing IDs that should never receive automated offers.">
                 <label className="block text-sm font-medium text-[#101828]">
                   Exclude listing IDs
-                  <input name="exclude_listing_ids" defaultValue={(rules.exclude_listing_ids || []).join(', ')} className="mt-2 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]" />
+                  <Input name="exclude_listing_ids" defaultValue={(rules.exclude_listing_ids || []).join(', ')} className="mt-2" />
                 </label>
               </FormSection>
 
@@ -197,10 +194,10 @@ export default function OffersPage() {
             <FormSection title="Offer message" description="Keep the watcher message brief, credible, and consistent with the brand voice.">
               <label className="block text-sm font-medium text-[#101828]">
                 Message template
-                <textarea
+                <Textarea
                   name="message_template"
                   defaultValue={rules.message_template || ''}
-                  className="mt-2 h-28 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 py-2 text-sm text-[#101828]"
+                  className="mt-2 h-28"
                 />
               </label>
             </FormSection>
