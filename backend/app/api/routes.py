@@ -529,9 +529,10 @@ def _serialize_listing_response(listing: Listing) -> dict:
     canonical = base["canonical_readiness"] if isinstance(base["canonical_readiness"], dict) else {}
     base["attention_reasons"] = [str(reason) for reason in (canonical.get("blocking_reasons") or []) if str(reason).strip()]
     base["processing_stage"] = listing.processing_stage
+    marketplace_data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}
+    base["description_regeneration_requests"] = list(marketplace_data.get("description_regeneration_requests") or [])[-10:]
     pricing_analysis = ((listing.marketplace_data or {}).get("pricing_analysis") or {}) if isinstance(listing.marketplace_data, dict) else {}
     base["quality_summary"] = compute_listing_quality_summary(listing, pricing_analysis=pricing_analysis)
-    marketplace_data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}
     base["marketplace_preflight_summary"] = marketplace_data.get("marketplace_preflight") if isinstance(marketplace_data.get("marketplace_preflight"), dict) else None
     latest_attempt = None
     if listing.publish_attempts:
