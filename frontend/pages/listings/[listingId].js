@@ -868,6 +868,7 @@ export default function ListingWorkspacePage() {
                   </Select>
                 </div>
                 <Textarea value={variantDraft} onChange={(event) => setVariantDraft(event.target.value)} className="mt-3 min-h-28 border-blue-200" maxLength={variantMarketplace === 'mercari' ? 1000 : undefined} />
+                {(listing.description_regeneration_requests || []).some((request) => request.marketplace === variantMarketplace && request.status === 'QUEUED') ? <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900">A fresh {CHANNEL_LABELS[variantMarketplace] || variantMarketplace} description has been queued. Your current copy is preserved until the generated revision is ready.</p> : null}
                 <div className="mt-2 flex items-center justify-between"><span className="text-xs text-[#667085]">{variantMarketplace === 'mercari' ? `${variantDraft.length}/1000 characters` : `${variantDraft.length} characters`} · saved as operator-edited</span><Button type="button" size="sm" onClick={saveMarketplaceVariant} disabled={savingVariant}>{savingVariant ? 'Saving…' : 'Save destination copy'}</Button></div>
               </div> : null}
               <div className="space-y-2">
