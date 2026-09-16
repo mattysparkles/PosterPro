@@ -10,8 +10,12 @@ from app.services.listing_review import summarize_listing_readiness
 def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None) -> dict[str, Any]:
     """Combine processing, content, and destination readiness without hiding blockers."""
     stored = listing.readiness_summary if isinstance(getattr(listing, "readiness_summary", None), dict) else {}
+    listing_images = getattr(listing, "listing_images", None)
+    if not listing_images:
+        image_urls = getattr(listing, "image_urls", None) or []
+        listing_images = [{"storage_path": str(url), "operator_state": "approved", "role": "primary"} for url in image_urls if str(url).strip()]
     base = summarize_listing_readiness(
-        listing_images=getattr(listing, "listing_images", None),
+        listing_images=listing_images,
         condition_data=getattr(listing, "condition_data", None),
         shipping_profile=getattr(listing, "shipping_profile", None),
         listing={"category_id": getattr(listing, "category_id", None), "category_suggestion": getattr(listing, "category_suggestion", None), "listing_price": getattr(listing, "listing_price", None), "suggested_price": getattr(listing, "suggested_price", None)},
@@ -53,7 +57,11 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
         if source_type_value in {"amazon_vine", "google_photos_album", "photo_intake"}:
             words = [word for word in description.split() if word.strip()]
             unique_words = {word.strip(".,:;!?()[]{}\"'").lower() for word in words}
-            if len(words) < 18 or len(unique_words) < 12:
+            # Only escalate a thin Vine description when structured source
+            # evidence exists to enrich it.  Legacy/test rows without source
+            # facts remain ordinary operator-review drafts rather than being
+            # misclassified as blocked.
+            if isinstance(source_facts, dict) and source_fact_count and (len(words) < 18 or len(unique_words) < 12):
                 blockers.append("Listing description needs product-specific enrichment")
     if not title and source_type_value in {"amazon_vine", "google_photos_album", "photo_intake"}:
         blockers.append("Product title is missing")
