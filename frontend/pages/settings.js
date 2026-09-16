@@ -2787,7 +2787,7 @@ export default function SettingsPage() {
                         />
                       </div>
                       <div className="mt-3 flex flex-wrap gap-2">
-                        {extensionUpdateRequired ? <a className="inline-flex min-h-11 items-center rounded-xl bg-amber-700 px-4 text-sm font-semibold text-white hover:bg-amber-800" href="/api/browser-extension/download" download>Update extension</a> : browserExtensionAvailable && !extensionOnline ? <Button type="button" data-posterpro-extension-authorize="true" onClick={() => issueMarketplaceExtensionPairingCode(true)} disabled={loadingExtensionPairing}>Connect this browser</Button> : !extensionOnline ? <Button type="button" href="/onboarding">Install &amp; connect extension</Button> : null}
+                        {extensionUpdateRequired ? <Button href="/api/browser-extension/download" download variant="danger">Update extension</Button> : browserExtensionAvailable && !extensionOnline ? <Button type="button" data-posterpro-extension-authorize="true" onClick={() => issueMarketplaceExtensionPairingCode(true)} disabled={loadingExtensionPairing}>Connect this browser</Button> : !extensionOnline ? <Button type="button" href="/onboarding">Install &amp; connect extension</Button> : null}
                         <Button type="button" variant="outline" href="/onboarding">Guided setup</Button>
                         <Button type="button" variant="outline" onClick={() => reload()}>Refresh status</Button>
                         <Button type="button" variant="outline" href="/jobs?tab=assisted">View assisted jobs</Button>
