@@ -4,6 +4,8 @@ import PageHeader from "../../components/ui/page-header";
 import SectionPanel from "../../components/ui/section-panel";
 import Button from "../../components/ui/button";
 import StatusPill from "../../components/ui/status-pill";
+import Select from "../../components/ui/select";
+import Checkbox from "../../components/ui/checkbox";
 import {
   fetchIntakeTimeline,
   createRetroactiveSlate,
@@ -233,13 +235,7 @@ export default function IntakeTimeline() {
     return (
       <div key={photo.id || `${entry.image_group_id}-${entryIndex}`} className="flex shrink-0 items-start gap-2">
         <div className="flex flex-col items-center">
-          <input
-            aria-label={`Select timeline asset ${photo.id}`}
-            type="checkbox"
-            checked={selectedIds.includes(photo.id)}
-            onChange={() => toggleSelected(photo.id)}
-            className="mb-1"
-          />
+          <Checkbox aria-label={`Select timeline asset ${photo.id}`} checked={selectedIds.includes(photo.id)} onChange={() => toggleSelected(photo.id)} className="mb-1 border-0 bg-transparent p-0" />
           <button
             type="button"
             onClick={() => setSelected(entry)}
@@ -305,9 +301,9 @@ export default function IntakeTimeline() {
             <input aria-label="Timeline zoom" type="range" min="0" max={WIDTHS.length - 1} value={zoom} onChange={(event) => changeZoom(Number(event.target.value))} />
             <Button size="icon-sm" variant="secondary" type="button" aria-label="Zoom in" onClick={() => changeZoom(zoom + 1)}>+</Button>
             <span className="text-xs text-slate-500">{WIDTHS[zoom]}px</span>
-            <select aria-label="Timeline filter" value={filter} onChange={(event) => setFilter(event.target.value)} className="rounded border px-2 py-1 text-xs">
+            <Select aria-label="Timeline filter" value={filter} onChange={(event) => setFilter(event.target.value)} className="h-9 w-auto py-1 text-xs">
               <option value="ALL">All</option><option value="PHOTOS">Photos</option><option value="SLATES">Slates</option><option value="HEAD">Head Slates</option><option value="TAIL">Tail Slates</option>
-            </select>
+            </Select>
             <span className="text-xs text-slate-600">Total {counts.total} · Photos {counts.photo_count} · Slates {counts.slate_count} · Loaded {items.length} ({loadedCounts.ambiguous} possible slate candidates)</span>
             <Button type="button" variant="outline" disabled={busy} onClick={() => { if (window.confirm(`Reset historical classifications for loaded Timeline assets?`)) void mutate(() => resetTimelineClassifications({ scope: "photo_ids", photo_ids: items.map((entry) => entry.photo?.id).filter((id) => id && !String(id).startsWith("slate-")), preserve_modern: true }), "Loaded classifications reset."); }}>Reset classifications</Button>
             {feedback && <span role="status" className="text-xs text-emerald-700">{feedback}</span>}

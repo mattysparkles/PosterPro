@@ -9,6 +9,7 @@ import Input from '../../components/ui/input';
 import PageHeader from '../../components/ui/page-header';
 import SectionPanel from '../../components/ui/section-panel';
 import StatusPill from '../../components/ui/status-pill';
+import Checkbox from '../../components/ui/checkbox';
 import { useAuth } from '../../contexts/AuthContext';
 import { fetchIntakeSettings, getGooglePhotosConnectUrl, runIntakeMonitor, setIntakeDraftingPaused, startGooglePhotosOAuth, updateIntakeSettings, updateServerSettings } from '../../lib/api';
 
@@ -323,14 +324,8 @@ export default function IntakeSettingsPage() {
                 <span className="font-semibold text-[var(--pp-text)]">Polling interval seconds</span>
                 <Input type="number" value={form.poll_interval_seconds || 300} onChange={(event) => updateField('poll_interval_seconds', Number(event.target.value || 300))} />
               </label>
-              <label className="flex items-center gap-3 text-sm text-[var(--pp-text)] md:col-span-2">
-                <input type="checkbox" checked={Boolean(form.enabled)} onChange={(event) => updateField('enabled', event.target.checked)} />
-                <span>Enable automatic intake monitoring</span>
-              </label>
-              <label className="flex items-center gap-3 text-sm text-[var(--pp-text)] md:col-span-2">
-                <input type="checkbox" checked={Boolean(form.auto_draft_listing)} onChange={(event) => updateField('auto_draft_listing', event.target.checked)} />
-                <span>Auto-create draft listings when a batch has product photos</span>
-              </label>
+              <Checkbox className="md:col-span-2" label="Enable automatic intake monitoring" checked={Boolean(form.enabled)} onChange={(event) => updateField('enabled', event.target.checked)} />
+              <Checkbox className="md:col-span-2" label="Auto-create draft listings when a batch has product photos" checked={Boolean(form.auto_draft_listing)} onChange={(event) => updateField('auto_draft_listing', event.target.checked)} />
               <label className="grid gap-2 text-sm md:col-span-2">
                 <span className="font-semibold text-[var(--pp-text)]">Max new item drafts per run</span>
                 <Input
@@ -342,10 +337,7 @@ export default function IntakeSettingsPage() {
                 />
                 <span className="text-xs text-[var(--pp-muted)]">Use this for testing, such as 25 items at a time. Leave it blank for normal full-run processing.</span>
               </label>
-              <label className="flex items-center gap-3 text-sm text-[var(--pp-text)] md:col-span-2">
-                <input type="checkbox" checked={Boolean(form.require_manual_review_before_publish)} onChange={(event) => updateField('require_manual_review_before_publish', event.target.checked)} />
-                <span>Require manual review before any marketplace publish step</span>
-              </label>
+              <Checkbox className="md:col-span-2" label="Require manual review before any marketplace publish step" checked={Boolean(form.require_manual_review_before_publish)} onChange={(event) => updateField('require_manual_review_before_publish', event.target.checked)} />
             </div>
           </SectionPanel>
 
@@ -396,18 +388,9 @@ export default function IntakeSettingsPage() {
                 <span className="font-semibold text-[var(--pp-text)]">Session naming pattern</span>
                 <Input value={form.default_session_naming_pattern || '{date}-{location}'} onChange={(event) => updateField('default_session_naming_pattern', event.target.value)} />
               </label>
-              <label className="flex items-center gap-3 text-sm text-[var(--pp-text)] md:col-span-2">
-                <input type="checkbox" checked={Boolean(form.auto_increment_item_id)} onChange={(event) => updateField('auto_increment_item_id', event.target.checked)} />
-                <span>Auto-increment item IDs</span>
-              </label>
-              <label className="flex items-center gap-3 text-sm text-[var(--pp-text)] md:col-span-2">
-                <input type="checkbox" checked={Boolean(form.auto_increment_box_id)} onChange={(event) => updateField('auto_increment_box_id', event.target.checked)} />
-                <span>Auto-increment box IDs</span>
-              </label>
-              <label className="flex items-center gap-3 text-sm text-[var(--pp-text)] md:col-span-2">
-                <input type="checkbox" checked={Boolean(form.keep_same_box_mode)} onChange={(event) => updateField('keep_same_box_mode', event.target.checked)} />
-                <span>Default to same box / tote mode</span>
-              </label>
+              <Checkbox className="md:col-span-2" label="Auto-increment item IDs" checked={Boolean(form.auto_increment_item_id)} onChange={(event) => updateField('auto_increment_item_id', event.target.checked)} />
+              <Checkbox className="md:col-span-2" label="Auto-increment box IDs" checked={Boolean(form.auto_increment_box_id)} onChange={(event) => updateField('auto_increment_box_id', event.target.checked)} />
+              <Checkbox className="md:col-span-2" label="Default to same box / tote mode" checked={Boolean(form.keep_same_box_mode)} onChange={(event) => updateField('keep_same_box_mode', event.target.checked)} />
             </div>
           </SectionPanel>
 
@@ -417,24 +400,15 @@ export default function IntakeSettingsPage() {
                 <span className="font-semibold text-[var(--pp-text)]">Image SEO filename pattern</span>
                 <Input value={form.image_seo_filename_pattern || '{item_id}_{seo_title}_{photo_number}'} onChange={(event) => updateField('image_seo_filename_pattern', event.target.value)} />
               </label>
-              <label className="flex items-center gap-3 text-sm text-[var(--pp-text)]">
-                <input type="checkbox" checked={Boolean(form.exclude_head_slate_from_public_listing_photos)} onChange={(event) => updateField('exclude_head_slate_from_public_listing_photos', event.target.checked)} />
-                <span>Exclude head slate images from public listing photos</span>
-              </label>
-              <label className="flex items-center gap-3 text-sm text-[var(--pp-text)]">
-                <input type="checkbox" checked={Boolean(form.internal_box_photos_default)} onChange={(event) => updateField('internal_box_photos_default', event.target.checked)} />
-                <span>Treat packed box / label photos as internal-only by default</span>
-              </label>
+              <Checkbox label="Exclude head slate images from public listing photos" checked={Boolean(form.exclude_head_slate_from_public_listing_photos)} onChange={(event) => updateField('exclude_head_slate_from_public_listing_photos', event.target.checked)} />
+              <Checkbox label="Treat packed box / label photos as internal-only by default" checked={Boolean(form.internal_box_photos_default)} onChange={(event) => updateField('internal_box_photos_default', event.target.checked)} />
               <label className="grid gap-2 text-sm">
                 <span className="font-semibold text-[var(--pp-text)]">Marketplace targets</span>
                 <div className="grid gap-2 rounded-[20px] border border-[var(--pp-border)] bg-[var(--pp-surface-muted)] p-4 sm:grid-cols-2">
                   {MARKETPLACE_TARGET_OPTIONS.map((target) => {
                     const checked = (form.marketplace_defaults?.targets || ['ebay', 'facebook']).includes(target.value);
                     return (
-                      <label key={target.value} className="flex items-center gap-3 text-sm text-[var(--pp-text)]">
-                        <input type="checkbox" checked={checked} onChange={() => toggleMarketplaceTarget(target.value)} />
-                        <span>{target.label}</span>
-                      </label>
+                      <Checkbox key={target.value} label={target.label} checked={checked} onChange={() => toggleMarketplaceTarget(target.value)} />
                     );
                   })}
                 </div>
