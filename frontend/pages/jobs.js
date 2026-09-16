@@ -7,6 +7,7 @@ import { RefreshCcw } from "lucide-react";
 import AppShell from "../components/layout/AppShell";
 import ActionBar from "../components/ui/action-bar";
 import Button from "../components/ui/button";
+import ActionLink from "../components/ui/action-link";
 import DataTable from "../components/ui/data-table";
 import Drawer from "../components/ui/drawer";
 import EmptyState from "../components/ui/empty-state";
@@ -866,13 +867,14 @@ export default function JobsPage() {
                   <p className="text-sm font-semibold text-[#101828]">Artifacts</p>
                   <div className="mt-3 grid gap-3 md:grid-cols-2">
                     {artifacts.map((entry) => (
-                      <a
+                        <ActionLink
                         key={entry.asset.asset_id}
-                        href={buildBridgeAssetUrl(entry.asset.asset_id)}
+                          href={buildBridgeAssetUrl(entry.asset.asset_id)}
+                          external
                         target="_blank"
                         rel="noreferrer"
                         className="overflow-hidden rounded-[12px] border border-[#e5e7eb] bg-[#f8fafc] transition hover:border-[#bfd2ff] hover:bg-white"
-                      >
+                        >
                         <img
                           src={buildBridgeAssetUrl(entry.asset.asset_id)}
                           alt={entry.label}
@@ -882,7 +884,7 @@ export default function JobsPage() {
                           <p className="text-sm font-medium text-[#101828]">{entry.label}</p>
                           <p className="mt-1 text-xs text-[#667085]">{entry.asset.file_name || entry.asset.asset_id}</p>
                         </div>
-                      </a>
+                        </ActionLink>
                     ))}
                   </div>
                 </div>
