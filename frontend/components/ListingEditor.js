@@ -7,6 +7,8 @@ import StatusPill from "./StatusPill";
 import Button from "./ui/button";
 import PhotoEditorModal from "./PhotoEditorModal";
 import Input from "./ui/input";
+import Select from "./ui/select";
+import Textarea from "./ui/textarea";
 import { toPublicImageUrl, searchEbayCategories, browseEbayCategories } from "../lib/api";
 
 const PLATFORM_OPTIONS = [
@@ -1010,7 +1012,7 @@ export default function ListingEditor({
           <div className="mt-4 grid gap-3 md:grid-cols-2">
           <div>
             <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Condition label</label>
-            <select
+            <Select
               className="mt-1 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]"
               value={conditionValue}
               onChange={(e) => { void persistCondition(e.target.value); }}
@@ -1019,7 +1021,7 @@ export default function ListingEditor({
               {conditionOptions.map((option) => (
                 <option key={option} value={option}>{option}</option>
               ))}
-            </select>
+            </Select>
             <Input
               className="mt-3"
               value={conditionValue}
@@ -1029,11 +1031,11 @@ export default function ListingEditor({
           </div>
             <div>
               <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Condition bucket</label>
-              <select className="pp-input mt-1 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]" value={conditionData.condition_bucket || "needs_review"} onChange={(e) => updateConditionField("condition_bucket", e.target.value)}>
+              <Select className="mt-1" value={conditionData.condition_bucket || "needs_review"} onChange={(e) => updateConditionField("condition_bucket", e.target.value)}>
                 {["needs_review","open_box_or_used_unknown","open_box","used","new_in_box","parts_only","import_condition_unverified"].map((option) => (
                   <option key={option} value={option}>{option.replaceAll("_", " ")}</option>
                 ))}
-              </select>
+              </Select>
             </div>
           </div>
           <div className="mt-3 grid gap-2 md:grid-cols-2">
@@ -1087,11 +1089,11 @@ export default function ListingEditor({
             </div>
             <div>
               <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Shipping class</label>
-              <select className="pp-input mt-1 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]" value={shippingProfile.shipping_class_suggestion || "usps_ground_advantage"} onChange={(e) => updateShippingField("shipping_class_suggestion", e.target.value)}>
+              <Select className="mt-1" value={shippingProfile.shipping_class_suggestion || "usps_ground_advantage"} onChange={(e) => updateShippingField("shipping_class_suggestion", e.target.value)}>
                 {["usps_ground_advantage","standard_ground","priority_mail","ups_ground","local_pickup_only","manual_review"].map((option) => (
                   <option key={option} value={option}>{option === "usps_ground_advantage" ? "USPS Ground Advantage" : option.replaceAll("_", " ")}</option>
                 ))}
-              </select>
+              </Select>
             </div>
           </div>
           <div className="mt-3 grid gap-3 md:grid-cols-3">
@@ -1137,7 +1139,7 @@ export default function ListingEditor({
       </div>
 
       <div className="mb-4 flex flex-wrap items-center gap-2 rounded-[12px] border border-[#e5e7eb] bg-[#f9fafb] p-3">
-        <select
+        <Select
           className="h-10 rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828] outline-none transition focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
           value={selectedTemplateId}
           onChange={(e) => setSelectedTemplateId(e.target.value)}
@@ -1148,7 +1150,7 @@ export default function ListingEditor({
               {template.name}
             </option>
           ))}
-        </select>
+        </Select>
         <Button
           size="sm"
           variant="outline"
@@ -1189,11 +1191,11 @@ export default function ListingEditor({
           onBlur={(e) => onSave(listing.id, { title: e.target.value })}
           title="This is the headline buyers see first."
         />
-        <textarea
+        <Textarea
           id="listing-description-field"
           defaultValue={listing.description || ""}
           placeholder="Describe condition, size, defects, accessories, and what is included."
-          className="min-h-28 w-full rounded-[10px] border border-[#e5e7eb] bg-white p-3 text-sm text-[#101828] outline-none transition placeholder:text-[#98a2b3] focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+          className="min-h-28"
           onBlur={(e) => onSave(listing.id, { description: e.target.value })}
           title="Explain the item in plain words so anyone can understand quickly."
         />
@@ -1228,7 +1230,7 @@ export default function ListingEditor({
           <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
             <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Suggested category path</label>
             {categoryOptions.length ? (
-              <select
+              <Select
                 id="listing-category-suggestion-field"
                 className="mt-1 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]"
                 value={getCategoryPresentation(listing, null).categorySuggestion || getCategoryPresentation(listing, null).legacyCategoryPath || ""}
@@ -1239,7 +1241,7 @@ export default function ListingEditor({
                 {categoryOptions.map((option) => (
                   <option key={option.value} value={option.value}>{option.label}</option>
                 ))}
-              </select>
+              </Select>
             ) : null}
             <Input
               className="mt-3"
@@ -1251,7 +1253,7 @@ export default function ListingEditor({
           </div>
           <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
             <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Marketplace category ID</label>
-            <select
+            <Select
               id="listing-category-field"
               className="mt-1 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]"
               value={getCategoryPresentation(listing, null).marketplaceCategoryId}
@@ -1262,7 +1264,7 @@ export default function ListingEditor({
               {categoryOptions.filter((option) => /^\d+$/.test(option.value)).map((option) => (
                 <option key={option.value} value={option.value}>{option.label}</option>
               ))}
-            </select>
+            </Select>
             {!getCategoryPresentation(listing, null).marketplaceCategoryId && getCategoryPresentation(listing, null).legacyCategoryPath ? (
               <p className="mt-2 text-xs text-[#b54708]">Current value looks like a category path, not a numeric marketplace category ID.</p>
             ) : (

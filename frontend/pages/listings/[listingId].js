@@ -769,6 +769,30 @@ export default function ListingWorkspacePage() {
         </div>
       </section>
 
+      {listing?.canonical_readiness ? (
+        <section className="mb-5 rounded-[16px] border border-[#d9e2ef] bg-white p-4" aria-label="Canonical listing readiness">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold text-[#101828]">PosterPro readiness</p>
+              <p className="mt-1 text-sm text-[#667085]">One shared result powers the queue, review, and publish decisions.</p>
+            </div>
+            <StatusPill
+              status={listing.canonical_readiness.queue === 'PUBLISHED' ? 'success' : listing.canonical_readiness.queue === 'NEEDS_ATTENTION' ? 'danger' : listing.canonical_readiness.queue === 'PROCESSING' ? 'warning' : 'info'}
+              label={String(listing.canonical_readiness.queue || 'PROCESSING').replaceAll('_', ' ')}
+            />
+          </div>
+          <div className="mt-3 grid gap-2 sm:grid-cols-4">
+            {[
+              ['Machine work', listing.canonical_readiness.processing_complete ? 'Complete' : 'In progress'],
+              ['Review', listing.canonical_readiness.review_required ? 'Required' : 'Not required'],
+              ['Publish', listing.canonical_readiness.publishable ? 'Ready' : 'Blocked'],
+              ['Remote state', listing.canonical_readiness.remote_state || 'LOCAL'],
+            ].map(([label, value]) => <div key={label} className="rounded-[10px] border border-[#eaecf0] bg-[#fcfcfd] p-3"><p className="text-xs font-semibold text-[#667085]">{label}</p><p className="mt-1 text-sm font-semibold text-[#101828]">{value}</p></div>)}
+          </div>
+          {listing.canonical_readiness.blocking_reasons?.length ? <div className="mt-3 rounded-[10px] border border-amber-200 bg-amber-50 p-3"><p className="text-xs font-semibold uppercase tracking-[0.08em] text-amber-900">Action needed</p><ul className="mt-1 list-disc pl-5 text-sm text-amber-900">{listing.canonical_readiness.blocking_reasons.slice(0, 5).map((reason) => <li key={reason}>{reason}</li>)}</ul></div> : null}
+        </section>
+      ) : null}
+
       <SectionPanel title="Marketplace status" description="Statuses reflect persisted marketplace records and external identities, not UI assumptions.">
         <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
           {marketplaceNames.map(([marketplace, label]) => {
