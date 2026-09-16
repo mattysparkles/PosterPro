@@ -65,7 +65,11 @@ def persist_marketplace_description_variants(listing: Listing, *, regenerate_gen
     existing = getattr(listing, "marketplace_descriptions", None)
     existing = existing if isinstance(existing, dict) else {}
     provenance = dict(existing.get("_provenance") or {}) if isinstance(existing.get("_provenance"), dict) else {}
+    marketplace_data = getattr(listing, "marketplace_data", None)
+    if isinstance(marketplace_data, dict) and isinstance(marketplace_data.get("marketplace_description_provenance"), dict):
+        provenance.update({str(key): str(value) for key, value in marketplace_data["marketplace_description_provenance"].items() if str(key).strip()})
     rendered = dict(existing)
+    rendered.pop("_provenance", None)
     for channel, value in (("ebay", variants["canonical"]), ("facebook", variants["canonical"]), ("mercari", variants["mercari"])):
         if provenance.get(channel) == "operator_edited":
             continue

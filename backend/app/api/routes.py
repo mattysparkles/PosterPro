@@ -2011,7 +2011,6 @@ def update_listing(
             if market_key in {"ebay", "facebook", "mercari", "poshmark", "vinted", "etsy", "offerup"} and str(text or "").strip():
                 variants[market_key] = str(text).strip()
                 provenance[market_key] = "operator_edited"
-        variants["_provenance"] = provenance
         listing.marketplace_descriptions = variants
         marketplace_data = dict(listing.marketplace_data or {})
         marketplace_data["marketplace_description_provenance"] = {
@@ -2168,7 +2167,6 @@ async def save_publish_listing_changes(
             if market_key in {"ebay", "facebook", "mercari", "poshmark", "vinted", "etsy", "offerup"} and str(text or "").strip():
                 variants[market_key] = str(text).strip()
                 provenance[market_key] = "operator_edited"
-        variants["_provenance"] = provenance
         listing.marketplace_descriptions = variants
         marketplace_data = dict(listing.marketplace_data or {})
         marketplace_data["marketplace_description_provenance"] = {
