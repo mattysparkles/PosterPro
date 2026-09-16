@@ -26,7 +26,7 @@ from app.services.amazon_media import AmazonProductMediaProvider, _extract_amazo
 from app.services.amazon_product_discovery import AmazonProductDiscoveryService
 from app.services.listing_review import normalize_listing_images
 from app.services.listing_review import derive_shipping_profile
-from app.services.vine_import_service import VineImportService, _clean_amazon_facts, _is_unsafe_vine_image, _merge_amazon_fact_evidence, description_source_similarity
+from app.services.vine_import_service import VineImportService, _apply_fact_specifics, _clean_amazon_facts, _is_unsafe_vine_image, _merge_amazon_fact_evidence, description_source_similarity
 from app.services.vine_parser import calculate_vine_eligibility, parse_vine_csv, parse_vine_pdf, parse_vine_xlsx
 from app.services.vine_policy import review_vine_product
 from app.services.category_rules import is_source_noise_category, resolve_taxonomy_leaf, suggest_category_from_text, verified_category_id
@@ -38,6 +38,16 @@ def test_vine_category_paths_reject_source_noise_and_keep_verified_ids():
     assert "Portable Toilets" in category
     assert verified_category_id(category) == "181397"
     assert is_source_noise_category("Amazon > FG 1910 > FREE 30-day refund/replacement")
+
+
+def test_fact_specifics_capacity_regex_handles_long_prose_without_backtracking():
+    specifics = {}
+    _apply_fact_specifics(
+        specifics,
+        {},
+        {"feature_bullets": ["x " * 20000 + "6.6 gallon capacity"], "product_description": ""},
+    )
+    assert specifics["Capacity"] == "6.6 gallon"
 
 
 def test_taxonomy_leaf_resolver_returns_real_leaf_and_rejects_test_nodes():

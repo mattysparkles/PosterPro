@@ -217,9 +217,12 @@ def _apply_fact_specifics(specifics: dict, provenance: dict[str, str], facts: di
     }
     prose = " ".join([*(facts.get("feature_bullets") or []), str(facts.get("product_description") or "")])
     if not mapping["Capacity"]:
-        match = re.search(r"((?:\d+(?:\.\d+)?\s*(?:,|and)?\s*)+gallon)", prose, re.I)
+        # Keep this expression bounded and non-ambiguous.  The previous nested
+        # repetition could catastrophically backtrack on long Amazon prose,
+        # stalling an entire batch refresh.
+        match = re.search(r"\b(?:\d+(?:\.\d+)?\s*(?:,|and)\s*)*\d+(?:\.\d+)?\s*gallons?\b", prose, re.I)
         if match:
-            mapping["Capacity"] = re.sub(r"\s+", " ", match.group(1)).strip()
+            mapping["Capacity"] = re.sub(r"\s+", " ", match.group(0)).strip()
     for name, value in mapping.items():
         text = str(value or "").strip()
         current = specifics.get(name)
