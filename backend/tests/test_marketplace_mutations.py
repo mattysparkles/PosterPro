@@ -1,5 +1,5 @@
 from app.models.models import Listing, User
-from app.services.marketplace_mutations import apply_marketplace_operation, apply_marketplace_operation_plan
+from app.services.marketplace_mutations import apply_marketplace_operation, apply_marketplace_operation_plan, validate_marketplace_operation_plan
 
 
 def test_marketplace_operation_changes_only_requested_destinations(db_session):
@@ -102,3 +102,13 @@ def test_compound_plan_supports_destination_specific_end(db_session):
     ], {listing.id: listing})
     assert result["changes"][0]["after"] == "end"
     assert listing.marketplace_data["marketplace_overrides"]["poshmark"]["status"] == "end"
+
+
+def test_plan_validation_is_side_effect_free(db_session):
+    user = User(email="mutation-plan-validate@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(user_id=user.id, listing_price=50)
+    db_session.add(listing); db_session.flush()
+    validate_marketplace_operation_plan([{"listing_id": listing.id, "markets": ["ebay"], "field": "price", "value": 45}], {listing.id: listing})
+    assert listing.listing_price == 50
+    assert not (listing.marketplace_data or {}).get("marketplace_overrides")

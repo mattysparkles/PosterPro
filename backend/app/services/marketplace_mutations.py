@@ -53,7 +53,18 @@ def validate_marketplace_operation_plan(
         field = str(operation.get("field") or "").strip()
         action = str(operation.get("action") or "set").strip()
         # Reuse the single-operation validator without mutating a listing.
-        probe = listings_by_id[listing_ids[0]]
+        source = listings_by_id[listing_ids[0]]
+        probe = Listing(
+            id=source.id,
+            user_id=source.user_id,
+            listing_price=source.listing_price,
+            title=source.title,
+            description=source.description,
+            category_suggestion=source.category_suggestion,
+            condition=source.condition,
+            marketplace_data=dict(source.marketplace_data or {}),
+            source_metadata=dict(source.source_metadata or {}),
+        )
         apply_marketplace_operation(probe, marketplaces=[str(value) for value in markets], field=field, action=action, value=operation.get("value"))
         # The probe mutation above is rolled back by restoring its original
         # dictionaries/attributes; validation must remain side-effect free.
