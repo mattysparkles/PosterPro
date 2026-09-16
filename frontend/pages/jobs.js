@@ -288,7 +288,7 @@ export default function JobsPage() {
 
   const draggableMetric = (section, key, node) => (
     <div key={key} role="group" aria-label={`Reorder ${key} metric`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const [fromSection, from] = String(draggingMetric || "").split(":"); if (fromSection === section) moveSectionMetric(section, from, key); setDraggingMetric(null); }} className="relative min-w-0">
-      <button type="button" draggable data-drag-handle aria-label={`Drag ${key} metric`} title="Drag to reorder" onClick={(event) => event.stopPropagation()} onDragStart={(event) => { event.stopPropagation(); event.dataTransfer.effectAllowed = "move"; setDraggingMetric(`${section}:${key}`); }} onDragEnd={() => setDraggingMetric(null)} className="absolute right-3 top-3 z-10 cursor-grab rounded px-1 text-xs text-slate-400 hover:bg-slate-100 active:cursor-grabbing">⋮⋮</button>
+      <Button type="button" variant="ghost" size="icon-sm" draggable data-drag-handle aria-label={`Drag ${key} metric`} title="Drag to reorder" onClick={(event) => event.stopPropagation()} onDragStart={(event) => { event.stopPropagation(); event.dataTransfer.effectAllowed = "move"; setDraggingMetric(`${section}:${key}`); }} onDragEnd={() => setDraggingMetric(null)} className="absolute right-3 top-3 z-10 !min-h-8 !h-8 !w-8 cursor-grab !px-0 text-xs text-slate-400 hover:bg-slate-100 active:cursor-grabbing">⋮⋮</Button>
       {node}
     </div>
   );
