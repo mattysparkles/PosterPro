@@ -63,6 +63,12 @@ def apply_marketplace_operation(
             previous = getattr(listing, attr, None)
             updated = calculate(previous)
             setattr(listing, attr, updated)
+            # ``canonical_description`` is the authoritative rich master
+            # copy. Keep the legacy column synchronized for older consumers,
+            # but never let a destination override rewrite either canonical
+            # field.
+            if field == "description":
+                listing.canonical_description = updated
             listing.source_metadata = mark_field_provenance(
                 listing.source_metadata,
                 field=field,

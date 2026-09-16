@@ -24,6 +24,16 @@ def test_canonical_operation_is_explicit_and_records_operator_provenance(db_sess
     assert "price" in listing.source_metadata["recovery"]["operator_locked_fields"]
 
 
+def test_canonical_description_operation_updates_rich_master_copy(db_session):
+    user = User(email="mutation-description@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(user_id=user.id, description="Old copy", canonical_description="Old copy")
+    result = apply_marketplace_operation(listing, marketplaces=["canonical"], field="description", value="New master copy")
+    assert result["changed"][0]["after"] == "New master copy"
+    assert listing.description == "New master copy"
+    assert listing.canonical_description == "New master copy"
+
+
 def test_invalid_target_is_rejected(db_session):
     user = User(email="mutation-invalid@example.com")
     db_session.add(user); db_session.flush()
