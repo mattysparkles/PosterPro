@@ -2013,6 +2013,12 @@ def update_listing(
                 provenance[market_key] = "operator_edited"
         variants["_provenance"] = provenance
         listing.marketplace_descriptions = variants
+        marketplace_data = dict(listing.marketplace_data or {})
+        marketplace_data["marketplace_description_provenance"] = {
+            **(marketplace_data.get("marketplace_description_provenance") or {}),
+            **provenance,
+        }
+        listing.marketplace_data = marketplace_data
     # Any material listing edit invalidates cached marketplace readiness. A
     # stale preflight was allowing corrected drafts to keep failing (or hiding
     # the new blocker set) until an unrelated refresh happened.
@@ -2164,6 +2170,12 @@ async def save_publish_listing_changes(
                 provenance[market_key] = "operator_edited"
         variants["_provenance"] = provenance
         listing.marketplace_descriptions = variants
+        marketplace_data = dict(listing.marketplace_data or {})
+        marketplace_data["marketplace_description_provenance"] = {
+            **(marketplace_data.get("marketplace_description_provenance") or {}),
+            **provenance,
+        }
+        listing.marketplace_data = marketplace_data
     if payload.marketplace_data is not None:
         listing.marketplace_data = normalize_marketplace_data(payload.marketplace_data)
     try:
