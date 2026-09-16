@@ -1470,6 +1470,14 @@ export async function reconcileSale(saleId, body = {}) {
   });
 }
 
+export async function recordManualSale(body) {
+  return jsonFetch(`${API_BASE}/sales/manual`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 export async function fetchSaleDetectionSettings(userId) {
   return jsonFetch(`${API_BASE}/sales/settings/${userId}`);
 }

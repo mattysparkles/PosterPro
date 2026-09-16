@@ -27,6 +27,7 @@ import {
   savePublishListingChanges,
   toggleAutonomousMode,
   updateListing,
+  recordManualSale,
 } from "../../lib/api";
 
 const CHANNEL_LABELS = {
@@ -222,6 +223,9 @@ export default function ListingWorkspacePage() {
   const [variantMarketplace, setVariantMarketplace] = useState('ebay');
   const [variantDraft, setVariantDraft] = useState('');
   const [savingVariant, setSavingVariant] = useState(false);
+  const [manualSaleAmount, setManualSaleAmount] = useState('');
+  const [manualSaleQuantity, setManualSaleQuantity] = useState('1');
+  const [recordingSale, setRecordingSale] = useState(false);
   const [form, setForm] = useState(() => normalizeListingForm(null));
   const [ebayCategoryRoots, setEbayCategoryRoots] = useState([]);
   const [categoryBrowseNodes, setCategoryBrowseNodes] = useState([]);
@@ -327,6 +331,23 @@ export default function ListingWorkspacePage() {
       toast.error(error.message || 'Could not save marketplace description.');
     } finally {
       setSavingVariant(false);
+    }
+  };
+
+  const recordSale = async () => {
+    if (!listing?.id || !Number(manualSaleAmount)) return;
+    setRecordingSale(true);
+    try {
+      const result = await recordManualSale({ listing_id: listing.id, amount: Number(manualSaleAmount), quantity: Math.max(1, Number(manualSaleQuantity || 1)), channel: 'manual' });
+      const refreshed = await fetchListing(listing.id);
+      setListing(refreshed);
+      setForm(normalizeListingForm(refreshed));
+      setManualSaleAmount('');
+      toast.success(`Sale recorded. ${result?.fanout?.length ? 'Inventory reconciliation queued.' : 'Inventory updated.'}`);
+    } catch (error) {
+      toast.error(error.message || 'Could not record sale.');
+    } finally {
+      setRecordingSale(false);
     }
   };
 
@@ -941,6 +962,14 @@ export default function ListingWorkspacePage() {
               ))}
             </div>
           </SectionPanel>
+
+          {!isNew && !listing?.sold_at ? <SectionPanel title="Record a sale" description="Sold this item in person or through another channel? Record it once and PosterPro will update inventory and reconcile active destinations.">
+            <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_140px_auto] sm:items-end">
+              <label className="space-y-1 text-sm font-medium text-[#101828]">Sale amount<input type="number" min="0.01" step="0.01" value={manualSaleAmount} onChange={(event) => setManualSaleAmount(event.target.value)} className="pp-input mt-1 h-10 w-full rounded-[10px] border border-[#e5e7eb] px-3" placeholder="0.00" /></label>
+              <label className="space-y-1 text-sm font-medium text-[#101828]">Units<input type="number" min="1" step="1" value={manualSaleQuantity} onChange={(event) => setManualSaleQuantity(event.target.value)} className="pp-input mt-1 h-10 w-full rounded-[10px] border border-[#e5e7eb] px-3" /></label>
+              <Button type="button" disabled={recordingSale || !Number(manualSaleAmount)} onClick={recordSale}>{recordingSale ? 'Recording…' : 'Record sale'}</Button>
+            </div>
+          </SectionPanel> : null}
 
           <SectionPanel title="Cross-Post Plan" description="Choose target channels, posting mode, and marketplace-specific rules from the same item record.">
             <div className="space-y-4">
