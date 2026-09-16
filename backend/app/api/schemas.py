@@ -399,6 +399,11 @@ class ListingResponse(BaseModel):
     readiness_summary: dict = Field(default_factory=dict)
     quality_summary: dict = Field(default_factory=dict)
     latest_publish_attempt: dict | None = None
+    # Canonical queue diagnostics exposed without secrets so operators can
+    # understand why a listing needs attention and where processing stopped.
+    canonical_readiness: dict = Field(default_factory=dict)
+    attention_reasons: list[str] = Field(default_factory=list)
+    processing_stage: str | None = None
 
     class Config:
         from_attributes = True

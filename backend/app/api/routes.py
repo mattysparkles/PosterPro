@@ -526,6 +526,9 @@ def _serialize_listing_response(listing: Listing) -> dict:
         },
     )
     base["canonical_readiness"] = canonical_listing_readiness(listing)
+    canonical = base["canonical_readiness"] if isinstance(base["canonical_readiness"], dict) else {}
+    base["attention_reasons"] = [str(reason) for reason in (canonical.get("blocking_reasons") or []) if str(reason).strip()]
+    base["processing_stage"] = listing.processing_stage
     pricing_analysis = ((listing.marketplace_data or {}).get("pricing_analysis") or {}) if isinstance(listing.marketplace_data, dict) else {}
     base["quality_summary"] = compute_listing_quality_summary(listing, pricing_analysis=pricing_analysis)
     marketplace_data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}

@@ -36,6 +36,9 @@ export default function ListingsGridCard({
   getListingPrice,
 }) {
   const bucket = getListingBucket(listing);
+  const attentionReasons = Array.isArray(listing?.attention_reasons)
+    ? listing.attention_reasons.filter((reason) => String(reason || '').trim())
+    : [];
   const explicitMarketplaces = getListingMarketplaces(listing, enabledPlatforms, { allowFallback: false });
   const canPublish = workflowPreferences.review_before_publish ? bucket === 'ready' : bucket === 'drafts' || bucket === 'ready';
 
@@ -70,7 +73,9 @@ export default function ListingsGridCard({
           <ListingsThumbnail src={getListingThumbnail(listing)} alt={getListingTitle(listing)} size="lg" />
           <div className="min-w-0">
             <p className="truncate text-sm font-semibold text-[#101828]">{getListingTitle(listing)}</p>
-            {getReadinessSummary(listing).blockers?.length ? <p className="mt-1 text-xs text-[#b42318]">{getReadinessSummary(listing).blockers[0]}</p> : null}
+            {attentionReasons.length ? (
+              <p className="mt-1 line-clamp-2 text-xs text-[#b42318]" title={attentionReasons.join('; ')}>{attentionReasons[0]}</p>
+            ) : getReadinessSummary(listing).blockers?.length ? <p className="mt-1 text-xs text-[#b42318]">{getReadinessSummary(listing).blockers[0]}</p> : null}
             <p className="mt-1 text-xs text-[#667085]">#{listing.id}{listing.sku ? ` · SKU ${listing.sku}` : ''}</p>
             <p className="mt-1 text-xs text-[#667085]">{getListingImageCount(listing)} image{getListingImageCount(listing) === 1 ? '' : 's'}</p>
             <ListingsMarketplacePreflightBadges
