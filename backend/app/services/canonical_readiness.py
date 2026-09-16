@@ -61,10 +61,14 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
             # evidence exists to enrich it.  Legacy/test rows without source
             # facts remain ordinary operator-review drafts rather than being
             # misclassified as blocked.
-            if isinstance(source_facts, dict) and source_fact_count and (len(words) < 18 or len(unique_words) < 12):
+            if (isinstance(source_facts, dict) and source_fact_count or not title) and (len(words) < 18 or len(unique_words) < 12):
                 blockers.append("Listing description needs product-specific enrichment")
     if not title and source_type_value in {"amazon_vine", "google_photos_album", "photo_intake"}:
         blockers.append("Product title is missing")
+    # Keep the most actionable content blocker first for thin legacy drafts.
+    if "Listing description needs product-specific enrichment" in blockers and blockers[0] == "Product title is missing":
+        blockers.remove("Listing description needs product-specific enrichment")
+        blockers.insert(0, "Listing description needs product-specific enrichment")
     blockers = list(dict.fromkeys(blockers))
     warnings = list(dict.fromkeys(warnings))
     preflight = (getattr(listing, "marketplace_data", None) or {}).get("marketplace_preflight") if isinstance(getattr(listing, "marketplace_data", None), dict) else None
