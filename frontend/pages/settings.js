@@ -2392,17 +2392,17 @@ export default function SettingsPage() {
                       </div>
                       <div className="space-y-2">
                         <label className="text-sm font-medium text-[#101828]">Active CMS theme</label>
-                        <select
+                        <Select
                           value={hostedPagesForm.active_theme_id}
                           onChange={(event) => setHostedPagesForm((current) => ({ ...current, active_theme_id: event.target.value }))}
-                          className="w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 py-2 text-sm text-[#101828] outline-none transition focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                          className="rounded-[10px] border-[#e5e7eb] px-3 py-2 text-[#101828]"
                         >
                           {(settingsPanels?.hosted_pages?.themes || []).map((theme) => (
                             <option key={theme.id} value={theme.id}>
                               {theme.name}
                             </option>
                           ))}
-                        </select>
+                        </Select>
                       </div>
                       <div className="grid gap-3 md:grid-cols-2">
                         {(settingsPanels?.hosted_pages?.themes || []).map((theme) => (
@@ -2446,10 +2446,10 @@ export default function SettingsPage() {
                       </div>
                       <div className="space-y-2">
                         <label className="text-sm font-medium text-[#101828]">Theme pack JSON</label>
-                        <textarea
+                        <Textarea
                           value={themeImportForm.theme_pack_json}
                           onChange={(event) => setThemeImportForm((current) => ({ ...current, theme_pack_json: event.target.value }))}
-                          className="min-h-56 w-full rounded-[10px] border border-[#e5e7eb] bg-white p-3 font-mono text-xs text-[#101828] outline-none transition placeholder:text-[#98a2b3] focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                          className="min-h-56 rounded-[10px] border-[#e5e7eb] p-3 font-mono text-xs text-[#101828]"
                         />
                       </div>
                       <div className="flex flex-wrap gap-2">
@@ -4395,11 +4395,11 @@ export default function SettingsPage() {
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium text-[#101828]">Workflow notes</label>
-              <textarea
+              <Textarea
                 value={marketplaceForm.notes}
                 onChange={(event) => setMarketplaceForm((current) => ({ ...current, notes: event.target.value }))}
                 placeholder="Capture anything the operator needs to know: shipping profile, posting cadence, manual review steps, or account caveats."
-                className="min-h-28 w-full rounded-[10px] border border-[#e5e7eb] bg-white p-3 text-sm text-[#101828] outline-none transition placeholder:text-[#98a2b3] focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                className="min-h-28 rounded-[10px] border-[#e5e7eb] p-3 text-[#101828]"
               />
             </div>
             <div className="grid gap-3 md:grid-cols-2">
