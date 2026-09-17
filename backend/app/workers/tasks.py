@@ -831,6 +831,28 @@ def _find_existing_imported_listing(*, db, user_id: int, source_marketplace: str
     if not reference:
         return None
 
+    # Exact remote identity is authoritative for import idempotency.  Check
+    # the normalized MarketplaceListing projection first so legacy rows whose
+    # source_metadata was incomplete still resolve to the existing canonical
+    # item instead of creating a duplicate.
+    try:
+        market = MarketplaceName(str(source_marketplace).lower())
+    except ValueError:
+        market = None
+    if market is not None:
+        exact = db.execute(
+            select(Listing)
+            .join(MarketplaceListing, MarketplaceListing.listing_id == Listing.id)
+            .where(
+                Listing.user_id == user_id,
+                MarketplaceListing.marketplace == market,
+                MarketplaceListing.marketplace_listing_id == reference,
+            )
+            .order_by(Listing.id.asc())
+        ).scalars().first()
+        if exact is not None:
+            return exact
+
     candidates = db.execute(
         select(Listing).where(
             Listing.user_id == user_id,
