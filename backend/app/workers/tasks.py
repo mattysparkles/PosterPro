@@ -396,7 +396,10 @@ def repair_vine_listing_quality_task(user_id: int | None = None, chunk_size: int
                             # Vine rows that predate the marketplace variant
                             # column.  This is deterministic and preserves
                             # operator-edited variants inside the mapper.
-                            Listing.marketplace_descriptions.is_(None),
+                            or_(
+                                Listing.marketplace_descriptions.is_(None),
+                                Listing.marketplace_descriptions == {},
+                            ),
                         ),
                     ).order_by(Listing.id)
                 ).all()
