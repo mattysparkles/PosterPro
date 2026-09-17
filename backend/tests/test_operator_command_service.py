@@ -50,6 +50,23 @@ def test_compound_operation_plan_supports_marketplace_specific_price_increase():
     ]
 
 
+def test_compound_operation_diagnostics_never_silently_drop_clause():
+    service = OperatorCommandService()
+    plan, unsupported = service.parse_operation_plan_with_diagnostics(
+        "Lower items 1 and 2 by 10% on eBay; change item 3 canonical title"
+    )
+    assert [(entry.items, entry.marketplaces, entry.field) for entry in plan] == [([1, 2], ["ebay"], "price")]
+    assert unsupported == ["change item 3 canonical title"]
+
+
+def test_compound_operation_diagnostics_accepts_all_supported_clauses():
+    plan, unsupported = OperatorCommandService().parse_operation_plan_with_diagnostics(
+        "Lower items 1 and 2 by 10% on eBay; give items 3 and 5 free eBay shipping; end item 5 on Poshmark"
+    )
+    assert len(plan) == 3
+    assert unsupported == []
+
+
 def _seed_live_ebay_listing(db_session, *, user: User, title: str, price: float, posted_days_ago: int) -> Listing:
     listing = Listing(
         user_id=user.id,

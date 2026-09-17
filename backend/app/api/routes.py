@@ -2818,7 +2818,26 @@ async def run_dashboard_operator_command(
     # execution remains behind the existing confirmation and scoped mutation
     # services. This prevents a multi-market request from becoming a global
     # update by accident.
-    operation_plan = operator_command_service.parse_operation_plan(payload.prompt)
+    operation_plan, unsupported_clauses = operator_command_service.parse_operation_plan_with_diagnostics(payload.prompt)
+    if unsupported_clauses and operation_plan:
+        # Never execute a partial interpretation of a compound request.  The
+        # user gets the understood operations and the exact clauses requiring
+        # clarification, with no side effects or misleading preview.
+        return {
+            "prompt": payload.prompt,
+            "parsed": False,
+            "command_type": "compound_operation_plan",
+            "dry_run": True,
+            "apply_live": False,
+            "requires_confirmation": False,
+            "message": "PosterPro understood only part of that request. Clarify the highlighted clause(s) before applying changes.",
+            "unsupported_clauses": unsupported_clauses,
+            "operations": [
+                {"items": operation.items, "marketplaces": operation.marketplaces, "field": operation.field, "action": operation.action, "value": operation.value}
+                for operation in operation_plan
+            ],
+            "changes": [],
+        }
     if operation_plan:
         from app.services.marketplace_mutations import apply_marketplace_operation_plan
         preview_ids = sorted({listing_id for operation in operation_plan for listing_id in operation.items})

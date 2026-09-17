@@ -59,6 +59,65 @@ class StructuredOperation:
 
 
 class OperatorCommandService:
+    def parse_operation_plan_with_diagnostics(self, prompt: str) -> tuple[list[StructuredOperation], list[str]]:
+        """Return parsed operations plus clauses that were not understood.
+
+        Compound commands are safety-sensitive: silently dropping one clause
+        can make an apparently precise request execute only part of the user's
+        intent.  Callers can therefore require the operator to clarify before
+        any mutation is previewed or applied.
+        """
+        text = " ".join(str(prompt or "").lower().split())
+        if not text:
+            return [], []
+        clauses = re.split(r"\s*(?:;|\n|\.\s+(?=(?:for\s+items?|give\s+items?|end\s+items?|remove\s+items?|lower\s+items?|reduce\s+items?)))\s*", text)
+        plan: list[StructuredOperation] = []
+        unsupported: list[str] = []
+        for clause in clauses:
+            before = len(plan)
+            # Reuse the established parser for one clause so parsing behavior
+            # remains identical to the legacy public method.
+            parsed = self._parse_operation_clause(clause)
+            if parsed:
+                plan.extend(parsed)
+            elif clause.strip():
+                unsupported.append(clause.strip())
+            if len(plan) == before and not clause.strip():
+                continue
+        return plan, unsupported
+
+    def _parse_operation_clause(self, clause: str) -> list[StructuredOperation]:
+        """Parse one clause; kept separate so diagnostics can be lossless."""
+        item_match = re.search(r"(?:items?|listings?)\s+(.+?)(?=\s+(?:by|with|at|on|free|make|price|reduce|lower|end|remove|delist)\b|$)", clause)
+        if not item_match:
+            item_match = re.search(r"^(?:give|end|remove|delist)\s+(.+?)(?=\s+(?:on|free|with)\b|$)", clause)
+        if not item_match:
+            return []
+        items = [int(value) for value in re.findall(r"\d+", item_match.group(1))]
+        markets = [name for name in ("ebay", "facebook", "mercari", "vinted", "poshmark", "etsy", "offerup") if name in clause]
+        if "all marketplaces" in clause or "every marketplace" in clause:
+            markets = ["all"]
+        if "canonical" in clause and not markets:
+            markets = ["canonical"]
+        if not items or not markets:
+            return []
+        if re.search(r"(?:regenerate|rewrite|refresh).{0,40}\bdescription(?:s)?\b", clause):
+            return [StructuredOperation(items, markets, "description", "regenerate", None)]
+        if re.search(r"(?:set|change|make|update).{0,30}\bprice(?:s)?\b.{0,12}(?:to|at)\s*\$?\d+(?:\.\d{1,2})?", clause):
+            amount = re.search(r"(?:to|at)\s*\$?(\d+(?:\.\d{1,2})?)", clause)
+            return [StructuredOperation(items, markets, "price", "set", round(float(amount.group(1)), 2))] if amount else []
+        if re.search(r"(?:raise|increase|increas(?:e|ing)|higher).{0,30}\d+(?:\.\d+)?\s*%", clause):
+            percent = re.search(r"(\d+(?:\.\d+)?)\s*%", clause)
+            return [StructuredOperation(items, markets, "price", "percentage_change", float(percent.group(1)))] if percent else []
+        if re.search(r"(?:lower|reduce|decrease|drop|cut).{0,30}\d+(?:\.\d+)?\s*%", clause):
+            percent = re.search(r"(\d+(?:\.\d+)?)\s*%", clause)
+            return [StructuredOperation(items, markets, "price", "percentage_change", -float(percent.group(1)))] if percent else []
+        if re.search(r"(?:free|no[- ]cost)\s+(?:ebay\s+)?shipping", clause):
+            return [StructuredOperation(items, markets, "shipping", "set", "free")]
+        if re.search(r"\bend\b|\bremove\b|\bdelist\b", clause):
+            return [StructuredOperation(items, markets, "listing", "end", None)]
+        return []
+
     def parse_operation_plan(self, prompt: str) -> list[StructuredOperation]:
         """Parse safe, explicit compound mutations for preview generation.
 
