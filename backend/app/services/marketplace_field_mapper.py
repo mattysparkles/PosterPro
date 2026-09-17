@@ -46,10 +46,19 @@ def marketplace_description_variants(listing: Listing) -> dict[str, str]:
     safe, _ = sanitize_customer_description(canonical)
     stored = getattr(listing, "marketplace_descriptions", None)
     stored = stored if isinstance(stored, dict) else {}
+    # Keep a rich master while giving long-form destinations a small amount of
+    # channel context.  This avoids the old failure mode where every adapter
+    # received the Mercari-condensed copy (or an identical opaque blob).
+    ebay = safe
+    if ebay and not ebay.lower().startswith("ebay listing:"):
+        ebay = f"eBay listing: {ebay}"
+    facebook = safe
+    if facebook and not facebook.lower().startswith("facebook marketplace:"):
+        facebook = f"Facebook Marketplace: {facebook}"
     return {
         "canonical": safe,
-        "ebay": str(stored.get("ebay") or safe).strip(),
-        "facebook": str(stored.get("facebook") or safe).strip(),
+        "ebay": str(stored.get("ebay") or ebay).strip(),
+        "facebook": str(stored.get("facebook") or facebook).strip(),
         "mercari": _condense_description(str(stored.get("mercari") or safe), 1000),
         "poshmark": _condense_description(str(stored.get("poshmark") or safe), 2000),
         "vinted": _condense_description(str(stored.get("vinted") or safe), 1000),

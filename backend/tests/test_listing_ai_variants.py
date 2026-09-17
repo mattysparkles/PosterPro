@@ -1,4 +1,6 @@
 from app.services.listing_ai import ListingAIService
+from app.services.marketplace_field_mapper import marketplace_description_variants
+from types import SimpleNamespace
 
 
 def test_mercari_fallback_preserves_structured_facts_and_limit():
@@ -56,3 +58,14 @@ def test_generate_rejects_thin_llm_copy_when_evidence_fallback_is_reviewable(mon
     assert generated["description"] != "A portable toilet for camping."
     assert "Foldable seat" in generated["description"]
     assert generated["ai_metadata"]["description_quality_gate"] == "fallback_evidence_composer"
+
+
+def test_long_form_marketplaces_keep_rich_copy_separate_from_mercari():
+    canonical = "A detailed product overview with useful buyer facts. " * 30
+    listing = SimpleNamespace(canonical_description=canonical, description=canonical, marketplace_descriptions={})
+    variants = marketplace_description_variants(listing)
+    assert len(variants["canonical"]) > 1000
+    assert len(variants["ebay"]) > 1000
+    assert len(variants["facebook"]) > 1000
+    assert len(variants["mercari"]) <= 1000
+    assert variants["ebay"] != variants["mercari"]
