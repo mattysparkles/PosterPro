@@ -6,7 +6,7 @@ from app.models.models import Listing
 from app.services.customer_description import sanitize_customer_description
 
 
-MARKETPLACE_DESCRIPTION_LIMITS = {"mercari": 1000}
+MARKETPLACE_DESCRIPTION_LIMITS = {"mercari": 1000, "vinted": 1000, "poshmark": 2000}
 
 
 def _condense_description(text: str, limit: int = 1000) -> str:
@@ -51,6 +51,8 @@ def marketplace_description_variants(listing: Listing) -> dict[str, str]:
         "ebay": str(stored.get("ebay") or safe).strip(),
         "facebook": str(stored.get("facebook") or safe).strip(),
         "mercari": _condense_description(str(stored.get("mercari") or safe), 1000),
+        "poshmark": _condense_description(str(stored.get("poshmark") or safe), 2000),
+        "vinted": _condense_description(str(stored.get("vinted") or safe), 1000),
     }
 
 
@@ -70,7 +72,13 @@ def persist_marketplace_description_variants(listing: Listing, *, regenerate_gen
         provenance.update({str(key): str(value) for key, value in marketplace_data["marketplace_description_provenance"].items() if str(key).strip()})
     rendered = dict(existing)
     rendered.pop("_provenance", None)
-    for channel, value in (("ebay", variants["canonical"]), ("facebook", variants["canonical"]), ("mercari", variants["mercari"])):
+    for channel, value in (
+        ("ebay", variants["ebay"]),
+        ("facebook", variants["facebook"]),
+        ("mercari", variants["mercari"]),
+        ("poshmark", variants["poshmark"]),
+        ("vinted", variants["vinted"]),
+    ):
         if provenance.get(channel) == "operator_edited":
             continue
         if regenerate_generated or not rendered.get(channel):
@@ -360,7 +368,7 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
         return {
             "marketplace": market,
             "title": shared["title"],
-            "description": shared["description"],
+            "description": _marketplace_override(listing, market, "description", shared["description_variants"]["poshmark"]),
             "listing_price": shared["price"],
             "size": shared["size"],
             "brand": shared["brand"],
@@ -415,7 +423,7 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
         return {
             "marketplace": market,
             "title": shared["title"],
-            "description": shared["description"],
+            "description": _marketplace_override(listing, market, "description", shared["description_variants"]["vinted"]),
             "price": shared["price"],
             "brand": shared["brand"],
             "size": shared["size"],

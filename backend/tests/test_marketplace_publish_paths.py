@@ -121,6 +121,8 @@ def test_marketplace_descriptions_keep_rich_canonical_copy_separate(db_session):
     assert build_marketplace_payload(listing, "ebay")["description"] == variants["ebay"]
     assert build_marketplace_payload(listing, "facebook")["description"] == variants["facebook"]
     assert build_marketplace_payload(listing, "mercari")["description"] == variants["mercari"]
+    assert len(variants["poshmark"]) <= 2000
+    assert len(variants["vinted"]) <= 1000
 
 
 def test_marketplace_variant_persistence_preserves_operator_override(db_session):
