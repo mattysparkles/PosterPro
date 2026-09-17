@@ -1,5 +1,13 @@
 # PosterPro Deployment Log
 
+## 2026-09-16 - Blocker queue shared-control migration
+
+- Rebuilt `/jobs/blockers` presentation around shared `ActionLink`, `Button`,
+  `Input`, and `PageHeader` primitives. Inline identity repair behavior,
+  image/blocker guidance, and filtered-listing navigation are preserved.
+- Frontend production build passed; `/jobs/blockers` returned `200` after
+  deployment. Commit `0029d5b` pushed normally.
+
 ## 2026-09-16 - Customer-description contamination audit
 
 - Read-only production scan using policy/navigation-specific patterns found 5
