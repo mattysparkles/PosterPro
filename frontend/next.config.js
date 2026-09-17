@@ -11,6 +11,16 @@ if (!buildTimestamp) buildTimestamp = new Date().toISOString();
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  // Keep the app usable when Next is accessed directly (local preview,
+  // operator diagnostics, or a health-check port) instead of through Caddy.
+  // The public deployment still routes /api through Caddy, while this
+  // fallback prevents the login form from posting to a Next 404.
+  async rewrites() {
+    return [{
+      source: '/api/:path*',
+      destination: `${process.env.POSTERPRO_INTERNAL_API_BASE || 'http://127.0.0.1:8030'}/:path*`,
+    }];
+  },
   // Never let an intermediary/browser pin an HTML document that references
   // CSS chunks from a previous deployment.  Chunks remain content-hashed;
   // only the document shell needs revalidation.
