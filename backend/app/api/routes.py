@@ -2151,7 +2151,7 @@ async def save_publish_listing_changes(
     if not listing:
         raise HTTPException(status_code=404, detail="Listing not found")
     ensure_user_owns_resource(current_user, listing.user_id)
-    before = {field: getattr(listing, field, None) for field in ("title", "description", "listing_price", "suggested_price", "quantity", "condition", "category_id", "category_suggestion", "item_specifics", "image_urls", "marketplace_data", "platform_quantities", "custom_labels")}
+    before = {field: getattr(listing, field, None) for field in ("title", "description", "canonical_description", "marketplace_descriptions", "listing_price", "suggested_price", "quantity", "condition", "category_id", "category_suggestion", "item_specifics", "image_urls", "marketplace_data", "platform_quantities", "custom_labels")}
     direct_updates = payload.model_dump(exclude_none=True, exclude={"quantity", "platform_quantities", "custom_labels", "marketplace_data", "marketplace_descriptions"})
     if "description" in direct_updates and "canonical_description" not in direct_updates:
         direct_updates["canonical_description"] = direct_updates["description"]
