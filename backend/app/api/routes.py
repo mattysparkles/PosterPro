@@ -510,7 +510,7 @@ def _serialize_listing_response(listing: Listing) -> dict:
             "marketplace": row.marketplace.value,
             "status": row.status.value if hasattr(row.status, "value") else str(row.status),
             "marketplace_listing_id": row.marketplace_listing_id,
-            "raw_response": row.raw_response,
+            "raw_response": _safe_marketplace_response(row.raw_response),
         }
         for row in latest_rows_by_marketplace.values()
     ]
@@ -555,14 +555,14 @@ def _serialize_listing_response(listing: Listing) -> dict:
             "finished_at": latest_attempt.finished_at,
             "dry_run": latest_attempt.dry_run,
             "preflight_status": latest_attempt.preflight_status,
-            "payload_snapshot": latest_attempt.payload_snapshot,
+            "payload_snapshot": _safe_marketplace_response(latest_attempt.payload_snapshot),
             "payload_hash": latest_attempt.payload_hash,
             "inventory_item_sku": latest_attempt.inventory_item_sku,
             "offer_id": latest_attempt.offer_id,
             "marketplace_listing_id": latest_attempt.marketplace_listing_id,
             "marketplace_status": latest_attempt.marketplace_status,
             "translated_error": latest_attempt.translated_error,
-            "raw_error": latest_attempt.raw_error,
+            "raw_error": _safe_marketplace_response(latest_attempt.raw_error),
             "retryable": latest_attempt.retryable,
             "retry_count": latest_attempt.retry_count,
             "previous_attempt_id": latest_attempt.previous_attempt_id,
@@ -573,6 +573,19 @@ def _serialize_listing_response(listing: Listing) -> dict:
         else None
     )
     return base
+
+
+def _safe_marketplace_response(value):
+    """Expose operational response context without leaking credentials/secrets."""
+    secret_keys = {"token", "access_token", "refresh_token", "client_secret", "secret", "password", "cookie", "authorization", "auth_header", "device_token", "device_secret"}
+    if isinstance(value, dict):
+        return {
+            str(key): "[redacted]" if str(key).strip().lower() in secret_keys or any(marker in str(key).strip().lower() for marker in ("token", "secret", "password", "cookie")) else _safe_marketplace_response(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_safe_marketplace_response(item) for item in value]
+    return value
 
 
 def _serialize_listing_summary(listing: Listing) -> dict:

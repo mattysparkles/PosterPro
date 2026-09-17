@@ -1,4 +1,4 @@
-from app.api.routes import _serialize_listing_response
+from app.api.routes import _serialize_listing_response, _safe_marketplace_response
 from app.models.enums import ListingStatus
 from app.models.models import Listing, MarketplaceImportJob, User
 from app.services.listing_review import (
@@ -199,3 +199,15 @@ def test_sync_listing_review_state_promotes_vine_source_images_for_review(db_ses
 
     assert listing.listing_images[0]["is_reference"] is False
     assert listing.listing_images[0]["operator_state"] == "approved"
+
+
+def test_listing_response_redacts_marketplace_credentials():
+    safe = _safe_marketplace_response({
+        "status": "PUBLISHED",
+        "access_token": "secret-token",
+        "nested": {"device_secret": "secret-device", "external_url": "https://example.test/item"},
+    })
+    assert safe["status"] == "PUBLISHED"
+    assert safe["access_token"] == "[redacted]"
+    assert safe["nested"]["device_secret"] == "[redacted]"
+    assert safe["nested"]["external_url"].startswith("https://")
