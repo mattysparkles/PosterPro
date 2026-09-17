@@ -162,6 +162,19 @@ def test_destination_overrides_apply_condition_and_item_specifics(db_session):
     assert listing.condition == "Used"
 
 
+def test_destination_category_override_reaches_ebay_payload(db_session):
+    user = User(email="destination-category@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(
+        user_id=user.id, title="Portable toilet", description="Canonical copy",
+        category_id="100", category_suggestion="Other", listing_price=40,
+        marketplace_data={"marketplace_overrides": {"ebay": {"category": "181397"}}},
+    )
+    payload = build_marketplace_payload(listing, "ebay")
+    assert payload["category_id"] == "181397"
+    assert listing.category_id == "100"
+
+
 def test_non_ebay_payload_does_not_reuse_ebay_category_id(db_session):
     user = User(email="marketplace-category-map@example.com")
     db_session.add(user)

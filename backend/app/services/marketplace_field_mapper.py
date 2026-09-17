@@ -241,7 +241,15 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
             "price": _marketplace_override(listing, market, "price", shared["price"]),
             "condition": _marketplace_override(listing, market, "condition", shared["condition"]),
             "quantity": shared["quantity"],
-            "category_id": _marketplace_override(listing, market, "category_id", listing.category_id),
+            # Category edits are destination-scoped. Older mutation plans use
+            # ``category`` while newer callers may provide ``category_id``;
+            # accept both without ever replacing the canonical category.
+            "category_id": _marketplace_override(
+                listing,
+                market,
+                "category_id",
+                _marketplace_override(listing, market, "category", listing.category_id),
+            ),
             "item_specifics": destination_specifics,
             "brand": shared["brand"],
             "size": shared["size"],
