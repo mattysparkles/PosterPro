@@ -118,6 +118,14 @@ def _marketplace_item_specifics(listing: Listing, marketplace: str, fallback: di
     return dict(override) if isinstance(override, dict) else dict(fallback)
 
 
+def _destination_shipping(listing: Listing, marketplace: str, fallback: dict[str, Any]) -> dict[str, Any]:
+    """Merge a destination shipping override over canonical shipping settings."""
+    override = _marketplace_override(listing, marketplace, "shipping")
+    if not isinstance(override, dict):
+        return dict(fallback)
+    return {**fallback, **override}
+
+
 def _specific(item_specifics: dict[str, Any], *names: str) -> Any:
     """Read known canonical specifics without inventing destination values."""
     normalized = {str(key).strip().casefold().replace("_", " "): value for key, value in item_specifics.items()}
@@ -242,6 +250,7 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
     if market == "ebay":
         marketplace_data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}
         destination_specifics = _marketplace_item_specifics(listing, market, shared["item_specifics"])
+        destination_shipping = _destination_shipping(listing, market, shipping)
         return {
             "marketplace": market,
             "title": _marketplace_override(listing, market, "title", shared["title"]),
@@ -271,16 +280,17 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
             "item_specifics_approximate": marketplace_data.get("ebay_item_specifics_approximate") or [],
             "image_urls": shared["image_urls"],
             "shipping_policy": {
-                "service": shipping.get("domestic_service"),
-                "free_shipping": shipping.get("free_shipping"),
-                "handling_time_days": shipping.get("handling_time_days"),
-                "international_enabled": shipping.get("international_enabled"),
+                "service": destination_shipping.get("domestic_service"),
+                "free_shipping": destination_shipping.get("free_shipping"),
+                "handling_time_days": destination_shipping.get("handling_time_days"),
+                "international_enabled": destination_shipping.get("international_enabled"),
             },
         }
 
     if market == "facebook":
         meetup_notes = (((listing.marketplace_data or {}).get("shipping") or {}).get("facebook_meetup_notes"))
         destination_specifics = _marketplace_item_specifics(listing, market, shared["item_specifics"])
+        destination_shipping = _destination_shipping(listing, market, shipping)
         return {
             "marketplace": market,
             "title": _marketplace_override(listing, market, "title", shared["title"]),
@@ -289,9 +299,9 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
             "condition": _marketplace_override(listing, market, "condition", shared["condition"]),
             "availability": "in stock" if (shared["quantity"] or 0) > 0 else "out of stock",
             "delivery_method": "local_pickup"
-            if shipping.get("local_pickup_enabled")
+            if destination_shipping.get("local_pickup_enabled")
             else "shipping"
-            if shipping.get("mode") in {"calculated", "flat"}
+            if destination_shipping.get("mode") in {"calculated", "flat"}
             else "manual",
             "meetup_notes": meetup_notes,
             "image_urls": _facebook_image_urls(shared["image_urls"]),
@@ -303,7 +313,7 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
             "item_specifics": destination_specifics,
             "dimensions": shared["dimensions"],
             "weight": shared["weight"],
-            "location": shipping.get("location") or shipping.get("postal_code"),
+            "location": destination_shipping.get("location") or destination_shipping.get("postal_code"),
         }
 
     if market == "etsy":
@@ -337,6 +347,7 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
 
     if market == "mercari":
         destination_specifics = _marketplace_item_specifics(listing, market, shared["item_specifics"])
+        destination_shipping = _destination_shipping(listing, market, shipping)
         return {
             "marketplace": market,
             "title": _marketplace_override(listing, market, "title", shared["title"]),
@@ -355,12 +366,12 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
             "inventory_id": shared["inventory_id"],
             "image_urls": shared["image_urls"],
             "shipping": {
-                "prepaid": shipping.get("free_shipping"),
-                "local_pickup_enabled": shipping.get("local_pickup_enabled"),
-                "shipping_payer": shipping.get("shipping_payer"),
-                "shipping_method": shipping.get("shipping_method"),
-                "parcel_size": shipping.get("parcel_size"),
-                "parcel_weight": shipping.get("parcel_weight") or shared["weight"],
+                "prepaid": destination_shipping.get("free_shipping"),
+                "local_pickup_enabled": destination_shipping.get("local_pickup_enabled"),
+                "shipping_payer": destination_shipping.get("shipping_payer"),
+                "shipping_method": destination_shipping.get("shipping_method"),
+                "parcel_size": destination_shipping.get("parcel_size"),
+                "parcel_weight": destination_shipping.get("parcel_weight") or shared["weight"],
             },
         }
 

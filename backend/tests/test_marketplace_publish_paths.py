@@ -177,6 +177,21 @@ def test_destination_category_override_reaches_ebay_payload(db_session):
     assert listing.category_id == "100"
 
 
+def test_destination_shipping_override_reaches_payload_without_changing_default(db_session):
+    user = User(email="destination-shipping@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(
+        user_id=user.id, title="Camping item", description="Canonical copy", listing_price=40,
+        shipping_profile={"mode": "calculated", "free_shipping": False, "domestic_service": "Ground"},
+        marketplace_data={"marketplace_overrides": {"mercari": {"shipping": {"free_shipping": True, "shipping_method": "prepaid"}}}},
+    )
+    db_session.add(listing); db_session.flush()
+    payload = build_marketplace_payload(listing, "mercari")
+    assert payload["shipping"]["prepaid"] is True
+    assert payload["shipping"]["shipping_method"] == "prepaid"
+    assert listing.shipping_profile["free_shipping"] is False
+
+
 def test_non_ebay_payload_does_not_reuse_ebay_category_id(db_session):
     user = User(email="marketplace-category-map@example.com")
     db_session.add(user)
