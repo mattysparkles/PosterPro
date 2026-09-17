@@ -1,5 +1,15 @@
 # PosterPro Deployment Log
 
+## 2026-09-16 - Customer-description contamination audit
+
+- Read-only production scan using policy/navigation-specific patterns found 5
+  `PROCESSED` rows and no posted rows. The matches are legitimate product
+  language (for example replacement batteries or included components), not
+  Amazon refund/navigation boilerplate; no repair mutation was warranted.
+- The broader historical `replacement` keyword is not a valid contamination
+  signal because it is common in product titles/descriptions. Existing
+  payload sanitization remains active for actual policy/navigation markers.
+
 ## 2026-09-16 - Category-noise readiness guard
 
 - Read-only production audit found `205` listings with source-policy/noisy
