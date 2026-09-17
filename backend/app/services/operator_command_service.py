@@ -80,11 +80,19 @@ class OperatorCommandService:
             parsed = self._parse_operation_clause(clause)
             if parsed:
                 plan.extend(parsed)
-            elif clause.strip():
+            elif clause.strip() and not self._is_explicit_noop_clause(clause):
                 unsupported.append(clause.strip())
             if len(plan) == before and not clause.strip():
                 continue
         return plan, unsupported
+
+    @staticmethod
+    def _is_explicit_noop_clause(clause: str) -> bool:
+        """Recognize explicit preservation instructions as intentional no-ops."""
+        normalized = " ".join(str(clause or "").lower().split())
+        return bool(re.search(r"\b(?:leave|keep|do not change|don't change|no changes?)\b", normalized)) and bool(
+            re.search(r"\b(?:unchanged|alone|as[- ]is|other|everything else)\b", normalized)
+        )
 
     def _parse_operation_clause(self, clause: str) -> list[StructuredOperation]:
         """Parse one clause; kept separate so diagnostics can be lossless."""

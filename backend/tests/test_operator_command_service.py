@@ -67,6 +67,15 @@ def test_compound_operation_diagnostics_accepts_all_supported_clauses():
     assert unsupported == []
 
 
+def test_compound_operation_diagnostics_treats_explicit_preservation_as_noop():
+    plan, unsupported = OperatorCommandService().parse_operation_plan_with_diagnostics(
+        "Raise items 10 and 11 by 8% on Mercari; leave eBay unchanged"
+    )
+    assert len(plan) == 1
+    assert plan[0].marketplaces == ["mercari"]
+    assert unsupported == []
+
+
 def _seed_live_ebay_listing(db_session, *, user: User, title: str, price: float, posted_days_ago: int) -> Listing:
     listing = Listing(
         user_id=user.id,
