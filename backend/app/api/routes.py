@@ -3074,13 +3074,15 @@ def generate_listing(
 
     generated = ai.generate(
         {
-            "title_hint": listing.cluster.title_hint if listing.cluster else None,
+            "title_hint": listing.cluster.title_hint if listing.cluster else listing.title,
             "source_type": listing.source_type,
             "image_count": len(listing.image_urls or []),
             "storage_unit_name": listing.storage_unit_name,
             "existing_specifics": listing.item_specifics or {},
             "existing_condition": listing.condition,
             "custom_labels": listing.custom_labels or [],
+            "source_metadata": listing.source_metadata if isinstance(listing.source_metadata, dict) else {},
+            "marketplace_targets": (listing.marketplace_data or {}).get("targets", ["ebay", "facebook"]) if isinstance(listing.marketplace_data, dict) else ["ebay", "facebook"],
         },
         db=db,
         user_id=current_user.id,
@@ -3120,6 +3122,24 @@ def generate_listing(
         "generation_source": generated.get("generation_source"),
         "model_used": generated.get("model_used"),
     }
+
+    # Persist destination-specific generated copy without collapsing it back
+    # into the canonical master description.  Human-edited variants remain
+    # authoritative and are never replaced by a background regeneration.
+    generated_variants = generated.get("marketplace_drafts") if isinstance(generated.get("marketplace_drafts"), dict) else {}
+    existing_variants = dict(listing.marketplace_descriptions or {}) if isinstance(listing.marketplace_descriptions, dict) else {}
+    variant_provenance = dict((listing.marketplace_data or {}).get("marketplace_description_provenance") or {})
+    for market, draft in generated_variants.items():
+        if not isinstance(draft, dict) or not str(draft.get("description") or "").strip():
+            continue
+        if is_human_owned_field(source_metadata, f"marketplace_descriptions.{market}") or variant_provenance.get(market) == "operator_edited":
+            continue
+        existing_variants[str(market).lower()] = str(draft["description"]).strip()
+        variant_provenance[str(market).lower()] = "generated"
+    if existing_variants:
+        listing.marketplace_descriptions = existing_variants
+    if variant_provenance:
+        marketplace_data["marketplace_description_provenance"] = variant_provenance
 
     # Explicit generation may refresh machine-owned fields, but it must never
     # overwrite an operator correction.  Human provenance is field-scoped and
