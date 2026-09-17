@@ -448,6 +448,7 @@ class ListingAIService:
             title=fallback.get("title"),
             source_metadata=image_signals.get("source_metadata"),
         )
+        description_quality_gate_applied = False
         if (
             llm
             and llm_description_quality.get("quality") in {"blocked", "thin"}
@@ -455,6 +456,7 @@ class ListingAIService:
         ):
             merged["description"] = str(fallback.get("description") or "").strip()
             llm_metadata["description_quality_gate"] = "fallback_evidence_composer"
+            description_quality_gate_applied = True
         merged["category_suggestion"] = str(merged.get("category_suggestion") or fallback["category_suggestion"]).strip()
         merged["condition"] = str(merged.get("condition") or fallback["condition"]).strip()
         merged["item_specifics"] = merged.get("item_specifics") if isinstance(merged.get("item_specifics"), dict) else fallback["item_specifics"]
@@ -469,7 +471,7 @@ class ListingAIService:
         merged["prompt_used"] = LISTING_PROMPT_TEMPLATE
         merged["intelligence_prompt"] = get_prompt_template("generate_listing_intelligence")
         merged["model_used"] = self.model if llm else "heuristic-fallback"
-        merged["generation_source"] = "openai" if llm else "fallback"
+        merged["generation_source"] = "openai_with_evidence_fallback" if description_quality_gate_applied else ("openai" if llm else "fallback")
         merged["schema_version"] = "posterpro_listing_intelligence_v1"
         merged["marketplace_targets"] = self._normalize_string_list(
             merged.get("marketplace_targets"),
