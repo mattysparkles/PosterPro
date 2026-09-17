@@ -712,9 +712,17 @@ export default function Dashboard() {
                         />
                       ) : null}
                     </div>
+                    {operatorCommandResult.unsupported_clauses?.length ? (
+                      <div role="alert" className="mt-4 rounded-[12px] border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950">
+                        <p className="font-semibold">Needs clarification before anything changes</p>
+                        <ul className="mt-2 list-disc space-y-1 pl-5">
+                          {operatorCommandResult.unsupported_clauses.map((clause) => <li key={clause}>{clause}</li>)}
+                        </ul>
+                      </div>
+                    ) : null}
                     {operatorCommandResult.parsed ? (
                       <>
-                        <div className="mt-4 grid gap-3 lg:grid-cols-4">
+                    <div className="mt-4 grid gap-3 lg:grid-cols-4">
                           <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
                             <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Eligible</p>
                             <p className="mt-2 text-2xl font-semibold text-[#101828]">{operatorCommandResult.summary?.eligible_count || 0}</p>
@@ -730,9 +738,9 @@ export default function Dashboard() {
                           <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
                             <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Updated</p>
                             <p className="mt-2 text-2xl font-semibold text-[#101828]">{operatorCommandResult.summary?.updated_count || 0}</p>
-                          </div>
-                        </div>
-                        {operatorCommandResult.requires_confirmation ? (
+                      </div>
+                    </div>
+                    {operatorCommandResult.requires_confirmation ? (
                           <div className="mt-4 rounded-[12px] border border-[#fecdca] bg-[#fff6f3] p-4">
                             <p className="text-sm font-semibold text-[#912018]">Live eBay changes require explicit confirmation.</p>
                             <p className="mt-1 text-sm text-[#7a271a]">Confirm the checkbox below, then apply the live price changes.</p>
