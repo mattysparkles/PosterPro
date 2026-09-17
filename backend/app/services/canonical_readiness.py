@@ -114,7 +114,21 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
     # ``complete``. Treating it as in-flight makes the publisher disagree with
     # the queue for otherwise reviewable legacy drafts.
     processing_complete = processing_state in {"complete", "completed", "processed", "ready"}
-    attention = bool(getattr(listing, "processing_blocking_reason", None)) or processing_state in {"needs_attention", "failed", "error"}
+    # Older Vine workers persisted ``needs_attention`` as the processing state
+    # even after a later pass cleared its blocker.  A review-marked row with no
+    # current blocking reason is terminal machine work, not still-processing.
+    if processing_state == "needs_attention" and not getattr(listing, "processing_blocking_reason", None) and getattr(listing, "needs_review", False):
+        processing_complete = True
+    # ``needs_attention`` is a legacy persisted state, not proof of a current
+    # blocker.  Reclassification can clear the underlying reasons while an
+    # older worker leaves that state behind.  Derive attention from current
+    # actionable blockers (or an explicit failed/error state) so the queue and
+    # publisher cannot keep surfacing a stale attention label.
+    attention = (
+        bool(getattr(listing, "processing_blocking_reason", None))
+        or processing_state in {"failed", "error"}
+        or (processing_state == "needs_attention" and bool(blockers))
+    )
     # A listing cannot be publishable while enrichment/processing is still in
     # flight, even when the basic photo/price checks happen to pass.
     publishable = bool(processing_complete and base.get("ready_for_publish")) and not attention and not blockers

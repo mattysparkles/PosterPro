@@ -16,6 +16,20 @@ def test_reviewable_complete_listing_is_not_attention(db_session):
     assert result["processing_stage"] == "complete"
 
 
+def test_stale_attention_state_without_current_blocker_is_reclassified_for_queue(db_session):
+    user = User(email="readiness-stale-attention@example.com"); db_session.add(user); db_session.flush()
+    listing = Listing(
+        user_id=user.id, processing_state="needs_attention", needs_review=True,
+        title="Portable Camping Toilet", description="A useful portable camping toilet with a foldable seat for outdoor use and easy cleanup.",
+        category_suggestion="Sporting Goods", category_id="123", listing_price=25,
+        listing_images=[{"storage_path": "/media/item.jpg", "operator_state": "approved", "role": "primary"}],
+        condition_data={"operator_review_required": False}, shipping_profile={"manual_measurement_needed": False},
+    )
+    result = canonical_listing_readiness(listing)
+    assert result["attention_required"] is False
+    assert result["queue"] == "NEEDS_REVIEW"
+
+
 def test_blocked_listing_cannot_be_publishable(db_session):
     user = User(email="readiness-blocked@example.com"); db_session.add(user); db_session.flush()
     listing = Listing(user_id=user.id, processing_state="needs_attention", processing_blocking_reason="Missing identity", needs_review=True)
