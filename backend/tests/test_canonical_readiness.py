@@ -106,6 +106,13 @@ def test_source_policy_breadcrumb_cannot_be_used_as_category(db_session):
     assert any("validated marketplace category" in reason for reason in result["blocking_reasons"])
 
 
+def test_valid_other_taxonomy_leaf_is_not_treated_as_source_noise():
+    from app.services.category_rules import is_source_noise_category
+
+    assert not is_source_noise_category("Sporting Goods > Boxing & MMA > Protective Gear > Other Protective Equipment")
+    assert is_source_noise_category("Other > Needs category review")
+
+
 def test_source_draft_with_token_description_requires_enrichment(db_session):
     user = User(email="readiness-thin-vine@example.com"); db_session.add(user); db_session.flush()
     listing = Listing(

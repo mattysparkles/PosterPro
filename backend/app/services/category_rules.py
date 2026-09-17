@@ -157,4 +157,9 @@ def is_source_noise_category(value: str | None) -> bool:
     if not text:
         return True
     markers = ("amazon", "refund", "replacement", "free return", "delivery", "seller", "return policy", "read full", "update location", "see exceptions", "report an issue", "secure transaction")
-    return any(marker in text for marker in markers) or text.startswith(("other", "read the full"))
+    # A legitimate taxonomy leaf may begin with “Other” (for example,
+    # “Other Protective Gear”).  Only treat the generic unresolved placeholder
+    # and source-page instruction as noise; do not discard valid marketplace
+    # categories merely because their display name starts with Other.
+    generic_other = text in {"other", "other > needs category review", "other needs category review"}
+    return any(marker in text for marker in markers) or generic_other or text.startswith("read the full")
