@@ -354,7 +354,7 @@ async def onboarding_help(payload: OnboardingHelpRequest, db: Session = Depends(
     key, provider = resolve_openai_key(db, current_user.id)
     if not key:
         return {
-            "answer": str(guidance.get("troubleshooting") or task.get("message") or "Follow the instructions shown for this step, then choose Check this step again. If it still does not work, contact PosterPro support and share the error code—not any password, API key, cookie, or token."),
+            "answer": str(guidance.get("troubleshooting") or task.get("message") or "Follow the instructions shown for this step. PosterPro will verify it automatically; if it still does not work, contact PosterPro support and share the error code—not any password, API key, cookie, or token."),
             "mode": "DETERMINISTIC_HELP",
             "ai_assisted": False,
             "secrets_sent": False,
@@ -401,7 +401,7 @@ async def onboarding_help(payload: OnboardingHelpRequest, db: Session = Depends(
         return {"answer": answer[:3000], "mode": provider.upper(), "ai_assisted": True, "secrets_sent": False}
     except (httpx.HTTPError, ValueError):
         return {
-            "answer": str(guidance.get("troubleshooting") or "PosterPro could not get an AI answer right now. Follow the steps on this screen and choose Check this step again."),
+            "answer": str(guidance.get("troubleshooting") or "PosterPro could not get an AI answer right now. Follow the steps on this screen; PosterPro will verify the connection automatically."),
             "mode": "DETERMINISTIC_HELP",
             "ai_assisted": False,
             "secrets_sent": False,
