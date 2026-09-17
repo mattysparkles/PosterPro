@@ -213,6 +213,19 @@ def apply_marketplace_operation(
         if previous is None and field == "price":
             previous = listing.listing_price
         updated = calculate(previous)
+        if field == "shipping":
+            # Shipping is a structured destination override.  Normalize the
+            # friendly operator value used by compound commands (for example,
+            # "make eBay shipping free") into the same shape consumed by all
+            # marketplace payload builders, while preserving existing scoped
+            # settings that were not targeted.
+            existing_shipping = market.get("shipping") if isinstance(market.get("shipping"), dict) else {}
+            if isinstance(updated, dict):
+                updated = {**existing_shipping, **updated}
+            elif str(updated).strip().lower() in {"free", "free_shipping", "no_cost"}:
+                updated = {**existing_shipping, "free_shipping": True, "mode": "included", "shipping_method": "free"}
+            else:
+                updated = {**existing_shipping, "shipping_method": updated}
         market[field] = updated
         market.setdefault("provenance", {})[field] = "operator_edited"
         if field == "description":

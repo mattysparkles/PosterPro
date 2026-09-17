@@ -1,5 +1,6 @@
 from app.models.models import Listing, User
 from app.services.marketplace_mutations import apply_marketplace_operation, apply_marketplace_operation_plan, validate_marketplace_operation_plan
+from app.services.marketplace_field_mapper import build_marketplace_payload
 
 
 def test_marketplace_operation_changes_only_requested_destinations(db_session):
@@ -170,3 +171,25 @@ def test_plan_validation_is_side_effect_free(db_session):
     validate_marketplace_operation_plan([{"listing_id": listing.id, "markets": ["ebay"], "field": "price", "value": 45}], {listing.id: listing})
     assert listing.listing_price == 50
     assert not (listing.marketplace_data or {}).get("marketplace_overrides")
+
+
+def test_free_shipping_command_is_normalized_for_marketplace_payload(db_session):
+    user = User(email="mutation-shipping-command@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(
+        user_id=user.id,
+        title="Camping item",
+        description="Useful camping item",
+        listing_price=40,
+        shipping_profile={"mode": "calculated", "free_shipping": False, "domestic_service": "Ground"},
+    )
+    db_session.add(listing); db_session.flush()
+    apply_marketplace_operation_plan([
+        {"listing_id": listing.id, "marketplaces": ["ebay"], "field": "shipping", "value": "free"},
+    ], {listing.id: listing})
+    override = listing.marketplace_data["marketplace_overrides"]["ebay"]["shipping"]
+    assert override["free_shipping"] is True
+    assert override["shipping_method"] == "free"
+    payload = build_marketplace_payload(listing, "ebay")
+    assert payload["shipping_policy"]["free_shipping"] is True
+    assert listing.shipping_profile["free_shipping"] is False
