@@ -146,7 +146,10 @@ def _listing_bucket_expression():
         # a later failed revise must not make an already-live item disappear
         # from Published. The failed job remains visible in Jobs/details.
         (or_(Listing.status == ListingStatus.FAILED, Listing.ebay_publish_status == "FAILED"), "failed"),
-        (or_(Listing.processing_state == "needs_attention", Listing.processing_state == "blocked"), "needs_attention"),
+        (or_(
+            Listing.processing_blocking_reason.is_not(None),
+            and_(Listing.processing_state.in_(["needs_attention", "blocked"]), Listing.needs_review.is_(False)),
+        ), "needs_attention"),
         (and_(Listing.processing_state.in_(["processing", "pending", "queued", "enriching", "source_enrichment", "image_enrichment", "category_resolution", "title_generation", "description_generation", "quality_validation"]), Listing.needs_review.is_(False), Listing.restricted_review_required.is_(False)), "processing"),
         (generic_caption, "needs_attention"),
         (or_(Listing.restricted_review_required.is_(True), Listing.needs_review.is_(True)), "review"),
@@ -224,7 +227,10 @@ def _listing_bucket(listing: Listing, remote_ebay_active_ids: set[str] | None = 
         for market in configured_targets
     ):
         return "needs_attention"
-    if str(listing.processing_state or "").strip().lower() in {"needs_attention", "blocked"}:
+    if (
+        str(listing.processing_state or "").strip().lower() in {"needs_attention", "blocked"}
+        and (str(getattr(listing, "processing_blocking_reason", None) or "").strip() or not listing.needs_review)
+    ):
         return "needs_attention"
     if reviewability.get("caption_like_title") or reviewability.get("bare_identifier_title"):
         return "needs_attention"
