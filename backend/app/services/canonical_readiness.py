@@ -6,6 +6,7 @@ import re
 
 from app.services.listing_review import summarize_listing_readiness
 from app.services.listing_ai import assess_description_quality
+from app.services.category_rules import is_source_noise_category
 
 
 def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None) -> dict[str, Any]:
@@ -33,6 +34,13 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
     description = str(getattr(listing, "canonical_description", None) or getattr(listing, "description", None) or "").strip()
     title = str(getattr(listing, "title", None) or "").strip()
     source_metadata = getattr(listing, "source_metadata", None) if isinstance(getattr(listing, "source_metadata", None), dict) else {}
+    category_id = str(getattr(listing, "category_id", None) or "").strip()
+    category_hint = str(getattr(listing, "category_suggestion", None) or "").strip()
+    # Source breadcrumbs/policy text are never a marketplace taxonomy. A
+    # missing ID plus a noisy hint is a real category blocker; a valid ID may
+    # retain an old display hint without making the listing unpublishable.
+    if not category_id and is_source_noise_category(category_hint):
+        blockers.append("A validated marketplace category is required; the current category hint is source-page or generic text")
     description_quality = assess_description_quality(description, title=title, source_metadata=source_metadata)
     source_type_value = str(getattr(listing, "source_type", None) or "").strip().lower()
     if re.search(r"(?:free\s+shipping|free\s+returns?|\d+[- ]day\s+(?:refund|return|replacement)|add\s+to\s+cart|buy\s+now|return\s+policy)", description, re.IGNORECASE):

@@ -78,6 +78,20 @@ def test_missing_description_is_a_real_readiness_blocker(db_session):
     assert "Description is missing" in result["blocking_reasons"]
 
 
+def test_source_policy_breadcrumb_cannot_be_used_as_category(db_session):
+    user = User(email="readiness-noisy-category@example.com"); db_session.add(user); db_session.flush()
+    listing = Listing(
+        user_id=user.id, processing_state="complete", needs_review=True,
+        title="Portable camping toilet", description="A useful portable camping toilet for outdoor trips and emergency use.",
+        category_suggestion="Amazon > FG 1910 > FREE 30-day refund/replacement",
+        listing_price=25, listing_images=[{"storage_path": "/media/item.jpg", "operator_state": "approved", "role": "primary"}],
+        condition_data={"operator_review_required": False}, shipping_profile={"manual_measurement_needed": False},
+    )
+    result = canonical_listing_readiness(listing, marketplace="ebay")
+    assert result["attention_required"] is True
+    assert any("validated marketplace category" in reason for reason in result["blocking_reasons"])
+
+
 def test_source_draft_with_token_description_requires_enrichment(db_session):
     user = User(email="readiness-thin-vine@example.com"); db_session.add(user); db_session.flush()
     listing = Listing(
