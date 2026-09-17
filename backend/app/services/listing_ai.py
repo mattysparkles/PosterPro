@@ -432,6 +432,29 @@ class ListingAIService:
 
         merged["title"] = str(merged.get("title") or fallback["title"])[:80]
         merged["description"] = str(merged.get("description") or fallback["description"]).strip()
+        # An LLM response is not automatically good listing copy.  Providers
+        # occasionally return a placeholder or a two-sentence stub even when
+        # the source record contains rich facts.  Keep the machine-finished
+        # contract honest by falling back to our evidence-based composer when
+        # the response is visibly thin or contains source-page noise.  This is
+        # deliberately a quality gate, not a global length requirement.
+        llm_description_quality = assess_description_quality(
+            merged["description"],
+            title=merged["title"],
+            source_metadata=image_signals.get("source_metadata"),
+        )
+        fallback_description_quality = assess_description_quality(
+            fallback.get("description"),
+            title=fallback.get("title"),
+            source_metadata=image_signals.get("source_metadata"),
+        )
+        if (
+            llm
+            and llm_description_quality.get("quality") in {"blocked", "thin"}
+            and fallback_description_quality.get("quality") == "reviewable"
+        ):
+            merged["description"] = str(fallback.get("description") or "").strip()
+            llm_metadata["description_quality_gate"] = "fallback_evidence_composer"
         merged["category_suggestion"] = str(merged.get("category_suggestion") or fallback["category_suggestion"]).strip()
         merged["condition"] = str(merged.get("condition") or fallback["condition"]).strip()
         merged["item_specifics"] = merged.get("item_specifics") if isinstance(merged.get("item_specifics"), dict) else fallback["item_specifics"]
@@ -471,6 +494,7 @@ class ListingAIService:
             "validation_status": llm_metadata.get("validation_status") or "fallback_only",
             "validation_errors": llm_metadata.get("validation_errors") or [],
             "response_provider": llm_metadata.get("response_provider") or ("openai" if llm else "fallback"),
+            "description_quality_gate": llm_metadata.get("description_quality_gate"),
             "service_tier": llm_metadata.get("service_tier"),
             "raw_request_preview": llm_metadata.get("raw_request_preview"),
             "error": llm_metadata.get("error"),

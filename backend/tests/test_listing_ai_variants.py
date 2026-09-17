@@ -29,3 +29,30 @@ def test_draft_quality_penalizes_source_navigation_noise():
     service = ListingAIService()
     generated = {"title": "Portable toilet", "description": "Portable toilet. Free 30-day refund and select delivery location.", "item_specifics": {"Type": "Portable Toilet"}, "missing_information": []}
     assert service._draft_quality(generated) == "weak"
+
+
+def test_generate_rejects_thin_llm_copy_when_evidence_fallback_is_reviewable(monkeypatch):
+    service = ListingAIService()
+
+    monkeypatch.setattr(service, "_llm_generation", lambda *args, **kwargs: {
+        "result": {
+            "title": "TrailCo Portable Camping Toilet",
+            "description": "A portable toilet for camping.",
+        },
+        "metadata": {"validation_status": "validated", "response_provider": "openai"},
+    })
+    generated = service.generate({
+        "title_hint": "TrailCo Portable Camping Toilet",
+        "source_type": "amazon_vine",
+        "source_metadata": {"source_facts": {
+            "feature_bullets": [
+                "Foldable seat with splash-resistant design",
+                "Removable waste tank for easier cleaning",
+            ],
+            "specifications": {"Capacity": "5.3 gallons", "Material": "HDPE plastic"},
+        }},
+    })
+
+    assert generated["description"] != "A portable toilet for camping."
+    assert "Foldable seat" in generated["description"]
+    assert generated["ai_metadata"]["description_quality_gate"] == "fallback_evidence_composer"
