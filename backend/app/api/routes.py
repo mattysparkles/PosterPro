@@ -1986,11 +1986,6 @@ def create_listing(
     db.add(listing)
     db.commit()
     db.refresh(listing)
-    metadata = dict(listing.source_metadata or {})
-    metadata["correction_job_id"] = correction.id
-    listing.source_metadata = metadata
-    db.commit()
-    db.refresh(listing)
     return _serialize_listing_response(listing)
 
 
