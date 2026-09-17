@@ -503,6 +503,14 @@ def normalize_import_payload(*, source_marketplace: str, payload: dict[str, Any]
     tags = item.get("tags") or item.get("keywords") or []
     if not isinstance(tags, list):
         tags = []
+    remote_listing_id = (
+        item.get("marketplace_listing_id")
+        or item.get("listing_id")
+        or item.get("external_listing_id")
+        or item.get("item_id")
+        or item.get("legacy_item_id")
+    )
+    remote_status = item.get("remote_status") or item.get("listing_status") or item.get("status")
 
     return {
         "title": item.get("title") or item.get("headline") or "",
@@ -515,4 +523,7 @@ def normalize_import_payload(*, source_marketplace: str, payload: dict[str, Any]
         "item_specifics": item_specifics,
         "tags": [str(tag).strip() for tag in tags if str(tag).strip()],
         "source_marketplace": source_marketplace.lower(),
+        "remote_listing_id": str(remote_listing_id).strip() if remote_listing_id not in (None, "") else None,
+        "remote_url": str(item.get("source_url") or item.get("url") or item.get("listing_url") or "").strip() or None,
+        "remote_status": str(remote_status).strip().lower() if remote_status not in (None, "") else None,
     }

@@ -975,6 +975,7 @@ def _create_imported_listing(
                 }
             )
         existing_listing.needs_review = True
+        _persist_imported_remote_identity(db, existing_listing, source_marketplace, normalized)
         db.add(existing_listing)
         db.flush()
         return existing_listing, False
@@ -1001,7 +1002,35 @@ def _create_imported_listing(
     )
     db.add(listing)
     db.flush()
+    _persist_imported_remote_identity(db, listing, source_marketplace, normalized)
     return listing, True
+
+
+def _persist_imported_remote_identity(db, listing: Listing, source_marketplace: str, normalized: dict) -> None:
+    """Attach an imported remote listing identity without creating duplicates."""
+    remote_id = str(normalized.get("remote_listing_id") or "").strip()
+    if not remote_id:
+        return
+    try:
+        market = MarketplaceName(str(source_marketplace).lower())
+    except ValueError:
+        return
+    row = db.execute(select(MarketplaceListing).where(
+        MarketplaceListing.listing_id == listing.id,
+        MarketplaceListing.marketplace == market,
+    )).scalars().first()
+    status_value = str(normalized.get("remote_status") or "published").upper()
+    status = MarketplaceListingStatus.PUBLISHED if status_value in {"ACTIVE", "PUBLISHED", "LIVE", "UPDATED"} else MarketplaceListingStatus.UPDATED
+    if row is None:
+        row = MarketplaceListing(listing_id=listing.id, marketplace=market)
+    row.marketplace_listing_id = remote_id
+    row.status = status
+    row.raw_response = {
+        **(row.raw_response if isinstance(row.raw_response, dict) else {}),
+        "imported": True,
+        "source_url": normalized.get("remote_url"),
+    }
+    db.add(row)
 
 
 def _extract_end_time_iso(marketplace_data: dict | None) -> str | None:

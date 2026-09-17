@@ -1,7 +1,7 @@
 from app.models.enums import ListingStatus, MarketplaceListingStatus
 from app.models.models import Listing, MarketplaceListing, User
 from app.services.marketplace_preflight import MarketplacePreflightService
-from app.services.marketplace_field_mapper import build_marketplace_payload, marketplace_description_variants, persist_marketplace_description_variants
+from app.services.marketplace_field_mapper import build_marketplace_payload, marketplace_description_variants, persist_marketplace_description_variants, normalize_import_payload
 from app.workers import tasks
 from app.workers.tasks import publish_listing_to_marketplace_task
 
@@ -190,6 +190,16 @@ def test_destination_shipping_override_reaches_payload_without_changing_default(
     assert payload["shipping"]["prepaid"] is True
     assert payload["shipping"]["shipping_method"] == "prepaid"
     assert listing.shipping_profile["free_shipping"] is False
+
+
+def test_import_normalization_preserves_remote_identity_fields():
+    normalized = normalize_import_payload(
+        source_marketplace="ebay",
+        payload={"item_id": "EBAY-123", "listing_url": "https://ebay.example/item/123", "status": "ACTIVE", "title": "Imported item"},
+    )
+    assert normalized["remote_listing_id"] == "EBAY-123"
+    assert normalized["remote_url"].endswith("/123")
+    assert normalized["remote_status"] == "active"
 
 
 def test_non_ebay_payload_does_not_reuse_ebay_category_id(db_session):
