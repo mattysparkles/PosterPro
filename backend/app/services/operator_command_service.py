@@ -93,6 +93,10 @@ class OperatorCommandService:
                 amount = re.search(r"(?:to|at)\s*\$?(\d+(?:\.\d{1,2})?)", clause)
                 if amount:
                     plan.append(StructuredOperation(items, markets, "price", "set", round(float(amount.group(1)), 2)))
+            elif re.search(r"(?:raise|increase|increas(?:e|ing)|higher).{0,30}\d+(?:\.\d+)?\s*%", clause):
+                percent = re.search(r"(\d+(?:\.\d+)?)\s*%", clause)
+                if percent:
+                    plan.append(StructuredOperation(items, markets, "price", "percentage_change", float(percent.group(1))))
             elif re.search(r"(?:lower|reduce|decrease|drop|cut).{0,30}\d+(?:\.\d+)?\s*%", clause):
                 percent = re.search(r"(\d+(?:\.\d+)?)\s*%", clause)
                 if percent:

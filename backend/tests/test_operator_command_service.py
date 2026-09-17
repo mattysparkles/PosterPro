@@ -43,6 +43,13 @@ def test_compound_operation_plan_supports_destination_absolute_price():
     ]
 
 
+def test_compound_operation_plan_supports_marketplace_specific_price_increase():
+    plan = OperatorCommandService().parse_operation_plan("Raise items 101 and 103 by 8% on Mercari; leave eBay unchanged")
+    assert [(entry.items, entry.marketplaces, entry.field, entry.action, entry.value) for entry in plan] == [
+        ([101, 103], ["mercari"], "price", "percentage_change", 8.0),
+    ]
+
+
 def _seed_live_ebay_listing(db_session, *, user: User, title: str, price: float, posted_days_ago: int) -> Listing:
     listing = Listing(
         user_id=user.id,

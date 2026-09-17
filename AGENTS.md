@@ -1,5 +1,15 @@
 # PosterPro Deployment Log
 
+## 2026-09-16 - Compound operator price-increase support
+
+- The structured operator-command parser now supports destination-scoped
+  percentage increases (`raise`/`increase`) in addition to reductions. It
+  produces the same explicit mutation-plan shape and leaves untargeted
+  marketplaces unchanged.
+- Regression coverage added for a Mercari-only price increase; operator
+  command suite: `12 passed`.
+
+
 ## 2026-09-16 - Canonical field revision capture
 
 - `save-publish-changes` revisions now snapshot `canonical_description` and
