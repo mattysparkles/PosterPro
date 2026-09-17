@@ -104,6 +104,12 @@ def _marketplace_override(listing: Listing, marketplace: str, field: str, fallba
     return fallback if value in (None, "") else value
 
 
+def _marketplace_item_specifics(listing: Listing, marketplace: str, fallback: dict[str, Any]) -> dict[str, Any]:
+    """Apply destination-specific item-specific overrides without mutating canonical facts."""
+    override = _marketplace_override(listing, marketplace, "item_specifics")
+    return dict(override) if isinstance(override, dict) else dict(fallback)
+
+
 def _specific(item_specifics: dict[str, Any], *names: str) -> Any:
     """Read known canonical specifics without inventing destination values."""
     normalized = {str(key).strip().casefold().replace("_", " "): value for key, value in item_specifics.items()}
@@ -227,15 +233,16 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
 
     if market == "ebay":
         marketplace_data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}
+        destination_specifics = _marketplace_item_specifics(listing, market, shared["item_specifics"])
         return {
             "marketplace": market,
             "title": _marketplace_override(listing, market, "title", shared["title"]),
             "description": _marketplace_override(listing, market, "description", shared["description_variants"]["ebay"]),
             "price": _marketplace_override(listing, market, "price", shared["price"]),
-            "condition": shared["condition"],
+            "condition": _marketplace_override(listing, market, "condition", shared["condition"]),
             "quantity": shared["quantity"],
-            "category_id": listing.category_id,
-            "item_specifics": shared["item_specifics"],
+            "category_id": _marketplace_override(listing, market, "category_id", listing.category_id),
+            "item_specifics": destination_specifics,
             "brand": shared["brand"],
             "size": shared["size"],
             "color": shared["color"],
@@ -257,12 +264,13 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
 
     if market == "facebook":
         meetup_notes = (((listing.marketplace_data or {}).get("shipping") or {}).get("facebook_meetup_notes"))
+        destination_specifics = _marketplace_item_specifics(listing, market, shared["item_specifics"])
         return {
             "marketplace": market,
             "title": _marketplace_override(listing, market, "title", shared["title"]),
             "description": _marketplace_override(listing, market, "description", shared["description_variants"]["facebook"]),
             "price": _marketplace_override(listing, market, "price", shared["price"]),
-            "condition": shared["condition"],
+            "condition": _marketplace_override(listing, market, "condition", shared["condition"]),
             "availability": "in stock" if (shared["quantity"] or 0) > 0 else "out of stock",
             "delivery_method": "local_pickup"
             if shipping.get("local_pickup_enabled")
@@ -272,10 +280,11 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
             "meetup_notes": meetup_notes,
             "image_urls": _facebook_image_urls(shared["image_urls"]),
             "category_hint": shared["category"],
-            "brand": shared["brand"],
-            "size": shared["size"],
-            "color": shared["color"],
-            "material": shared["material"],
+            "brand": _specific(destination_specifics, "Brand") or shared["brand"],
+            "size": _specific(destination_specifics, "Size", "Apparel Size") or shared["size"],
+            "color": _specific(destination_specifics, "Color", "Colour") or shared["color"],
+            "material": _specific(destination_specifics, "Material", "Materials") or shared["material"],
+            "item_specifics": destination_specifics,
             "dimensions": shared["dimensions"],
             "weight": shared["weight"],
             "location": shipping.get("location") or shipping.get("postal_code"),
@@ -311,17 +320,19 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
         }
 
     if market == "mercari":
+        destination_specifics = _marketplace_item_specifics(listing, market, shared["item_specifics"])
         return {
             "marketplace": market,
             "title": _marketplace_override(listing, market, "title", shared["title"]),
             "description": _marketplace_override(listing, market, "description", shared["description_variants"]["mercari"]),
             "price": _marketplace_override(listing, market, "price", shared["price"]),
-            "condition": shared["condition"],
+            "condition": _marketplace_override(listing, market, "condition", shared["condition"]),
             "category_hint": shared["category"],
-            "brand": shared["brand"],
-            "size": shared["size"],
-            "color": shared["color"],
-            "material": shared["material"],
+            "brand": _specific(destination_specifics, "Brand") or shared["brand"],
+            "size": _specific(destination_specifics, "Size", "Apparel Size") or shared["size"],
+            "color": _specific(destination_specifics, "Color", "Colour") or shared["color"],
+            "material": _specific(destination_specifics, "Material", "Materials") or shared["material"],
+            "item_specifics": destination_specifics,
             "dimensions": shared["dimensions"],
             "weight": shared["weight"],
             "quantity": shared["quantity"],

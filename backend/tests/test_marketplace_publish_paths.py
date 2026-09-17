@@ -143,6 +143,25 @@ def test_destination_overrides_are_used_by_payload_without_changing_canonical(db
     assert listing.listing_price == 50
 
 
+def test_destination_overrides_apply_condition_and_item_specifics(db_session):
+    user = User(email="destination-condition-aspects@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(
+        user_id=user.id,
+        title="Jacket",
+        description="Canonical copy",
+        condition="Used",
+        listing_price=40,
+        item_specifics={"Brand": "Example", "Size": "M"},
+        marketplace_data={"marketplace_overrides": {"ebay": {"condition": "New", "item_specifics": {"Brand": "Example", "Size": "L"}}}},
+    )
+    db_session.add(listing); db_session.flush()
+    payload = build_marketplace_payload(listing, "ebay")
+    assert payload["condition"] == "New"
+    assert payload["item_specifics"]["Size"] == "L"
+    assert listing.condition == "Used"
+
+
 def test_non_ebay_payload_does_not_reuse_ebay_category_id(db_session):
     user = User(email="marketplace-category-map@example.com")
     db_session.add(user)
