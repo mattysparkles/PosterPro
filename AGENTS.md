@@ -1,5 +1,14 @@
 # PosterPro Deployment Log
 
+## 2026-09-16 - Canonical field revision capture
+
+- `save-publish-changes` revisions now snapshot `canonical_description` and
+  `marketplace_descriptions` before applying edits. Canonical and destination
+  copy changes therefore appear in the revision delta, manual provenance, and
+  idempotency comparison instead of being silently omitted.
+- Focused editor/revision API test passed; backend restarted active. Commit
+  `01f6b90` pushed normally.
+
 ## 2026-09-16 - Routed crosspost readiness boundary
 
 - Routing-aware single and bulk crosspost endpoints now create durable
