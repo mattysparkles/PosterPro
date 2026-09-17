@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from app.core.config import settings
+from app.core import config as config_module
 from app.core.secrets import decrypt_secret_if_needed
 from app.models.models import User
 
@@ -34,7 +34,8 @@ def sponsored_ai_entitlement(user: User | None, *, now: datetime | None = None) 
     # The fail-closed meter-ready gate prevents a configuration mistake from
     # turning on unmetered platform spend before monthly tenant accounting is
     # implemented and enabled.
-    allowed = bool(settings.sponsored_ai_enabled and settings.sponsored_ai_metering_ready and active and entitlements.get("sponsored_ai") is True)
+    runtime_settings = config_module.settings
+    allowed = bool(runtime_settings.sponsored_ai_enabled and runtime_settings.sponsored_ai_metering_ready and active and entitlements.get("sponsored_ai") is True)
     allowance = max(0, int(entitlements.get("ai_monthly_tokens") or 0)) if allowed else 0
     period = str(subscription.get("period_start") or "")
     usage = root.get("ai_usage_period") if isinstance(root.get("ai_usage_period"), dict) else {}
@@ -54,7 +55,7 @@ def sponsored_ai_entitlement(user: User | None, *, now: datetime | None = None) 
 def resolve_openai_key(db, user_id: int | None) -> tuple[str | None, str]:
     """Return a key for the requested tenant and its effective provider mode."""
     if db is None or user_id is None:
-        return settings.openai_api_key, "platform_system"
+        return config_module.settings.openai_api_key, "platform_system"
     user = db.get(User, user_id)
     if not user:
         return None, "disabled"
@@ -62,15 +63,15 @@ def resolve_openai_key(db, user_id: int | None) -> tuple[str | None, str]:
     mode = str(config.get("mode") or "").strip().upper()
     if mode == "BYO_OPENAI":
         encoded = config.get("openai_api_key_enc")
-        key = decrypt_secret_if_needed(encoded, secret_key=settings.session_secret) if isinstance(encoded, str) else None
+        key = decrypt_secret_if_needed(encoded, secret_key=config_module.settings.session_secret) if isinstance(encoded, str) else None
         return (key, "byo_openai") if key else (None, "disabled")
     if mode == "POSTERPRO_SPONSORED":
         entitlement = sponsored_ai_entitlement(user)
-        return (settings.openai_api_key, "posterpro_sponsored") if entitlement["entitled"] else (None, "disabled")
+        return (config_module.settings.openai_api_key, "posterpro_sponsored") if entitlement["entitled"] else (None, "disabled")
     # Preserve the platform operator's existing admin tooling. Normal tenants
     # must explicitly choose BYO or receive a real server-side entitlement.
     if user.is_admin and not bool(getattr(user, "_posterpro_view_as_regular", False)):
-        return settings.openai_api_key, "platform_admin"
+        return config_module.settings.openai_api_key, "platform_admin"
     return None, "disabled"
 
 
@@ -84,7 +85,7 @@ def public_ai_setup_state(user: User | None) -> dict[str, Any]:
         state = "CONNECTED"
     elif mode == "POSTERPRO_SPONSORED":
         state = "COMING_SOON"
-    elif user and user.is_admin and settings.openai_api_key:
+    elif user and user.is_admin and config_module.settings.openai_api_key:
         mode = "PLATFORM_DEFAULT"
         state = "CONNECTED"
     else:
