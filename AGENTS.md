@@ -1,5 +1,16 @@
 # PosterPro Deployment Log
 
+## 2026-09-16 - Category-noise readiness guard
+
+- Read-only production audit found `205` listings with source-policy/noisy
+  category suggestions and `1,949` listings without a category ID. No records
+  were mutated by the audit.
+- Canonical readiness now blocks a missing category ID paired with a source
+  breadcrumb/policy/generic hint instead of treating that text as taxonomy.
+- Regression test covers an Amazon refund breadcrumb and passes with the
+  canonical blocker.
+- Commit `9c33ffc`; no marketplace mutation performed.
+
 ## 2026-09-16 - Sale polling replay window
 
 ### Fixed
