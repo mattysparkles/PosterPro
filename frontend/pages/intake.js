@@ -8,6 +8,7 @@ import MetricCard from '../components/ui/metric-card';
 import PageHeader from '../components/ui/page-header';
 import SectionPanel from '../components/ui/section-panel';
 import StatusPill from '../components/ui/status-pill';
+import { Card, CardDescription, CardTitle } from '../components/ui/card';
 import { useAuth } from '../contexts/AuthContext';
 import {
   buildIntakeExportUrl,
@@ -118,20 +119,30 @@ export default function IntakeDashboardPage() {
           )}
         />
 
-        {(user?.is_admin || user?.can_access_vine_import) ? (
-          <section className="rounded-[22px] border border-amber-200 bg-amber-50/70 p-5 shadow-sm" aria-labelledby="vine-intake-title">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div className="flex items-start gap-3">
-                <div className="rounded-xl bg-amber-100 p-2 text-amber-800"><FileSpreadsheet size={20} aria-hidden="true" /></div>
-                <div>
-                  <h2 id="vine-intake-title" className="text-base font-semibold text-[var(--pp-text)]">Amazon Vine Report</h2>
-                  <p className="mt-1 max-w-2xl text-sm text-[var(--pp-muted)]">Import items from your Amazon Vine report and create PosterPro intake and listing records.</p>
-                </div>
-              </div>
-              <Button href="/imports/vine" variant="secondary"><FileSpreadsheet size={16} aria-hidden="true" /> Upload Vine report</Button>
-            </div>
-          </section>
-        ) : null}
+        <section aria-labelledby="intake-methods-title">
+          <div className="mb-3 flex items-end justify-between gap-3">
+            <div><p className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--pp-accent)]">Choose an intake method</p><h2 id="intake-methods-title" className="mt-1 text-xl font-semibold text-[var(--pp-text)]">Start with what you have</h2></div>
+            <p className="hidden text-sm text-[var(--pp-muted)] sm:block">Every method ends in the same review-ready listing workflow.</p>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <Card className="flex flex-col justify-between">
+              <div><div className="mb-3 inline-flex rounded-xl bg-blue-50 p-2 text-blue-700"><Camera size={20} aria-hidden="true" /></div><CardTitle>Photo Intake</CardTitle><CardDescription className="mt-1">Create a slate, take product photos, and let PosterPro group and enrich the item automatically.</CardDescription></div>
+              <Button href="/intake/slate" className="mt-5 w-full"><QrCode size={16} /> Start photo intake</Button>
+            </Card>
+            {(user?.is_admin || user?.can_access_vine_import) ? <Card className="flex flex-col justify-between border-amber-200 bg-amber-50/60">
+              <div><div className="mb-3 inline-flex rounded-xl bg-amber-100 p-2 text-amber-800"><FileSpreadsheet size={20} aria-hidden="true" /></div><CardTitle>Amazon Vine Report</CardTitle><CardDescription className="mt-1">Import products from your Vine report and create PosterPro intake and listing records.</CardDescription></div>
+              <Button href="/imports/vine" variant="secondary" className="mt-5 w-full"><FileSpreadsheet size={16} aria-hidden="true" /> Upload Vine report</Button>
+            </Card> : null}
+            <Card className="flex flex-col justify-between">
+              <div><div className="mb-3 inline-flex rounded-xl bg-slate-100 p-2 text-slate-700"><Settings2 size={20} aria-hidden="true" /></div><CardTitle>Manual Item</CardTitle><CardDescription className="mt-1">Start with a name, barcode, or photos. PosterPro fills in the research and listing details.</CardDescription></div>
+              <Button href="/listings/new" variant="secondary" className="mt-5 w-full">Create manual item</Button>
+            </Card>
+            <Card className="flex flex-col justify-between">
+              <div><div className="mb-3 inline-flex rounded-xl bg-violet-50 p-2 text-violet-700"><FolderSync size={20} aria-hidden="true" /></div><CardTitle>Connected Photos</CardTitle><CardDescription className="mt-1">Check your connected Google Photos intake source and review grouped batches already waiting.</CardDescription></div>
+              <Button href="/intake/queue" variant="secondary" className="mt-5 w-full">Review photo batches</Button>
+            </Card>
+          </div>
+        </section>
 
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           <MetricCard label="Active sessions" value={metrics.sessions} helper="Session records available" />
