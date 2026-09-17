@@ -973,12 +973,12 @@ export default function JobsPage() {
                   </div>
                 ) : null}
                 {activeJob.job.external_listing_id ? <p className="mt-2 break-all text-sm">External ID: {activeJob.job.external_listing_id}</p> : null}
-                {activeJob.job.external_url ? <a href={activeJob.job.external_url} target="_blank" rel="noreferrer" className="mt-1 inline-block break-all text-sm text-[#175cd3] hover:underline">Open external listing</a> : null}
+                {activeJob.job.external_url ? <ActionLink href={activeJob.job.external_url} external target="_blank" rel="noreferrer" className="mt-2">Open external listing</ActionLink> : null}
                 {String(activeJob.job.status || "").toUpperCase() === "AWAITING_OPERATOR_REVIEW" ? (
                   <div className="mt-4 space-y-3 rounded-lg border border-amber-300 bg-amber-50 p-3">
                     <p className="text-sm font-semibold text-amber-950">Operator review required</p>
                     <p className="text-xs text-amber-900">The extension has filled the marketplace form and stopped. Review and submit or end the listing on the marketplace; then record the confirmed result here. PosterPro does not auto-submit this action.</p>
-                    {(activeJob.job.result?.page_url || activeJob.job.payload?.marketplace_payload?.start_url) ? <a href={activeJob.job.result?.page_url || activeJob.job.payload?.marketplace_payload?.start_url} target="_blank" rel="noreferrer" className="inline-flex text-sm font-semibold text-[#175cd3] underline">Open marketplace review page</a> : null}
+                    {(activeJob.job.result?.page_url || activeJob.job.payload?.marketplace_payload?.start_url) ? <ActionLink href={activeJob.job.result?.page_url || activeJob.job.payload?.marketplace_payload?.start_url} external target="_blank" rel="noreferrer">Open marketplace review page</ActionLink> : null}
                     {String(activeJob.job.action || "").toUpperCase() !== "END" ? <div className="grid gap-2 md:grid-cols-2">
                       <label className="text-xs font-medium text-[#344054]">Marketplace listing ID<Input value={assistedExternalId} onChange={(event) => setAssistedExternalId(event.target.value)} placeholder="Required for a new listing" /></label>
                       <label className="text-xs font-medium text-[#344054]">Marketplace listing URL<Input value={assistedExternalUrl} onChange={(event) => setAssistedExternalUrl(event.target.value)} placeholder="https://marketplace.example/…" /></label>
@@ -1047,7 +1047,7 @@ export default function JobsPage() {
                           </div>
                           <p className="mt-1 text-xs text-[#667085]">Device #{job.device_id || "not claimed"} · attempts {job.attempt_count || 0} · claimed {formatExactTime(job.claimed_at)} · finished {formatExactTime(job.completed_at)}</p>
                           {job.external_listing_id ? <p className="mt-1 break-all text-xs text-[#344054]">External listing: {job.external_listing_id}</p> : null}
-                          {job.external_url ? <a className="mt-1 inline-block break-all text-xs text-[#175cd3] hover:underline" href={job.external_url} target="_blank" rel="noreferrer">Open marketplace listing</a> : null}
+                          {job.external_url ? <ActionLink href={job.external_url} external target="_blank" rel="noreferrer" className="mt-1 text-xs">Open marketplace listing</ActionLink> : null}
                           {job.error_code || job.error_detail ? <p role="alert" className="mt-2 rounded-md bg-red-50 p-2 text-xs text-[#912018]">{job.error_code ? `${job.error_code}: ` : ""}{job.error_detail || "Marketplace action failed."}</p> : null}
                         </div>
                       ))}
