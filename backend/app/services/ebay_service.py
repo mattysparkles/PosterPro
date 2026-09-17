@@ -19,6 +19,7 @@ from PIL import Image
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core import config as config_module
 from app.core.config import reload_settings, settings
 from app.models.enums import EbayPublishStatus, ListingStatus, MarketplaceListingStatus, MarketplaceName
 from app.models.models import Listing, MarketplaceAccount, MarketplaceListing, MarketplaceMetadataCache, MarketplacePublishAttempt, User
@@ -169,7 +170,10 @@ class EbayAPIClient:
 
     def __init__(self, access_token: str, *, sandbox: bool | None = None, timeout_seconds: int = 30):
         self.access_token = access_token
-        runtime_settings = reload_settings()
+        # Read the live settings object so tests and runtime configuration
+        # changes are honored; reloading a new object here can ignore a
+        # deliberate environment override on the process' settings singleton.
+        runtime_settings = config_module.settings
         use_sandbox = runtime_settings.environment != "production" if sandbox is None else sandbox
         self.base_url = "https://api.sandbox.ebay.com" if use_sandbox else "https://api.ebay.com"
         self.timeout = httpx.Timeout(timeout_seconds)
