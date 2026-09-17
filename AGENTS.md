@@ -1,5 +1,15 @@
 # PosterPro Deployment Log
 
+## 2026-09-16 - Routed crosspost readiness boundary
+
+- Routing-aware single and bulk crosspost endpoints now create durable
+  destination jobs even when a listing has readiness blockers. The worker is
+  the authoritative publish gate and records the canonical blocker per
+  destination instead of rejecting the routing request before a job exists.
+- This preserves explicit routing previews and makes recoverable failures
+  observable/retryable without allowing an unsafe publish.
+- Routing/API tests: `52 passed`; commit `21523d7` pushed normally.
+
 ## 2026-09-16 - Blocker queue shared-control migration
 
 - Rebuilt `/jobs/blockers` presentation around shared `ActionLink`, `Button`,
