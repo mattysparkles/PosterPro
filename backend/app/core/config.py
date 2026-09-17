@@ -149,6 +149,12 @@ def reload_settings() -> Settings:
     Long-running worker processes need a way to pick up those changes without
     a manual restart, especially for marketplace OAuth credentials.
     """
-    global settings
-    settings = Settings()
+    # Refresh the existing singleton in place.  Several long-lived services
+    # keep a reference to ``settings``; rebinding the module variable leaves
+    # those consumers with stale configuration (and makes environment changes
+    # appear nondeterministic).  Updating the instance preserves references
+    # while still applying the current environment/.env values.
+    refreshed = Settings()
+    settings.__dict__.clear()
+    settings.__dict__.update(refreshed.__dict__)
     return settings
