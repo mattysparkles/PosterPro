@@ -211,3 +211,19 @@ def test_listing_response_redacts_marketplace_credentials():
     assert safe["access_token"] == "[redacted]"
     assert safe["nested"]["device_secret"] == "[redacted]"
     assert safe["nested"]["external_url"].startswith("https://")
+
+
+def test_listing_response_does_not_present_source_policy_as_category(db_session):
+    user = User(email="category-display@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(
+        user_id=user.id,
+        title="RV windshield curtain",
+        description="Blackout curtain for an RV windshield.",
+        category_suggestion="Amazon > FREE 30-day refund/replacement",
+        category_id=None,
+    )
+    db_session.add(listing); db_session.flush()
+    payload = _serialize_listing_response(listing)
+    assert payload["category_suggestion"] == "Marketplace category needs resolution"
+    assert payload["category_resolution_status"] == "NEEDS_RESOLUTION"

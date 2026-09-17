@@ -62,7 +62,7 @@ from app.models.models import (
 )
 from app.services.ebay import EbayService
 from app.services.ebay_service import revise_ebay_listing, get_category_tree
-from app.services.category_rules import resolve_taxonomy_leaf
+from app.services.category_rules import is_source_noise_category, resolve_taxonomy_leaf
 from app.services.embedding import fake_clip_embedding
 from app.services.google_photos import GooglePhotosService
 from app.services.image_pipeline import ImagePipelineService
@@ -493,6 +493,16 @@ def _approval_preflight_status(listing: Listing) -> dict:
 def _serialize_listing_response(listing: Listing) -> dict:
     sync_listing_review_state(listing=listing)
     base = ListingResponse.model_validate(listing).model_dump()
+    # Never surface scraped policy/navigation fragments as if they were a
+    # marketplace taxonomy.  Keep the persisted source evidence untouched, but
+    # give the operator an honest, actionable display value until taxonomy
+    # resolution supplies a verified category ID.
+    raw_category_hint = str(base.get("category_suggestion") or "").strip()
+    if not str(base.get("category_id") or "").strip() and is_source_noise_category(raw_category_hint):
+        base["category_suggestion"] = "Marketplace category needs resolution"
+        base["category_resolution_status"] = "NEEDS_RESOLUTION"
+    else:
+        base["category_resolution_status"] = "VERIFIED" if str(base.get("category_id") or "").strip() else "UNRESOLVED"
     # The catalog card and its queue filter must share one readiness decision.
     # Frontend-only recomputation can be incomplete because summary responses
     # intentionally omit the heavyweight quality/readiness summaries.
