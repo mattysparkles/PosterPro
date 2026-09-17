@@ -2872,6 +2872,22 @@ async def run_dashboard_operator_command(
                 }
             end_operations = [operation for operation in operation_plan if operation.action == 'end' or operation.field == 'listing']
             regular_operations = [operation for operation in operation_plan if operation not in end_operations]
+            # Validate every non-end mutation before creating any durable end
+            # jobs.  End jobs are dispatched asynchronously, so allowing a
+            # later malformed field operation to fail would otherwise leave a
+            # compound request partially applied despite the preview having
+            # shown one coherent plan.
+            if regular_operations:
+                regular_listing_ids = sorted({listing_id for operation in regular_operations for listing_id in operation.items})
+                regular_listings = {listing_id: db.get(Listing, listing_id) for listing_id in regular_listing_ids}
+                regular_payload = [
+                    {"listing_ids": operation.items, "marketplaces": operation.marketplaces, "field": operation.field, "action": operation.action, "value": operation.value}
+                    for operation in regular_operations
+                ]
+                try:
+                    apply_marketplace_operation_plan(regular_payload, regular_listings, preview_only=True)
+                except ValueError as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
             if end_operations:
                 # End operations are queued as durable, destination-scoped
                 # jobs.  The worker performs exact remote-identity checks and
