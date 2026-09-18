@@ -49,12 +49,11 @@ def marketplace_description_variants(listing: Listing) -> dict[str, str]:
     # Keep a rich master while giving long-form destinations a small amount of
     # channel context.  This avoids the old failure mode where every adapter
     # received the Mercari-condensed copy (or an identical opaque blob).
+    # Channel adapters may format the same verified facts differently, but a
+    # marketplace name is not product copy.  Keep generated long-form
+    # descriptions natural and leave explicit operator variants untouched.
     ebay = safe
-    if ebay and not ebay.lower().startswith("ebay listing:"):
-        ebay = f"eBay listing: {ebay}"
     facebook = safe
-    if facebook and not facebook.lower().startswith("facebook marketplace:"):
-        facebook = f"Facebook Marketplace: {facebook}"
     return {
         "canonical": safe,
         "ebay": str(stored.get("ebay") or ebay).strip(),

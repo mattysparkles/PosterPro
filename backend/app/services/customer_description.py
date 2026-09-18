@@ -16,6 +16,8 @@ FORBIDDEN_DESCRIPTION_PATTERNS = (
     r"ai confidence:",
     r"needs review",
     r"marketplace guidance:",
+    r"prepared from .* signals for buyer review",
+    r"before publishing",
 )
 
 def sanitize_customer_description(value: str | None) -> tuple[str, list[str]]:

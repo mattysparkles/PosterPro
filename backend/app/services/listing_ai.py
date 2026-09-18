@@ -333,13 +333,13 @@ def build_listing_description(
         condition_text = " ".join(str(condition_notes).split()).strip()
         if condition_text:
             parts.append(f"Condition notes: {condition_text}.")
-    if source_label:
-        parts.append(f"Prepared from {source_label} signals for buyer review.")
+    # ``source_label`` is useful for generation/evidence telemetry, but it is
+    # internal implementation context and must never leak into customer copy.
     if photo_notes:
         notes = [str(note).strip() for note in photo_notes if str(note).strip()]
         if notes:
             parts.append(f"Photo evidence notes: {'; '.join(notes[:2])}.")
-    parts.append("Confirm exact model, included parts, and compatibility from the attached evidence before publishing.")
+    parts.append("Please review the photos for condition, completeness, and included accessories before purchase.")
     return " ".join(parts).strip()
 
 
