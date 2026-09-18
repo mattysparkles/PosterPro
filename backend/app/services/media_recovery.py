@@ -113,8 +113,10 @@ def _title_looks_like_bare_identifier(value: str | None) -> bool:
     alpha_tokens = [token for token in tokens if any(char.isalpha() for char in token)]
     if not alpha_tokens:
         return True
-    if len(tokens) <= 3 and all(len(token) <= 5 for token in tokens):
-        return True
+    # Short ordinary product names (for example "Plant Grow Light") are
+    # still valid identities.  Treat only compact code-like strings as bare
+    # identifiers; otherwise normalized-title consolidation can discard the
+    # stable base product group in favor of a descriptive sibling.
     if len(alpha_tokens) == 1 and len(tokens) <= 4 and any(token.isdigit() or re.fullmatch(r"[0-9a-z]+", token) for token in tokens):
         return True
     return False
@@ -383,16 +385,38 @@ def consolidate_sibling_children_by_evidence(db: Session, *, parent: MediaRecove
         strong = [item for item in cluster if item["key"] is not None]
         if not strong and not all(item["normalized_title"] for item in cluster):
             continue
-        winner = max(
-            (item["child"] for item in cluster),
-            key=lambda child: (
-                _child_specificity_score(next(item for item in cluster if item["child"].id == child.id)),
-                bool(child.draft_listing_id),
-                float(child.grouping_confidence or 0.0),
-                len(child.media_paths_json or []),
-                -child.id,
-            ),
-        )
+        # When the merge is based only on normalized titles, descriptor words
+        # that were deliberately removed during normalization (for example
+        # "packaging" or "dual head") must not make a later sibling the
+        # canonical keeper.  Keep the earliest/base title stable in that case.
+        # Stronger barcode/model evidence still wins through the specificity
+        # scorer, including the existing bare-identifier protection.
+        has_strong_key = any(item["key_kind"] in {"barcode", "model"} for item in cluster)
+        if (
+            not has_strong_key
+            and all(item["key_kind"] == "title" for item in cluster)
+            and not any(item["bare_identifier_title"] for item in cluster)
+        ):
+            winner = min(
+                (item["child"] for item in cluster),
+                key=lambda child: (
+                    len(next(item for item in cluster if item["child"].id == child.id)["title_tokens"]),
+                    -float(child.grouping_confidence or 0.0),
+                    -len(child.media_paths_json or []),
+                    child.id,
+                ),
+            )
+        else:
+            winner = max(
+                (item["child"] for item in cluster),
+                key=lambda child: (
+                    _child_specificity_score(next(item for item in cluster if item["child"].id == child.id)),
+                    bool(child.draft_listing_id),
+                    float(child.grouping_confidence or 0.0),
+                    len(child.media_paths_json or []),
+                    -child.id,
+                ),
+            )
         losers = [item["child"] for item in cluster if item["child"].id != winner.id]
         reason = "shared_identity_evidence" if strong else "normalized_title_match"
         _merge_child_group_analysis(db, parent=parent, winner=winner, losers=losers, reason=reason)
