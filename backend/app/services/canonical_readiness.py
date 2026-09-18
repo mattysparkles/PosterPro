@@ -126,7 +126,7 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
                 continue
             for issue in destination.get("blockers") or []:
                 if isinstance(issue, dict):
-                    message = str(issue.get("message") or issue.get("code") or "").strip()
+                    message = str(issue.get("message") or issue.get("user_message") or issue.get("raw_error") or issue.get("code") or "").strip()
                 else:
                     message = str(issue).strip()
                 if message:
@@ -136,8 +136,8 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
     if marketplace and isinstance(preflight, dict):
         row = (preflight.get("by_marketplace") or {}).get(str(marketplace).lower()) if isinstance(preflight.get("by_marketplace"), dict) else None
         if isinstance(row, dict):
-            blockers.extend(str(item.get("message") or item.get("code") or item) for item in (row.get("blockers") or []) if item)
-            warnings.extend(str(item.get("message") or item.get("code") or item) for item in (row.get("warnings") or []) if item)
+            blockers.extend(str(item.get("message") or item.get("user_message") or item.get("raw_error") or item.get("code") or item) for item in (row.get("blockers") or []) if item)
+            warnings.extend(str(item.get("message") or item.get("user_message") or item.get("raw_error") or item.get("code") or item) for item in (row.get("warnings") or []) if item)
             blockers = list(dict.fromkeys(blockers))
             warnings = list(dict.fromkeys(warnings))
     if str(marketplace or "").lower() == "ebay" and not str(getattr(listing, "category_id", None) or "").strip():

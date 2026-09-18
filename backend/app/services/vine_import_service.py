@@ -1267,8 +1267,16 @@ class VineImportService:
                 if blockers:
                     listing.processing_state = "needs_attention"
                     listing.needs_review = False
+                    first_blocker = blockers[0]
                     listing.processing_blocking_reason = str(
-                        blockers[0].get("message") if isinstance(blockers[0], dict) else blockers[0]
+                        (
+                            first_blocker.get("message")
+                            or first_blocker.get("user_message")
+                            or first_blocker.get("raw_error")
+                            or first_blocker.get("code")
+                        )
+                        if isinstance(first_blocker, dict)
+                        else first_blocker
                     )
                     listing.processing_error_stage = "preflight"
                 else:

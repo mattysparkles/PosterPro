@@ -700,8 +700,8 @@ class MarketplacePreflightService:
             "warning_count": len(warnings),
             "blocker_codes": [str(item.get("code") or "").strip() for item in blockers if str(item.get("code") or "").strip()],
             "warning_codes": [str(item.get("code") or "").strip() for item in warnings if str(item.get("code") or "").strip()],
-            "blocker_messages": [str(item.get("message") or "").strip() for item in blockers if str(item.get("message") or "").strip()],
-            "warning_messages": [str(item.get("message") or "").strip() for item in warnings if str(item.get("message") or "").strip()],
+            "blocker_messages": [str(item.get("message") or item.get("user_message") or item.get("raw_error") or item.get("code") or "").strip() for item in blockers if str(item.get("message") or item.get("user_message") or item.get("raw_error") or item.get("code") or "").strip()],
+            "warning_messages": [str(item.get("message") or item.get("user_message") or item.get("raw_error") or item.get("code") or "").strip() for item in warnings if str(item.get("message") or item.get("user_message") or item.get("raw_error") or item.get("code") or "").strip()],
             "missing_fields": [str(item or "").strip() for item in (preflight.get("missing_fields") or []) if str(item or "").strip()],
             "invalid_fields": [str(item or "").strip() for item in (preflight.get("invalid_fields") or []) if str(item or "").strip()],
             "ready": status in {"ready", "ready_with_warnings", "published"},
@@ -712,8 +712,8 @@ class MarketplacePreflightService:
             "source_version": str(preflight.get("source_version") or PRELIGHT_CACHE_VERSION),
             "top_blocker_code": blockers[0].get("code") if blockers else None,
             "top_warning_code": warnings[0].get("code") if warnings else None,
-            "top_blocker_message": blockers[0].get("message") if blockers else None,
-            "top_warning_message": warnings[0].get("message") if warnings else None,
+            "top_blocker_message": (blockers[0].get("message") or blockers[0].get("user_message") or blockers[0].get("raw_error") or blockers[0].get("code")) if blockers else None,
+            "top_warning_message": (warnings[0].get("message") or warnings[0].get("user_message") or warnings[0].get("raw_error") or warnings[0].get("code")) if warnings else None,
         }
 
     def cache_preflight_summary(self, db: Session, listing: Listing, preflight: dict[str, Any]) -> dict[str, Any]:
