@@ -5,6 +5,7 @@ from typing import Any
 import re
 
 from app.services.listing_review import summarize_listing_readiness
+from app.services.listing_specificity import classify_listing_reviewability
 from app.services.listing_ai import assess_description_quality
 from app.services.category_rules import is_source_noise_category
 
@@ -36,10 +37,18 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
     source_metadata = getattr(listing, "source_metadata", None) if isinstance(getattr(listing, "source_metadata", None), dict) else {}
     category_id = str(getattr(listing, "category_id", None) or "").strip()
     category_hint = str(getattr(listing, "category_suggestion", None) or "").strip()
+    preflight = (getattr(listing, "marketplace_data", None) or {}).get("marketplace_preflight") if isinstance(getattr(listing, "marketplace_data", None), dict) else None
+    fresh_preflight_ready = bool(isinstance(preflight, dict) and isinstance(preflight.get("by_marketplace"), dict) and any(
+        isinstance(row, dict)
+        and not bool(row.get("stale"))
+        and str(row.get("status") or "").lower() in {"ready", "ready_with_warnings", "needs_review", "published"}
+        and not bool(row.get("blockers"))
+        for row in preflight["by_marketplace"].values()
+    ))
     # Source breadcrumbs/policy text are never a marketplace taxonomy. A
     # missing ID plus a noisy hint is a real category blocker; a valid ID may
     # retain an old display hint without making the listing unpublishable.
-    if not category_id and is_source_noise_category(category_hint):
+    if not category_id and is_source_noise_category(category_hint) and not fresh_preflight_ready:
         blockers.append("A validated marketplace category is required; the current category hint is source-page or generic text")
     description_quality = assess_description_quality(description, title=title, source_metadata=source_metadata)
     source_type_value = str(getattr(listing, "source_type", None) or "").strip().lower()
@@ -57,7 +66,7 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
         source_facts_covered = covered
         if len(fact_values) >= 4 and covered < max(2, min(4, len(fact_values) // 3)):
             blockers.append("Description does not cover enough verified product facts")
-    if not description:
+    if not description and not fresh_preflight_ready:
         blockers.append("Description is missing")
     elif len(description) < 180:
         # A short description may still be valid for a simple item, but it is
@@ -75,13 +84,55 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
                 blockers.append("Listing description needs product-specific enrichment")
     if not title and source_type_value in {"amazon_vine", "google_photos_album", "photo_intake"}:
         blockers.append("Product title is missing")
+    reviewability = classify_listing_reviewability(
+        title=title,
+        description=description,
+        category=category_hint,
+        item_specifics=getattr(listing, "item_specifics", None) if isinstance(getattr(listing, "item_specifics", None), dict) else {},
+        source_metadata=source_metadata,
+        has_images=bool(listing_images),
+    )
+    if reviewability.get("caption_like_title") or reviewability.get("bare_identifier_title"):
+        blockers.append("Product identity is too generic to safely publish")
     # Keep the most actionable content blocker first for thin legacy drafts.
     if "Listing description needs product-specific enrichment" in blockers and blockers[0] == "Product title is missing":
         blockers.remove("Listing description needs product-specific enrichment")
         blockers.insert(0, "Listing description needs product-specific enrichment")
     blockers = list(dict.fromkeys(blockers))
     warnings = list(dict.fromkeys(warnings))
-    preflight = (getattr(listing, "marketplace_data", None) or {}).get("marketplace_preflight") if isinstance(getattr(listing, "marketplace_data", None), dict) else None
+    # A fresh destination preflight is the evidence-producing validator for
+    # legacy/imported rows. Some older records do not carry denormalized
+    # image/shipping fields even though the destination preflight passed them.
+    if fresh_preflight_ready:
+        base_blockers = set(base.get("blockers") or [])
+        derived_only = {
+            "No images attached",
+            "Only source/reference images attached",
+            "Primary image not set",
+            "Package weight or dimensions still need review",
+            "Price missing",
+            "Description is missing",
+            "A validated marketplace category is required; the current category hint is source-page or generic text",
+        }
+        blockers = [reason for reason in blockers if reason not in base_blockers or reason not in derived_only]
+    preflight_blockers: list[str] = []
+    if isinstance(preflight, dict) and isinstance(preflight.get("by_marketplace"), dict):
+        destinations = preflight["by_marketplace"].values()
+        if marketplace:
+            selected_destination = preflight["by_marketplace"].get(str(marketplace).lower())
+            destinations = [selected_destination] if isinstance(selected_destination, dict) else []
+        for destination in destinations:
+            if not isinstance(destination, dict):
+                continue
+            for issue in destination.get("blockers") or []:
+                if isinstance(issue, dict):
+                    message = str(issue.get("message") or issue.get("code") or "").strip()
+                else:
+                    message = str(issue).strip()
+                if message:
+                    preflight_blockers.append(message)
+        blockers.extend(preflight_blockers)
+        blockers = list(dict.fromkeys(blockers))
     if marketplace and isinstance(preflight, dict):
         row = (preflight.get("by_marketplace") or {}).get(str(marketplace).lower()) if isinstance(preflight.get("by_marketplace"), dict) else None
         if isinstance(row, dict):
@@ -93,6 +144,7 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
         blockers.append("A validated eBay category ID is required before publishing")
         blockers = list(dict.fromkeys(blockers))
     processing_state = str(getattr(listing, "processing_state", "") or "").lower()
+    listing_status = str(getattr(getattr(listing, "status", None), "value", getattr(listing, "status", "")) or "").lower()
     # A remote publication is a distinct canonical state from a local draft
     # revision.  Older workers may leave local processing/readiness blockers on
     # a listing after it was successfully published; those blockers must not
@@ -113,7 +165,28 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
     # it represents completed machine processing even though newer workers use
     # ``complete``. Treating it as in-flight makes the publisher disagree with
     # the queue for otherwise reviewable legacy drafts.
-    processing_complete = processing_state in {"complete", "completed", "processed", "ready"}
+    processing_complete = processing_state in {"complete", "completed", "processed", "ready"} or listing_status in {"ready", "processed", "posted", "published"}
+    if (
+        not processing_complete
+        and getattr(listing, "needs_review", False)
+        and processing_state == "queued"
+        and fresh_preflight_ready
+        and not getattr(listing, "processing_blocking_reason", None)
+    ):
+        # ``queued`` is the ORM/database default on older completed drafts;
+        # a fresh successful preflight plus the durable review marker proves
+        # that this row is awaiting the operator, not still in enrichment.
+        processing_complete = True
+    if (
+        not processing_complete
+        and getattr(listing, "needs_review", False)
+        and not getattr(listing, "processing_blocking_reason", None)
+        and processing_state not in {"processing", "pending", "queued", "enriching", "source_enrichment", "image_enrichment", "category_resolution", "title_generation", "description_generation", "quality_validation"}
+    ):
+        # Older completed drafts did not persist a processing_state.  The
+        # explicit review marker is the durable terminal signal for those
+        # rows; do not make them appear perpetually in Processing.
+        processing_complete = True
     # Older Vine workers persisted ``needs_attention`` as the processing state
     # even after a later pass cleared its blocker.  A review-marked row with no
     # current blocking reason is terminal machine work, not still-processing.
@@ -131,14 +204,32 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
     )
     # A listing cannot be publishable while enrichment/processing is still in
     # flight, even when the basic photo/price checks happen to pass.
-    publishable = bool(processing_complete and base.get("ready_for_publish")) and not attention and not blockers
+    base_ready = bool(base.get("ready_for_publish")) or fresh_preflight_ready
+    publishable = bool(processing_complete and base_ready) and not attention and not blockers
     destination_publishable = publishable
     if marketplace and isinstance(preflight, dict):
         destination = (preflight.get("by_marketplace") or {}).get(str(marketplace).lower()) if isinstance(preflight.get("by_marketplace"), dict) else None
         if isinstance(destination, dict):
             destination_publishable = destination_publishable and str(destination.get("status") or "").lower() in {"ready", "ready_with_warnings", "published"} and not bool(destination.get("blockers"))
-    transient_processing = processing_state in {"processing", "pending", "queued", "enriching", "source_enrichment", "image_enrichment", "category_resolution", "title_generation", "description_generation", "quality_validation"}
-    queue = "PUBLISHED" if remote_live else "NEEDS_ATTENTION" if (attention or blockers) else "PROCESSING" if (transient_processing or not processing_complete) else "NEEDS_REVIEW" if getattr(listing, "needs_review", False) else "READY"
+    transient_processing = (
+        processing_state in {"processing", "pending", "queued", "enriching", "source_enrichment", "image_enrichment", "category_resolution", "title_generation", "description_generation", "quality_validation"}
+        and not processing_complete
+    )
+    # In-flight enrichment is not an attention state even when an intermediate
+    # quality check has warnings/blockers.  It remains Processing until bounded
+    # retry/fallback work is exhausted; only then can a genuine blocker enter
+    # Needs Attention.
+    queue = (
+        "PUBLISHED" if remote_live
+        else "DRAFTS" if listing_status not in {"ready", "processed", "posted", "published"} and processing_state == "queued" and not getattr(listing, "needs_review", False) and not getattr(listing, "processing_stage", None) and not getattr(listing, "processing_blocking_reason", None)
+        # Explicit preflight/processing blockers outrank the transient state.
+        # A queued review row with a destination blocker is actionable, not
+        # merely in flight; otherwise the UI and publisher disagree about it.
+        else "NEEDS_ATTENTION" if ((attention or blockers) and (not transient_processing or bool(processing_blocker) or bool(preflight_blockers)))
+        else "PROCESSING" if (transient_processing or (not processing_complete and not attention and not blockers))
+        else "NEEDS_REVIEW" if getattr(listing, "needs_review", False)
+        else "READY"
+    )
     result = {
         "processing_complete": processing_complete,
         "enrichment_complete": bool(stored.get("enrichment_complete", processing_complete)),

@@ -207,6 +207,22 @@ def _listing_bucket(listing: Listing, remote_ebay_active_ids: set[str] | None = 
         return "published"
     if listing.status == ListingStatus.FAILED or normalized_status in {"failed", "error"} or str(listing.ebay_publish_status or "").upper() == "FAILED":
         return "failed"
+    # The readiness service is the canonical queue contract.  Keep the
+    # legacy fallbacks below only for records too old to have enough fields;
+    # otherwise queue filtering and serialized detail must make the same
+    # decision for Needs Review vs Needs Attention.
+    canonical = canonical_listing_readiness(listing)
+    canonical_queue = str(canonical.get("queue") or "").upper()
+    if canonical_queue == "NEEDS_ATTENTION":
+        return "needs_attention"
+    if canonical_queue == "PROCESSING":
+        return "processing"
+    if canonical_queue == "NEEDS_REVIEW":
+        return "review"
+    if canonical_queue == "DRAFTS":
+        return "drafts"
+    if canonical_queue == "READY":
+        return "ready" if explicitly_approved else "drafts"
     # Persisted preflight is authoritative even when an older worker did not
     # set processing_state. Keep blocked rows in the repair queue instead of
     # allowing them to masquerade as Needs Review.
