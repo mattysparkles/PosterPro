@@ -62,6 +62,8 @@ from app.services.google_photos_oauth import get_google_photos_oauth_state, uplo
 from app.services.listing_ai import ListingAIService
 from app.services.ai_entitlements import resolve_openai_key
 from app.services.listing_review import derive_condition_data, derive_shipping_profile, normalize_listing_images, shipping_policy_for_user, summarize_listing_readiness
+from app.services.listing_provenance import is_human_owned_field
+from app.services.marketplace_field_mapper import persist_marketplace_description_variants
 from app.services.media_lifecycle import purge_listing_media
 from app.services.listing_workspace import normalize_marketplace_data
 from app.services.photo_enrichment import PhotoEnrichmentService
@@ -3383,16 +3385,31 @@ class IntakeSlateService:
             }
         )
         price_data = self.ebay.enrich_price(generated.get("title") or title_hint, None)
-        listing.title = (slate.title or generated.get("title") or title_hint)[:255] if slate and slate.title else (generated.get("title") or title_hint)[:255]
-        listing.description = self._compose_description(slate=slate, generated=generated)
-        listing.category_suggestion = generated.get("category_suggestion") or listing.category_suggestion
-        listing.item_specifics = self._merged_specifics(slate=slate, generated=generated)
+        human_owned = lambda field: bool(listing.id) and is_human_owned_field(listing.source_metadata, field)
+        generated_title = (slate.title or generated.get("title") or title_hint)[:255] if slate and slate.title else (generated.get("title") or title_hint)[:255]
+        generated_description = self._compose_description(slate=slate, generated=generated)
+        generated_category = generated.get("category_suggestion") or listing.category_suggestion
+        generated_specifics = self._merged_specifics(slate=slate, generated=generated)
+        if not human_owned("title"):
+            listing.title = generated_title
+        if not human_owned("description"):
+            listing.description = generated_description
+            listing.canonical_description = generated_description
+            # Refresh generated destination copy from the new canonical draft;
+            # persist_marketplace_description_variants deliberately skips any
+            # marketplace variant marked operator_edited.
+            persist_marketplace_description_variants(listing, regenerate_generated=True)
+        if not human_owned("category_suggestion"):
+            listing.category_suggestion = generated_category
+        if not human_owned("item_specifics"):
+            listing.item_specifics = generated_specifics
         if photo_signals.get("barcode_candidates") and not (listing.item_specifics or {}).get("UPC"):
             listing.item_specifics = {
                 **(listing.item_specifics or {}),
                 "UPC": str(photo_signals["barcode_candidates"][0]),
             }
-        listing.tags = generated.get("tags") or listing.tags or []
+        if not human_owned("tags"):
+            listing.tags = generated.get("tags") or listing.tags or []
         listing.estimated_value = generated.get("estimated_value") or listing.estimated_value
         listing.suggested_price = float((generated.get("estimated_value") or listing.suggested_price or 24.0))
         listing.listing_price = listing.listing_price or listing.suggested_price
@@ -3473,8 +3490,10 @@ class IntakeSlateService:
             float(listing.suggested_price or generated.get("estimated_value") or 24.0),
         )
         listing.suggested_price = recommended_price
-        listing.listing_price = float(listing.listing_price or recommended_price)
-        listing.buy_it_now_price = float(listing.buy_it_now_price or recommended_price)
+        if not human_owned("listing_price"):
+            listing.listing_price = float(listing.listing_price or recommended_price)
+        if not human_owned("buy_it_now_price"):
+            listing.buy_it_now_price = float(listing.buy_it_now_price or recommended_price)
         listing.marketplace_data = normalize_marketplace_data(
             {
                 **(listing.marketplace_data or {}),
