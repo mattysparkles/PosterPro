@@ -1773,10 +1773,12 @@ def test_integrity_scan_persists_source_state_and_audit_event(db_session, monkey
     service.save_settings(db=db_session, user=user, payload={'enabled': True, 'album_url': 'https://photos.app.goo.gl/integrity'})
     monkeypatch.setattr(service, 'monitor_google_album', lambda _db, *, user: {'imported': 0, 'reconciliation_processed': 0})
     monkeypatch.setattr(service, 'sync_google_album_truth', lambda _db, *, user: {'album_visible_count': 0, 'stale_found': 0})
+    monkeypatch.setattr(service, 'refresh_drafts_until_stable', lambda _db, *, user, max_passes: {'passes': max_passes, 'regenerated_drafts': 0})
 
     result = service.run_integrity_scan(db_session, user=user)
 
     assert result['monitor']['imported'] == 0
+    assert result['draft_reconciliation']['passes'] == 2
     assert db_session.query(IntakeReconciliationJob).filter_by(user_id=user.id).count() == 0
     events = db_session.query(IntakeReconciliationEvent).filter_by(user_id=user.id, event_type='integrity_scan').all()
     assert len(events) == 1

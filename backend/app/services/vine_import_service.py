@@ -23,7 +23,7 @@ from app.services.ebay_service import _clip_specific_value, _derive_color, _deri
 from app.services.listing_review import derive_condition_data, derive_shipping_profile, normalize_listing_images, shipping_policy_for_user
 from app.services.listing_workspace import normalize_marketplace_data
 from app.services.listing_provenance import is_human_owned_field
-from app.services.marketplace_field_mapper import build_marketplace_payload, persist_marketplace_description_variants
+from app.services.marketplace_field_mapper import apply_generated_marketplace_drafts, build_marketplace_payload, persist_marketplace_description_variants
 from app.services.vine_parser import ParsedVineRow, parse_vine_csv, parse_vine_pdf, parse_vine_xlsx
 from app.services.vine_parser import parse_date_value
 from app.services.vine_policy import review_vine_product
@@ -1698,12 +1698,26 @@ class VineImportService:
                 "included_components": facts.get("included_components") or [],
                 "copy_constraint": "Create original buyer-facing copy. Do not repeat any source sentence or bullet verbatim; use factual values only and do not invent unsupported claims.",
             },
+            # The marketplace-draft formatter consumes normalized source
+            # metadata. Keep it alongside the legacy source_facts field so
+            # channel variants use the same verified evidence as the master.
+            "source_metadata": {"source_facts": {
+                "brand": facts.get("brand"), "model": facts.get("model"), "mpn": facts.get("mpn"),
+                "product_type": facts.get("product_type") or specifics.get("Type"),
+                "feature_bullets": facts.get("feature_bullets") or [],
+                "specifications": facts.get("specifications") or {},
+                "dimensions": facts.get("dimensions") or {}, "weight": facts.get("weight"),
+                "material": facts.get("material"), "color": facts.get("color"),
+                "size": facts.get("size"), "capacity": facts.get("capacity"),
+                "included_components": facts.get("included_components") or [],
+            }},
             "photo_keywords": [str(facts.get(k) or "") for k in ("brand", "model", "product_type") if facts.get(k)],
             "marketplace_targets": ["ebay"],
         }
         try:
             from app.services.listing_ai import ListingAIService
             generated = ListingAIService().generate(ai_signals, db=db, user_id=listing.user_id, listing_id=listing.id)
+            apply_generated_marketplace_drafts(listing, generated.get("marketplace_drafts"))
             ai_description = str(generated.get("description") or "").strip()
             if generated.get("generation_source") == "openai" and self._vine_description_is_usable(ai_description, listing.title, facts) and not self._description_source_copy(ai_description, facts) and not self._description_contains_source_noise(ai_description):
                 return ai_description

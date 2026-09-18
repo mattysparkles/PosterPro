@@ -20,7 +20,7 @@ from app.services.pricing_research_service import compute_listing_quality_summar
 from app.services.process_notifications import create_process_notification
 from app.services.vine_import_service import VineImportService
 from app.services.canonical_readiness import canonical_listing_readiness
-from app.services.marketplace_field_mapper import persist_marketplace_description_variants
+from app.services.marketplace_field_mapper import apply_generated_marketplace_drafts, persist_marketplace_description_variants
 from scripts.repair_recovery_draft_copy import _needs_category_refresh, _product_listing_description
 
 TARGET_SOURCE_TYPES = {"amazon_vine", "media_inventory_recovery"}
@@ -1459,6 +1459,7 @@ class ListingProcessingService:
             }
             source_metadata["recovery"] = refreshed_recovery
             listing.source_metadata = source_metadata
+            apply_generated_marketplace_drafts(listing, generated.get("marketplace_drafts"))
             # All intake sources converge on the same destination-copy model;
             # generated variants refresh here while operator-edited variants
             # remain protected by their provenance marker.
@@ -1516,6 +1517,7 @@ class ListingProcessingService:
                 item_specifics=listing.item_specifics,
                 existing=listing.shipping_profile,
             )
+            apply_generated_marketplace_drafts(listing, generated.get("marketplace_drafts"))
             persist_marketplace_description_variants(listing, regenerate_generated=True)
             updated["generated"] = generated
         return updated

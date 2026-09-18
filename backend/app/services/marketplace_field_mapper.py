@@ -64,6 +64,38 @@ def marketplace_description_variants(listing: Listing) -> dict[str, str]:
     }
 
 
+def apply_generated_marketplace_drafts(listing: Listing, drafts: dict[str, Any] | None) -> None:
+    """Persist validated generator output without touching human variants.
+
+    Listing AI already produces destination-aware drafts.  Older callers only
+    copied the canonical description and silently discarded those variants,
+    which made every marketplace receive the same text.  This small adapter
+    is intentionally provenance-aware and leaves operator-edited destinations
+    untouched.
+    """
+    if not isinstance(drafts, dict):
+        return
+    existing = dict(getattr(listing, "marketplace_descriptions", None) or {})
+    provenance = dict(existing.get("_provenance") or {}) if isinstance(existing.get("_provenance"), dict) else {}
+    marketplace_data = getattr(listing, "marketplace_data", None)
+    if isinstance(marketplace_data, dict) and isinstance(marketplace_data.get("marketplace_description_provenance"), dict):
+        provenance.update({str(k): str(v) for k, v in marketplace_data["marketplace_description_provenance"].items() if str(k).strip()})
+    for channel, draft in drafts.items():
+        channel_name = str(channel).strip().lower()
+        if channel_name not in {"ebay", "facebook", "mercari", "poshmark", "vinted"} or provenance.get(channel_name) == "operator_edited":
+            continue
+        value = draft.get("description") if isinstance(draft, dict) else draft
+        value = " ".join(str(value or "").split()).strip()
+        if not value:
+            continue
+        limit = MARKETPLACE_DESCRIPTION_LIMITS.get(channel_name)
+        existing[channel_name] = _condense_description(value, limit) if limit else value
+        provenance[channel_name] = "generated"
+    if provenance:
+        existing["_provenance"] = provenance
+    listing.marketplace_descriptions = existing
+
+
 def persist_marketplace_description_variants(listing: Listing, *, regenerate_generated: bool = False) -> dict[str, str]:
     """Materialize channel copy while preserving explicit operator overrides.
 

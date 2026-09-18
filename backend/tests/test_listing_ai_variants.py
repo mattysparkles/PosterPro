@@ -1,5 +1,5 @@
 from app.services.listing_ai import ListingAIService
-from app.services.marketplace_field_mapper import marketplace_description_variants
+from app.services.marketplace_field_mapper import apply_generated_marketplace_drafts, marketplace_description_variants
 from types import SimpleNamespace
 
 
@@ -69,3 +69,21 @@ def test_long_form_marketplaces_keep_rich_copy_separate_from_mercari():
     assert len(variants["facebook"]) > 1000
     assert len(variants["mercari"]) <= 1000
     assert variants["ebay"] != variants["mercari"]
+
+
+def test_generated_marketplace_drafts_are_persisted_without_overwriting_operator_copy():
+    listing = SimpleNamespace(
+        description="Verified master description.",
+        canonical_description="Verified master description.",
+        marketplace_descriptions={"facebook": "Human Facebook copy.", "_provenance": {"facebook": "operator_edited"}},
+        marketplace_data={},
+    )
+    apply_generated_marketplace_drafts(listing, {
+        "ebay": {"description": "Detailed eBay variant with specifications."},
+        "facebook": {"description": "Generated Facebook variant that must not replace the human copy."},
+        "mercari": {"description": "Mercari condensed variant."},
+    })
+    assert listing.marketplace_descriptions["ebay"] == "Detailed eBay variant with specifications."
+    assert listing.marketplace_descriptions["facebook"] == "Human Facebook copy."
+    assert listing.marketplace_descriptions["mercari"] == "Mercari condensed variant."
+    assert listing.marketplace_descriptions["_provenance"]["facebook"] == "operator_edited"

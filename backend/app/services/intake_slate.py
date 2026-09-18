@@ -63,7 +63,7 @@ from app.services.listing_ai import ListingAIService
 from app.services.ai_entitlements import resolve_openai_key
 from app.services.listing_review import derive_condition_data, derive_shipping_profile, normalize_listing_images, shipping_policy_for_user, summarize_listing_readiness
 from app.services.listing_provenance import is_human_owned_field
-from app.services.marketplace_field_mapper import persist_marketplace_description_variants
+from app.services.marketplace_field_mapper import apply_generated_marketplace_drafts, persist_marketplace_description_variants
 from app.services.media_lifecycle import purge_listing_media
 from app.services.listing_workspace import normalize_marketplace_data
 from app.services.photo_enrichment import PhotoEnrichmentService
@@ -3395,6 +3395,7 @@ class IntakeSlateService:
         if not human_owned("description"):
             listing.description = generated_description
             listing.canonical_description = generated_description
+            apply_generated_marketplace_drafts(listing, generated.get("marketplace_drafts"))
             # Refresh generated destination copy from the new canonical draft;
             # persist_marketplace_description_variants deliberately skips any
             # marketplace variant marked operator_edited.
@@ -3640,6 +3641,12 @@ class IntakeSlateService:
             raise ValueError("No intake Google Photos album or Drive link is configured.")
         monitor_result = self.monitor_google_album(db, user=user)
         truth_result = self.sync_google_album_truth(db, user=user)
+        # A provider truth scan changes the canonical photo stream.  Rebuild
+        # and redraft closed groups in the same bounded operation so an
+        # integrity scan cannot report success while leaving stale listing
+        # projections behind.  The draft pipeline preserves operator-owned
+        # fields and published remote identities.
+        draft_reconciliation = self.refresh_drafts_until_stable(db, user=user, max_passes=2)
         source_state = self._source_state_for(
             db,
             user_id=user.id,
@@ -3652,6 +3659,7 @@ class IntakeSlateService:
             "last_integrity_result": {
                 "monitor": monitor_result,
                 "truth": truth_result,
+                "draft_reconciliation": draft_reconciliation,
             },
         }
         db.add(source_state)
@@ -3661,11 +3669,11 @@ class IntakeSlateService:
                 event_type="integrity_scan",
                 status="completed",
                 interval_json={"source_key": source_state.source_key},
-                details_json={"monitor": monitor_result, "truth": truth_result},
+                details_json={"monitor": monitor_result, "truth": truth_result, "draft_reconciliation": draft_reconciliation},
             )
         )
         db.commit()
-        return {"monitor": monitor_result, "truth": truth_result}
+        return {"monitor": monitor_result, "truth": truth_result, "draft_reconciliation": draft_reconciliation}
 
     def _materialize_listing_images(self, *, item_id: str, title: str, photos: list[IntakePhoto]) -> tuple[list[str], list[dict[str, Any]]]:
         public_urls: list[str] = []
