@@ -1493,6 +1493,15 @@ def get_listings(
             )
 
     if queue_filters:
+        # Lifecycle buckets are derived by canonical_listing_readiness below.
+        # Do not pre-filter them with legacy denormalized flags (for example,
+        # ``status=draft`` or ``needs_review``), or a row whose durable state
+        # was repaired by the readiness service can never reach the Python
+        # classifier. Sold/archived visibility remains SQL-scoped above.
+        if normalized_queue in {"drafts", "processing", "needs_attention", "review", "ready"}:
+            queue_filters = []
+
+    if queue_filters:
         statement = statement.where(*queue_filters)
     visibility_filter = _listing_visibility_filter(normalized_queue)
     statement = statement.where(visibility_filter)
