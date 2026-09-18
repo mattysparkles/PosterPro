@@ -195,7 +195,10 @@ def _product_payload(listing: Listing, profile: StorefrontProfile, *, detail: bo
         source_url=source_metadata.get("source_image_url"),
         source_page_url=source_metadata.get("amazon_source_page_url"),
         source_platform=listing.source_type or "storefront",
-        default_is_reference=listing.source_type in {"amazon_vine", "google_photos_album"},
+        # Google Photos/Slate media are actual item captures.  Only explicit
+        # source-marketplace/reference metadata should exclude an image from
+        # the public gallery.
+        default_is_reference=bool(str(source_metadata.get("source_marketplace") or "").strip()),
         approved=True,
     )
     image_urls = []

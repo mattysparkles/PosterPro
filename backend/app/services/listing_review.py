@@ -351,11 +351,12 @@ def sync_listing_review_state(*, listing) -> None:
         source_url=source_metadata.get("source_image_url"),
         source_page_url=source_metadata.get("amazon_source_page_url"),
         source_platform=listing.source_type or "upload",
-        default_is_reference=bool(
-            source_type_value in {"google_photos_album"}
-            or str(source_metadata.get("source_marketplace") or "").strip()
-        ),
-        approved=source_type_value in {"upload", "storage_batch", "amazon_vine"},
+        default_is_reference=bool(str(source_metadata.get("source_marketplace") or "").strip()),
+        # Google Photos/Slate captures are the operator's actual item photos,
+        # not marketplace reference imagery.  They enter the same reviewable
+        # draft flow as uploaded/Vine media; explicit ``is_reference`` or a
+        # rejected operator state still wins per image.
+        approved=source_type_value in {"upload", "storage_batch", "amazon_vine", "google_photos_album", "photo_intake"},
     )
     listing.image_urls = [item["storage_path"] for item in (listing.listing_images or []) if item.get("operator_state") != "rejected"]
     listing.condition_data = derive_condition_data(

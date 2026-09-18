@@ -201,6 +201,36 @@ def test_sync_listing_review_state_promotes_vine_source_images_for_review(db_ses
     assert listing.listing_images[0]["operator_state"] == "approved"
 
 
+def test_sync_listing_review_state_treats_google_slate_photos_as_item_media(db_session):
+    user = User(email="google-photo-media@example.com")
+    db_session.add(user)
+    db_session.flush()
+
+    listing = Listing(
+        user_id=user.id,
+        status=ListingStatus.draft,
+        title="Slate captured item",
+        image_urls=["/media/google-photos/item-front.jpg"],
+        source_type="google_photos_album",
+        source_metadata={"intake": {"photo_ids": [123]}},
+    )
+
+    sync_listing_review_state(listing=listing)
+
+    image = listing.listing_images[0]
+    assert image["is_reference"] is False
+    assert image["operator_state"] == "approved"
+    readiness = summarize_listing_readiness(
+        listing_images=listing.listing_images,
+        condition_data=listing.condition_data,
+        shipping_profile=listing.shipping_profile,
+        listing={"title": listing.title, "category_suggestion": listing.category_suggestion},
+        source_type=listing.source_type,
+    )
+    assert readiness["actual_image_count"] == 1
+    assert readiness["manual_photo_needed"] is False
+
+
 def test_listing_response_redacts_marketplace_credentials():
     safe = _safe_marketplace_response({
         "status": "PUBLISHED",
