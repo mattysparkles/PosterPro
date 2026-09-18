@@ -1388,3 +1388,25 @@ requirements above. Credentials were not rotated or printed.
   `mattysparkles@icloud.com`, `is_admin=true`, role `admin`, all commerce
   entitlements true, and AI state `CONNECTED` / `PLATFORM_DEFAULT` without
   exposing credentials. Services were restarted only for PosterPro.
+
+## 2026-09-18 - Intake media and redraft safety continuation
+
+- Fixed sibling recovery-group consolidation so ordinary short product names
+  (for example `Plant Grow Light`) are not treated as bare identifiers. Title-
+  only normalized merges retain the stable base group; barcode/model evidence
+  still wins when present. Focused recovery/intake suites passed `32 tests`.
+- Google Photos/Slate captures are now treated as actual item media by listing
+  readiness and storefront projection unless an individual image is explicitly
+  marked reference/rejected. Added regression coverage; listing-review suite
+  passed `9 tests` and Google intake subset passed `8 tests`.
+- Slate redrafts now preserve operator-owned title, description, category,
+  specifics, tags, and price fields while refreshing generated canonical and
+  destination descriptions. Generated marketplace variants refresh only when
+  not marked `operator_edited`.
+- Description output no longer leaks internal generation labels or publishing
+  instructions, and long-form eBay/Facebook variants no longer receive awkward
+  marketplace-name prefixes. Description/publish focused suite passed `20`.
+- Commits pushed: `0d03eba`, `4376b18`, `6a1ba82`, `83d891d`.
+- Frontend production build completed successfully with existing lint/image
+  warnings. Host service restart and authenticated route/browser verification
+  remain external to the restricted Codex namespace.
