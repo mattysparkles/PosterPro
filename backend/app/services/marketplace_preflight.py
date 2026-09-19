@@ -309,6 +309,26 @@ class MarketplacePreflightService:
         quality = compute_listing_quality_summary(listing, pricing_analysis=pricing)
         blockers = self._base_blockers(listing, market, pricing, readiness)
         warnings = self._base_warnings(listing, market, pricing, readiness)
+        # The canonical readiness service is the contract shared by queues and
+        # publish workers.  Preserve its actionable blockers in this
+        # destination preflight as well; otherwise the editor could display a
+        # clean preflight while the queue/publisher correctly reject the same
+        # listing.
+        existing_blocker_messages = {
+            str(issue.get("message") or issue.get("user_message") or issue.get("code") or "").strip().lower()
+            for issue in blockers
+            if isinstance(issue, dict)
+        }
+        for reason in canonical.get("blocking_reasons") or []:
+            message = str(reason or "").strip()
+            if not message or message.lower() in existing_blocker_messages:
+                continue
+            blockers.append(_issue(
+                "CANONICAL_READINESS_BLOCKED",
+                message,
+                fix_hint="Resolve the listed PosterPro readiness blocker before publishing.",
+            ))
+            existing_blocker_messages.add(message.lower())
         payload_preview: dict[str, Any] = {}
         policy_summary: dict[str, Any] = {}
         category_summary: dict[str, Any] = {}

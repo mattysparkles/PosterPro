@@ -512,6 +512,26 @@ def test_facebook_preflight_flags_reference_only_images(db_session):
     assert result["policy_summary"]["browser_bridge_required"] is True
 
 
+def test_preflight_includes_canonical_readiness_blockers(db_session, monkeypatch):
+    _, listing = _seed_user_and_listing(db_session)
+    monkeypatch.setattr(
+        "app.services.marketplace_preflight.canonical_listing_readiness",
+        lambda *_args, **_kwargs: {
+            "blocking_reasons": ["Description needs verified product-specific enrichment"],
+            "publishable": False,
+        },
+    )
+
+    result = MarketplacePreflightService().preflight_listing(db_session, listing, "facebook")
+
+    assert result["status"] == "blocked"
+    assert any(
+        issue["code"] == "CANONICAL_READINESS_BLOCKED"
+        and issue["message"] == "Description needs verified product-specific enrichment"
+        for issue in result["blockers"]
+    )
+
+
 def test_ebay_preflight_reference_only_images_do_not_also_raise_invalid_url(db_session, monkeypatch):
     _, listing = _seed_user_and_listing(db_session)
     listing.listing_images = [
