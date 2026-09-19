@@ -260,6 +260,23 @@ def _merge_dimension_specifics(specifics: dict, provenance: dict, facts: dict) -
             provenance[key] = "amazon_product_page_dimensions"
 
 
+def _remove_vine_specific_noise(specifics: dict, provenance: dict, source_metadata: dict | None = None) -> None:
+    """Remove scraped placeholders/UI fields while preserving human edits."""
+    source = source_metadata if isinstance(source_metadata, dict) else {}
+    noise_keys = {"asin", "customer reviews", "reviews", "best sellers rank", "javascript"}
+    noise_values = {"does not apply", "unknown", "n/a", "not applicable", "none", "null"}
+    for key, value in list(specifics.items()):
+        field = str(key).strip()
+        if is_human_owned_field(source, f"item_specifics.{field}") or is_human_owned_field(source, "item_specifics"):
+            continue
+        key_lower = field.lower()
+        text = ", ".join(str(part).strip() for part in value if str(part).strip()) if isinstance(value, list) else str(value or "").strip()
+        lower = text.lower()
+        if key_lower in noise_keys or lower in noise_values or any(marker in lower for marker in ("var dpacr", "p.when(", "acrlink-click-metrics", "customer reviews")):
+            specifics.pop(key, None)
+            provenance.pop(key, None)
+
+
 def _positive_price(value) -> float | None:
     try:
         price = float(value)
@@ -697,6 +714,7 @@ class VineImportService:
                     specifics[key] = value
                     provenance[key] = "amazon_product_page"
             _merge_dimension_specifics(specifics, provenance, amazon_facts)
+            _remove_vine_specific_noise(specifics, provenance, listing.source_metadata)
             listing.item_specifics = specifics
             listing.tags = self._build_tags(item, listing.tags)
             marketplace_data = normalize_marketplace_data(dict(listing.marketplace_data or {}))
@@ -841,6 +859,7 @@ class VineImportService:
                     specifics[key] = value
                     provenance[key] = "amazon_product_page"
             _merge_dimension_specifics(specifics, provenance, facts)
+            _remove_vine_specific_noise(specifics, provenance, listing.source_metadata)
             listing.item_specifics = specifics
             persist_marketplace_description_variants(listing, regenerate_generated=True)
             marketplace_data = normalize_marketplace_data(dict(listing.marketplace_data or {}))
@@ -962,6 +981,7 @@ class VineImportService:
                     specifics[key] = value
                     provenance[key] = "amazon_product_page"
             _merge_dimension_specifics(specifics, provenance, facts)
+            _remove_vine_specific_noise(specifics, provenance, listing.source_metadata)
             listing.item_specifics = specifics
             persist_marketplace_description_variants(listing, regenerate_generated=True)
             marketplace_data = normalize_marketplace_data(dict(listing.marketplace_data or {}))
@@ -1472,6 +1492,7 @@ class VineImportService:
                 specifics[key] = value
                 provenance[key] = "amazon_product_page"
         _merge_dimension_specifics(specifics, provenance, facts)
+        _remove_vine_specific_noise(specifics, provenance, source)
         # eBay's Mirrors leaf asks for Item Height/Width, while Amazon often
         # records the same wall-mounted product as Item Length x Item Width.
         # For a mirror, preserve those measured axes in the destination's
