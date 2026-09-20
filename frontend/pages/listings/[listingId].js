@@ -208,6 +208,7 @@ export default function ListingWorkspacePage() {
   const { autonomousConfig, reload: reloadDashboard } = useDashboardData(user?.id);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [updateFeedback, setUpdateFeedback] = useState(null);
   const [generating, setGenerating] = useState(false);
   const [revisionFields, setRevisionFields] = useState([]);
   const [revisionNote, setRevisionNote] = useState("");
@@ -648,12 +649,42 @@ export default function ListingWorkspacePage() {
   const saveAndPublishChanges = async () => {
     if (!listing?.id) return;
     setSaving(true);
+    setUpdateFeedback({ status: "queued", message: "Saved locally. Updating active marketplaces…" });
     try {
       const result = await savePublishListingChanges(listing.id, buildPayload(listing.status));
       const saved = result?.listing || result;
       setListing(saved);
       setForm(normalizeListingForm(saved));
-      toast.success(`${result?.jobs?.length || 0} marketplace update job(s) queued.`);
+      const jobs = result?.jobs || [];
+      setUpdateFeedback({ status: jobs.length ? "running" : "saved", message: jobs.length ? `Saved locally. Updating ${jobs.length} active marketplace${jobs.length === 1 ? "" : "s"}…` : "Saved locally. No active marketplace update was required." });
+      toast.success(jobs.length ? `${jobs.length} marketplace update job(s) queued.` : "Changes saved locally.");
+      // Keep the editor honest about remote state. Do not leave the operator
+      // guessing after a successful request: follow the durable jobs to a
+      // terminal result and surface the exact destination error if one fails.
+      if (jobs.length) {
+        let latestJobs = [];
+        for (let attempt = 0; attempt < 12; attempt += 1) {
+          latestJobs = await fetchCrosspostJobs(listing.id).catch(() => []);
+          const pending = latestJobs.some((job) => ["queued", "running", "pending"].includes(String(job.status || "").toLowerCase()));
+          if (!pending) break;
+          await new Promise((resolve) => setTimeout(resolve, 1200));
+        }
+        setCrosspostJobs(latestJobs || []);
+        const failed = (latestJobs || []).filter((job) => ["failed", "error"].includes(String(job.status || "").toLowerCase()));
+        if (failed.length) {
+          const reason = failed.map((job) => `${(job.target_marketplaces || []).join(", ") || "Marketplace"}: ${job.last_error || "update failed"}`).join("; ");
+          setUpdateFeedback({ status: "failed", message: `Saved locally, but remote update failed — ${reason}` });
+          toast.error(`Remote update failed: ${reason}`);
+        } else {
+          setUpdateFeedback({ status: "updated", message: "Marketplace updates confirmed ✓" });
+          toast.success("Marketplace updates confirmed.");
+        }
+        const refreshed = await fetchListing(listing.id).catch(() => null);
+        if (refreshed) {
+          setListing(refreshed);
+          setForm(normalizeListingForm(refreshed));
+        }
+      }
       await reloadDashboard();
     } catch (error) {
       toast.error(error.message || "Could not publish changes.");
@@ -1217,6 +1248,7 @@ export default function ListingWorkspacePage() {
                 <StatusPill status={workflow.review_before_publish ? "info" : "warning"} label={workflow.review_before_publish ? "Approval required" : "Direct publish allowed"} />
                 <StatusPill status={String(listing?.marketplace_data?.sync_state || "synced").includes("failed") ? "error" : String(listing?.marketplace_data?.sync_state || "synced").includes("queued") ? "warning" : "success"} label={{local_changes_not_published:"Local changes not published",update_queued:"Update queued",partially_synced:"Partially synced",update_failed:"Update failed",synced:"Synced"}[String(listing?.marketplace_data?.sync_state || "synced")] || String(listing?.marketplace_data?.sync_state || "synced")} />
               </div>
+              {updateFeedback ? <div className={`rounded-[12px] border p-3 text-sm ${updateFeedback.status === "failed" ? "border-[#fecdca] bg-[#fff6f5] text-[#b42318]" : updateFeedback.status === "updated" ? "border-[#abefc6] bg-[#f6fef9] text-[#067647]" : "border-[#fedf89] bg-[#fffaeb] text-[#93370d]"}`} role="status">{updateFeedback.message}</div> : null}
               <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-4 text-sm text-[#475467]">
                 Save here first, then let AI enrich the record, then approve for publish. The same page works for manual products, imported marketplace listings, and photo-ingested drafts.
               </div>
