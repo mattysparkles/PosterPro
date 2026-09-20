@@ -13,7 +13,7 @@ from app.models.enums import MarketplaceName
 from app.models.models import MarketplaceAccount, MarketplaceExtensionDevice, MarketplaceExtensionJob, User
 from app.services.ai_entitlements import public_ai_setup_state
 from app.services.ebay_service import summarize_ebay_account_health
-from app.services.google_photos_oauth import get_google_photos_oauth_state, google_photos_oauth_ready
+from app.services.google_photos_oauth import GooglePhotosOAuthError, get_google_photos_oauth_state, google_photos_oauth_ready, refresh_google_photos_access_token
 
 
 ONBOARDING_KEY = "guided_onboarding_v1"
@@ -127,7 +127,17 @@ def _destination_status(name: str, user: User, db: Session) -> dict[str, Any]:
             except ValueError:
                 expired = False
             if expired:
-                return {"status": "EXPIRED", "message": "Google's saved access token is past its expiry. Choose Connect Google again; PosterPro will not change the saved authorization until you approve Google's sign-in."}
+                # Access-token expiry is normal OAuth lifecycle behavior. A
+                # durable refresh token is the user's authorization and must
+                # be used automatically; it is not a reason to ask for client
+                # credentials or force a consent flow again.
+                if oauth.get("has_refresh_token"):
+                    try:
+                        refreshed = refresh_google_photos_access_token(user, db)
+                        return {"status": "CONNECTED", "message": "Google Photos is connected and ready for photo intake.", "verified_at": refreshed.get("last_connected_at") or oauth.get("last_connected_at"), "account": refreshed.get("account_email") or oauth.get("account_email"), "refreshed": True}
+                    except GooglePhotosOAuthError as exc:
+                        return {"status": "REAUTH_REQUIRED", "message": "Google Photos connection needs to be renewed. PosterPro could not refresh the saved authorization; reconnect through Google sign-in.", "error": str(exc)}
+                return {"status": "REAUTH_REQUIRED", "message": "Google Photos connection needs to be renewed. Reconnect through Google sign-in; platform OAuth settings are managed by PosterPro."}
         if oauth.get("connection_state") in {"token_expired", "error"} and not oauth.get("has_refresh_token"):
             return {"status": "EXPIRED", "message": "Reconnect Google Photos to continue."}
         # Google Photos is used by PosterPro for authenticated library/media

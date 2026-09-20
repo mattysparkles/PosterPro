@@ -58,7 +58,7 @@ from app.models.models import (
 from app.services.ebay import EbayService
 from app.services.automation_bridge import AutomationBridgeError, submit_bridge_job
 from app.services.google_photos import GooglePhotosService
-from app.services.google_photos_oauth import get_google_photos_oauth_state, upload_photo_to_album, GooglePhotosOAuthError
+from app.services.google_photos_oauth import get_google_photos_oauth_state, google_photos_oauth_ready, upload_photo_to_album, GooglePhotosOAuthError
 from app.services.listing_ai import ListingAIService
 from app.services.ai_entitlements import resolve_openai_key
 from app.services.listing_review import derive_condition_data, derive_shipping_profile, normalize_listing_images, shipping_policy_for_user, summarize_listing_readiness
@@ -161,6 +161,7 @@ class IntakeSlateService:
                 "scopes": [],
                 "redirect_uri": None,
             },
+            "oauth_ready": bool(google_photos_oauth_ready()) if user else False,
             "marketplace_defaults": {
                 **DEFAULT_INTAKE_SETTINGS["marketplace_defaults"],
                 **(stored.get("marketplace_defaults") if isinstance(stored.get("marketplace_defaults"), dict) else {}),

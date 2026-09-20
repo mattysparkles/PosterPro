@@ -127,7 +127,7 @@ def test_onboarding_assisted_marketplace_requires_passed_live_diagnostic(db_sess
     assert task["missing_required_fields"] == ["condition"]
 
 
-def test_google_photos_expired_token_is_reported_without_refreshing_credentials(db_session, monkeypatch):
+def test_google_photos_expired_token_refreshes_when_refresh_authorization_exists(db_session, monkeypatch):
     from datetime import UTC, datetime, timedelta
     from app.core.secrets import encrypt_secret
     import app.services.onboarding_service as onboarding_service
@@ -143,12 +143,33 @@ def test_google_photos_expired_token_is_reported_without_refreshing_credentials(
     })
     db_session.add(user); db_session.flush()
     monkeypatch.setattr(onboarding_service, "google_photos_oauth_ready", lambda: True)
-    before = user.settings_json["google_photos_oauth"]["access_token_enc"]
+    monkeypatch.setattr(onboarding_service, "refresh_google_photos_access_token", lambda user, db: {"last_connected_at": "refreshed", "account_email": "owner@example.com"})
     task = next(task for task in onboarding_service.onboarding_snapshot(user, db_session)["tasks"] if task["id"] == "google_photos")
-    assert task["status"] == "EXPIRED"
-    assert "will not change" in task["message"]
-    assert user.settings_json["google_photos_oauth"]["access_token_enc"] == before
+    assert task["status"] == "CONNECTED"
+    assert "connected" in task["message"].lower()
     assert task["guidance"]["steps"]
+
+
+def test_google_photos_expired_token_reports_reauth_when_refresh_is_revoked(db_session, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+    from app.core.secrets import encrypt_secret
+    import app.services.onboarding_service as onboarding_service
+
+    user = User(email=f"google-revoked-{uuid4()}@example.com", role="owner", settings_json={
+        "google_photos_oauth": {
+            "connected": True,
+            "access_token_enc": encrypt_secret("saved-access-token", secret_key=config_module.settings.session_secret),
+            "refresh_token_enc": encrypt_secret("revoked-refresh-token", secret_key=config_module.settings.session_secret),
+            "token_expires_at": (datetime.now(UTC) - timedelta(hours=1)).replace(tzinfo=None).isoformat(),
+        },
+    })
+    db_session.add(user); db_session.flush()
+    monkeypatch.setattr(onboarding_service, "google_photos_oauth_ready", lambda: True)
+    from app.services.google_photos_oauth import GooglePhotosOAuthError
+    monkeypatch.setattr(onboarding_service, "refresh_google_photos_access_token", lambda user, db: (_ for _ in ()).throw(GooglePhotosOAuthError("invalid_grant")))
+    task = next(task for task in onboarding_service.onboarding_snapshot(user, db_session)["tasks"] if task["id"] == "google_photos")
+    assert task["status"] == "REAUTH_REQUIRED"
+    assert "renewed" in task["message"].lower()
 
 
 def test_ebay_connection_is_not_publish_ready_until_seller_policies_and_location_are_verified(db_session):

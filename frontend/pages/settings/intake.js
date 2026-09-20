@@ -192,6 +192,7 @@ export default function IntakeSettingsPage() {
             albumLabel={form?.album_url || form?.folder_id || 'PosterPro'}
             albumId={form?.google_photos?.album_id || form?.google_photos?.album_identifier}
             connectionState={form?.google_photos?.connection_state}
+            platformConfigured={Boolean(form?.google_photos?.oauth_ready)}
             redirectUri={form?.google_photos?.redirect_uri || defaultGoogleRedirectUri}
             connectUrl={googlePhotosConnectUrl}
             apiKeysUrl="/settings/intake?google_photos=missing-config#google-photos-oauth"

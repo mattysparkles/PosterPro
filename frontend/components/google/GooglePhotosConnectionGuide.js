@@ -35,6 +35,7 @@ export default function GooglePhotosConnectionGuide({
   onStartLogin,
   missingConfig = false,
   compact = false,
+  platformConfigured = true,
 }) {
   return (
     <section className="rounded-[28px] border border-[var(--pp-border)] bg-[linear-gradient(135deg,#fffdf7_0%,#f7faff_48%,#ffffff_100%)] p-5 shadow-[0_20px_50px_rgba(16,24,40,0.08)]">
@@ -45,8 +46,7 @@ export default function GooglePhotosConnectionGuide({
             {connected ? 'Google Photos is connected' : 'Connect Google Photos step by step'}
           </h2>
           <p className="mt-3 text-sm leading-7 text-[var(--pp-muted)]">
-            PosterPro should not leave you guessing. This flow takes you to the exact page for each step: configure OAuth, authorize Google, verify the
-            account, then open Slate and test an upload.
+            PosterPro should not leave you guessing. {connected ? 'Your saved Google authorization is active; PosterPro will keep using it and refresh access tokens automatically.' : 'This flow authorizes your Google account, verifies the connection, then opens Slate for intake.'}
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -74,26 +74,26 @@ export default function GooglePhotosConnectionGuide({
               </p>
             </div>
           ) : null}
-          <Step
+          {missingConfig ? <Step
             number={1}
             title="Open Google OAuth settings"
-            description="If the Client ID, Client Secret, or redirect URI are missing, use the exact API-keys section where PosterPro stores them."
+            description="This PosterPro installation needs its platform Google OAuth application configured before users can connect their accounts."
             action={(
               <Button href={apiKeysUrl || '/settings?tab=api-keys#google-photos-oauth'} variant="secondary">
-                Open API keys
+                Open platform setup
               </Button>
             )}
-            done={!missingConfig}
-          />
+            done={platformConfigured}
+          /> : null}
           <Step
             number={2}
             title="Authorize the Google account"
             description="PosterPro sends you to Google’s consent screen with the right scope. Pick the account that owns or can access the PosterPro album."
-            action={(
+            action={!connected ? (
               <Button onClick={onStartLogin} variant="default">
-                {connected ? 'Reconnect Google Photos' : 'Start Google login'}
+                Start Google login
               </Button>
-            )}
+            ) : null}
             done={connected}
           />
           <Step
@@ -136,9 +136,9 @@ export default function GooglePhotosConnectionGuide({
             )}
             done={connected}
           />
-          {onSaveConfig ? (
+          {onSaveConfig && missingConfig ? (
             <div className="rounded-[20px] border border-dashed border-[var(--pp-border)] bg-[var(--pp-surface-strong)] p-4">
-              <p className="text-sm font-semibold text-[var(--pp-text)]">Need to save OAuth settings first?</p>
+              <p className="text-sm font-semibold text-[var(--pp-text)]">Platform setup required</p>
               <p className="mt-2 text-sm leading-6 text-[var(--pp-muted)]">
                 Save the Google OAuth Client ID, Client Secret, and redirect URI, then return here and click Start Google login.
               </p>
