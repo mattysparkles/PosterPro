@@ -1316,10 +1316,48 @@ def process_marketplace_crosspost_job_task(self, job_id: int) -> dict:
                 try:
                     expected_identity = str((job.execution_plan or {}).get("external_listing_id") or "").strip()
                     revised = asyncio.run(revise_ebay_listing(listing, db, expected_external_listing_id=expected_identity))
+                    upsert_marketplace_listing(
+                        db,
+                        listing_id=listing.id,
+                        marketplace=market,
+                        status=MarketplaceListingStatus.UPDATED,
+                        response=revised,
+                    )
+                    _force_marketplace_listing_state(
+                        db,
+                        listing_id=listing.id,
+                        marketplace=market,
+                        status=MarketplaceListingStatus.UPDATED,
+                        response=revised,
+                    )
                     results.append({"marketplace": market, "execution_mode": "direct_api", "operation": "UPDATE", "status": "UPDATED", "response": revised})
                 except Exception as exc:
                     failed_markets.append(market)
-                    results.append({"marketplace": market, "execution_mode": "direct_api", "operation": "UPDATE", "status": "failed", "error": str(exc)})
+                    failure_response = {
+                        "status": "FAILED",
+                        "operation": "UPDATE",
+                        "external_listing_id": str((job.execution_plan or {}).get("external_listing_id") or "").strip() or None,
+                        "error": str(exc),
+                    }
+                    # A failed update is a destination failure, not a reason
+                    # to create a replacement listing. Persist it on the exact
+                    # marketplace identity so the editor/jobs UI can show the
+                    # real blocker and retry that destination only.
+                    upsert_marketplace_listing(
+                        db,
+                        listing_id=listing.id,
+                        marketplace=market,
+                        status=MarketplaceListingStatus.FAILED,
+                        response=failure_response,
+                    )
+                    _force_marketplace_listing_state(
+                        db,
+                        listing_id=listing.id,
+                        marketplace=market,
+                        status=MarketplaceListingStatus.FAILED,
+                        response=failure_response,
+                    )
+                    results.append({"marketplace": market, "execution_mode": "direct_api", "operation": "UPDATE", "status": "failed", "error": str(exc), "response": failure_response})
                 continue
             if operation == "update" and str(market).lower() != MarketplaceName.ebay.value:
                 try:

@@ -168,6 +168,72 @@ def test_ebay_end_crosspost_worker_targets_exact_identity_and_completes(db_sessi
     assert result["results"][0]["operation"] == "END"
     assert result["results"][0]["status"] == "ENDED"
 
+
+def test_ebay_update_worker_marks_exact_marketplace_state_updated(db_session, monkeypatch):
+    user = User(email="exact-ebay-update@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(
+        user_id=user.id,
+        status=ListingStatus.posted,
+        title="Update item",
+        description="A confirmed active listing",
+        listing_price=29.99,
+        quantity=1,
+        ebay_listing_id="123456789012",
+        marketplace_data={},
+    )
+    db_session.add(listing); db_session.flush()
+    marketplace_listing = MarketplaceListing(
+        listing_id=listing.id,
+        marketplace="ebay",
+        marketplace_listing_id="123456789012",
+        status=MarketplaceListingStatus.PUBLISHED,
+    )
+    db_session.add(marketplace_listing)
+    job = MarketplaceCrosspostJob(
+        user_id=user.id,
+        listing_id=listing.id,
+        target_marketplaces=["ebay"],
+        requested_mode="manual_update",
+        status="queued",
+        execution_plan={"operation": "update", "external_listing_id": "123456789012"},
+    )
+    db_session.add(job); db_session.commit()
+
+    async def fake_revise(_listing, _db, *, expected_external_listing_id):
+        assert expected_external_listing_id == "123456789012"
+        return {"status": "UPDATED", "listing_id": expected_external_listing_id, "offer_id": "offer-123"}
+
+    monkeypatch.setattr(tasks, "revise_ebay_listing", fake_revise)
+    result = tasks.process_marketplace_crosspost_job_task.run(job.id)
+
+    assert result["status"] == "completed"
+    db_session.refresh(marketplace_listing)
+    assert marketplace_listing.status == MarketplaceListingStatus.UPDATED
+    assert marketplace_listing.raw_response["status"] == "UPDATED"
+
+
+def test_ebay_update_worker_persists_failure_without_creating_replacement(db_session, monkeypatch):
+    user = User(email="exact-ebay-update-failure@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(user_id=user.id, status=ListingStatus.posted, title="Update failure", listing_price=29.99, ebay_listing_id="123456789012")
+    db_session.add(listing); db_session.flush()
+    marketplace_listing = MarketplaceListing(listing_id=listing.id, marketplace="ebay", marketplace_listing_id="123456789012", status=MarketplaceListingStatus.PUBLISHED)
+    db_session.add(marketplace_listing)
+    job = MarketplaceCrosspostJob(user_id=user.id, listing_id=listing.id, target_marketplaces=["ebay"], requested_mode="manual_update", status="queued", execution_plan={"operation": "update", "external_listing_id": "123456789012"})
+    db_session.add(job); db_session.commit()
+
+    async def fail_revise(*_args, **_kwargs):
+        raise RuntimeError("eBay account verification required")
+
+    monkeypatch.setattr(tasks, "revise_ebay_listing", fail_revise)
+    result = tasks.process_marketplace_crosspost_job_task.run(job.id)
+
+    assert result["status"] == "failed"
+    db_session.refresh(marketplace_listing)
+    assert marketplace_listing.status == MarketplaceListingStatus.FAILED
+    assert "verification required" in marketplace_listing.raw_response["error"]
+
 def test_hosted_facebook_assist_requires_visible_listing_before_marking_published(db_session, monkeypatch):
     user = User(
         email="facebook-visibility@example.com",

@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -474,6 +475,63 @@ def test_end_ebay_listing_treats_unpublished_offer_as_idempotent(monkeypatch):
     ))
     assert result["status"] == "ALREADY_ENDED"
     assert calls == [("GET", "/sell/inventory/v1/offer/offer-abc")]
+
+
+def test_resolve_existing_offer_recovers_historical_marketplace_sync_identity():
+    listing = DummyListing()
+    listing.ebay_listing_id = "188693164224"
+    listing.marketplace_listings = [SimpleNamespace(
+        marketplace="MarketplaceName.ebay",
+        raw_response={"offer_id": "215920750011", "ebay_listing_id": "188693164224"},
+    )]
+
+    assert ebay_service._resolve_existing_ebay_offer_id(listing) == "215920750011"
+
+
+def test_revise_ebay_listing_uses_recovered_offer_without_creating_new_offer(monkeypatch):
+    listing = DummyListing()
+    listing.id = 1063
+    listing.ebay_listing_id = "188693164224"
+    listing.marketplace_data = {}
+    listing.marketplace_listings = [SimpleNamespace(
+        marketplace="MarketplaceName.ebay",
+        marketplace_listing_id="188693164224",
+        status="MarketplaceListingStatus.PUBLISHED",
+        raw_response={"offer_id": "215920750011"},
+    )]
+    calls = []
+
+    class FakeClient:
+        def __init__(self, _token):
+            pass
+
+        async def request(self, method, path, **kwargs):
+            calls.append((method, path, kwargs.get("payload")))
+            if method == "GET":
+                return {"listing": {"listingId": "188693164224"}, "status": "PUBLISHED"}
+            assert method == "PUT" and path == "/sell/inventory/v1/offer/215920750011"
+            return {"status": "UPDATED"}
+
+    async def fake_account(_user_id, _db):
+        return DummyAccount()
+
+    async def fake_plan(*_args, **_kwargs):
+        return {"payload_preview": {"item_specifics": {}}, "inventory_item_payload": {"sku": "sku-1063"}, "offer_payload": {"pricingSummary": {"price": {"value": "29.99"}}}}
+
+    async def fake_item(*_args, **_kwargs):
+        return {"sku": "sku-1063"}
+
+    monkeypatch.setattr(ebay_service, "get_or_refresh_account", fake_account)
+    monkeypatch.setattr(ebay_service, "build_ebay_publish_plan", fake_plan)
+    monkeypatch.setattr(ebay_service, "create_or_replace_item", fake_item)
+    monkeypatch.setattr(ebay_service, "EbayAPIClient", FakeClient)
+    monkeypatch.setattr(ebay_service, "_sync_ebay_marketplace_listing", lambda *_args, **_kwargs: None)
+
+    result = asyncio.run(ebay_service.revise_ebay_listing(listing, DummyDB(), expected_external_listing_id="188693164224"))
+
+    assert result["status"] == "UPDATED"
+    assert calls[0][:2] == ("GET", "/sell/inventory/v1/offer/215920750011")
+    assert calls[1][:2] == ("PUT", "/sell/inventory/v1/offer/215920750011")
 
 
 def test_revise_ebay_listing_never_creates_replacement_when_offer_identity_is_missing(monkeypatch):

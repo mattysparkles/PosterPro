@@ -2498,6 +2498,7 @@ class VineImportService:
         specifications = facts.get("specifications") or {}
         excluded_spec_keys = {"customer reviews", "reviews", "asin", "model", "brand", "brand name", "type", "item type", "product type", "best sellers rank", "date first available", "publication date", "customer rating", "department"}
         useful_specs = []
+        candidate_specs = []
         seen_spec_keys: set[str] = set()
         for key, value in specifications.items():
             normalized_key = re.sub(r"\s+", " ", str(key).strip().lower())
@@ -2515,9 +2516,13 @@ class VineImportService:
             if normalized_key in {"capacity", "tank capacity", "supported capacity", "material", "color", "colour", "size", "item weight", "weight"}:
                 continue
             seen_spec_keys.add(normalized_key)
-            useful_specs.append((key, value))
-            if len(useful_specs) >= 12:
-                break
+            candidate_specs.append((key, value, normalized_key))
+        apparel_context = any(marker in f"{name} {product_type}".lower() for marker in ("jacket", "coat", "shirt", "clothing", "apparel", "varsity", "letterman"))
+        if apparel_context:
+            preferred = ("closure type", "fit type", "sleeve type", "sleeve length description", "collar style", "lining description", "fabric type", "apparel fabric stretch", "product care instructions", "department", "pattern")
+            priority = {name: index for index, name in enumerate(preferred)}
+            candidate_specs.sort(key=lambda row: priority.get(row[2], len(priority)))
+        useful_specs = [(key, value) for key, value, _ in candidate_specs[:12]]
         if useful_specs:
             lines.extend(["", "Product details:", *[f"• {key}: {value}" for key, value in useful_specs]])
         for label, key in (("Material", "material"), ("Color", "color"), ("Size", "size"), ("Capacity", "capacity")):

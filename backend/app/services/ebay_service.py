@@ -2776,10 +2776,32 @@ def _resolve_existing_ebay_offer_id(listing: Listing) -> str | None:
         offer.get("offer_id"),
         marketplace_data.get("offer_id"),
         marketplace_data.get("current_offer_id"),
+        (marketplace_data.get("ebay_revision") or {}).get("offer_id") if isinstance(marketplace_data.get("ebay_revision"), dict) else None,
     ):
         value = str(candidate or "").strip()
         if value:
             return value
+
+    # Historical eBay sync rows stored the authoritative offer identity in
+    # MarketplaceListing.raw_response rather than copying it into
+    # listing.marketplace_data. Recover that exact ID for updates/ends; never
+    # derive or guess an offer from the listing ID or SKU.
+    for row in getattr(listing, "marketplace_listings", None) or []:
+        market = str(getattr(getattr(row, "marketplace", None), "value", getattr(row, "marketplace", "")) or "").lower()
+        if market not in {"ebay", "marketplacename.ebay"}:
+            continue
+        raw = getattr(row, "raw_response", None)
+        if not isinstance(raw, dict):
+            continue
+        candidates = [
+            raw.get("offer_id"), raw.get("offerId"),
+            (raw.get("source_identifiers") or {}).get("offer_id") if isinstance(raw.get("source_identifiers"), dict) else None,
+            ((raw.get("remote") or {}).get("raw_offer") or {}).get("offerId") if isinstance((raw.get("remote") or {}).get("raw_offer"), dict) else None,
+        ]
+        for candidate in candidates:
+            value = str(candidate or "").strip()
+            if value:
+                return value
 
     attempts = [attempt for attempt in (listing.publish_attempts or []) if isinstance(attempt, MarketplacePublishAttempt)]
     attempts = sorted(

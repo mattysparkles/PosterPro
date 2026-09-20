@@ -116,6 +116,108 @@ intake_slate_service = IntakeSlateService()
 vine_import_service = VineImportService()
 
 
+def _queue_agent_marketplace_updates(
+    db: Session,
+    *,
+    user: User,
+    changes: list[dict],
+    operation_label: str = "agent_mutation",
+) -> list[dict]:
+    """Queue exact-identity updates for agent mutations.
+
+    The agent and the listing editor must share the same remote-update contract:
+    a local destination override is only a desired state until a durable update
+    job has attempted the exact known marketplace identity.  Canonical-only or
+    unpublished destinations remain local-only and are reported as such.
+    """
+    grouped: dict[tuple[int, str], dict[str, dict]] = {}
+    for change in changes or []:
+        try:
+            listing_id = int(change.get("listing_id"))
+        except (TypeError, ValueError):
+            continue
+        market = str(change.get("marketplace") or "").strip().lower()
+        if market not in SUPPORTED_MARKETS:
+            continue
+        grouped.setdefault((listing_id, market), {})[str(change.get("field") or "field")] = {
+            "before": change.get("before"),
+            "after": change.get("after"),
+        }
+
+    results: list[dict] = []
+    from app.api.marketplace_jobs import _enqueue_priority
+
+    for (listing_id, market), changed_fields in grouped.items():
+        active = db.execute(
+            select(MarketplaceListing).where(
+                MarketplaceListing.listing_id == listing_id,
+                MarketplaceListing.status.in_([MarketplaceListingStatus.PUBLISHED, MarketplaceListingStatus.UPDATED]),
+                MarketplaceListing.marketplace_listing_id.is_not(None),
+                func.lower(cast(MarketplaceListing.marketplace, String)) == market,
+            ).order_by(MarketplaceListing.id.desc())
+        ).scalars().first()
+        if not active or not str(active.marketplace_listing_id or "").strip():
+            results.append({"listing_id": listing_id, "marketplace": market, "status": "saved_locally", "message": "No active remote listing identity was found."})
+            continue
+        pending = db.execute(
+            select(MarketplaceCrosspostJob).where(
+                MarketplaceCrosspostJob.user_id == user.id,
+                MarketplaceCrosspostJob.listing_id == listing_id,
+                MarketplaceCrosspostJob.status.in_(["queued", "running"]),
+            ).order_by(MarketplaceCrosspostJob.id.desc())
+        ).scalars().all()
+        existing = next(
+            (
+                job for job in pending
+                if market in [str(value).strip().lower() for value in (job.target_marketplaces or [])]
+                and str((job.execution_plan or {}).get("operation") or "").lower() == "update"
+            ),
+            None,
+        )
+        if existing:
+            results.append({"listing_id": listing_id, "marketplace": market, "status": "already_queued", "job_id": existing.id, "external_listing_id": active.marketplace_listing_id})
+            continue
+        revision = ListingRevision(
+            listing_id=listing_id,
+            user_id=user.id,
+            revision=int((db.get(Listing, listing_id).marketplace_data or {}).get("posterpro_revision") or 0) + 1,
+            operation=operation_label,
+            changed_fields=changed_fields,
+            marketplaces_targeted=[market],
+            marketplace_results={},
+            sync_state="update_queued",
+            status="queued",
+        )
+        db.add(revision)
+        db.flush()
+        job = MarketplaceCrosspostJob(
+            user_id=user.id,
+            listing_id=listing_id,
+            source_marketplace="posterpro",
+            target_marketplaces=[market],
+            requested_mode=operation_label,
+            status="queued",
+            priority=0,
+            requested_by=user.id,
+            execution_plan={
+                "operation": "update",
+                "revision_id": revision.id,
+                "external_listing_id": str(active.marketplace_listing_id),
+                "changed_fields": changed_fields,
+            },
+        )
+        db.add(job)
+        db.flush()
+        try:
+            task = _enqueue_priority(process_marketplace_crosspost_job_task, job.id, job.priority)
+            job.task_id = task.id
+        except Exception as exc:  # queue failure remains visible and retryable
+            results.append({"listing_id": listing_id, "marketplace": market, "status": "queued", "job_id": job.id, "dispatch_error": str(exc)})
+        else:
+            results.append({"listing_id": listing_id, "marketplace": market, "status": "queued", "job_id": job.id, "task_id": job.task_id, "external_listing_id": active.marketplace_listing_id})
+    return results
+
+
 def _is_merged_recovery_child(listing: Listing) -> bool:
     source_metadata = listing.source_metadata if isinstance(listing.source_metadata, dict) else {}
     recovery = source_metadata.get("recovery") if isinstance(source_metadata.get("recovery"), dict) else {}
@@ -2990,8 +3092,10 @@ async def run_dashboard_operator_command(
                     try:
                         applied = apply_marketplace_operation_plan(plan_payload, listings)
                         db.add_all(listings.values())
+                        update_results = _queue_agent_marketplace_updates(db, user=current_user, changes=applied["changes"])
                         db.commit()
                         results.extend({"listing_id": change["listing_id"], "status": "updated", "change": change} for change in applied["changes"])
+                        results.extend(update_results)
                     except ValueError as exc:
                         db.rollback()
                         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -3004,8 +3108,10 @@ async def run_dashboard_operator_command(
                 try:
                     applied = apply_marketplace_operation_plan(plan_payload, listings)
                     db.add_all(listings.values())
+                    update_results = _queue_agent_marketplace_updates(db, user=current_user, changes=applied["changes"])
                     db.commit()
                     results = [{"listing_id": change["listing_id"], "status": "updated", "change": change} for change in applied["changes"]]
+                    results.extend(update_results)
                 except ValueError as exc:
                     db.rollback()
                     raise HTTPException(status_code=422, detail=str(exc)) from exc
