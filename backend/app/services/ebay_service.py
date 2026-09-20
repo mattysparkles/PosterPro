@@ -32,6 +32,15 @@ class EbayIntegrationError(RuntimeError):
     """Raised for eBay API integration errors."""
 
 
+def _ebay_effective_price(listing: Listing) -> Any:
+    """Resolve eBay's destination price without mutating canonical price."""
+    marketplace_data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}
+    overrides = marketplace_data.get("marketplace_overrides") if isinstance(marketplace_data.get("marketplace_overrides"), dict) else {}
+    ebay_override = overrides.get("ebay") if isinstance(overrides.get("ebay"), dict) else {}
+    override = ebay_override.get("price")
+    return override if override not in (None, "") else (listing.suggested_price or listing.listing_price or listing.buy_it_now_price or listing.estimated_value or 19.99)
+
+
 _EBAY_TRADING_NAMESPACE = "urn:ebay:apis:eBLBaseComponents"
 
 
@@ -2499,7 +2508,10 @@ async def build_ebay_publish_plan(
 
     sku = _build_ebay_sku(listing.user_id, listing.id)
     sku = _build_ebay_sku(listing.user_id, listing.id)
-    price = listing.suggested_price or listing.listing_price or listing.buy_it_now_price or listing.estimated_value or 19.99
+    # Destination overrides are deliberate operator state.  They take
+    # precedence over the canonical/reference price for eBay updates while
+    # leaving other marketplaces untouched.
+    price = _ebay_effective_price(listing)
     package_weight_and_size = _build_ebay_package_weight_and_size(listing)
     inventory_payload = {
         "sku": sku,

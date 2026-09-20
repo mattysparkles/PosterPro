@@ -42,6 +42,14 @@ class DummyAccount:
         self.refresh_token = "refresh-token"
 
 
+def test_ebay_effective_price_honors_destination_override_without_changing_canonical():
+    listing = DummyListing()
+    listing.listing_price = 49.99
+    listing.marketplace_data = {"marketplace_overrides": {"ebay": {"price": 25.0}, "mercari": {"price": 28.0}}}
+    assert ebay_service._ebay_effective_price(listing) == 25.0
+    assert listing.listing_price == 49.99
+
+
 def test_vine_ebay_taxonomy_rejects_first_semantically_wrong_suggestion(monkeypatch):
     listing = DummyListing()
     listing.source_type = "amazon_vine"
