@@ -2503,13 +2503,20 @@ class VineImportService:
             normalized_key = re.sub(r"\s+", " ", str(key).strip().lower())
             if normalized_key in excluded_spec_keys or normalized_key in seen_spec_keys or not self._usable_vine_fact(value):
                 continue
+            # Apparel source tables often contain one row per size (XS, S,
+            # M, ...). Those rows are already represented by the fit table
+            # context below; they must not consume the slots that carry the
+            # buyer-useful construction facts (closure, sleeve, lining, care,
+            # and stretch).
+            if re.fullmatch(r"(?:xxxs|xxs|xs|s|m|l|xl|xxl|xxxl|xxxxl|xxxxxl)", normalized_key):
+                continue
             # Scalar facts are rendered in their dedicated sections below;
             # avoid repeating Capacity/Color/Material in both places.
             if normalized_key in {"capacity", "tank capacity", "supported capacity", "material", "color", "colour", "size", "item weight", "weight"}:
                 continue
             seen_spec_keys.add(normalized_key)
             useful_specs.append((key, value))
-            if len(useful_specs) >= 8:
+            if len(useful_specs) >= 12:
                 break
         if useful_specs:
             lines.extend(["", "Product details:", *[f"• {key}: {value}" for key, value in useful_specs]])

@@ -129,6 +129,28 @@ def test_vine_specifics_remove_scraped_placeholders_and_preserve_useful_facts():
     assert set(provenance) == {"Brand", "Size"}
 
 
+def test_vine_description_fallback_prioritizes_apparel_facts_over_size_rows():
+    item = VineImportItem(product_name="Mens Varsity Jacket - Letterman Bomber Style Baseball Jackets For Men", asin="B0APPAREL1")
+    facts = {
+        "title": item.product_name,
+        "brand": "Decrum",
+        "specifications": {
+            "Brand Size": "Chest (in)", "XS": "33 - 34", "S": "35 - 37", "M": "38 - 40",
+            "L": "42 - 44", "XL": "46 - 48", "XXL": "50 - 52", "XXXL": "53 - 55",
+            "Material": "Fleece", "Color": "Black", "Sleeve Type": "Long Sleeve",
+            "Fit Type": "Regular", "Collar Style": "Banded Collar", "Closure Type": "Button",
+            "Lining Description": "Polyester", "Product Care Instructions": "Machine Wash",
+        },
+    }
+
+    description = VineImportService()._rewrite_amazon_description(item, amazon_facts=facts)
+
+    assert "Sleeve Type: Long Sleeve" in description
+    assert "Fit Type: Regular" in description
+    assert "Closure Type: Button" in description
+    assert "Product Care Instructions: Machine Wash" in description
+
+
 def test_vine_fallback_does_not_copy_source_product_prose():
     item = VineImportItem(product_name="Nilight RV Bumper Tote Tank Carrier", asin="B0TEST2141")
     source_sentence = "This carrier provides a secure and convenient way to transport a portable tote tank on a square RV bumper."
