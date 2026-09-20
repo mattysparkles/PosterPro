@@ -3,6 +3,7 @@ from __future__ import annotations
 import html as html_lib
 import json
 import re
+import time
 from datetime import datetime
 from urllib.parse import urlparse
 
@@ -13,6 +14,39 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models.models import Image, ProductMediaCache
 from app.services.storage import LocalStorage
+
+
+_AMAZON_HTML_MAX_BYTES = 4 * 1024 * 1024
+_AMAZON_HTML_DEADLINE_SECONDS = 20.0
+
+
+def _fetch_amazon_html(url: str, headers: dict[str, str]) -> tuple[int, str]:
+    """Fetch a bounded Amazon page without allowing a streaming response to hang a worker.
+
+    A scalar httpx timeout only limits individual socket reads.  Amazon (or an
+    intermediary) can keep sending tiny chunks indefinitely, which previously
+    left Vine batch enrichment stuck inside one ASIN request.  Enforce both
+    per-read and total response deadlines and cap the body retained for parsing.
+    """
+    timeout = httpx.Timeout(connect=5.0, read=5.0, write=5.0, pool=5.0)
+    started = time.monotonic()
+    chunks: list[bytes] = []
+    total = 0
+    with httpx.Client(timeout=timeout, follow_redirects=True, headers=headers) as client:
+        # Keep lightweight test/provider doubles compatible with the bounded
+        # production path while real clients use streaming below.
+        if not hasattr(client, "stream"):
+            response = client.get(url)
+            return response.status_code, str(getattr(response, "text", ""))
+        with client.stream("GET", url) as response:
+            for chunk in response.iter_bytes():
+                if time.monotonic() - started > _AMAZON_HTML_DEADLINE_SECONDS:
+                    raise TimeoutError("amazon_page_deadline_exceeded")
+                total += len(chunk)
+                if total > _AMAZON_HTML_MAX_BYTES:
+                    raise ValueError("amazon_page_too_large")
+                chunks.append(chunk)
+            return response.status_code, b"".join(chunks).decode("utf-8", errors="replace")
 
 
 def _extract_json_ld_blocks(html: str) -> list[dict]:
@@ -353,9 +387,8 @@ class AmazonProductMediaProvider:
                 "Pragma": "no-cache",
                 "Upgrade-Insecure-Requests": "1",
             }
-            with httpx.Client(timeout=15, follow_redirects=True, headers=request_headers) as client:
-                response = client.get(product_url)
-            if response.status_code >= 400:
+            status_code, html = _fetch_amazon_html(product_url, request_headers)
+            if status_code >= 400:
                 return self._cache_result(
                     asin,
                     product_url=product_url,
@@ -363,11 +396,10 @@ class AmazonProductMediaProvider:
                     local_asset_ids=[],
                     primary_image_url=None,
                     fetch_status="blocked",
-                    fetch_error=f"http_{response.status_code}",
+                    fetch_error=f"http_{status_code}",
                     source_provider="page_metadata",
                 )
 
-            html = response.text
             og_match = re.search(r'<meta\s+property="og:image"\s+content="([^"]+)"', html, flags=re.IGNORECASE)
             gallery = [url for url in _extract_json_ld_images(html) if _is_amazon_media_url(url)]
             description = _extract_product_description(html)
@@ -481,11 +513,10 @@ class AmazonProductMediaProvider:
                 "Pragma": "no-cache",
                 "Upgrade-Insecure-Requests": "1",
             }
-            with httpx.Client(timeout=15, follow_redirects=True, headers=request_headers) as client:
-                response = client.get(product_url)
-            if response.status_code >= 400:
+            status_code, html = _fetch_amazon_html(product_url, request_headers)
+            if status_code >= 400:
                 return {}
-            return _extract_amazon_product_facts(response.text)
+            return _extract_amazon_product_facts(html)
         except Exception:
             return {}
 

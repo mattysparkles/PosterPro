@@ -71,6 +71,58 @@ STALE_IMPORT_JOB_AFTER = timedelta(minutes=20)
 sale_detection_service = SaleDetectionService()
 inventory_service = InventoryService()
 
+
+@celery_app.task(name="build_vine_batch_drafts", bind=True, max_retries=2)
+def build_vine_batch_drafts_task(self, batch_id: int, user_id: int) -> dict[str, Any]:
+    """Build one Vine batch outside the upload request.
+
+    Amazon page/media enrichment is inherently long-running and may require
+    bounded retries. Keeping it in the durable worker prevents an HTTP upload
+    request from timing out halfway through a batch and leaving the operator
+    with a parsed-but-never-built import.
+    """
+    db = SessionLocal()
+    try:
+        from app.models.models import VineImportBatch
+
+        batch = db.get(VineImportBatch, int(batch_id))
+        if batch is None or int(batch.user_id) != int(user_id):
+            return {"batch_id": int(batch_id), "status": "missing"}
+        stats = dict(batch.stats_json or {})
+        stats["auto_build_status"] = "processing"
+        batch.stats_json = stats
+        db.add(batch)
+        db.commit()
+        result = VineImportService().auto_build_batch_drafts(
+            db,
+            batch=batch,
+            item_ids=None,
+            new_only=True,
+            include_cancelled=True,
+        )
+        batch = db.get(VineImportBatch, int(batch_id))
+        if batch is not None:
+            stats = dict(batch.stats_json or {})
+            stats["auto_build_status"] = "complete"
+            batch.stats_json = stats
+            db.add(batch)
+            db.commit()
+        return {"batch_id": int(batch_id), "status": "complete", "result": result}
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        batch = db.get(VineImportBatch, int(batch_id))
+        if batch is not None:
+            stats = dict(batch.stats_json or {})
+            stats["auto_build_status"] = "failed"
+            stats["auto_build_error"] = str(exc)
+            batch.stats_json = stats
+            db.add(batch)
+            db.commit()
+        logger.exception("Vine batch draft worker failed", extra={"batch_id": batch_id, "user_id": user_id})
+        raise self.retry(exc=exc, countdown=60)
+    finally:
+        db.close()
+
 @celery_app.task(name="process_listing_correction_jobs")
 def process_listing_correction_jobs_task(limit: int = 10) -> dict[str, Any]:
     """Claim manual corrections in durable priority order and record material deltas."""

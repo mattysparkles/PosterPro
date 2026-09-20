@@ -13,11 +13,12 @@ from app.api.schemas import (
     VineImportItemUpdateRequest,
 )
 from app.core.auth import ensure_user_owns_resource, ensure_vine_access, get_current_user
+from app.core.config import settings
 from app.core.database import get_db
 from app.models.models import VineImportBatch, VineImportItem, User
 from app.services.process_notifications import create_process_notification
 from app.services.vine_import_service import VineImportService
-from app.workers.tasks import repair_recent_vine_images_task
+from app.workers.tasks import build_vine_batch_drafts_task, repair_recent_vine_images_task
 
 router = APIRouter(prefix="/imports/vine", tags=["vine-imports"])
 service = VineImportService()
@@ -68,13 +69,26 @@ async def upload_vine_report(
             metadata_json={"stage": "draft_build_started", "batch_id": batch.id},
         )
         db.commit()
-        service.auto_build_batch_drafts(
-            db,
-            batch=batch,
-            item_ids=None,
-            new_only=True,
-            include_cancelled=True,
-        )
+        # Production uploads are acknowledged after parsing and handed to the
+        # durable worker.  Amazon enrichment can involve many bounded network
+        # calls; keeping it in the request used to leave parsed batches with
+        # no drafts when the client/server timed out.  Development/test mode
+        # retains the synchronous path for deterministic local API tests.
+        if str(settings.environment or "").lower() in {"production", "staging"}:
+            queued_stats = dict(batch.stats_json or {})
+            queued_stats["auto_build_status"] = "queued"
+            batch.stats_json = queued_stats
+            db.add(batch)
+            db.commit()
+            build_vine_batch_drafts_task.delay(batch.id, current_user.id)
+        else:
+            service.auto_build_batch_drafts(
+                db,
+                batch=batch,
+                item_ids=None,
+                new_only=True,
+                include_cancelled=True,
+            )
         try:
             repair_recent_vine_images_task.delay(current_user.id)
         except Exception as task_exc:  # noqa: BLE001
@@ -275,13 +289,22 @@ def auto_build_vine_drafts(
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
     ensure_user_owns_resource(current_user, batch.user_id)
-    result = service.auto_build_batch_drafts(
-        db,
-        batch=batch,
-        item_ids=payload.item_ids,
-        new_only=payload.new_only,
-        include_cancelled=payload.include_cancelled,
-    )
+    if str(settings.environment or "").lower() in {"production", "staging"}:
+        queued_stats = dict(batch.stats_json or {})
+        queued_stats["auto_build_status"] = "queued"
+        batch.stats_json = queued_stats
+        db.add(batch)
+        db.commit()
+        build_vine_batch_drafts_task.delay(batch.id, current_user.id)
+        result = {"batch_id": batch.id, "status": "queued", "new_only": payload.new_only}
+    else:
+        result = service.auto_build_batch_drafts(
+            db,
+            batch=batch,
+            item_ids=payload.item_ids,
+            new_only=payload.new_only,
+            include_cancelled=payload.include_cancelled,
+        )
     repair_recent_vine_images_task.delay(current_user.id)
     return result
 
