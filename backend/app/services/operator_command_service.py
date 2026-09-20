@@ -46,6 +46,9 @@ class ParsedOperatorCommand:
     minimum_age_days: int | None = None
     minimum_price: float | None = None
     price_filter_mode: str = "all"
+    weekday: int | None = None
+    odd_remote_id: bool = False
+    shipping_flat: float | None = None
 
 
 @dataclass
@@ -184,6 +187,9 @@ class OperatorCommandService:
             minimum_age_days=int(minimum_age_days) if minimum_age_days is not None else None,
             minimum_price=float(minimum_price) if minimum_price is not None else None,
             price_filter_mode=price_filter_mode,
+            weekday=self._extract_weekday(normalized),
+            odd_remote_id=bool(re.search(r"\b(?:item|listing) number\b.{0,20}\bodd\b", normalized)),
+            shipping_flat=self._extract_flat_shipping(normalized),
         )
 
     async def handle_prompt(
@@ -293,6 +299,13 @@ class OperatorCommandService:
                 continue
             posted_at = marketplace_row.created_at or marketplace_row.updated_at or listing.updated_at or listing.created_at
 
+            if parsed.weekday is not None and (not posted_at or posted_at.weekday() != parsed.weekday):
+                continue
+            if parsed.odd_remote_id:
+                remote_id = str(marketplace_row.marketplace_listing_id or "").strip()
+                if not remote_id.isdigit() or int(remote_id) % 2 == 0:
+                    continue
+
             current_price = self._coerce_price(listing.listing_price or listing.suggested_price or listing.buy_it_now_price)
             if current_price is None:
                 skipped_without_price += 1
@@ -323,6 +336,7 @@ class OperatorCommandService:
                     "ebay_listing_id": listing.ebay_listing_id,
                     "status": "preview" if dry_run or not apply_live else "queued",
                     "message": None,
+                    "shipping_flat": parsed.shipping_flat,
                 }
             )
 
@@ -392,6 +406,8 @@ class OperatorCommandService:
                 # compatibility with the canonical price used by the eBay
                 # adapter. Other marketplace overrides remain untouched.
                 apply_marketplace_operation(listing, marketplaces=["ebay"], field="price", value=row["new_price"])
+                if parsed.shipping_flat is not None:
+                    apply_marketplace_operation(listing, marketplaces=["ebay"], field="shipping", value={"shipping_method": "flat", "shipping_price": parsed.shipping_flat, "free_shipping": False})
                 listing.listing_price = row["new_price"]
                 listing.suggested_price = row["new_price"]
                 marketplace_data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}
@@ -450,7 +466,21 @@ class OperatorCommandService:
         percent_word_match = re.search(r"(zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|twenty|thirty)\s+percent", normalized_prompt)
         if percent_word_match:
             return float(_NUMBER_WORDS[percent_word_match.group(1)])
+        if re.search(r"\bpi\s*percent\b", normalized_prompt):
+            return math.pi
         return None
+
+    def _extract_weekday(self, normalized_prompt: str) -> int | None:
+        for name, value in (("monday", 0), ("tuesday", 1), ("wednesday", 2), ("thursday", 3), ("friday", 4), ("saturday", 5), ("sunday", 6)):
+            if re.search(rf"\bon\s+{name}\b", normalized_prompt):
+                return value
+        return None
+
+    def _extract_flat_shipping(self, normalized_prompt: str) -> float | None:
+        match = re.search(r"(?:change|set|make).{0,40}\b(?:flat )?shipping\b.{0,20}\$([0-9]+(?:\.[0-9]{1,2})?)", normalized_prompt)
+        if not match:
+            match = re.search(r"\$([0-9]+(?:\.[0-9]{1,2})?)\s+flat shipping", normalized_prompt)
+        return float(match.group(1)) if match else None
 
     def _extract_age_days(self, normalized_prompt: str) -> int | None:
         if not any(token in normalized_prompt for token in ("day", "days", "week", "weeks", "month", "months", "older than", "more than", "posted for", "listed for")):

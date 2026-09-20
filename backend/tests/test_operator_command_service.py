@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from datetime import UTC, datetime, timedelta
 
 from app.models.enums import EbayPublishStatus, ListingStatus, MarketplaceListingStatus, MarketplaceName
@@ -74,6 +75,17 @@ def test_compound_operation_diagnostics_treats_explicit_preservation_as_noop():
     assert len(plan) == 1
     assert plan[0].marketplaces == ["mercari"]
     assert unsupported == []
+
+
+def test_operator_command_parses_pi_weekday_odd_id_and_flat_shipping_filters():
+    parsed = OperatorCommandService().parse_prompt(
+        "Find every item posted to eBay on Tuesday whose item number is odd. Reduce their prices by pi percent to the 17th digit and change them to $5 flat shipping."
+    )
+    assert parsed is not None
+    assert parsed.percent == math.pi
+    assert parsed.weekday == 1
+    assert parsed.odd_remote_id is True
+    assert parsed.shipping_flat == 5.0
 
 
 def _seed_live_ebay_listing(db_session, *, user: User, title: str, price: float, posted_days_ago: int) -> Listing:
