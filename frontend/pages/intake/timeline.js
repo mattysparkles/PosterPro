@@ -18,8 +18,9 @@ import {
 } from "../../lib/api";
 import { loadTimelineWindow } from "../../lib/timelinePagination.mjs";
 import { canonicalGroupTone, groupPalette, slatePalette } from "../../lib/timelineTheme.mjs";
+import { clampTimelineZoom, DEFAULT_TIMELINE_ZOOM, TIMELINE_THUMBNAIL_WIDTHS } from "../../lib/timelineLayout.mjs";
 
-const WIDTHS = [48, 64, 88, 120, 160];
+const WIDTHS = TIMELINE_THUMBNAIL_WIDTHS;
 const PAGE_SIZE = 500;
 
 function classify(photo) {
@@ -64,7 +65,7 @@ export default function IntakeTimeline() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState("");
-  const [zoom, setZoom] = useState(2);
+  const [zoom, setZoom] = useState(DEFAULT_TIMELINE_ZOOM);
   const [filter, setFilter] = useState("ALL");
   const [counts, setCounts] = useState({ total: 0, photo_count: 0, slate_count: 0 });
   const scrollRef = useRef(null);
@@ -116,14 +117,14 @@ export default function IntakeTimeline() {
   useEffect(() => {
     try {
       const saved = Number(window.localStorage.getItem("posterpro.timeline.zoom"));
-      if (Number.isFinite(saved)) setZoom(Math.max(0, Math.min(WIDTHS.length - 1, saved)));
+      if (Number.isFinite(saved)) setZoom(clampTimelineZoom(saved));
     } catch { /* storage may be unavailable in private browsing */ }
     refresh().finally(() => setLoading(false));
   }, [refresh]);
 
   const changeZoom = (value) => {
     const left = scrollRef.current?.scrollLeft || 0;
-    const next = Math.max(0, Math.min(WIDTHS.length - 1, value));
+    const next = clampTimelineZoom(value);
     setZoom(next);
     try { window.localStorage.setItem("posterpro.timeline.zoom", String(next)); } catch { /* best effort */ }
     window.requestAnimationFrame(() => {
@@ -213,15 +214,16 @@ export default function IntakeTimeline() {
     const photo = entry.photo || {};
     const state = classify(photo);
     const width = WIDTHS[zoom];
-    const controlPalette = groupPalette(darkGroup ? "dark" : "light");
+    // Keep controls on a light, high-contrast surface even when the group uses
+    // an alternating tone.  The previous dark-group palette made shared
+    // buttons unreadable after the global Button migration.
+    const controlPalette = groupPalette("light");
     const darkGroupControlStyle = {
       color: controlPalette.controlColor,
       backgroundColor: controlPalette.controlBackground,
       borderColor: controlPalette.controlBorder,
     };
-    const groupContrastClass = darkGroup
-      ? "hover:!bg-[#454545] hover:!text-white focus-visible:!ring-white disabled:!opacity-100"
-      : "";
+    const groupContrastClass = "hover:!bg-slate-100 focus-visible:!ring-blue-500";
     const thumbnail = toThumbnailImageUrl(
       photo.thumbnail_url || photo.display_url || photo.downloaded_url || photo.local_path,
       width,
@@ -234,9 +236,9 @@ export default function IntakeTimeline() {
       ? groupEntries[entryIndex + 1]
       : groups[groupIndex + 1]?.entries?.[0];
     return (
-      <div key={photo.id || `${entry.image_group_id}-${entryIndex}`} className="flex shrink-0 items-start gap-2">
-        <div className="flex flex-col items-center">
-          <Checkbox aria-label={`Select timeline asset ${photo.id}`} checked={selectedIds.includes(photo.id)} onChange={() => toggleSelected(photo.id)} className="mb-1 border-0 bg-transparent p-0" />
+      <div key={photo.id || `${entry.image_group_id}-${entryIndex}`} className="flex min-w-0 items-start gap-2">
+        <div className="flex min-w-0 flex-col items-center" style={{ width }}>
+          <Checkbox aria-label={`Select timeline asset ${photo.id}`} checked={selectedIds.includes(photo.id)} onChange={() => toggleSelected(photo.id)} className="mb-2 border-slate-300 bg-white" />
           <Button
             type="button"
             onClick={() => setSelected(entry)}
@@ -247,9 +249,9 @@ export default function IntakeTimeline() {
             }}
             variant="ghost"
             size="sm"
-            className={`h-auto min-h-0 rounded-xl border-2 p-1 text-left shadow-sm ${state.slate ? "font-semibold" : "border-transparent bg-transparent text-inherit"} ${selected?.photo?.id === photo.id ? "ring-2 ring-blue-500" : ""}`}
+            className={`!min-h-0 h-auto w-full rounded-xl border-2 p-1.5 text-left shadow-sm ${state.slate ? "font-semibold" : "border-slate-200 !bg-white text-slate-900"} ${selected?.photo?.id === photo.id ? "ring-2 ring-blue-500" : ""}`}
           >
-            <div className="relative aspect-square overflow-hidden rounded-lg bg-slate-100">
+            <div className="relative aspect-square overflow-hidden rounded-lg bg-slate-100 ring-1 ring-slate-200">
               {thumbnail ? (
                 <img src={thumbnail} alt={photo.original_filename || `Timeline asset ${photo.id}`} loading="lazy" decoding="async" className="h-full w-full object-cover" />
               ) : (
@@ -257,38 +259,38 @@ export default function IntakeTimeline() {
                   {state.slate ? "MODERN SLATE NEEDS REPAIR" : "Image unavailable"}
                 </span>
               )}
-              {state.slate && <span className="absolute left-1 top-1 rounded bg-black/75 px-1.5 py-0.5 text-[10px] font-black text-white">{state.role} SLATE</span>}
-              {state.primary && <span className="absolute bottom-1 left-1 rounded bg-amber-300 px-1.5 py-0.5 text-[10px] font-black text-black">PRIMARY</span>}
+              {state.slate && <span className="absolute left-1 top-1 rounded-md bg-slate-950/85 px-2 py-1 text-[10px] font-black tracking-wide text-white">{state.role} SLATE</span>}
+              {state.primary && <span className="absolute bottom-1 left-1 rounded-md bg-amber-300 px-2 py-1 text-[10px] font-black tracking-wide text-amber-950">PRIMARY</span>}
             </div>
-            <p className="mt-1 max-w-full truncate text-[10px]">{photo.original_filename || `${state.slate ? "Slate" : "Photo"} ${photo.id}`}</p>
-            <div className="flex flex-wrap items-center justify-between gap-1">
+            <p className="mt-2 max-w-full truncate text-xs font-semibold">{photo.original_filename || `${state.slate ? "Slate" : "Photo"} ${photo.id}`}</p>
+            <div className="mt-1 flex flex-wrap items-center justify-between gap-1">
               <StatusPill status={state.slate ? "warning" : "default"} label={photo.group_photo_label || state.role} />
-              {photo.photo_number && <span className="text-[9px]">Image {photo.photo_number}</span>}
+              {photo.photo_number && <span className="text-[11px] text-slate-500">Image {photo.photo_number}</span>}
             </div>
           </Button>
           {state.slate && slateId && (
-            <div className="mt-1 flex gap-1">
-              <ActionLink href={`/intake/slate?slate_id=${slateId}`} size="icon-sm" className="!h-7 !min-h-7 !rounded-md !px-2 text-[9px] font-semibold">Edit slate</ActionLink>
-              <ActionLink href={`/intake/slate?slate_id=${slateId}#voice`} size="icon-sm" className="!h-7 !min-h-7 !rounded-md !px-2 text-[9px]">Voice note</ActionLink>
-              {slateMetadata.legacy_source_image_url && <ActionLink href={slateMetadata.legacy_source_image_url} target="_blank" rel="noreferrer" external size="icon-sm" className="!h-7 !min-h-7 !rounded-md !px-2 text-[9px]">View source</ActionLink>}
+            <div className="mt-2 grid w-full grid-cols-2 gap-1">
+              <ActionLink href={`/intake/slate?slate_id=${slateId}`} size="sm" className="!h-8 !min-h-8 !rounded-md !px-2 text-[11px] font-semibold">Edit slate</ActionLink>
+              <ActionLink href={`/intake/slate?slate_id=${slateId}#voice`} size="sm" className="!h-8 !min-h-8 !rounded-md !px-2 text-[11px]">Voice note</ActionLink>
+              {slateMetadata.legacy_source_image_url && <ActionLink href={slateMetadata.legacy_source_image_url} target="_blank" rel="noreferrer" external size="sm" className="col-span-2 !h-8 !min-h-8 !rounded-md !px-2 text-[11px]">View source</ActionLink>}
             </div>
           )}
-          <div className="mt-1 flex max-w-[190px] flex-wrap justify-center gap-1">
+          <div className="mt-2 grid w-full grid-cols-1 gap-1">
             {!state.slate && (state.primary ? (
               <>
-                <Button type="button" variant="outline" disabled style={darkGroupControlStyle} className={`px-1 py-0 text-[9px] ${groupContrastClass}`}>PRIMARY</Button>
-                <Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => setTimelinePrimary(photo.id, { clear: true }), "Automatic best-photo selection restored for this group.")} className={`px-1 py-0 text-[9px] ${groupContrastClass}`}>CLEAR PRIMARY / USE AUTO</Button>
+                <Button size="sm" type="button" variant="outline" disabled style={darkGroupControlStyle} className={`!h-8 !min-h-8 !px-2 text-[11px] ${groupContrastClass}`}>PRIMARY</Button>
+                <Button size="sm" type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => setTimelinePrimary(photo.id, { clear: true }), "Automatic best-photo selection restored for this group.")} className={`!h-8 !min-h-8 !px-2 text-[11px] ${groupContrastClass}`}>Clear primary</Button>
               </>
             ) : (
-              <Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => setTimelinePrimary(photo.id), "Manual primary selected and listing media reordered.")} className={`px-1 py-0 text-[9px] ${groupContrastClass}`}>SET PRIMARY</Button>
+              <Button size="sm" type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => setTimelinePrimary(photo.id), "Manual primary selected and listing media reordered.")} className={`!h-8 !min-h-8 !px-2 text-[11px] ${groupContrastClass}`}>Set primary</Button>
             ))}
-            {state.slate && <Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => classifyTimelineAssets([photo.id], state.role === "TAIL" ? "HEAD" : "TAIL"), `Slate marked ${state.role === "TAIL" ? "HEAD" : "TAIL"}.`)} className={`px-1 py-0 text-[9px] ${groupContrastClass}`}>{state.role === "TAIL" ? "HEAD SLATE" : "TAIL SLATE"}</Button>}
-            {state.slate && <Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => classifyTimelineAssets([photo.id], "PHOTO"), "Slate classification removed.")} className={`px-1 py-0 text-[9px] ${groupContrastClass}`}>REMOVE SLATE</Button>}
-            <Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => remove(entry)} className={`px-1 py-0 text-[9px] ${groupContrastClass}`}>DELETE</Button>
+            {state.slate && <Button size="sm" type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => classifyTimelineAssets([photo.id], state.role === "TAIL" ? "HEAD" : "TAIL"), `Slate marked ${state.role === "TAIL" ? "HEAD" : "TAIL"}.`)} className={`!h-8 !min-h-8 !px-2 text-[11px] ${groupContrastClass}`}>{state.role === "TAIL" ? "Mark Head slate" : "Mark Tail slate"}</Button>}
+            {state.slate && <Button size="sm" type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => classifyTimelineAssets([photo.id], "PHOTO"), "Slate classification removed.")} className={`!h-8 !min-h-8 !px-2 text-[11px] ${groupContrastClass}`}>Remove slate</Button>}
+            <Button size="sm" type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => remove(entry)} className={`!h-8 !min-h-8 !px-2 text-[11px] ${groupContrastClass}`}>Delete</Button>
           </div>
-          {!state.slate && <div className="mt-1 flex gap-1"><Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => classifyTimelineAssets([photo.id], "HEAD"), "Marked Head Slate.")} className={`px-1 py-0 text-[9px] ${groupContrastClass}`}>HEAD SLATE</Button><Button type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => classifyTimelineAssets([photo.id], "TAIL"), "Marked Tail Slate; preceding photos stay in this item group.")} className={`px-1 py-0 text-[9px] ${groupContrastClass}`}>TAIL SLATE</Button></div>}
+          {!state.slate && <div className="mt-1 grid grid-cols-2 gap-1"><Button size="sm" type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => classifyTimelineAssets([photo.id], "HEAD"), "Marked Head Slate.")} className={`!h-8 !min-h-8 !px-2 text-[11px] ${groupContrastClass}`}>Head slate</Button><Button size="sm" type="button" variant="outline" disabled={busy} style={darkGroupControlStyle} onClick={() => mutate(() => classifyTimelineAssets([photo.id], "TAIL"), "Marked Tail Slate; preceding photos stay in this item group.")} className={`!h-8 !min-h-8 !px-2 text-[11px] ${groupContrastClass}`}>Tail slate</Button></div>}
         </div>
-        {hasNext && nextEntry && <Button type="button" variant="tertiary" size="sm" disabled={busy} onClick={() => void addSlate(entry, nextEntry)} className="mt-16 shrink-0 rounded-full border-dashed border-blue-300 bg-white/80 px-2 py-1 text-xs text-blue-700">+ Add Slate</Button>}
+        {hasNext && nextEntry && <Button type="button" variant="tertiary" size="sm" disabled={busy} onClick={() => void addSlate(entry, nextEntry)} className="mt-24 shrink-0 whitespace-nowrap rounded-full border border-dashed border-blue-300 !bg-blue-50 px-3 py-2 text-xs text-blue-800">+ Add slate</Button>}
       </div>
     );
   };
@@ -296,20 +298,40 @@ export default function IntakeTimeline() {
   return (
     <AppShell>
       <div className="space-y-6">
-        <PageHeader title="Photo Timeline" description="Capture chronology is authoritative. Head Slates identify photos after them; Tail Slates identify photos before them." actions={<Button variant="outline" onClick={() => void refresh()}>Refresh</Button>} />
-        <SectionPanel title="Intake filmstrip" description="Canonical image groups are shown as contiguous alternating regions. Green marks a Head Slate; fuchsia marks a Tail Slate.">
-          <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
-            <span>Zoom</span>
-            <Button size="icon-sm" variant="secondary" type="button" aria-label="Zoom out" onClick={() => changeZoom(zoom - 1)}>−</Button>
-            <input aria-label="Timeline zoom" type="range" min="0" max={WIDTHS.length - 1} value={zoom} onChange={(event) => changeZoom(Number(event.target.value))} />
-            <Button size="icon-sm" variant="secondary" type="button" aria-label="Zoom in" onClick={() => changeZoom(zoom + 1)}>+</Button>
-            <span className="text-xs text-slate-500">{WIDTHS[zoom]}px</span>
-            <Select aria-label="Timeline filter" value={filter} onChange={(event) => setFilter(event.target.value)} className="h-9 w-auto py-1 text-xs">
-              <option value="ALL">All</option><option value="PHOTOS">Photos</option><option value="SLATES">Slates</option><option value="HEAD">Head Slates</option><option value="TAIL">Tail Slates</option>
-            </Select>
-            <span className="text-xs text-slate-600">Total {counts.total} · Photos {counts.photo_count} · Slates {counts.slate_count} · Loaded {items.length} ({loadedCounts.ambiguous} possible slate candidates)</span>
-            <Button type="button" variant="outline" disabled={busy} onClick={() => { if (window.confirm(`Reset historical classifications for loaded Timeline assets?`)) void mutate(() => resetTimelineClassifications({ scope: "photo_ids", photo_ids: items.map((entry) => entry.photo?.id).filter((id) => id && !String(id).startsWith("slate-")), preserve_modern: true }), "Loaded classifications reset."); }}>Reset classifications</Button>
-            {feedback && <span role="status" className="text-xs text-emerald-700">{feedback}</span>}
+        <PageHeader title="Photo Timeline" description="Capture chronology is authoritative. Head Slates identify photos after them; Tail Slates identify photos before them." />
+        <SectionPanel title="Intake timeline" description="Capture chronology is preserved. Head Slates begin a group; Tail Slates close one. Product photos stay large enough to inspect labels and condition.">
+          <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
+            <div className="flex flex-wrap items-end gap-4">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-semibold text-slate-800">Thumbnail size</span>
+                <Button size="icon-sm" variant="secondary" type="button" aria-label="Zoom out" onClick={() => changeZoom(zoom - 1)}>−</Button>
+                <input className="w-32 accent-blue-700" aria-label="Timeline zoom" type="range" min="1" max={WIDTHS.length - 1} value={zoom} onChange={(event) => changeZoom(Number(event.target.value))} />
+                <Button size="icon-sm" variant="secondary" type="button" aria-label="Zoom in" onClick={() => changeZoom(zoom + 1)}>+</Button>
+                <span className="min-w-12 text-center text-xs font-medium text-slate-600">{WIDTHS[zoom]} px</span>
+              </div>
+              <label className="flex items-center gap-2 text-sm font-semibold text-slate-800">View
+                <Select aria-label="Timeline filter" value={filter} onChange={(event) => setFilter(event.target.value)} className="h-10 w-auto min-w-32 py-1 text-sm">
+                  <option value="ALL">All assets</option><option value="PHOTOS">Photos</option><option value="SLATES">Slates</option><option value="HEAD">Head Slates</option><option value="TAIL">Tail Slates</option>
+                </Select>
+              </label>
+              <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-600" aria-label="Timeline totals">
+                <span><b className="text-slate-900">{counts.total.toLocaleString()}</b> assets</span>
+                <span><b className="text-slate-900">{counts.photo_count.toLocaleString()}</b> photos</span>
+                <span><b className="text-slate-900">{counts.slate_count.toLocaleString()}</b> slates</span>
+                <span>{items.length.toLocaleString()} loaded</span>
+              </div>
+              <div className="ml-auto flex items-center gap-2">
+                <Button type="button" variant="outline" onClick={() => void refresh()} disabled={loading || busy}>Refresh</Button>
+                <details className="relative">
+                  <summary className="cursor-pointer list-none rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm">Advanced</summary>
+                  <div className="absolute right-0 z-20 mt-2 w-72 rounded-xl border border-slate-200 bg-white p-3 shadow-xl">
+                    <p className="text-xs leading-5 text-slate-600">Reset is destructive and should only be used when intentionally repairing historical classifications. Manual Slate corrections are preserved by default.</p>
+                    <Button type="button" variant="danger" className="mt-3 w-full" disabled={busy} onClick={() => { if (window.confirm(`Reset historical classifications for loaded Timeline assets? This cannot be undone.`)) void mutate(() => resetTimelineClassifications({ scope: "photo_ids", photo_ids: items.map((entry) => entry.photo?.id).filter((id) => id && !String(id).startsWith("slate-")), preserve_modern: true }), "Loaded classifications reset."); }}>Reset classifications</Button>
+                  </div>
+                </details>
+              </div>
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-slate-600"><span className="rounded-full bg-lime-100 px-2 py-1 font-semibold text-lime-900">HEAD SLATE</span><span className="rounded-full bg-fuchsia-100 px-2 py-1 font-semibold text-fuchsia-900">TAIL SLATE</span><span>{loadedCounts.ambiguous.toLocaleString()} possible slate candidates</span>{feedback && <span role="status" className="font-semibold text-emerald-700">{feedback}</span>}</div>
           </div>
           {selectedIds.length > 0 && <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border bg-white p-2 text-xs">
             <span>{selectedIds.length} selected</span>
@@ -319,17 +341,17 @@ export default function IntakeTimeline() {
             <Button type="button" variant="outline" onClick={() => setSelectedIds([])}>Clear selection</Button>
           </div>}
           {loading ? <p className="text-sm text-slate-500">Loading timeline…</p> : (
-            <div ref={scrollRef} className="overflow-x-auto pb-3">
-              <div className="flex min-w-max items-stretch gap-3">
+            <div ref={scrollRef} className="max-w-full overflow-x-auto pb-3">
+              <div className="flex min-w-0 flex-col gap-4">
                 {filter === "ALL" && items[0] && <Button type="button" variant="tertiary" size="sm" disabled={busy} onClick={() => void addSlate(null, items[0])} className="my-auto shrink-0 rounded-full border-dashed border-blue-300 bg-white/80 px-3 py-2 text-xs text-blue-700">+ Add Slate at start</Button>}
                 {groups.map((group, groupIndex) => {
               const tone = canonicalGroupTone(group.index);
               const palette = groupPalette(tone);
               const background = { backgroundColor: palette.backgroundColor, color: palette.color };
               const darkGroup = tone === "dark";
-              return <section key={group.id} data-image-group-id={group.id} data-image-group-index={group.index} data-image-group-tone={tone} style={background} className="flex shrink-0 flex-col rounded-2xl border border-slate-400/50 p-3">
-                    <div className="mb-2 flex items-center justify-between gap-3 text-[10px] font-semibold uppercase tracking-wide opacity-80"><span>{group.index ? `Image Group ${group.index}` : "Unassigned Slate"}</span><span>{group.entries.filter((entry) => !classify(entry.photo || {}).slate).length} photos</span></div>
-                    <div className="flex min-w-min items-start gap-2">{group.entries.map((entry, index) => renderEntry(entry, index, group.entries, groupIndex, darkGroup))}</div>
+              return <section key={group.id} data-image-group-id={group.id} data-image-group-index={group.index} data-image-group-tone={tone} style={background} className="w-full min-w-0 rounded-2xl border border-slate-300/80 p-4 shadow-sm">
+                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border-b border-current/15 pb-2"><span className="text-sm font-bold tracking-tight">{group.index ? `Item Group ${group.index}` : "Unassigned group"}</span><span className="rounded-full bg-white/80 px-2 py-1 text-xs font-semibold text-slate-700">{group.entries.filter((entry) => !classify(entry.photo || {}).slate).length} product photos · {group.entries.filter((entry) => classify(entry.photo || {}).slate).length} Slates</span></div>
+                    <div className="flex flex-wrap items-start gap-4">{group.entries.map((entry, index) => renderEntry(entry, index, group.entries, groupIndex, darkGroup))}</div>
                   </section>;
                 })}
                 {filter === "ALL" && items.length === counts.total && items.length > 0 && <Button type="button" variant="tertiary" size="sm" disabled={busy} onClick={() => void addSlate(items[items.length - 1], null)} className="my-auto shrink-0 rounded-full border-dashed border-blue-300 bg-white/80 px-3 py-2 text-xs text-blue-700">+ Add Slate at end</Button>}
@@ -337,10 +359,10 @@ export default function IntakeTimeline() {
               </div>
             </div>
           )}
-          {!loading && items.length < counts.total && <div className="mt-2 flex justify-center"><Button type="button" variant="outline" disabled={loadingMore} onClick={loadMore}>{loadingMore ? "Loading…" : `Load more (${items.length} of ${counts.total})`}</Button></div>}
-          {selected && <div className="mt-3 rounded-lg border bg-white p-3 text-sm text-slate-900">
-            <b>Selected:</b> {selected.photo?.id} · {classify(selected.photo || {}).role} · Group {selected.image_group_id || selected.photo?.image_group_id || "unassigned"} · Captured {selected.photo?.captured_at || "time unavailable"}
-            <Button type="button" variant="outline" className="ml-3" onClick={() => setSelected(null)}>Close</Button>
+          {!loading && items.length < counts.total && <div className="mt-4 flex justify-center"><Button type="button" variant="outline" disabled={loadingMore} onClick={loadMore}>{loadingMore ? "Loading…" : `Load more (${items.length.toLocaleString()} of ${counts.total.toLocaleString()})`}</Button></div>}
+          {selected && <div role="dialog" aria-label="Photo inspector" className="mt-4 grid gap-4 rounded-2xl border border-blue-200 bg-white p-4 text-sm text-slate-900 shadow-sm md:grid-cols-[minmax(220px,360px)_1fr]">
+            <div className="overflow-hidden rounded-xl bg-slate-100"><img src={toThumbnailImageUrl(selected.photo?.display_url || selected.photo?.downloaded_url || selected.photo?.local_path, 900, 900)} alt={selected.photo?.original_filename || `Timeline asset ${selected.photo?.id}`} className="h-full max-h-[360px] w-full object-contain" /></div>
+            <div><div className="flex items-start justify-between gap-3"><div><p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Photo inspector</p><h3 className="mt-1 text-lg font-bold">{selected.photo?.original_filename || `Asset ${selected.photo?.id}`}</h3></div><Button type="button" variant="outline" onClick={() => setSelected(null)}>Close</Button></div><dl className="mt-3 grid gap-2 text-sm sm:grid-cols-2"><div><dt className="text-xs text-slate-500">Asset</dt><dd className="font-medium">#{selected.photo?.id}</dd></div><div><dt className="text-xs text-slate-500">Role</dt><dd className="font-medium">{classify(selected.photo || {}).role}</dd></div><div><dt className="text-xs text-slate-500">Group</dt><dd className="font-medium">{selected.image_group_id || selected.photo?.image_group_id || "unassigned"}</dd></div><div><dt className="text-xs text-slate-500">Captured</dt><dd className="font-medium">{selected.photo?.captured_at || "time unavailable"}</dd></div></dl></div>
           </div>}
         </SectionPanel>
       </div>
