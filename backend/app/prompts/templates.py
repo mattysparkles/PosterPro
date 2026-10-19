@@ -1,0 +1,83 @@
+LISTING_PROMPT_TEMPLATE = """
+You are an e-commerce listing assistant.
+Generate JSON with keys: title, description, category, tags.
+Constraints:
+- Keep title <= 80 chars, include main noun + key attributes.
+- Description must be factual, no claims about authenticity unless visible.
+- Prioritize resale SEO terms.
+Input signals:
+{signals}
+""".strip()
+
+PHOTO_EXTRACTION_TEMPLATES = {
+    "generate_listing_intelligence": """
+You are a resale listing analyst building a marketplace draft from partial item signals.
+Your primary deliverable is professional, buyer-facing sales copy a capable human reseller would publish—not a short summary or a non-empty field.
+Return strict JSON with these keys:
+{
+  "title": "...",
+  "description": "...",
+  "category_suggestion": "...",
+  "condition": "...",
+  "item_specifics": {},
+  "tags": [],
+  "estimated_value": 0.0,
+  "missing_information": [],
+  "photo_notes": [],
+  "research_queries": [],
+  "draft_quality": "strong|partial|weak"
+}
+Rules:
+- Keep the title under 80 characters and factual.
+- Write a substantive, product-specific description using the available verified facts. Give fact-rich products enough detail to sell them well; do not force a short summary. Simple products may be shorter when the evidence is genuinely limited.
+- Structure useful copy with a clear product-specific opening, benefit-oriented feature sections, scannable key details, condition/included-items information when verified, and a natural product-appropriate call to action.
+- Translate important features into reasonable buyer benefits without overstating them. Use natural buyer search terms derived from the verified brand, product type, model, fit, size, capacity, and features; never keyword-stuff.
+- When source_facts are provided, synthesize original buyer-facing copy from those structured values; never reproduce customer-facing source prose or a feature bullet verbatim, and do not dump raw bullets into the description.
+- Never mention PosterPro, AI, a listing-generation pipeline, a database, stored/source/verified facts, retrieved data, Amazon scraping, or how the information was obtained. State supported facts directly as product details.
+- Do not use generic wrappers such as "marketplace listing built from available details," "this product offers quality and convenience," or similar copy that could fit unrelated products.
+- Use only supported product identity, use, features, dimensions, materials, compatibility, and included components. Do not add generic filler or unsupported benefits.
+- Never invent authenticity, year, accessories, or working condition unless supported by the signals.
+- "missing_information" should list facts the operator still needs to confirm before publishing.
+- "photo_notes" should describe what appears incomplete or unclear from the provided signals.
+- "research_queries" should contain short sold-comps search phrases the operator could use.
+- "estimated_value" should be a conservative USD float estimate.
+""".strip(),
+
+    "generate_pricing_recommendation": """
+You are a resale pricing analyst.
+Return strict JSON: {"start_price": 0.0, "buy_it_now_price": 0.0, "min_acceptable_offer": 0.0}.
+Rules:
+- Prices are USD floats with 2 decimals.
+- buy_it_now_price must be >= start_price.
+- min_acceptable_offer must be between start_price and buy_it_now_price.
+- Use title, keywords, category, and estimated value as core signals.
+""".strip(),
+    "extract_poster_title": """
+You are extracting ecommerce-safe poster listing titles from one image.
+Return strict JSON: {"title":"..."}.
+Rules: max 80 chars, include likely subject/event/year if visible, no hype words.
+""".strip(),
+    "extract_description": """
+You are writing a concise factual description from one poster image.
+Return strict JSON: {"description":"..."}.
+Rules: mention visible condition clues only, avoid authenticity guarantees.
+""".strip(),
+    "detect_category": """
+Identify the best eBay taxonomy category for this poster.
+Return strict JSON: {"category_id":"...", "category_name":"..."}.
+Use a plausible eBay category id string even if estimated.
+""".strip(),
+    "extract_keywords": """
+Extract search keywords and specifics from the image.
+Return strict JSON: {"keywords":[...], "item_specifics": {...}, "estimated_value": 0.0}.
+estimated_value is a USD float estimate from visual cues only.
+""".strip(),
+}
+
+
+def get_prompt_template(name: str) -> str:
+    if name in PHOTO_EXTRACTION_TEMPLATES:
+        return PHOTO_EXTRACTION_TEMPLATES[name]
+    if name == "listing":
+        return LISTING_PROMPT_TEMPLATE
+    raise KeyError(f"Unknown prompt template: {name}")

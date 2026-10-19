@@ -1,0 +1,145 @@
+import asyncio
+import tempfile
+import functools
+import os
+import faulthandler
+from pathlib import Path
+
+import anyio.to_thread
+import httpx
+import pytest
+import fastapi.routing
+import starlette.concurrency
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from app import main as main_module
+from app.core import database as database_module
+from app.core.database import Base
+from app.main import app
+from app.workers import tasks as tasks_module
+
+
+async def _anyio_run_sync_compat(func, *args, abandon_on_cancel=False, cancellable=None, limiter=None):  # noqa: ARG001
+    return func(*args)
+
+
+# Patch AnyIO thread offload for this test environment.
+# In this sandbox, AnyIO's default worker-thread path can hang, which blocks
+# FastAPI's sync route/dependency execution. Swapping to asyncio.to_thread keeps
+# the runtime behavior consistent while unblocking route-level tests.
+anyio.to_thread.run_sync = _anyio_run_sync_compat  # type: ignore[assignment]
+
+
+def _reset_database(test_engine) -> None:
+    Base.metadata.drop_all(bind=test_engine)
+    Base.metadata.create_all(bind=test_engine)
+
+
+@pytest.fixture
+def db_session():
+    """Use an isolated per-test DB; never let a test reset configured app data."""
+    original_engine = database_module.engine
+    original_session_local = database_module.SessionLocal
+    original_main_engine = main_module.engine
+    original_main_session_local = main_module.SessionLocal
+    original_task_session_local = tasks_module.SessionLocal
+    tmp = tempfile.NamedTemporaryFile(prefix="posterpro-test-", suffix=".db", dir="/tmp", delete=False)
+    test_db_path = tmp.name
+    tmp.close()
+    test_engine = create_engine(
+        f"sqlite:///{test_db_path}",
+        pool_pre_ping=True,
+        connect_args={"check_same_thread": False, "timeout": 3},
+    )
+    test_session_local = sessionmaker(bind=test_engine, autoflush=False, autocommit=False)
+    database_module.engine = test_engine
+    database_module.SessionLocal = test_session_local
+    main_module.engine = test_engine
+    main_module.SessionLocal = test_session_local
+    tasks_module.SessionLocal = test_session_local
+    db = None
+    try:
+        _reset_database(test_engine)
+        db = test_session_local()
+        yield db
+    finally:
+        if db is not None:
+            db.close()
+        main_module.engine = original_main_engine
+        main_module.SessionLocal = original_main_session_local
+        tasks_module.SessionLocal = original_task_session_local
+        database_module.engine = original_engine
+        database_module.SessionLocal = original_session_local
+        test_engine.dispose()
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            Path(f"{test_db_path}{suffix}").unlink(missing_ok=True)
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
+@pytest.fixture
+async def async_client():
+    if os.getenv("POSTERPRO_TEST_FAULTHANDLER") == "1":
+        faulthandler.dump_traceback_later(20, repeat=True)
+    original_fastapi_run_in_threadpool = fastapi.routing.run_in_threadpool
+    original_starlette_run_in_threadpool = starlette.concurrency.run_in_threadpool
+
+    async def _run_in_threadpool_compat(func, *args, **kwargs):
+        if kwargs:
+            func = functools.partial(func, **kwargs)
+        return func(*args)
+
+    fastapi.routing.run_in_threadpool = _run_in_threadpool_compat  # type: ignore[assignment]
+    starlette.concurrency.run_in_threadpool = _run_in_threadpool_compat  # type: ignore[assignment]
+
+    original_engine = database_module.engine
+    original_session_local = database_module.SessionLocal
+    original_main_engine = main_module.engine
+    original_main_session_local = main_module.SessionLocal
+    original_task_session_local = tasks_module.SessionLocal
+    test_engine = None
+    test_db_path = None
+    try:
+        tmp = tempfile.NamedTemporaryFile(prefix="posterpro-test-", suffix=".db", dir="/tmp", delete=False)
+        test_db_path = tmp.name
+        tmp.close()
+
+        test_engine = create_engine(
+            f"sqlite:///{tmp.name}",
+            pool_pre_ping=True,
+            connect_args={"check_same_thread": False, "timeout": 3},
+        )
+        database_module.engine = test_engine
+        database_module.SessionLocal = sessionmaker(bind=test_engine, autoflush=False, autocommit=False)
+        main_module.engine = test_engine
+        main_module.SessionLocal = database_module.SessionLocal
+        tasks_module.SessionLocal = database_module.SessionLocal
+
+        await asyncio.wait_for(app.router.startup(), timeout=10)
+        _reset_database(test_engine)
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            yield client
+        await asyncio.wait_for(app.router.shutdown(), timeout=10)
+    finally:
+        main_module.engine = original_main_engine
+        main_module.SessionLocal = original_main_session_local
+        tasks_module.SessionLocal = original_task_session_local
+        database_module.engine = original_engine
+        database_module.SessionLocal = original_session_local
+        fastapi.routing.run_in_threadpool = original_fastapi_run_in_threadpool  # type: ignore[assignment]
+        starlette.concurrency.run_in_threadpool = original_starlette_run_in_threadpool  # type: ignore[assignment]
+        if test_engine is not None:
+            test_engine.dispose()
+        if test_db_path:
+            for suffix in ("", "-wal", "-shm", "-journal"):
+                try:
+                    Path(f"{test_db_path}{suffix}").unlink(missing_ok=True)
+                except OSError:
+                    # Teardown cleanup must not hide the original test result.
+                    pass

@@ -1,0 +1,49 @@
+import enum
+
+
+class ListingStatus(str, enum.Enum):
+    draft = "draft"
+    ready = "ready"
+    archived = "archived"
+    posted = "posted"
+    rejected = "rejected"
+    INGESTED = "INGESTED"
+    PROCESSED = "PROCESSED"
+    PUBLISHED = "PUBLISHED"
+    FAILED = "FAILED"
+
+
+class EbayPublishStatus(str, enum.Enum):
+    DRAFT = "DRAFT"
+    POSTING = "POSTING"
+    POSTED = "POSTED"
+    FAILED = "FAILED"
+
+
+class MarketplaceName(str, enum.Enum):
+    ebay = "ebay"
+    etsy = "etsy"
+    facebook = "facebook"
+    mercari = "mercari"
+    poshmark = "poshmark"
+    depop = "depop"
+    whatnot = "whatnot"
+    vinted = "vinted"
+    offerup = "offerup"
+    storefront_direct = "storefront_direct"
+
+
+MARKETPLACE_DESTINATION_VALUES = frozenset(
+    item.value for item in MarketplaceName if item is not MarketplaceName.storefront_direct
+)
+
+
+class MarketplaceListingStatus(str, enum.Enum):
+    DRAFT = "DRAFT"
+    PUBLISHED = "PUBLISHED"
+    UPDATED = "UPDATED"
+    FAILED = "FAILED"
+    DELETED = "DELETED"
+    SOLD = "SOLD"
+    CLOSED = "CLOSED"
+    PENDING = "PENDING"

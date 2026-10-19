@@ -1,0 +1,226 @@
+from uuid import uuid4
+
+import pytest
+
+
+@pytest.mark.anyio
+async def test_automation_toggle_is_admin_only_and_persists(async_client, monkeypatch, tmp_path):
+    from app.api import auth as auth_api
+    from app.core.config import settings
+
+    env_path = tmp_path / 'posterpro.env'
+    monkeypatch.setattr(auth_api, '_BACKEND_ENV_PATH', env_path)
+    monkeypatch.setattr(settings, 'autonomous_mode', True)
+    denied = await async_client.post('/config/toggle-autonomous', json={'enabled': False})
+    assert denied.status_code == 401
+
+    register = await async_client.post('/auth/register', json={
+        'full_name': 'Automation Admin',
+        'email': f'automation-admin-{uuid4()}@example.com',
+        'password': 'supersecret123',
+    })
+    assert register.status_code == 201
+    response = await async_client.post('/config/toggle-autonomous', json={'enabled': False})
+    assert response.status_code == 200
+    assert response.json()['autonomous_mode'] is False
+    assert 'AUTONOMOUS_MODE=false' in env_path.read_text(encoding='utf-8')
+
+@pytest.mark.anyio
+async def test_register_login_password_change_reset_and_view_mode(async_client):
+    register_response = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "PosterPro Owner",
+            "email": "owner@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register_response.status_code == 201
+    register_data = register_response.json()
+    assert register_data["user"]["email"] == "owner@example.com"
+    assert register_data["user"]["is_admin"] is True
+    assert register_data["user"]["effective_is_admin"] is True
+    assert register_data["is_bootstrap_admin"] is True
+
+    me_response = await async_client.get("/auth/me")
+    assert me_response.status_code == 200
+    assert me_response.json()["role"] == "owner"
+
+    logout_response = await async_client.post("/auth/logout")
+    assert logout_response.status_code == 200
+    assert (await async_client.get("/auth/me")).status_code == 401
+
+    login_response = await async_client.post(
+        "/auth/login",
+        json={
+            "email": "owner@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert login_response.status_code == 200
+    assert login_response.json()["is_bootstrap_admin"] is True
+
+    change_password_response = await async_client.post(
+        "/auth/password/change",
+        json={
+            "current_password": "supersecret123",
+            "new_password": "supersecret456",
+        },
+    )
+    assert change_password_response.status_code == 200
+
+    await async_client.post("/auth/logout")
+    assert (
+        (await async_client.post(
+            "/auth/login",
+            json={
+                "email": "owner@example.com",
+                "password": "supersecret123",
+            },
+        )).status_code
+        == 400
+    )
+    assert (
+        (await async_client.post(
+            "/auth/login",
+            json={
+                "email": "owner@example.com",
+                "password": "supersecret456",
+            },
+        )).status_code
+        == 200
+    )
+
+    preview_response = await async_client.post("/auth/session/view-mode", json={"view_as_regular": True})
+    assert preview_response.status_code == 200
+    preview_data = preview_response.json()
+    assert preview_data["is_admin"] is True
+    assert preview_data["effective_is_admin"] is False
+    assert preview_data["view_as_regular"] is True
+    assert preview_data["role"] == "public"
+
+    restore_response = await async_client.post("/auth/session/view-mode", json={"view_as_regular": False})
+    assert restore_response.status_code == 200
+    assert restore_response.json()["effective_is_admin"] is True
+
+    forgot_response = await async_client.post(
+        "/auth/password/forgot",
+        json={"email": "owner@example.com"},
+    )
+    assert forgot_response.status_code == 200
+    reset_token = forgot_response.json()["reset_token_preview"]
+    assert reset_token
+
+    reset_response = await async_client.post(
+        "/auth/password/reset",
+        json={
+            "token": reset_token,
+            "new_password": "supersecret789",
+        },
+    )
+    assert reset_response.status_code == 200
+    assert reset_response.json()["user"]["email"] == "owner@example.com"
+
+    await async_client.post("/auth/logout")
+    final_login_response = await async_client.post(
+        "/auth/login",
+        json={
+            "email": "owner@example.com",
+            "password": "supersecret789",
+        },
+    )
+    assert final_login_response.status_code == 200
+
+
+@pytest.mark.anyio
+async def test_auth_routes_support_cross_origin_session_requests(async_client):
+    options_response = await async_client.options(
+        "/auth/login",
+        headers={
+            "Origin": "http://localhost:3030",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+    assert options_response.status_code == 200
+    assert options_response.headers["access-control-allow-origin"] == "http://localhost:3030"
+    assert options_response.headers["access-control-allow-credentials"] == "true"
+
+
+@pytest.mark.anyio
+async def test_dashboard_metric_layout_is_persisted_per_user_and_sanitized(async_client):
+    register = await async_client.post("/auth/register", json={"full_name": "Layout Owner", "email": "dashboard-layout@example.com", "password": "supersecret123"})
+    assert register.status_code == 201
+    saved = await async_client.patch("/auth/me", json={"profile_preferences": {"dashboard_metrics": {"order": ["live", "ready", "live", "secret"], "visible": {"live": True, "ready": False, "secret": True}}}})
+    assert saved.status_code == 200
+    layout = saved.json()["profile_preferences"]["dashboard_metrics"]
+    assert layout["order"] == ["live", "ready", "review", "draft"]
+    assert layout["visible"] == {"ready": False, "review": True, "live": True, "draft": True}
+    reread = await async_client.get("/auth/me")
+    assert reread.json()["profile_preferences"]["dashboard_metrics"] == layout
+    second = await async_client.post("/auth/register", json={"full_name": "Separate Layout Owner", "email": f"dashboard-layout-{uuid4()}@example.com", "password": "supersecret123"})
+    assert second.status_code == 201
+    assert second.json()["user"]["profile_preferences"].get("dashboard_metrics") is None
+
+
+@pytest.mark.anyio
+async def test_jobs_metric_layout_is_persisted_and_sanitized(async_client):
+    register = await async_client.post("/auth/register", json={"full_name": "Jobs Layout Owner", "email": f"jobs-layout-{uuid4()}@example.com", "password": "supersecret123"})
+    assert register.status_code == 201
+    saved = await async_client.patch("/auth/me", json={"profile_preferences": {"jobs_layout": {"overview": ["failed", "failed", "unknown"], "system": ["sold"], "processing": ["attention", "worker"]}}})
+    assert saved.status_code == 200
+    layout = saved.json()["profile_preferences"]["jobs_layout"]
+    assert layout["overview"] == ["failed", "crosspost", "imports", "queued"]
+    assert layout["system"][0] == "sold"
+    assert set(layout["system"]) == {"catalog", "drafts", "review", "published", "sold", "intake", "queued_work", "failed_work", "notices"}
+    assert layout["processing"][:2] == ["attention", "worker"]
+    reread = await async_client.get("/auth/me")
+    assert reread.json()["profile_preferences"]["jobs_layout"] == layout
+
+
+@pytest.mark.anyio
+async def test_profile_timezone_is_persisted_and_validated(async_client):
+    register = await async_client.post("/auth/register", json={"full_name": "Timezone Owner", "email": f"timezone-{uuid4()}@example.com", "password": "supersecret123"})
+    assert register.status_code == 201
+    saved = await async_client.patch("/auth/me", json={"profile_preferences": {"timezone": "America/New_York"}})
+    assert saved.status_code == 200
+    assert saved.json()["profile_preferences"]["timezone"] == "America/New_York"
+    invalid = await async_client.patch("/auth/me", json={"profile_preferences": {"timezone": "Not/A_Real_Zone"}})
+    assert invalid.status_code == 422
+
+
+@pytest.mark.anyio
+async def test_vine_reseller_features_preference_is_persisted(async_client):
+    register = await async_client.post("/auth/register", json={"full_name": "Vine Preference", "email": f"vine-pref-{uuid4()}@example.com", "password": "supersecret123"})
+    assert register.status_code == 201
+    saved = await async_client.patch("/auth/me", json={"profile_preferences": {"vine_features_enabled": False}})
+    assert saved.status_code == 200
+    assert saved.json()["profile_preferences"]["vine_features_enabled"] is False
+    reread = await async_client.get("/auth/me")
+    assert reread.json()["profile_preferences"]["vine_features_enabled"] is False
+
+
+@pytest.mark.anyio
+async def test_shipping_profitability_preferences_are_user_scoped_and_persisted(async_client):
+    registered = await async_client.post("/auth/register", json={"full_name": "Shipping Policy", "email": f"shipping-policy-{uuid4()}@example.com", "password": "supersecret123"})
+    assert registered.status_code == 201
+    saved = await async_client.patch("/auth/me", json={
+        "shipping_policy_enabled": False,
+        "shipping_price_threshold": 31.5,
+        "shipping_currency": "CAD",
+        "preferred_shipping_carrier": "USPS",
+        "preferred_shipping_service": "USPSGroundAdvantage",
+        "buyer_paid_rate_type": "flat",
+        "minimum_estimated_net_proceeds": 7.5,
+        "minimum_gross_margin": 0.25,
+        "promotion_treatment": "include_known_costs",
+        "negotiated_offer_treatment": "recheck_before_acceptance",
+    })
+    assert saved.status_code == 200, saved.text
+    workflow = saved.json()["workflow_preferences"]
+    assert workflow["shipping_policy_enabled"] is False
+    assert workflow["shipping_price_threshold"] == 31.5
+    assert workflow["shipping_currency"] == "CAD"
+    assert workflow["buyer_paid_rate_type"] == "flat"
+    assert workflow["minimum_estimated_net_proceeds"] == 7.5
+    assert workflow["minimum_gross_margin"] == 0.25
+    assert workflow["preferred_shipping_service"] == "USPSGroundAdvantage"

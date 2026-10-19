@@ -1,0 +1,358 @@
+from app.models.enums import ListingStatus, MarketplaceListingStatus
+from app.models.models import Listing, MarketplaceListing, User
+from app.services.marketplace_preflight import MarketplacePreflightService
+from app.services.marketplace_field_mapper import build_marketplace_draft_previews, build_marketplace_payload, destination_category_snapshot, marketplace_description_variants, persist_marketplace_description_variants, normalize_import_payload
+from app.workers import tasks
+from app.workers.tasks import publish_listing_to_marketplace_task, _find_existing_imported_listing
+
+
+def test_destination_drafts_prepare_categories_without_marketplace_connections(db_session):
+    user = User(email="offline-destination-prep@example.com")
+    db_session.add(user)
+    db_session.flush()
+    listing = Listing(
+        user_id=user.id,
+        status=ListingStatus.draft,
+        title="Kohree Class A RV Cover",
+        description="A detailed product description for the motorhome cover.",
+        canonical_description="A detailed product description for the motorhome cover.",
+        category_id="181068",
+        category_suggestion="Automotive > RV, Trailer & Camper Parts & Accessories > Covers",
+        listing_price=99.0,
+        quantity=1,
+        item_specifics={"Brand": "Kohree"},
+        marketplace_data={"marketplace_overrides": {"facebook": {"category": "Vehicles > RVs"}}},
+    )
+    previews = build_marketplace_draft_previews(listing)
+    categories = destination_category_snapshot(listing)
+    assert set(previews) >= {"ebay", "facebook", "mercari", "vinted", "offerup", "poshmark", "etsy", "depop", "whatnot"}
+    assert previews["ebay"]["category_id"] == "181068"
+    assert previews["facebook"]["category_hint"] == "Vehicles > RVs"
+    assert categories["facebook"]["connection_required"] is False
+    assert categories["mercari"]["status"] == "prepared"
+
+
+def test_legacy_non_ebay_publish_task_uses_assisted_handoff(db_session):
+    user = User(
+        email="assisted-publish@example.com",
+        settings_json={
+            "marketplace_connections": {
+                "mercari": {
+                    "display_name": "Mercari Test",
+                    "account_handle": "mercari-test",
+                    "workflow_state": "ready",
+                    "publish_mode": "manual_review",
+                }
+            }
+        },
+    )
+    db_session.add(user)
+    db_session.flush()
+
+    listing = Listing(
+        user_id=user.id,
+        status=ListingStatus.PROCESSED,
+        title="Camera bundle",
+        description="Clean tested bundle",
+        listing_price=129.0,
+        quantity=1,
+        marketplace_data={"targets": ["mercari"]},
+    )
+    db_session.add(listing)
+    db_session.commit()
+    db_session.refresh(listing)
+
+    result = publish_listing_to_marketplace_task.run(listing.id, "mercari")
+
+    assert result["marketplace"] == "mercari"
+    assert result["execution_mode"] == "manual_only"
+    assert result["status"] == "planned"
+    assert result["response"]["status"] == "MANUAL_HANDOFF_READY"
+
+    marketplace_listing = (
+        db_session.query(MarketplaceListing)
+        .filter(
+            MarketplaceListing.listing_id == listing.id,
+            MarketplaceListing.marketplace == "mercari",
+        )
+        .one()
+    )
+    assert marketplace_listing.status == MarketplaceListingStatus.PENDING
+    assert marketplace_listing.raw_response["status"] == "MANUAL_HANDOFF_READY"
+
+
+def test_single_listing_publish_uses_hosted_fallback_when_extension_is_offline(db_session, monkeypatch):
+    user = User(
+        email="hosted-fallback@example.com",
+        settings_json={"marketplace_connections": {"facebook": {"publish_mode": "browser_assist"}}},
+    )
+    db_session.add(user)
+    db_session.flush()
+    listing = Listing(
+        user_id=user.id,
+        status=ListingStatus.PROCESSED,
+        title="Small side table",
+        description="Wood side table in clean condition.",
+        listing_price=30.0,
+        quantity=1,
+        marketplace_data={"targets": ["facebook"]},
+    )
+    db_session.add(listing)
+    db_session.commit()
+    execution_modes = []
+    monkeypatch.setattr(tasks, "execute_secondary_marketplace_path", lambda **kwargs: execution_modes.append(kwargs["execution_mode"]) or {"status": "BROWSER_AUTOMATION_READY"})
+    monkeypatch.setattr(MarketplacePreflightService, "preflight_listing", lambda _self, _db, row, market: {"listing_id": row.id, "marketplace": market, "status": "ready", "blockers": [], "warnings": []})
+
+    result = publish_listing_to_marketplace_task.run(listing.id, "facebook")
+
+    assert result["execution_mode"] == "hosted_browser_assist"
+    assert execution_modes == ["hosted_browser_assist"]
+
+
+def test_mercari_payload_trims_description_to_word_limit(db_session):
+    user = User(email="mercari-trim@example.com")
+    db_session.add(user)
+    db_session.flush()
+
+    description = " ".join(f"word{i}" for i in range(1205))
+    listing = Listing(
+        user_id=user.id,
+        status=ListingStatus.PROCESSED,
+        title="Mercari test listing",
+        description=description,
+        listing_price=55.0,
+        quantity=1,
+        marketplace_data={"targets": ["mercari"]},
+    )
+    db_session.add(listing)
+    db_session.flush()
+
+    payload = build_marketplace_payload(listing, "mercari")
+    assert payload["marketplace"] == "mercari"
+    assert payload["description"] is not None
+    assert len(str(payload["description"])) <= 1000
+
+
+def test_internal_vine_workflow_tags_never_become_marketplace_tags_or_materials():
+    listing = Listing(
+        user_id=1,
+        status=ListingStatus.draft,
+        title="Cotton utility pouch",
+        description="A practical cotton pouch with a zip closure.",
+        listing_price=18.0,
+        quantity=1,
+        condition="New",
+        category_suggestion="Accessories > Pouches",
+        item_specifics={"Brand": "Northwind", "Material": "Cotton"},
+        tags=["amazon_vine", "review_required", "draft_preview_ready", "everyday carry"],
+        image_urls=["https://example.test/pouch.jpg"],
+    )
+    payloads = [build_marketplace_payload(listing, market) for market in (
+        "ebay", "facebook", "mercari", "vinted", "offerup", "poshmark", "etsy", "depop",
+    )]
+    banned = {"amazon_vine", "review_required", "draft_preview_ready"}
+
+    def strings(value):
+        if isinstance(value, dict):
+            return [text for child in value.values() for text in strings(child)]
+        if isinstance(value, (list, tuple)):
+            return [text for child in value for text in strings(child)]
+        return [value] if isinstance(value, str) else []
+
+    assert not any(text in banned for payload in payloads for text in strings(payload))
+    depop = build_marketplace_payload(listing, "depop")
+    etsy = build_marketplace_payload(listing, "etsy")
+    assert depop["hashtags"] == ["everyday carry"]
+    assert etsy["materials"] == ["Cotton"]
+
+
+def test_marketplace_descriptions_keep_rich_canonical_copy_separate(db_session):
+    user = User(email="marketplace-description-variants@example.com")
+    db_session.add(user); db_session.flush()
+    canonical = "Portable camping toilet with a sealed waste tank, fresh-water flush reservoir, level indicators, rotating spout, carry handle, and removable components for RV travel. " * 8
+    listing = Listing(user_id=user.id, title="Portable Camping Toilet", description=canonical, canonical_description=canonical, listing_price=89, quantity=1)
+    variants = marketplace_description_variants(listing)
+    assert len(variants["canonical"]) > 1000
+    assert len(variants["ebay"]) > 1000
+    assert len(variants["facebook"]) > 1000
+    assert len(variants["mercari"]) <= 1000
+    assert "sealed waste tank" in variants["mercari"]
+    assert build_marketplace_payload(listing, "ebay")["description"] == variants["ebay"]
+    assert build_marketplace_payload(listing, "facebook")["description"] == variants["facebook"]
+    assert build_marketplace_payload(listing, "mercari")["description"] == variants["mercari"]
+    assert len(variants["poshmark"]) <= 2000
+    assert len(variants["vinted"]) <= 1000
+
+
+def test_marketplace_variant_persistence_preserves_operator_override(db_session):
+    user = User(email="marketplace-description-override@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(user_id=user.id, title="Test product", description="Rich canonical copy with supported product facts and buyer context.", marketplace_descriptions={"mercari": "Operator edited Mercari copy."})
+    rendered = persist_marketplace_description_variants(listing)
+    assert rendered["mercari"] == "Operator edited Mercari copy."
+    assert rendered["ebay"] == listing.description
+    assert rendered["facebook"] == listing.description
+
+
+def test_destination_overrides_are_used_by_payload_without_changing_canonical(db_session):
+    user = User(email="marketplace-override-payload@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(user_id=user.id, title="Original", description="Canonical copy", listing_price=50, marketplace_data={"marketplace_overrides": {"ebay": {"price": 42, "title": "eBay-specific title", "provenance": {"price": "operator_edited"}}}})
+    payload = build_marketplace_payload(listing, "ebay")
+    assert payload["price"] == 42
+    assert payload["title"] == "eBay-specific title"
+    assert listing.listing_price == 50
+
+
+def test_destination_overrides_apply_condition_and_item_specifics(db_session):
+    user = User(email="destination-condition-aspects@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(
+        user_id=user.id,
+        title="Jacket",
+        description="Canonical copy",
+        condition="Used",
+        listing_price=40,
+        item_specifics={"Brand": "Example", "Size": "M"},
+        marketplace_data={"marketplace_overrides": {"ebay": {"condition": "New", "item_specifics": {"Brand": "Example", "Size": "L"}}}},
+    )
+    db_session.add(listing); db_session.flush()
+    payload = build_marketplace_payload(listing, "ebay")
+    assert payload["condition"] == "New"
+    assert payload["item_specifics"]["Size"] == "L"
+    assert listing.condition == "Used"
+
+
+def test_destination_category_override_reaches_ebay_payload(db_session):
+    user = User(email="destination-category@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(
+        user_id=user.id, title="Portable toilet", description="Canonical copy",
+        category_id="100", category_suggestion="Other", listing_price=40,
+        marketplace_data={"marketplace_overrides": {"ebay": {"category": "181397"}}},
+    )
+    payload = build_marketplace_payload(listing, "ebay")
+    assert payload["category_id"] == "181397"
+    assert listing.category_id == "100"
+
+
+def test_destination_shipping_override_reaches_payload_without_changing_default(db_session):
+    user = User(email="destination-shipping@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(
+        user_id=user.id, title="Camping item", description="Canonical copy", listing_price=40,
+        shipping_profile={"mode": "calculated", "free_shipping": False, "domestic_service": "Ground"},
+        marketplace_data={"marketplace_overrides": {"mercari": {"shipping": {"free_shipping": True, "shipping_method": "prepaid"}}}},
+    )
+    db_session.add(listing); db_session.flush()
+    payload = build_marketplace_payload(listing, "mercari")
+    assert payload["shipping"]["prepaid"] is True
+    assert payload["shipping"]["shipping_method"] == "prepaid"
+    assert listing.shipping_profile["free_shipping"] is False
+
+
+def test_import_normalization_preserves_remote_identity_fields():
+    normalized = normalize_import_payload(
+        source_marketplace="ebay",
+        payload={"item_id": "EBAY-123", "listing_url": "https://ebay.example/item/123", "status": "ACTIVE", "title": "Imported item"},
+    )
+    assert normalized["remote_listing_id"] == "EBAY-123"
+    assert normalized["remote_url"].endswith("/123")
+    assert normalized["remote_status"] == "active"
+
+
+def test_import_dedupe_prefers_exact_remote_identity_projection(db_session):
+    user = User(email="remote-identity-dedupe@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(user_id=user.id, source_type="ebay_import", title="Existing")
+    db_session.add(listing); db_session.flush()
+    db_session.add(MarketplaceListing(
+        listing_id=listing.id,
+        marketplace="ebay",
+        marketplace_listing_id="REMOTE-42",
+        status=MarketplaceListingStatus.PUBLISHED,
+    ))
+    db_session.flush()
+    found = _find_existing_imported_listing(
+        db=db_session,
+        user_id=user.id,
+        source_marketplace="ebay",
+        source_listing_reference="REMOTE-42",
+    )
+    assert found is not None
+    assert found.id == listing.id
+
+
+def test_non_ebay_payload_does_not_reuse_ebay_category_id(db_session):
+    user = User(email="marketplace-category-map@example.com")
+    db_session.add(user)
+    db_session.flush()
+
+    listing = Listing(
+        user_id=user.id,
+        status=ListingStatus.PROCESSED,
+        title="Wool sweater",
+        description="Warm wool sweater.",
+        listing_price=40.0,
+        quantity=1,
+        category_id="57988",
+        category_suggestion="Clothing, Shoes & Accessories > Sweaters",
+        item_specifics={"Type": "Sweater"},
+    )
+
+    mercari = build_marketplace_payload(listing, "mercari")
+    ebay = build_marketplace_payload(listing, "ebay")
+
+    assert mercari["category_hint"] == "Clothing, Shoes & Accessories > Sweaters"
+    assert mercari["category_hint"] != listing.category_id
+    assert ebay["category_id"] == "57988"
+
+
+def test_assisted_marketplace_payloads_keep_canonical_evidence_without_fabricating_etsy_fields(db_session):
+    user = User(email="marketplace-fields@example.com")
+    db_session.add(user)
+    db_session.flush()
+    listing = Listing(
+        user_id=user.id,
+        title="Vintage wool coat",
+        description="A lined wool coat in very good condition.",
+        listing_price=68.0,
+        quantity=1,
+        category_id="12345",
+        category_suggestion="Clothing > Coats",
+        condition="Used - Very Good",
+        item_specifics={
+            "brand": "Northwind",
+            "Apparel Size": "M",
+            "Colour": "Navy",
+            "Materials": "Wool",
+            "Item Weight": "1.2 kg",
+            "Item Length": "32 in",
+        },
+        shipping_profile={
+            "shipping_charge_mode": "flat",
+            "parcel_size": "medium",
+            "parcel_weight": "1.2 kg",
+            "shipping_payer": "buyer",
+        },
+    )
+
+    facebook = build_marketplace_payload(listing, "facebook")
+    mercari = build_marketplace_payload(listing, "mercari")
+    poshmark = build_marketplace_payload(listing, "poshmark")
+    vinted = build_marketplace_payload(listing, "vinted")
+    etsy = build_marketplace_payload(listing, "etsy")
+    offerup = build_marketplace_payload(listing, "offerup")
+
+    for payload in (facebook, mercari, poshmark, vinted, etsy, offerup):
+        assert payload["category_hint"] == "Clothing > Coats"
+        assert payload.get("brand") == "Northwind"
+        assert payload.get("size") == "M"
+        assert payload.get("color") == "Navy"
+        assert payload.get("weight") == "1.2 kg"
+        assert "category_id" not in payload
+    assert mercari["shipping"]["parcel_size"] == "medium"
+    assert vinted["shipping"]["parcel_weight"] == "1.2 kg"
+    assert offerup["shipping"]["shipping_payer"] == "buyer"
+    assert etsy["who_made"] is None
+    assert etsy["when_made"] is None

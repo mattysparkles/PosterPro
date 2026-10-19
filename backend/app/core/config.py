@@ -1,0 +1,167 @@
+import sys
+from pathlib import Path
+
+from pydantic import AliasChoices, Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.core.secrets import decrypt_secret_if_needed
+
+
+_RUNNING_PYTEST = "pytest" in sys.modules
+_DEFAULT_DB_URL = "sqlite:///./posterpro_test.db" if _RUNNING_PYTEST else "sqlite:///./posterpro.db"
+_BACKEND_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+_ENV_FILE = None if _RUNNING_PYTEST else str(_BACKEND_ENV_FILE)
+
+
+class Settings(BaseSettings):
+    app_name: str = "PosterPro"
+    app_base_url: str | None = None
+    environment: str = "development"
+    cors_allowed_origins: str | None = None
+    # Keep local defaults credential-free; production should supply explicit env vars.
+    database_url: str = _DEFAULT_DB_URL
+    redis_url: str = "redis://localhost:6379/1"
+    storage_root: str = "./storage"
+    startup_schema_compat_enabled: bool = True
+    startup_vine_image_repair_enabled: bool = False
+    session_secret: str | None = None
+    openai_api_key_plain: str | None = Field(default=None, validation_alias=AliasChoices("OPENAI_API_KEY"))
+    openai_api_key_enc: str | None = Field(default=None, validation_alias=AliasChoices("OPENAI_API_KEY_ENC"))
+    ebay_client_id: str | None = None
+    ebay_client_secret_plain: str | None = Field(default=None, validation_alias=AliasChoices("EBAY_CLIENT_SECRET"))
+    ebay_client_secret_enc: str | None = Field(default=None, validation_alias=AliasChoices("EBAY_CLIENT_SECRET_ENC"))
+    ebay_runame: str | None = None
+    ebay_redirect_uri: str | None = None
+    # Optional EPN link parameters; attribution is disabled unless every
+    # required field is configured on the server.
+    ebay_epn_campaign_id: str | None = None
+    ebay_epn_channel_id: str | None = None
+    ebay_epn_rotation_id: str | None = None
+    ebay_epn_tool_id: str | None = None
+    ebay_epn_event_type: str | None = None
+    commerce_billing_enabled: bool = False
+    google_photos_client_id: str | None = None
+    google_photos_client_secret_plain: str | None = Field(default=None, validation_alias=AliasChoices("GOOGLE_PHOTOS_CLIENT_SECRET"))
+    google_photos_client_secret_enc: str | None = Field(default=None, validation_alias=AliasChoices("GOOGLE_PHOTOS_CLIENT_SECRET_ENC"))
+    google_photos_redirect_uri: str | None = None
+    photoroom_api_key_plain: str | None = Field(default=None, validation_alias=AliasChoices("PHOTOROOM_API_KEY"))
+    photoroom_api_key_enc: str | None = Field(default=None, validation_alias=AliasChoices("PHOTOROOM_API_KEY_ENC"))
+    photoroom_api_url: str = "https://sdk.photoroom.com/v1/segment"
+    automation_bridge_enabled: bool = False
+    automation_bridge_url: str | None = None
+    automation_bridge_timeout_seconds: int = 30
+    automation_bridge_vnc_host: str = "127.0.0.1"
+    automation_bridge_vnc_port: int = 5901
+    automation_bridge_api_key_plain: str | None = Field(default=None, validation_alias=AliasChoices("AUTOMATION_BRIDGE_API_KEY"))
+    automation_bridge_api_key_enc: str | None = Field(default=None, validation_alias=AliasChoices("AUTOMATION_BRIDGE_API_KEY_ENC"))
+    autonomous_mode: bool = True
+    autonomous_dry_run: bool = False
+    autonomous_crosspost_enabled: bool = True
+    auto_relist_enabled: bool = True
+    auto_relist_min_price: float = 20.0
+    auto_relist_user_rules_json: str | None = None
+    sale_detection_enabled: bool = True
+    sale_detection_dry_run: bool = True
+    sale_detection_poll_minutes: int = 15
+    # Replay a bounded window so deploys/provider outages do not permanently
+    # skip sales; reconciliation is idempotent by remote order/listing ID.
+    sale_detection_lookback_minutes: int = 360
+    sold_sync_enabled: bool = False
+    intake_monitor_enabled: bool = False
+    historical_backlog_auto_resume_enabled: bool = False
+    max_concurrent_bulk_tasks: int = 50
+    ai_cost_mode: str = "COMPLIMENTARY_ONLY"
+    # Hard firewall: automatic work may never fall through to a positive paid
+    # API balance unless the operator explicitly opts in.
+    paid_openai_spend_allowed: bool = False
+    # This installation's platform project participates in the shared-traffic
+    # complimentary-token offer.  BYO keys remain ineligible unless explicitly
+    # granted by tenant policy.
+    openai_complimentary_traffic_eligible: bool = True
+    ai_mini_daily_entitlement: int = 2_500_000
+    ai_mini_daily_safe_ceiling: int = 2_350_000
+    ai_large_daily_entitlement: int = 250_000
+    ai_large_daily_safe_ceiling: int = 225_000
+    ai_provider_circuit_cooldown_seconds: int = 900
+    sponsored_ai_enabled: bool = False
+    sponsored_ai_metering_ready: bool = False
+    sponsored_ai_allowed_models: str = "gpt-4o-mini"
+    sponsored_ai_request_limit_per_minute: int = 20
+    bulk_chunk_size: int = 0
+    amazon_vine_import_enabled: bool = False
+    amazon_vine_import_premium_only: bool = False
+    amazon_media_lookup_enabled: bool = False
+    amazon_media_page_fallback_enabled: bool = False
+    amazon_marketplace_region: str = "US"
+    amazon_media_fetch_mode: str = "manual_only"
+    amazon_media_rate_limit_per_minute: int = 12
+    amazon_paapi_access_key_enc: str | None = None
+    amazon_paapi_secret_key_enc: str | None = None
+    amazon_paapi_partner_tag_enc: str | None = None
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password_plain: str | None = Field(default=None, validation_alias=AliasChoices("SMTP_PASSWORD"))
+    smtp_password_enc: str | None = Field(default=None, validation_alias=AliasChoices("SMTP_PASSWORD_ENC"))
+    smtp_from_email: str | None = None
+    smtp_from_name: str | None = None
+    smtp_use_tls: bool = True
+
+    model_config = SettingsConfigDict(env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore")
+
+    @property
+    def openai_api_key(self) -> str | None:
+        return decrypt_secret_if_needed(self.openai_api_key_enc, secret_key=self.session_secret) or self.openai_api_key_plain
+
+    @property
+    def ebay_client_secret(self) -> str | None:
+        return decrypt_secret_if_needed(self.ebay_client_secret_enc, secret_key=self.session_secret) or self.ebay_client_secret_plain
+
+    @property
+    def google_photos_client_secret(self) -> str | None:
+        return decrypt_secret_if_needed(self.google_photos_client_secret_enc, secret_key=self.session_secret) or self.google_photos_client_secret_plain
+
+    @property
+    def photoroom_api_key(self) -> str | None:
+        return decrypt_secret_if_needed(self.photoroom_api_key_enc, secret_key=self.session_secret) or self.photoroom_api_key_plain
+
+    @property
+    def automation_bridge_api_key(self) -> str | None:
+        return decrypt_secret_if_needed(self.automation_bridge_api_key_enc, secret_key=self.session_secret) or self.automation_bridge_api_key_plain
+
+    @property
+    def amazon_paapi_access_key(self) -> str | None:
+        return decrypt_secret_if_needed(self.amazon_paapi_access_key_enc, secret_key=self.session_secret)
+
+    @property
+    def amazon_paapi_secret_key(self) -> str | None:
+        return decrypt_secret_if_needed(self.amazon_paapi_secret_key_enc, secret_key=self.session_secret)
+
+    @property
+    def amazon_paapi_partner_tag(self) -> str | None:
+        return decrypt_secret_if_needed(self.amazon_paapi_partner_tag_enc, secret_key=self.session_secret)
+
+    @property
+    def smtp_password(self) -> str | None:
+        return decrypt_secret_if_needed(self.smtp_password_enc, secret_key=self.session_secret) or self.smtp_password_plain
+
+
+settings = Settings()
+
+
+def reload_settings() -> Settings:
+    """Reload settings from the current process environment and env file.
+
+    PosterPro updates backend/.env when operators save server credentials.
+    Long-running worker processes need a way to pick up those changes without
+    a manual restart, especially for marketplace OAuth credentials.
+    """
+    # Refresh the existing singleton in place.  Several long-lived services
+    # keep a reference to ``settings``; rebinding the module variable leaves
+    # those consumers with stale configuration (and makes environment changes
+    # appear nondeterministic).  Updating the instance preserves references
+    # while still applying the current environment/.env values.
+    refreshed = Settings()
+    settings.__dict__.clear()
+    settings.__dict__.update(refreshed.__dict__)
+    return settings

@@ -1,0 +1,9 @@
+{
+  "name": "PosterPro Intake Slate",
+  "short_name": "PosterPro Intake",
+  "start_url": "/intake/slate",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
+  "description": "Offline-capable intake slate generator for PosterPro product intake sessions."
+}

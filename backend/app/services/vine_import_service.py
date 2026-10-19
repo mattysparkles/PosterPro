@@ -1,0 +1,3897 @@
+from __future__ import annotations
+
+import csv
+import io
+import hashlib
+import json
+import re
+from difflib import SequenceMatcher
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
+
+from sqlalchemy import func, inspect, or_, select
+from sqlalchemy.orm import Session
+
+from app.core.config import settings
+from app.models.enums import ListingStatus, MarketplaceName
+from app.models.models import Listing, ListingProcessingEvent, ProductMediaCache, VineImportBatch, VineImportItem, User
+from app.services.category_rules import is_source_noise_category, suggest_category_from_text
+from app.services.automation_bridge import submit_bridge_job, wait_for_bridge_job
+from app.services.amazon_media import AmazonProductMediaProvider, _normalize_dimension_facts
+from app.services.amazon_product_discovery import AmazonProductDiscoveryService
+from app.services.ebay_service import _clip_specific_value, _derive_color, _derive_item_type, _fallback_aspect_value
+from app.services.listing_review import _shipping_number, derive_condition_data, derive_shipping_profile, normalize_listing_images, shipping_policy_for_user
+from app.services.listing_workspace import normalize_marketplace_data
+# Vine retries may update machine-owned placeholders, but must preserve both
+# operator edits and Codex-recovered verified copy/data.
+from app.services.listing_provenance import is_preserved_field as is_human_owned_field
+from app.services.marketplace_field_mapper import apply_generated_marketplace_drafts, build_marketplace_draft_previews, destination_category_snapshot, persist_marketplace_description_variants
+from app.services.vine_parser import ParsedVineRow, parse_vine_csv, parse_vine_pdf, parse_vine_xlsx
+from app.services.vine_parser import parse_date_value
+from app.services.vine_policy import review_vine_product
+from app.services.category_rules import verified_category_id
+from app.services.canonical_readiness import canonical_listing_readiness
+from app.services.ebay_taxonomy import category_by_id, closest_local_category, resolve_local_category, validate_listing_category
+
+VINE_IMAGE_BACKFILL_CUTOFF = date(2026, 6, 15)
+
+
+def _vine_local_taxonomy_available(db: Session) -> bool:
+    """Check once per session whether the synchronized eBay leaf tree exists."""
+    key = "posterpro.vine_local_taxonomy_available"
+    if key not in db.info:
+        try:
+            db.info[key] = bool(inspect(db.get_bind()).has_table("ebay_taxonomy_categories"))
+        except Exception:
+            db.info[key] = False
+    return bool(db.info[key])
+
+
+def _is_unsafe_vine_image(image: dict) -> bool:
+    path = " ".join(
+        str(image.get(key) or "").strip()
+        for key in ("storage_path", "source_url", "source_page_url")
+    ).lower()
+    metadata = image.get("metadata") if isinstance(image.get("metadata"), dict) else {}
+    provider = str(metadata.get("provider") or image.get("source_platform") or "").strip().lower()
+    return any(
+        token in path
+        for token in (
+            "vine-search-auto",
+            "vine-search-fallback",
+            "vine-search-last",
+            "/vine-search/",
+            "vine-search/",
+            "vine-search-fallback/",
+            "vine-search-last/",
+        )
+    ) or provider in {"vine_search_auto", "bing_image_search"}
+
+
+def _sanitize_vine_text(value: str | None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    raw = re.sub(r"\bamazon\s+vine\b", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"\bvine\s+report\b", "report", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"\binternal\s+vine\s+intake\s+workflow\b", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"\bvine\b", "", raw, flags=re.IGNORECASE)
+    # Source pages often append policy/promotional UI fragments. They are not
+    # product facts and must not leak into titles or generated copy.
+    raw = re.sub(r"\b(?:free\s+shipping|free\s+returns?|\d+[- ]day\s+(?:refund|return|replacement)|sponsored|limited[- ]time(?:\s+deal)?|add\s+to\s+cart|buy\s+now)\b", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"\s{2,}", " ", raw)
+    raw = re.sub(r"\n{3,}", "\n\n", raw)
+    return raw.strip(" \t\r\n-")
+
+
+_VINE_SOURCE_NOISE_MARKERS = (
+    "best sellers rank", "free 30-day refund", "return policy", "add to cart",
+    "sponsored", "secure transaction", "free shipping", "free returns",
+    "after-sales", "customer service", "delivery", "buy now",
+)
+
+
+def _contains_vine_source_noise(value: str | None) -> bool:
+    text = " ".join(str(value or "").split()).lower()
+    return any(marker in text for marker in _VINE_SOURCE_NOISE_MARKERS)
+
+
+def description_source_similarity(description: str | None, source_prose: list[str] | None) -> float:
+    """Detect substantial prose copying without penalizing shared facts."""
+    candidate_text = " ".join(re.findall(r"[a-z0-9]+", str(description or "").lower()))
+    if len(candidate_text.split()) < 8:
+        return 0.0
+    best = 0.0
+    for prose in source_prose or []:
+        source_text = " ".join(re.findall(r"[a-z0-9]+", str(prose or "").lower()))
+        if len(source_text.split()) < 8:
+            continue
+        if source_text in candidate_text:
+            best = 1.0
+            continue
+        # SequenceMatcher rewards long contiguous prose overlap; factual words
+        # scattered through an original rewrite do not trip this threshold.
+        best = max(best, SequenceMatcher(None, candidate_text, source_text).ratio())
+    return round(best, 4)
+
+
+# These are marketplace-facing category paths, not eBay taxonomy IDs.  They
+# are intentionally narrow only where the product wording is decisive; an
+# uncertain product remains in a reviewable generic category instead of being
+# put in an unrelated collectible/camera category.
+_VINE_CATEGORY_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("pool pump", "spa pump", "pool filter pump"), "Home & Garden > Yard, Garden & Outdoor Living > Pools & Spas > Pool Pumps"),
+    (("coffee maker", "espresso machine", "keurig"), "Home & Garden > Kitchen, Dining & Bar > Small Kitchen Appliances > Coffee Machines"),
+    (("vacuum", "robot vacuum"), "Home & Garden > Household Supplies & Cleaning > Vacuum Cleaners"),
+    (("grow light",), "Home & Garden > Lamps, Lighting & Ceiling Fans > Grow Light Kits"),
+    (("pressure washer",), "Home & Garden > Yard, Garden & Outdoor Living > Outdoor Power Equipment > Pressure Washers"),
+    (("air purifier",), "Home & Garden > Household Supplies & Cleaning > Air Purifiers"),
+    (("fishing net", "landing net"), "Sporting Goods > Fishing > Fishing Accessories > Landing Nets"),
+    (("propane gas detector", "rv gas detector"), "Automotive > RV, Trailer & Camper Parts & Accessories > Safety & Security"),
+    (("rv seat cover", "rv seat covers", "motorhome seat cover", "captains chair"), "Automotive > Parts & Accessories > Interior Parts & Accessories > Seat Covers"),
+    (("marker organizer", "pen organizer", "desktop storage rack"), "Office & School Supplies > Office Supplies > Desk Organization"),
+    (("dog", "cat", "pet"), "Pet Supplies"),
+    (("shampoo", "serum", "skin care", "skincare", "hair dryer"), "Health & Beauty"),
+    (("lithium battery charger", "battery charger"), "Consumer Electronics > Multipurpose Batteries & Power > Battery Chargers"),
+    (("keyboard", "mouse", "usb hub", "charger", "adapter", "router"), "Computers/Tablets & Networking"),
+    (("toy", "dinosaur", "puzzle", "rc "), "Toys & Hobbies"),
+)
+
+
+def _supported_capacity_value(value) -> str:
+    """Return capacity only when its units/measure describe a capacity.
+
+    Amazon's generic detail tables occasionally mislabel protocol/version
+    strings (for example ``802.3a``) or electrical current (``360 A``) as
+    Capacity. Keep those values as untrusted evidence, but do not send them to
+    marketplace aspects or generated copy.
+    """
+    text = _sanitize_vine_text(value)[:120]
+    if not text or text.strip().lower() in {"does not apply", "unknown", "n/a", "not applicable"}:
+        return ""
+    if re.search(
+        r"\b(?:gallons?| gals?|lit(?:er|re)s?|ml|millilit(?:er|re)s?|"
+        r"fl\.?\s*oz|ounces?|oz|pounds?|lbs?|kilograms?|kg|grams?|g|"
+        r"tons?|quarts?|qt|cups?|pints?|pt|bushels?|cubic\s*(?:in|ft|feet)|"
+        r"gb|tb|mb|mah|wh|watts?|pots?|rooms?|people|persons|seats?|"
+        r"items?|pieces?|units?|sheets?|pages?|bottles?|ports?|slots?)\b",
+        text,
+        re.I,
+    ):
+        return text
+    return ""
+
+
+def _clean_amazon_facts(raw: dict | None) -> dict:
+    source = raw if isinstance(raw, dict) else {}
+    specifications = source.get("specifications") if isinstance(source.get("specifications"), dict) else {}
+    if not specifications:
+        specifications = source.get("item_specifics") if isinstance(source.get("item_specifics"), dict) else {}
+    components = source.get("included_components") or source.get("includedComponents") or []
+    if isinstance(components, str):
+        components = [part.strip() for part in re.split(r"[,;\n]", components) if part.strip()]
+    bullets = source.get("feature_bullets") or source.get("featureBullets") or source.get("bullets") or []
+    if isinstance(bullets, str):
+        bullets = [part.strip() for part in re.split(r"\n+", bullets) if part.strip()]
+    normalized_specs = {
+        str(key).strip()[:100]: _sanitize_vine_text(value)[:300]
+        for key, value in specifications.items()
+        if str(key).strip() and _sanitize_vine_text(value)
+    }
+    untrusted_specs = dict(source.get("untrusted_specifications") or {}) if isinstance(source.get("untrusted_specifications"), dict) else {}
+    for key in list(normalized_specs):
+        if key.strip().lower() in {"capacity", "tank capacity", "supported capacity"} and not _supported_capacity_value(normalized_specs[key]):
+            untrusted_specs[key] = normalized_specs.pop(key)
+    capacity = _supported_capacity_value(source.get("capacity"))
+    return {
+        "title": _sanitize_vine_text(source.get("title"))[:512],
+        "brand": _sanitize_vine_text(source.get("brand"))[:160],
+        "model": _sanitize_vine_text(source.get("model") or source.get("model_number"))[:160],
+        "mpn": _sanitize_vine_text(source.get("mpn") or source.get("part_number"))[:160],
+        "material": _sanitize_vine_text(source.get("material"))[:160],
+        "color": _sanitize_vine_text(source.get("color") or source.get("colour"))[:120],
+        "size": _sanitize_vine_text(source.get("size"))[:120],
+        "product_type": _sanitize_vine_text(source.get("product_type") or source.get("type"))[:160],
+        "capacity": capacity,
+        "included_components": [_sanitize_vine_text(value)[:200] for value in components if _sanitize_vine_text(value)][:12],
+        "product_description": _sanitize_vine_text(source.get("product_description") or source.get("description"))[:2000],
+        "current_price": _positive_price(source.get("current_price")),
+        "price_source": _sanitize_vine_text(source.get("price_source"))[:80].lower(),
+        "feature_bullets": [_sanitize_vine_text(value)[:300] for value in bullets if _sanitize_vine_text(value)][:12],
+        "specifications": normalized_specs,
+        "untrusted_specifications": untrusted_specs,
+        "dimensions": dict(source.get("dimensions") or {}) if isinstance(source.get("dimensions"), dict) else {},
+        "weight": _sanitize_vine_text(source.get("weight") or source.get("item_weight"))[:120],
+        "breadcrumbs": [_sanitize_vine_text(value)[:120] for value in (source.get("breadcrumbs") or []) if _sanitize_vine_text(value)][:12],
+    }
+
+
+def _facts_have_content(facts: dict | None) -> bool:
+    """Whether a normalized facts object contains useful source evidence."""
+    if not isinstance(facts, dict):
+        return False
+    return bool(
+        facts.get("current_price")
+        or facts.get("feature_bullets")
+        or facts.get("specifications")
+        or facts.get("dimensions")
+        or facts.get("weight")
+        or facts.get("product_description")
+        or facts.get("brand")
+        or facts.get("model")
+    )
+
+
+def _count_verified_amazon_facts(facts: dict | None) -> int:
+    """Count buyer-useful, normalized evidence without treating identity as enrichment.
+
+    An ASIN, title, or a generic ``Type: Kit`` proves that we found a row; it
+    does not prove that Amazon's product information made it to copy.  This
+    count deliberately reflects the latter, and is used for stage reporting.
+    """
+    normalized = _clean_amazon_facts(facts)
+    count = 0
+    for key in ("brand", "model", "mpn", "material", "color", "size", "capacity", "weight"):
+        if normalized.get(key):
+            count += 1
+    count += len(normalized.get("feature_bullets") or [])
+    count += len(normalized.get("included_components") or [])
+    if normalized.get("product_description"):
+        count += 1
+    ignored_specs = {"type", "product type", "item type", "brand", "model", "asin"}
+    count += sum(
+        1 for key, value in (normalized.get("specifications") or {}).items()
+        if str(key).strip().lower() not in ignored_specs and _sanitize_vine_text(value)
+    )
+    count += len(normalized.get("dimensions") or {})
+    return count
+
+
+def _vine_enrichment_stages(*, item: VineImportItem, listing: Listing, facts: dict) -> dict:
+    """Report independent Vine enrichment stages; images never imply text success."""
+    source = listing.source_metadata if isinstance(listing.source_metadata, dict) else {}
+    normalized = _clean_amazon_facts(facts)
+    fact_count = _count_verified_amazon_facts(normalized)
+    image_count = len(listing.image_urls or [])
+    source_url = item.amazon_source_page_url or item.manual_amazon_url or item.item_url
+    inferred_page_text_available = bool(
+        normalized.get("feature_bullets")
+        or normalized.get("product_description")
+        or any(
+            str(key).strip().lower() not in {"type", "product type", "item type", "brand", "model", "asin"}
+            for key in (normalized.get("specifications") or {})
+        )
+    )
+    recorded_text = source.get("amazon_source_text") if isinstance(source.get("amazon_source_text"), dict) else {}
+    page_text_available = recorded_text.get("state") == "complete" if recorded_text else inferred_page_text_available
+    description_words = len(str(listing.description or "").split())
+    return {
+        "source_identity": {
+            "state": "complete" if item.asin and source_url else "incomplete",
+            "asin": item.asin or None,
+            "source_url": source_url,
+            "csv_title": item.product_name or None,
+        },
+        "image_retrieval": {
+            "state": "complete" if image_count else "unavailable",
+            "image_count": image_count,
+            "primary_image_selected": bool((listing.listing_images or []) and (
+                (listing.listing_images or [])[0].get("is_primary")
+                or (listing.listing_images or [])[0].get("role") == "primary"
+            )),
+        },
+        "text_extraction": {
+            "state": "complete" if page_text_available else "inaccessible",
+            "fact_count": fact_count,
+            "bullet_count": len(normalized.get("feature_bullets") or []),
+            "has_product_description": bool(normalized.get("product_description")),
+            "reason": None if page_text_available else (recorded_text.get("reason") or "Amazon page response did not expose product text; no source prose was inferred from successful image retrieval."),
+        },
+        "fact_normalization": {
+            "state": "complete" if fact_count else "waiting_for_source_evidence",
+            "verified_fact_count": fact_count,
+        },
+        "description_generation": {
+            "state": "complete" if fact_count and description_words >= 80 else "blocked_by_missing_source_facts",
+            "word_count": description_words,
+            "generator": (source.get("vine_description_generation") or {}).get("source"),
+        },
+        "readiness_validation": {
+            "state": "pending_source_enrichment" if not fact_count else "pending_or_complete",
+        },
+    }
+
+
+def _merge_amazon_fact_evidence(prior: dict | None, fresh: dict | None) -> dict:
+    """Merge partial Amazon results without erasing durable structured facts."""
+    old = _clean_amazon_facts(prior)
+    new = _clean_amazon_facts(fresh)
+    merged = dict(old)
+    for key, value in new.items():
+        if value in (None, "", [], {}):
+            continue
+        if isinstance(value, dict):
+            merged[key] = {**(old.get(key) if isinstance(old.get(key), dict) else {}), **value}
+        elif isinstance(value, list):
+            merged[key] = list(dict.fromkeys([*(old.get(key) if isinstance(old.get(key), list) else []), *value]))
+        else:
+            merged[key] = value
+    return _clean_amazon_facts(merged)
+
+
+def _apply_fact_specifics(specifics: dict, provenance: dict[str, str], facts: dict) -> None:
+    """Overlay explicit Amazon facts onto placeholder item specifics."""
+    mapping = {
+        "Brand": facts.get("brand"), "Model": facts.get("model"), "MPN": facts.get("mpn"),
+        "Material": facts.get("material"), "Color": facts.get("color"), "Size": facts.get("size"),
+        "Type": facts.get("product_type"), "Capacity": facts.get("capacity"),
+    }
+    prose = " ".join([*(facts.get("feature_bullets") or []), str(facts.get("product_description") or "")])
+    if not mapping["Capacity"]:
+        # Keep this expression bounded and non-ambiguous.  The previous nested
+        # repetition could catastrophically backtrack on long Amazon prose,
+        # stalling an entire batch refresh.
+        match = re.search(r"\b(?:\d+(?:\.\d+)?\s*(?:,|and)\s*)*\d+(?:\.\d+)?\s*gallons?\b", prose, re.I)
+        if match:
+            mapping["Capacity"] = re.sub(r"\s+", " ", match.group(0)).strip()
+    for name, value in mapping.items():
+        text = str(value or "").strip()
+        current = specifics.get(name)
+        current_text = ", ".join(str(part).strip() for part in current if str(part).strip()) if isinstance(current, list) else str(current or "").strip()
+        current_lower = current_text.lower()
+        replaceable = current_lower in {"", "does not apply", "unknown", "n/a", "not applicable", "unbranded", "replacement part"}
+        if name == "Brand" and current_lower and current_lower in str(facts.get("title") or "").lower():
+            replaceable = True
+        if name == "Model" and current_lower and current_lower == str(facts.get("asin") or "").lower():
+            replaceable = True
+        if text and replaceable:
+            specifics[name] = _clip_specific_value(text)
+            provenance[name] = "amazon_product_page"
+
+
+def _merge_dimension_specifics(specifics: dict, provenance: dict, facts: dict) -> None:
+    """Add only evidence-backed item/product dimensions to marketplace specifics."""
+    dimensions = facts.get("dimensions") if isinstance(facts.get("dimensions"), dict) else {}
+    if not dimensions or dimensions.get("dimension_type") == "package":
+        return
+    unit = str(dimensions.get("unit") or "in").strip()
+    suffix = {"in": "in", "cm": "cm", "mm": "mm", "ft": "ft"}.get(unit, unit)
+    for field, key in (("length", "Item Length"), ("width", "Item Width"), ("height", "Item Height")):
+        value = dimensions.get(field)
+        if value is None:
+            continue
+        rendered = f"{value:g} {suffix}" if isinstance(value, (int, float)) else str(value)
+        existing = specifics.get(key)
+        if existing is None or str(existing).strip().lower() in {"does not apply", "unknown", "n/a", "not applicable"} or (isinstance(existing, list) and any(str(v).strip().lower() in {"does not apply", "unknown", "n/a", "not applicable"} for v in existing)):
+            specifics[key] = rendered
+            provenance[key] = "amazon_product_page_dimensions"
+
+
+def _remove_vine_specific_noise(specifics: dict, provenance: dict, source_metadata: dict | None = None) -> None:
+    """Remove scraped placeholders/UI fields while preserving human edits."""
+    source = source_metadata if isinstance(source_metadata, dict) else {}
+    noise_keys = {"asin", "customer reviews", "reviews", "best sellers rank", "javascript"}
+    noise_values = {"does not apply", "unknown", "n/a", "not applicable", "none", "null"}
+    for key, value in list(specifics.items()):
+        field = str(key).strip()
+        if is_human_owned_field(source, f"item_specifics.{field}") or is_human_owned_field(source, "item_specifics"):
+            continue
+        key_lower = field.lower()
+        text = ", ".join(str(part).strip() for part in value if str(part).strip()) if isinstance(value, list) else str(value or "").strip()
+        lower = text.lower()
+        # Amazon ASINs are identifiers, not product models.  Older Vine
+        # imports incorrectly copied the ASIN into the Model field; remove
+        # that machine-owned value while preserving an operator-owned model.
+        source_asin = str(source.get("asin") or source.get("amazon_match_asin") or "").strip().lower()
+        if key_lower == "model" and source_asin and lower == source_asin:
+            specifics.pop(key, None)
+            provenance.pop(key, None)
+            continue
+        if key_lower in noise_keys or lower in noise_values or any(marker in lower for marker in ("var dpacr", "p.when(", "acrlink-click-metrics", "customer reviews")):
+            specifics.pop(key, None)
+            provenance.pop(key, None)
+
+
+def _positive_price(value) -> float | None:
+    try:
+        price = float(value)
+    except (TypeError, ValueError):
+        return None
+    return round(price, 2) if price > 0 else None
+
+
+def _vine_return_policy_preferences() -> dict:
+    return {
+        "return_policy_preference": "no_returns_accepted",
+        "returns_accepted": False,
+        "returns_policy_reason": "inventory_liquidation_preference",
+    }
+
+
+def _promote_vine_listing_to_review(listing: Listing) -> None:
+    """Mark the lifecycle status without bypassing the canonical quality gate.
+
+    Vine rows are only reviewable after the caller's final readiness check has
+    passed.  This helper is invoked during intermediate enrichment passes, so
+    setting ``needs_review`` here caused incomplete rows (especially rows with
+    no category leaf) to leak into the review queue.
+    """
+    current_status = str(getattr(listing, "status", "") or "").strip().lower()
+    if current_status not in {"ready", "posted", "published", "rejected"}:
+        listing.status = ListingStatus.PROCESSED
+
+
+class VineImportService:
+    """Orchestrates Amazon Vine intake into reviewable PosterPro listing drafts.
+
+    Contract:
+    - Import rows from `.xlsx`, `.csv`, or `.pdf` into `VineImportBatch` + `VineImportItem`.
+    - Discover product images through a pluggable Amazon discovery layer.
+    - Create or reuse draft listings with duplicate protection and source traceability.
+    """
+
+    def create_batch_from_upload(
+        self,
+        db: Session,
+        *,
+        current_user: User,
+        filename: str,
+        file_bytes: bytes,
+        reference_date: date | None = None,
+    ) -> VineImportBatch:
+        """Parse a Vine report upload and persist normalized row records."""
+        enforce_six_month_lock = self._enforce_six_month_lock_for_user(current_user)
+        extension = Path(filename).suffix.lower()
+        if extension not in {".xlsx", ".pdf", ".csv"}:
+            raise ValueError("Only .xlsx, .csv, and .pdf Vine reports are supported")
+        if extension == ".xlsx":
+            parsed_rows = parse_vine_xlsx(
+                file_bytes,
+                reference_date=reference_date,
+                enforce_six_month_lock=enforce_six_month_lock,
+            )
+        elif extension == ".csv":
+            parsed_rows = parse_vine_csv(
+                file_bytes,
+                reference_date=reference_date,
+                enforce_six_month_lock=enforce_six_month_lock,
+            )
+        else:
+            parsed_rows = parse_vine_pdf(
+                file_bytes,
+                reference_date=reference_date,
+                enforce_six_month_lock=enforce_six_month_lock,
+            )
+        existing_fingerprints = self._load_existing_vine_fingerprints(db, current_user.id)
+        batch = VineImportBatch(
+            user_id=current_user.id,
+            filename=filename,
+            source_type=extension.lstrip("."),
+            report_year=self._detect_report_year(parsed_rows, filename),
+            status="parsed",
+            parsed_count=len(parsed_rows),
+            stats_json={"pdf_requires_review": extension == ".pdf"},
+        )
+        db.add(batch)
+        db.flush()
+
+        for parsed in parsed_rows:
+            policy = review_vine_product(parsed.product_name)
+            warnings = list(parsed.parse_warnings or [])
+            fingerprint = self._vine_row_fingerprint(parsed)
+            duplicate_item = existing_fingerprints.get(fingerprint)
+            if duplicate_item is not None:
+                duplicate_warning = f"Duplicate of prior Vine import row (matched item {duplicate_item.id})"
+                if duplicate_warning not in warnings:
+                    warnings.append(duplicate_warning)
+            if (
+                not enforce_six_month_lock
+                and parsed.eligible_after
+                and parsed.eligibility_status == "eligible"
+            ):
+                warnings.append(
+                    f"6-month eligibility date: {parsed.eligible_after.isoformat()} (lock enforcement is disabled)"
+                )
+            if not enforce_six_month_lock and parsed.eligibility_status.startswith("locked_until_"):
+                warnings.append(
+                    f"Lock status {parsed.eligibility_status} treated as informational because lock enforcement is disabled"
+                )
+                parsed.eligibility_status = "eligible"
+            item = VineImportItem(
+                batch_id=batch.id,
+                user_id=current_user.id,
+                order_number=parsed.order_number,
+                asin=parsed.asin,
+                product_name=parsed.product_name,
+                order_type=parsed.order_type,
+                order_date=parsed.order_date,
+                shipped_date=parsed.shipped_date,
+                cancelled_date=parsed.cancelled_date,
+                estimated_tax_value=parsed.estimated_tax_value,
+                eligible_after=parsed.eligible_after,
+                eligibility_status=parsed.eligibility_status,
+                raw_row_json=parsed.raw_row_json,
+                parse_warnings_json=warnings,
+                media_status="pending",
+                restricted_review_required=policy.restricted_review_required,
+                restricted_reasons=policy.restricted_reasons,
+                detected_category_guess=policy.detected_category_guess,
+                marketplace_allowed_status=policy.marketplace_allowed_status,
+                source_confidence=parsed.source_confidence,
+                reviewed=extension in {".xlsx", ".csv"},
+                brand=parsed.brand,
+                category=parsed.category,
+                source_status=parsed.status,
+                review_deadline=parsed.review_deadline,
+                item_url=parsed.item_url,
+            )
+            db.add(item)
+
+        db.flush()
+        self._refresh_batch_stats(db, batch)
+        db.commit()
+        db.refresh(batch)
+        return batch
+
+    def _enforce_six_month_lock_for_user(self, user: User) -> bool:
+        settings_json = user.settings_json or {}
+        raw = settings_json.get("vine_preferences")
+        vine_preferences = raw if isinstance(raw, dict) else {}
+        return bool(vine_preferences.get("enforce_six_month_lock", True))
+
+    def fetch_media(self, db: Session, *, batch: VineImportBatch, item_ids: list[int]) -> dict:
+        """Resolve Amazon matches and attach cached/fetched media asset ids per row."""
+        provider = AmazonProductMediaProvider(db, owner_user_id=batch.user_id)
+        discovery = AmazonProductDiscoveryService(provider)
+        items = db.execute(select(VineImportItem).where(VineImportItem.batch_id == batch.id, VineImportItem.id.in_(item_ids))).scalars().all()
+        fetched = 0
+        blocked = 0
+        manual_review = 0
+        for item in items:
+            result = discovery.discover_for_vine_item(asin=item.asin, product_name=item.product_name, manual_url=item.manual_amazon_url)
+            resolved_asin = str(result.get("asin") or item.asin or "").strip().upper()
+            if resolved_asin and resolved_asin != item.asin:
+                item.asin = resolved_asin
+            item.amazon_match_status = result.get("status")
+            item.amazon_match_confidence = result.get("confidence")
+            item.amazon_match_asin = resolved_asin or item.asin
+            item.amazon_match_title = result.get("title") or item.product_name
+            item.amazon_source_page_url = result.get("source_page_url")
+            item.media_status = result.get("image_status") or "blocked"
+            item.image_import_status = item.media_status
+            item.media_asset_ids_json = result.get("local_asset_ids") or []
+            if item.media_status in {"cached", "fetched"}:
+                fetched += 1
+            elif item.amazon_match_status == "manual_review_needed":
+                manual_review += 1
+            else:
+                blocked += 1
+            db.add(item)
+        db.commit()
+        return {"fetched": fetched, "blocked": blocked, "manual_review_needed": manual_review}
+
+    def create_inventory_records(
+        self,
+        db: Session,
+        *,
+        batch: VineImportBatch,
+        item_ids: list[int],
+        include_locked: bool,
+        include_cancelled: bool = False,
+    ) -> dict:
+        """Create draft listings from Vine rows, reusing existing Vine drafts when possible."""
+        items = db.execute(select(VineImportItem).where(VineImportItem.batch_id == batch.id, VineImportItem.id.in_(item_ids))).scalars().all()
+        created = 0
+        skipped = 0
+        reused = 0
+        previous_items_by_fingerprint = self._load_existing_vine_fingerprints(db, batch.user_id)
+        for item in items:
+            if item.inventory_item_id:
+                # Early Vine imports stored the durable Listing FK in
+                # inventory_item_id before listing_id was added as the
+                # canonical link. Repair that alias instead of reporting the
+                # row as skipped/not-created forever.
+                if not item.listing_id:
+                    item.listing_id = item.inventory_item_id
+                    db.add(item)
+                skipped += 1
+                continue
+            if self._is_duplicate_vine_item(item):
+                duplicate_listing = self._resolve_duplicate_listing_from_map(db, item, previous_items_by_fingerprint)
+                if duplicate_listing is not None:
+                    item.inventory_item_id = duplicate_listing.id
+                    item.listing_id = duplicate_listing.id
+                    reused += 1
+                    db.add(item)
+                else:
+                    skipped += 1
+                continue
+            if item.eligibility_status == "cancelled" and not include_cancelled:
+                skipped += 1
+                continue
+            if item.eligibility_status.startswith("locked_until_") and not include_locked:
+                skipped += 1
+                continue
+            duplicate = self._find_existing_vine_listing(db, item)
+            if duplicate is not None:
+                item.inventory_item_id = duplicate.id
+                item.listing_id = duplicate.id
+                reused += 1
+                db.add(item)
+                continue
+            cached_urls = self._lookup_cached_media_urls(db, item.asin)
+            inventory_specifics, inventory_provenance = self._build_item_specifics(item, title=item.product_name)
+            listing = Listing(
+                user_id=item.user_id,
+                status=ListingStatus.draft,
+                title=item.product_name,
+                quantity=1,
+                condition="New",
+                condition_data=derive_condition_data(
+                    listing={"condition": "New", "source_type": "amazon_vine"},
+                    source_type="amazon_vine",
+                    source_metadata=self._source_metadata(item, batch.id),
+                    existing={"condition_source": "import", "operator_review_required": True},
+                ),
+                source_type="amazon_vine",
+                source_metadata=self._source_metadata(item, batch.id),
+                # Vine ETV is a tax-reporting value, not money spent to acquire
+                # inventory. Keep it in source_metadata; acquisition cost is
+                # intentionally unknown unless the operator records one.
+                purchase_cost=None,
+                suggested_price=item.estimated_tax_value,
+                listing_price=item.estimated_tax_value,
+                shipping_profile=self._build_estimated_shipping_profile(item, title=item.product_name),
+                custom_labels=self._build_labels(item, has_photos=bool(cached_urls)),
+                needs_review=True,
+                restricted_review_required=item.restricted_review_required,
+                restricted_reasons=item.restricted_reasons,
+                detected_category_guess=item.detected_category_guess,
+                marketplace_allowed_status=item.marketplace_allowed_status,
+                image_urls=cached_urls,
+                listing_images=self._build_trusted_amazon_listing_images(
+                    image_urls=cached_urls,
+                    source_page_url=item.amazon_source_page_url or item.item_url or item.manual_amazon_url,
+                    asin=item.asin,
+                    product_name=item.product_name,
+                ),
+                item_specifics=inventory_specifics,
+            )
+            inventory_marketplace_data = normalize_marketplace_data(dict(listing.marketplace_data or {}))
+            inventory_marketplace_data["ebay_item_specifics_provenance"] = inventory_provenance
+            inventory_marketplace_data["ebay_item_specifics_approximate"] = [
+                field for field, source in inventory_provenance.items() if source in {"derived", "approximate", "default"}
+            ]
+            listing.marketplace_data = inventory_marketplace_data
+            db.add(listing)
+            db.flush()
+            item.inventory_item_id = listing.id
+            db.add(item)
+            created += 1
+        self._refresh_batch_stats(db, batch)
+        db.commit()
+        return {"created": created, "skipped": skipped, "reused": reused}
+
+    def create_listing_drafts(
+        self,
+        db: Session,
+        *,
+        batch: VineImportBatch,
+        item_ids: list[int],
+        include_cancelled: bool = False,
+        # Preserve the public/service default of enriching from Amazon during
+        # draft creation. Bulk callers that need a fast photo-less seed can
+        # explicitly pass False and let the retry worker enrich it later.
+        fetch_media_first: bool = True,
+        require_media_for_asin: bool = False,
+        allow_drafts_without_media: bool = False,
+    ) -> dict:
+        items = db.execute(select(VineImportItem).where(VineImportItem.batch_id == batch.id, VineImportItem.id.in_(item_ids))).scalars().all()
+        created = 0
+        updated = 0
+        skipped = 0
+        created_listing_ids: list[int] = []
+
+        provider = AmazonProductMediaProvider(db, owner_user_id=batch.user_id)
+        discovery = AmazonProductDiscoveryService(provider)
+        previous_items_by_fingerprint = self._load_existing_vine_fingerprints(db, batch.user_id)
+        for item in items:
+            if item.inventory_item_id and not item.listing_id:
+                item.listing_id = item.inventory_item_id
+                db.add(item)
+            if self._is_duplicate_vine_item(item):
+                duplicate_listing = self._resolve_duplicate_listing_from_map(db, item, previous_items_by_fingerprint)
+                if duplicate_listing is not None:
+                    item.inventory_item_id = duplicate_listing.id
+                    item.listing_id = duplicate_listing.id
+                    db.add(item)
+                    updated += 1
+                else:
+                    skipped += 1
+                continue
+            if item.eligibility_status == "cancelled" and not include_cancelled:
+                skipped += 1
+                continue
+            if item.inventory_item_id is None:
+                result = self.create_inventory_records(
+                    db,
+                    batch=batch,
+                    item_ids=[item.id],
+                    include_locked=True,
+                    include_cancelled=include_cancelled,
+                )
+                if result["created"] == 0 and result.get("reused", 0) == 0:
+                    skipped += 1
+                    continue
+                db.refresh(item)
+            listing = db.get(Listing, item.inventory_item_id)
+            if listing is None:
+                skipped += 1
+                continue
+
+            # Draft creation must remain fast and durable even when Amazon
+            # discovery is slow/unavailable. The background repair path can
+            # enrich images/facts later; CSV identity is sufficient to create
+            # the initial draft record.
+            # A Vine draft must use the same source retrieval contract whether
+            # the caller is doing a fast seed or a full enrichment pass.  The
+            # ``fetch_media_first`` flag controls the bridge/media retry below;
+            # it must not silently discard the discovery response (facts,
+            # images, and provenance) returned by the existing provider.
+            result = discovery.discover_for_vine_item(
+                asin=item.asin,
+                product_name=item.product_name,
+                manual_url=item.manual_amazon_url,
+            )
+            resolved_asin = str(result.get("asin") or item.asin or "").strip().upper()
+            if resolved_asin and resolved_asin != item.asin:
+                item.asin = resolved_asin
+            if not resolved_asin:
+                item.media_status = "missing_asin"
+                item.parse_warnings_json = [*(item.parse_warnings_json or []), "Cannot fetch images without ASIN"]
+            else:
+                item.media_status = result.get("status") or item.media_status or "blocked"
+                item.media_asset_ids_json = result.get("local_asset_ids") or item.media_asset_ids_json or []
+                item.amazon_match_status = result.get("status") or item.amazon_match_status
+                item.amazon_match_confidence = result.get("confidence") or item.amazon_match_confidence
+                item.amazon_match_asin = resolved_asin or item.amazon_match_asin or item.asin
+                item.amazon_match_title = result.get("title") or item.amazon_match_title or item.product_name
+                item.amazon_source_page_url = result.get("source_page_url") or item.amazon_source_page_url
+            db.add(item)
+
+            cached_urls = self._lookup_cached_media_urls(db, item.asin)
+            discovered_urls = [str(url).strip() for url in (result.get("images") or []) if str(url).strip()]
+            discovered_description = _sanitize_vine_text(result.get("description") or "")
+            # A transient Amazon response must not erase durable evidence from
+            # an earlier successful fetch (this was the cause of drafts
+            # reverting to boilerplate descriptions and ETV pricing).
+            prior_facts = _clean_amazon_facts((listing.source_metadata or {}).get("amazon_product_facts"))
+            fresh_facts = _clean_amazon_facts(result.get("product_facts"))
+            amazon_facts = _merge_amazon_fact_evidence(prior_facts, fresh_facts)
+            # Amazon page parsing and earlier repair jobs may have persisted
+            # structured evidence in item_specifics. Normalize it into the
+            # same facts object before copy/category/price generation.
+            amazon_facts = self._hydrate_vine_facts(amazon_facts, item=item, listing=listing)
+            if fetch_media_first and not (cached_urls or discovered_urls) and (item.asin or resolved_asin):
+                bridge_cache = self._bridge_capture_for_asin(db, item.asin or resolved_asin, item.product_name or listing.title)
+                if bridge_cache is not None:
+                    cached_urls = self._lookup_cached_media_urls(db, item.asin)
+                    if not cached_urls and bridge_cache.gallery_image_urls_json:
+                        cached_urls = self._filter_valid_gallery_urls(
+                            [str(url) for url in (bridge_cache.gallery_image_urls_json or []) if str(url).strip()]
+                        )
+                    if not cached_urls and bridge_cache.primary_image_url:
+                        cached_urls = [str(bridge_cache.primary_image_url).strip()]
+            if require_media_for_asin and not allow_drafts_without_media and item.asin:
+                if not (cached_urls or discovered_urls):
+                    item.parse_warnings_json = [*(item.parse_warnings_json or []), "Draft creation blocked until photos are fetched for this ASIN"]
+                    if item.media_status in {None, "pending"}:
+                        item.media_status = "blocked"
+                    db.add(item)
+                    skipped += 1
+                    continue
+
+            listing.title = self._generate_title(item.product_name, amazon_facts=amazon_facts)
+            listing.description = self._generate_vine_original_description(
+                db, listing=listing, item=item, facts=amazon_facts
+            )
+            listing.status = ListingStatus.draft
+            listing.needs_review = True
+            listing.condition = "New"
+            # Vine quantity is seller inventory, not the product's pack count.
+            # Historical drafts occasionally carried zero and then failed eBay
+            # preflight; repair only non-positive import-managed quantities.
+            quantity_source = str((listing.marketplace_data or {}).get("quantity_source") or "").lower() if isinstance(listing.marketplace_data, dict) else ""
+            if int(listing.quantity or 0) <= 0 and quantity_source not in {"manual", "operator"}:
+                listing.quantity = 1
+            listing.condition_data = derive_condition_data(
+                listing={"condition": listing.condition, "source_type": "amazon_vine"},
+                source_type="amazon_vine",
+                source_metadata=self._source_metadata(item, batch.id),
+                existing={
+                    **(listing.condition_data or {}),
+                    "condition_bucket": "new_in_box",
+                    "new_in_box": True,
+                    "open_box": False,
+                    "used": False,
+                    "operator_review_required": True,
+                    "item_condition_notes": "Amazon Vine items are listed as New. Confirm packaging, completeness, and condition before publish.",
+                },
+            )
+            listing.source_type = "amazon_vine"
+            listing.source_metadata = {
+                **(dict(listing.source_metadata or {})),
+                **self._source_metadata(item, batch.id, amazon_facts=amazon_facts),
+            }
+            listing_source = dict(listing.source_metadata or {})
+            listing_source["amazon_enrichment"] = {
+                "state": "durable_facts" if _count_verified_amazon_facts(amazon_facts) else "source_text_unavailable",
+                "asin": item.asin,
+                "facts_keys": sorted(key for key, value in amazon_facts.items() if value not in (None, "", [], {})),
+                "stages": _vine_enrichment_stages(item=item, listing=listing, facts=amazon_facts),
+            }
+            listing.source_metadata = listing_source
+            category, category_source = self._resolve_category(item, amazon_facts=amazon_facts)
+            pricing = self._pricing_from_amazon(item, amazon_facts=amazon_facts)
+            if pricing["listing_price"] is not None:
+                listing.suggested_price = pricing["listing_price"]
+                listing.listing_price = pricing["listing_price"]
+                listing.buy_it_now_price = pricing["listing_price"]
+            shipping_estimate = self._build_estimated_shipping_profile(item, title=listing.title, description=listing.description, existing=listing.shipping_profile or {}, amazon_facts=amazon_facts)
+            listing.shipping_profile = derive_shipping_profile(
+                listing={"title": listing.title, "description": listing.description},
+                existing=shipping_estimate,
+                policy=shipping_policy_for_user(db.get(User, batch.user_id)),
+            )
+            listing.shipping_profile["estimated_fields"] = shipping_estimate.get("estimated_fields") or []
+            listing.shipping_profile["provenance"] = shipping_estimate.get("provenance") or {}
+            listing.category_suggestion = category
+            category_id = str(category).strip() if str(category).strip().isdigit() else verified_category_id(category)
+            if category_id:
+                listing.category_id = category_id
+            # Resolve against the complete synchronized eBay leaf tree during
+            # initial import, not only during a later repair/preflight pass.
+            # The local tree is authoritative for IDs; Vine keyword paths are
+            # semantic hints and must not leave ordinary drafts without IDs.
+            if _vine_local_taxonomy_available(db):
+                self._resolve_vine_local_leaf(db, listing=listing, item=item)
+                category = str(listing.category_suggestion or category)
+                validation = (listing.source_metadata or {}).get("category_validation", {})
+                if isinstance(validation, dict) and validation.get("status") == "valid_local":
+                    category_source = "local_taxonomy_resolver"
+            specifics, provenance = self._build_item_specifics(item, listing.title, listing.description, listing.item_specifics)
+            _apply_fact_specifics(specifics, provenance, amazon_facts)
+            for key, value in (amazon_facts.get("specifications") or {}).items():
+                if key not in specifics and value:
+                    specifics[key] = value
+                    provenance[key] = "amazon_product_page"
+            _merge_dimension_specifics(specifics, provenance, amazon_facts)
+            _remove_vine_specific_noise(specifics, provenance, listing.source_metadata)
+            listing.item_specifics = specifics
+            listing.tags = self._build_tags(item, listing.tags)
+            marketplace_data = normalize_marketplace_data(dict(listing.marketplace_data or {}))
+            existing_targets = marketplace_data.get("targets")
+            if isinstance(existing_targets, list):
+                targets = [str(value).strip().lower() for value in existing_targets if str(value).strip()]
+            else:
+                targets = []
+            for target in (MarketplaceName.ebay.value, MarketplaceName.facebook.value):
+                if target not in targets:
+                    targets.append(target)
+            marketplace_data["targets"] = targets
+            marketplace_data["crosspost_mode"] = str(marketplace_data.get("crosspost_mode") or "approval_required")
+            marketplace_data["vine_ready_for_approval"] = True
+            channels = marketplace_data.get("channels") if isinstance(marketplace_data.get("channels"), dict) else {}
+            ebay_channel = dict(channels.get(MarketplaceName.ebay.value) or {})
+            ebay_channel["enabled"] = True
+            ebay_channel["status"] = "draft_ready"
+            ebay_channel["publish_mode"] = str(ebay_channel.get("publish_mode") or "direct_api")
+            facebook_channel = dict(channels.get(MarketplaceName.facebook.value) or {})
+            facebook_channel["enabled"] = True
+            facebook_channel["status"] = "draft_ready"
+            facebook_channel["publish_mode"] = str(facebook_channel.get("publish_mode") or "manual_or_provider")
+            channels[MarketplaceName.ebay.value] = ebay_channel
+            channels[MarketplaceName.facebook.value] = facebook_channel
+            marketplace_data["channels"] = channels
+            marketplace_data["ebay_item_specifics_provenance"] = provenance
+            marketplace_data["ebay_item_specifics_approximate"] = [
+                field for field, source in provenance.items() if source in {"derived", "approximate", "default"}
+            ]
+            marketplace_data["vine_category"] = {"value": category, "source": category_source}
+            marketplace_data["policy_preferences"] = {
+                **(marketplace_data.get("policy_preferences") if isinstance(marketplace_data.get("policy_preferences"), dict) else {}),
+                **_vine_return_policy_preferences(),
+            }
+            marketplace_data["pricing_analysis"] = {
+                **pricing,
+                "reference_source_url": result.get("source_page_url") or item.amazon_source_page_url,
+            }
+            buyer_pays_shipping = bool(pricing["listing_price"] is not None and pricing["listing_price"] < 10)
+            marketplace_data["shipping"] = {
+                **(marketplace_data.get("shipping") if isinstance(marketplace_data.get("shipping"), dict) else {}),
+                "mode": "calculated" if buyer_pays_shipping else "included",
+                "free_shipping": not buyer_pays_shipping,
+                "buyer_pays_shipping": buyer_pays_shipping,
+                "pricing_rule": "buyer_pays_under_10" if buyer_pays_shipping else "seller_pays_10_and_over",
+            }
+            listing.marketplace_data = marketplace_data
+            listing.marketplace_data["draft_previews"] = build_marketplace_draft_previews(listing)
+            listing.marketplace_data["destination_categories"] = destination_category_snapshot(listing)
+
+            if not (listing.image_urls or []):
+                image_urls_to_use = cached_urls or discovered_urls
+                if image_urls_to_use:
+                    listing.image_urls = image_urls_to_use
+                    listing.listing_images = self._build_trusted_amazon_listing_images(
+                        image_urls=image_urls_to_use,
+                        source_page_url=result.get("source_page_url") or item.amazon_source_page_url or item.item_url or item.manual_amazon_url,
+                        asin=item.asin,
+                        product_name=listing.title,
+                    )
+                    labels = [label for label in (listing.custom_labels or []) if label != "needs_photos"]
+                    listing.custom_labels = labels or None
+                else:
+                    listing.custom_labels = list(dict.fromkeys([*(listing.custom_labels or []), "needs_photos"]))
+            else:
+                listing.custom_labels = [label for label in (listing.custom_labels or []) if label != "needs_photos"] or None
+
+            db.add(listing)
+            if not item.listing_id:
+                created += 1
+                created_listing_ids.append(listing.id)
+            else:
+                updated += 1
+            item.listing_id = listing.id
+            db.add(item)
+        total_drafts = db.execute(
+            select(func.count())
+            .select_from(VineImportItem)
+            .where(
+                VineImportItem.batch_id == batch.id,
+                or_(VineImportItem.listing_id.is_not(None), VineImportItem.inventory_item_id.is_not(None)),
+            )
+        ).scalar_one()
+        batch.drafts_created_count = int(total_drafts or 0)
+        batch.status = "imported" if batch.drafts_created_count else batch.status
+        db.add(batch)
+        db.commit()
+        self._update_batch_stats_json(
+            db,
+            batch=batch,
+            updates={"draft_created": created, "draft_updated": updated, "draft_skipped": skipped},
+            commit=True,
+        )
+        return {"created": created, "updated": updated, "skipped": skipped, "created_listing_ids": created_listing_ids}
+
+    def refresh_batch_drafts_from_stored_amazon_facts(self, db: Session, *, batch: VineImportBatch) -> dict:
+        """Repair Vine draft metadata from durable Amazon facts without a re-scrape.
+
+        This is used for deterministic policy corrections (such as category
+        rules) after a batch has already been matched and reviewed.  It only
+        updates AI/import-managed fields on the same Vine draft IDs.
+        """
+        pairs = db.execute(
+            select(VineImportItem, Listing)
+            .join(Listing, Listing.id == VineImportItem.listing_id)
+            .where(VineImportItem.batch_id == batch.id, Listing.source_type == "amazon_vine")
+        ).all()
+        updated = 0
+        missing_facts = 0
+        for item, listing in pairs:
+            if self._is_archived_vine_listing(listing):
+                continue
+            source_metadata = dict(listing.source_metadata or {})
+            facts = _clean_amazon_facts(source_metadata.get("amazon_product_facts"))
+            if not facts:
+                missing_facts += 1
+                continue
+            # A source refresh must never erase the operator locks that keep
+            # later Vine jobs from restoring values the operator corrected.
+            preserved_provenance = {
+                key: source_metadata[key]
+                for key in ("recovery", "codex_revenue_recovery", "vine_description_generation")
+                if key in source_metadata
+            }
+            if not is_human_owned_field(listing.source_metadata or {}, "title"):
+                listing.title = self._generate_title(item.product_name or listing.title, amazon_facts=facts)
+            if not is_human_owned_field(listing.source_metadata or {}, "description"):
+                # Batch metadata repair must remain bounded and resumable. Use
+                # the deterministic, fact-backed formatter here; the normal
+                # enrichment worker still escalates uncertain copy to AI.
+                listing.description = self._rewrite_amazon_description(item, amazon_facts=facts)
+                listing.canonical_description = str(listing.description or "").strip() or None
+            category_validation = source_metadata.get("category_validation") if isinstance(source_metadata.get("category_validation"), dict) else {}
+            has_current_local_leaf = (
+                str(category_validation.get("status") or "").lower() == "valid_local"
+                and str(category_validation.get("category_id") or "").strip() == str(listing.category_id or "").strip()
+                and bool(str(category_validation.get("full_path") or "").strip())
+            )
+            if has_current_local_leaf:
+                # A synchronized tree leaf is stronger evidence than an old
+                # Vine export's bare numeric "category" value. Preserve its
+                # owning-tree breadcrumb across worker retries.
+                category = str(category_validation["full_path"]).strip()
+                category_source = "synchronized_local_taxonomy"
+            else:
+                category, category_source = self._resolve_category(item, amazon_facts=facts)
+            pricing = self._pricing_from_amazon(item, amazon_facts=facts)
+            if not is_human_owned_field(source_metadata, "condition"):
+                listing.condition = "New"
+            quantity_source = str((listing.marketplace_data or {}).get("quantity_source") or "").lower() if isinstance(listing.marketplace_data, dict) else ""
+            if int(listing.quantity or 0) <= 0 and quantity_source not in {"manual", "operator"}:
+                listing.quantity = 1
+            if not is_human_owned_field(source_metadata, "category_suggestion"):
+                listing.category_suggestion = category
+            category_id = str(category).strip() if str(category).strip().isdigit() else verified_category_id(category)
+            if category_id and not is_human_owned_field(source_metadata, "category_id"):
+                listing.category_id = category_id
+            if pricing["listing_price"] is not None:
+                for field in ("suggested_price", "listing_price", "buy_it_now_price"):
+                    if not is_human_owned_field(source_metadata, field):
+                        setattr(listing, field, pricing["listing_price"])
+            specifics = dict(listing.item_specifics or {})
+            provenance = dict((listing.marketplace_data or {}).get("ebay_item_specifics_provenance") or {})
+            if not is_human_owned_field(source_metadata, "item_specifics"):
+                specifics, provenance = self._build_item_specifics(item, listing.title, listing.description, specifics)
+                _apply_fact_specifics(specifics, provenance, facts)
+                for key, value in (facts.get("specifications") or {}).items():
+                    if key not in specifics and value and not is_human_owned_field(source_metadata, f"item_specifics.{key}"):
+                        specifics[key] = value
+                        provenance[key] = "amazon_product_page"
+                _merge_dimension_specifics(specifics, provenance, facts)
+                _remove_vine_specific_noise(specifics, provenance, source_metadata)
+                listing.item_specifics = specifics
+            persist_marketplace_description_variants(listing, regenerate_generated=True)
+            marketplace_data = normalize_marketplace_data(dict(listing.marketplace_data or {}))
+            buyer_pays_shipping = bool(pricing["listing_price"] is not None and pricing["listing_price"] < 10)
+            marketplace_data["vine_category"] = {"value": category, "source": category_source}
+            marketplace_data["pricing_analysis"] = {**pricing, "reference_source_url": item.amazon_source_page_url or item.item_url}
+            marketplace_data["shipping"] = {
+                **(marketplace_data.get("shipping") if isinstance(marketplace_data.get("shipping"), dict) else {}),
+                "mode": "calculated" if buyer_pays_shipping else "included",
+                "free_shipping": not buyer_pays_shipping,
+                "buyer_pays_shipping": buyer_pays_shipping,
+                "pricing_rule": "buyer_pays_under_10" if buyer_pays_shipping else "seller_pays_10_and_over",
+            }
+            marketplace_data["policy_preferences"] = {
+                **(marketplace_data.get("policy_preferences") if isinstance(marketplace_data.get("policy_preferences"), dict) else {}),
+                **_vine_return_policy_preferences(),
+            }
+            marketplace_data["ebay_item_specifics_provenance"] = provenance
+            listing.marketplace_data = marketplace_data
+            listing.source_metadata = {
+                **self._source_metadata(item, batch.id, amazon_facts=facts),
+                **preserved_provenance,
+            }
+            listing.marketplace_data["draft_previews"] = build_marketplace_draft_previews(listing)
+            listing.marketplace_data["destination_categories"] = destination_category_snapshot(listing)
+            listing.condition_data = derive_condition_data(
+                listing={"condition": "New", "source_type": "amazon_vine"},
+                source_type="amazon_vine",
+                source_metadata=listing.source_metadata,
+                existing={
+                    **(listing.condition_data or {}),
+                    "condition_bucket": "new_in_box",
+                    "new_in_box": True,
+                    "open_box": False,
+                    "used": False,
+                    "operator_review_required": True,
+                    "item_condition_notes": "Amazon Vine items are listed as New. Confirm packaging, completeness, and condition before publish.",
+                },
+            )
+            _promote_vine_listing_to_review(listing)
+            # Finalize from the canonical readiness contract. Never mark a
+            # newly-created row complete merely because a Listing record was
+            # inserted; unresolved identity/content/category blockers must be
+            # visible and retryable instead of masquerading as review-ready.
+            readiness = canonical_listing_readiness(listing)
+            blockers = [str(reason).strip() for reason in (readiness.get("blocking_reasons") or []) if str(reason).strip()]
+            if blockers:
+                blocker_text = " ".join(blockers).lower()
+                retryable_markers = (
+                    "description", "ai rewrite", "source prose", "category",
+                    "taxonomy", "type is required", "required marketplace",
+                    "pricing", "image", "photo", "product-specific enrichment",
+                )
+                if any(marker in blocker_text for marker in retryable_markers):
+                    attempt = int(getattr(listing, "processing_attempt_count", 0) or 0) + 1
+                    listing.processing_state = "retry"
+                    listing.processing_attempt_count = attempt
+                    listing.processing_stage = (
+                        "description_generation" if any(token in blocker_text for token in ("description", "ai rewrite", "source prose", "enrichment"))
+                        else "category_resolution" if any(token in blocker_text for token in ("category", "taxonomy", "type is required", "required marketplace"))
+                        else "pricing_research" if "pricing" in blocker_text
+                        else "image_enrichment"
+                    )
+                    listing.processing_next_retry_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=min(60, max(5, 2 ** min(attempt, 6))))
+                    listing.processing_blocking_reason = None
+                    listing.processing_error_stage = "quality_validation"
+                    listing.needs_review = False
+                else:
+                    listing.processing_state = "needs_attention"
+                    listing.processing_blocking_reason = blockers[0]
+                    listing.processing_error_stage = "quality_validation"
+                    listing.needs_review = False
+            else:
+                listing.processing_state = "complete"
+                listing.processing_blocking_reason = None
+                listing.processing_error_stage = None
+                listing.needs_review = True
+            db.add(listing)
+            updated += 1
+        db.commit()
+        return {"updated": updated, "missing_facts": missing_facts, "publication_actions": 0}
+
+    def refresh_vine_listing_metadata(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        batch_id: int | None = None,
+        listing_ids: list[int] | None = None,
+        since_order_date: date | None = None,
+        limit: int | None = None,
+    ) -> dict:
+        # Historical imports populated either ``listing_id`` or the older
+        # ``inventory_item_id`` column.  Reconcile both associations so no
+        # Vine draft is left in a transient queued state simply because its
+        # provenance row uses the compatibility column.
+        query = (
+            select(VineImportItem, Listing)
+            .join(
+                Listing,
+                or_(VineImportItem.listing_id == Listing.id, VineImportItem.inventory_item_id == Listing.id),
+            )
+            .where(Listing.user_id == user_id, Listing.source_type == "amazon_vine")
+        )
+        if batch_id is not None:
+            query = query.where(VineImportItem.batch_id == batch_id)
+        if listing_ids:
+            query = query.where(Listing.id.in_(listing_ids))
+        if since_order_date is not None:
+            query = query.where(VineImportItem.order_date.is_not(None), VineImportItem.order_date >= since_order_date)
+        pairs = db.execute(query).all()
+        if limit is not None:
+            pairs = pairs[: max(0, limit)]
+        updated = 0
+        missing_facts = 0
+        for item, listing in pairs:
+            # Archived/kept inventory is intentionally outside the active
+            # revenue queue.  Protect it even when a caller supplies explicit
+            # listing IDs or invokes metadata refresh directly rather than via
+            # the scheduled task's archive-filtered selector.
+            if self._is_archived_vine_listing(listing):
+                continue
+            source_metadata = dict(listing.source_metadata or {})
+            facts = _clean_amazon_facts(source_metadata.get("amazon_product_facts"))
+            if not facts:
+                missing_facts += 1
+                continue
+            preserved_provenance = {
+                key: source_metadata[key]
+                for key in ("recovery", "codex_revenue_recovery", "vine_description_generation")
+                if key in source_metadata
+            }
+            if not is_human_owned_field(source_metadata, "title"):
+                listing.title = self._generate_title(item.product_name or listing.title, amazon_facts=facts)
+            if not is_human_owned_field(source_metadata, "description"):
+                # All Vine source prose must pass through the configured AI
+                # rewrite path.  The helper records whether OpenAI succeeded;
+                # its deterministic fallback is retained only for retryable
+                # Processing state and is never treated as review-ready copy.
+                listing.description = self._generate_vine_original_description(
+                    db, listing=listing, item=item, facts=facts
+                )
+                listing.canonical_description = str(listing.description or "").strip() or None
+            category, category_source = self._resolve_category(item, amazon_facts=facts)
+            pricing = self._pricing_from_amazon(item, amazon_facts=facts)
+            if not is_human_owned_field(source_metadata, "condition"):
+                listing.condition = "New"
+            if not is_human_owned_field(source_metadata, "category_suggestion"):
+                listing.category_suggestion = category
+            category_id = str(category).strip() if str(category).strip().isdigit() else verified_category_id(category)
+            if category_id and not is_human_owned_field(source_metadata, "category_id"):
+                listing.category_id = category_id
+            if pricing["listing_price"] is not None:
+                for field in ("suggested_price", "listing_price", "buy_it_now_price"):
+                    if not is_human_owned_field(source_metadata, field):
+                        setattr(listing, field, pricing["listing_price"])
+            specifics = dict(listing.item_specifics or {})
+            provenance = dict((listing.marketplace_data or {}).get("ebay_item_specifics_provenance") or {})
+            if not is_human_owned_field(source_metadata, "item_specifics"):
+                specifics, provenance = self._build_item_specifics(item, listing.title, listing.description, specifics)
+                for key, value in (facts.get("specifications") or {}).items():
+                    if key not in specifics and value and not is_human_owned_field(source_metadata, f"item_specifics.{key}"):
+                        specifics[key] = value
+                        provenance[key] = "amazon_product_page"
+                _merge_dimension_specifics(specifics, provenance, facts)
+                _remove_vine_specific_noise(specifics, provenance, source_metadata)
+                listing.item_specifics = specifics
+            persist_marketplace_description_variants(listing, regenerate_generated=True)
+            marketplace_data = normalize_marketplace_data(dict(listing.marketplace_data or {}))
+            buyer_pays_shipping = bool(pricing["listing_price"] is not None and pricing["listing_price"] < 10)
+            marketplace_data["vine_category"] = {"value": category, "source": category_source}
+            marketplace_data["pricing_analysis"] = {**pricing, "reference_source_url": item.amazon_source_page_url or item.item_url}
+            marketplace_data["shipping"] = {
+                **(marketplace_data.get("shipping") if isinstance(marketplace_data.get("shipping"), dict) else {}),
+                "mode": "calculated" if buyer_pays_shipping else "included",
+                "free_shipping": not buyer_pays_shipping,
+                "buyer_pays_shipping": buyer_pays_shipping,
+                "pricing_rule": "buyer_pays_under_10" if buyer_pays_shipping else "seller_pays_10_and_over",
+            }
+            marketplace_data["policy_preferences"] = {
+                **(marketplace_data.get("policy_preferences") if isinstance(marketplace_data.get("policy_preferences"), dict) else {}),
+                **_vine_return_policy_preferences(),
+            }
+            marketplace_data["ebay_item_specifics_provenance"] = provenance
+            listing.marketplace_data = marketplace_data
+            generation_meta = (listing.source_metadata or {}).get("vine_description_generation") if isinstance(listing.source_metadata, dict) else None
+            listing.source_metadata = self._source_metadata(item, item.batch_id, amazon_facts=facts)
+            listing.source_metadata.update(preserved_provenance)
+            if isinstance(generation_meta, dict):
+                listing.source_metadata["vine_description_generation"] = generation_meta
+            # ``_source_metadata`` is rebuilt from the import row, so it does
+            # not carry the local taxonomy proof that canonical readiness
+            # requires. Revalidate the exact current ID against the synced
+            # local tree after the rebuild; this persists tree/version/leaf/
+            # breadcrumb evidence without a remote taxonomy request. It also
+            # leaves an ambiguous or invalid category unresolved instead of
+            # manufacturing a validation record.
+            self._resolve_vine_local_leaf(db, listing=listing, item=item)
+            if bool(getattr(listing, "restricted_review_required", False)) and any(
+                term in str(listing.title or "").lower() for term in ("cigarette tube", "cigarette paper")
+            ):
+                from app.services.ebay_taxonomy import validate_listing_category
+
+                category_check = validate_listing_category(db, listing)
+                if category_check.get("status") != "valid_local" or category_check.get("flags"):
+                    prior_category = str(listing.category_id or "").strip()
+                    if prior_category:
+                        history = list((listing.marketplace_data or {}).get("category_history") or [])
+                        history.append({"category_id": prior_category, "validation": category_check, "reason": "restricted cigarette-related product; no verified matching local category", "recorded_at": datetime.now(UTC).isoformat()})
+                        listing.marketplace_data = {**(listing.marketplace_data or {}), "category_history": history[-10:]}
+                    listing.category_id = None
+                    metadata = dict(listing.source_metadata or {})
+                    metadata["category_validation"] = {
+                        "status": "policy_review_required", "marketplace": "EBAY_US",
+                        "tree_id": "0", "tree_version": "134", "category_id": None,
+                        "evidence": {"source": "restricted_product_safety_gate", "reason": "No verified matching local leaf; marketplace policy review required"},
+                    }
+                    listing.source_metadata = metadata
+            listing.marketplace_data["draft_previews"] = build_marketplace_draft_previews(listing)
+            listing.marketplace_data["destination_categories"] = destination_category_snapshot(listing)
+            listing.condition_data = derive_condition_data(
+                listing={"condition": "New", "source_type": "amazon_vine"},
+                source_type="amazon_vine",
+                source_metadata=listing.source_metadata,
+                existing={
+                    **(listing.condition_data or {}),
+                    "condition_bucket": "new_in_box",
+                    "new_in_box": True,
+                    "open_box": False,
+                    "used": False,
+                    "operator_review_required": True,
+                    "item_condition_notes": "Amazon Vine items are listed as New. Confirm packaging, completeness, and condition before publish.",
+                },
+            )
+            # A metadata refresh is not approval. It must establish the same
+            # fresh destination preflight required by the publish path before
+            # the listing can enter Needs Review. This scheduled refresh used
+            # to evaluate canonical product data only, which allowed blocked
+            # Motors listings to be promoted and discarded the destination
+            # result on the next cycle.
+            from app.services.marketplace_preflight import MarketplacePreflightService
+
+            prior_blocker = str(listing.processing_blocking_reason or "").strip()
+            if prior_blocker:
+                history = listing.marketplace_data.get("vine_processing_history") if isinstance(listing.marketplace_data, dict) else None
+                history = list(history) if isinstance(history, list) else []
+                history.append({"previous_blocker": prior_blocker, "stage": listing.processing_error_stage, "recorded_at": datetime.now(UTC).isoformat()})
+                listing.marketplace_data = {**(listing.marketplace_data or {}), "vine_processing_history": history[-10:]}
+            # Clear only the prior machine lifecycle marker while rebuilding
+            # the current result; the original is retained above for diagnosis.
+            listing.processing_blocking_reason = None
+            listing.processing_error_stage = None
+            listing.processing_state = "complete"
+            listing.needs_review = False
+            preflight_service = MarketplacePreflightService()
+            destination_result = preflight_service.preflight_listing(db, listing, "ebay")
+            preflight_service.cache_preflight_summary(db, listing, destination_result)
+            readiness = canonical_listing_readiness(listing, marketplace="ebay")
+            blockers = list(readiness.get("canonical_blocking_reasons") or [])
+            if bool(getattr(listing, "restricted_review_required", False)):
+                reasons = getattr(listing, "restricted_reasons", None) or []
+                reason_text = ", ".join(str(reason).replace("-", " ") for reason in reasons if str(reason).strip())
+                listing.processing_state = "needs_attention"
+                listing.processing_blocking_reason = (
+                    f"Marketplace policy review required: {reason_text or 'restricted item'}; "
+                    "confirm each selected marketplace permits this product before assigning a category or publishing."
+                )
+                listing.processing_error_stage = "policy_review"
+                listing.needs_review = False
+            elif blockers:
+                # Vine enrichment is a durable machine workflow.  Category,
+                # required-specifics, description, image, and pricing
+                # blockers are retryable until the provider/research lane has
+                # actually exhausted its configured attempts.  Older refresh
+                # passes incorrectly promoted these rows straight to Needs
+                # Attention, which made a transient AI/taxonomy failure look
+                # like an operator problem and prevented the scheduled retry
+                # from doing its job.
+                blocker_text = " ".join(str(value).strip() for value in blockers if str(value).strip())
+                retryable_markers = (
+                    "description", "ai rewrite", "source prose", "category",
+                    "taxonomy", "type is required", "required marketplace",
+                    "pricing", "image", "photo", "product-specific enrichment",
+                )
+                if any(marker in blocker_text.lower() for marker in retryable_markers):
+                    attempt = int(getattr(listing, "processing_attempt_count", 0) or 0) + 1
+                    listing.processing_state = "retry"
+                    listing.processing_attempt_count = attempt
+                    listing.processing_stage = (
+                        "description_generation" if any(token in blocker_text.lower() for token in ("description", "ai rewrite", "source prose", "enrichment"))
+                        else "category_resolution" if any(token in blocker_text.lower() for token in ("category", "taxonomy", "type is required", "required marketplace"))
+                        else "pricing_research" if "pricing" in blocker_text.lower()
+                        else "image_enrichment"
+                    )
+                    listing.processing_next_retry_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=min(60, max(5, 2 ** min(attempt, 6))))
+                    listing.processing_blocking_reason = None
+                    listing.processing_error_stage = "quality_validation"
+                    listing.needs_review = False
+                else:
+                    listing.processing_state = "needs_attention"
+                    listing.needs_review = False
+                    listing.processing_blocking_reason = str(blockers[0])
+                    listing.processing_error_stage = "quality_validation"
+            elif readiness.get("destination_blocking_reasons"):
+                listing.processing_state = "needs_attention"
+                listing.processing_blocking_reason = str(readiness["destination_blocking_reasons"][0])
+                listing.processing_error_stage = "preflight"
+                listing.needs_review = False
+            elif readiness.get("destination_preflight_pending"):
+                attempt = int(getattr(listing, "processing_attempt_count", 0) or 0) + 1
+                listing.processing_state = "retry"
+                listing.processing_attempt_count = attempt
+                listing.processing_stage = "preflight"
+                listing.processing_next_retry_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=10)
+                listing.processing_blocking_reason = "Destination preflight is pending; run the configured marketplace checks before publishing"
+                listing.processing_error_stage = "preflight"
+                listing.needs_review = False
+            elif readiness.get("review_required") and readiness.get("publishable") and readiness.get("queue") == "NEEDS_REVIEW":
+                listing.processing_state = "complete"
+                _promote_vine_listing_to_review(listing)
+                listing.processing_blocking_reason = None
+                listing.processing_error_stage = None
+            else:
+                listing.processing_state = "retry"
+                listing.processing_attempt_count = int(getattr(listing, "processing_attempt_count", 0) or 0) + 1
+                listing.processing_stage = "preflight"
+                listing.processing_next_retry_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=10)
+                listing.processing_blocking_reason = "Destination readiness is not confirmed; rerun publish preflight"
+                listing.processing_error_stage = "preflight"
+                listing.needs_review = False
+            db.add(listing)
+            updated += 1
+        db.commit()
+        return {"updated": updated, "missing_facts": missing_facts, "publication_actions": 0}
+
+    def auto_build_batch_drafts(
+        self,
+        db: Session,
+        *,
+        batch: VineImportBatch,
+        item_ids: list[int] | None = None,
+        new_only: bool = True,
+        include_cancelled: bool = True,
+    ) -> dict:
+        # Vine exports are often full-year snapshots. Work from the newest
+        # received row first and let the durable row fingerprint skip products
+        # already handled in an earlier upload.
+        query = select(VineImportItem).where(VineImportItem.batch_id == batch.id).order_by(
+            VineImportItem.shipped_date.desc().nullslast(),
+            VineImportItem.order_date.desc().nullslast(),
+            VineImportItem.id.desc(),
+        )
+        if item_ids:
+            query = query.where(VineImportItem.id.in_(item_ids))
+        items = db.execute(query).scalars().all()
+        target_items = [
+            item
+            for item in items
+            if (not new_only or not self._is_duplicate_vine_item(item))
+        ]
+        target_item_ids = [item.id for item in target_items]
+        duplicate_count = sum(1 for item in items if self._is_duplicate_vine_item(item))
+        if not target_item_ids:
+            result = {
+                "batch_id": batch.id,
+                "processed_item_ids": [],
+                "listing_ids": [],
+                "new_only": new_only,
+                "duplicates_skipped": duplicate_count,
+                "draft_result": {"created": 0, "updated": 0, "skipped": 0, "created_listing_ids": []},
+                "repair_result": {"updated": 0, "removed_unsafe": 0, "already_present": 0, "missing_asin": 0, "bridge_refetched": 0, "bridge_failed": 0},
+            }
+            self._update_batch_stats_json(
+                db,
+                batch=batch,
+                updates={
+                    "auto_build_processed": 0,
+                    "auto_build_duplicates_skipped": duplicate_count,
+                    "auto_build_created": 0,
+                    "auto_build_updated": 0,
+                    "auto_build_repair_updated": 0,
+                },
+                commit=True,
+            )
+            return result
+
+        draft_result = self.create_listing_drafts(
+            db,
+            batch=batch,
+            item_ids=target_item_ids,
+            include_cancelled=include_cancelled,
+            fetch_media_first=True,
+            require_media_for_asin=False,
+            allow_drafts_without_media=True,
+        )
+
+        refreshed_items = db.execute(
+            select(VineImportItem).where(VineImportItem.id.in_(target_item_ids)).order_by(VineImportItem.id.asc())
+        ).scalars().all()
+        draft_listing_ids = sorted({item.listing_id for item in refreshed_items if item.listing_id})
+        recent_listing_ids = sorted(
+            {
+                item.listing_id
+                for item in refreshed_items
+                if item.listing_id and item.order_date and item.order_date >= VINE_IMAGE_BACKFILL_CUTOFF
+            }
+        )
+        older_listing_ids = sorted(set(draft_listing_ids) - set(recent_listing_ids))
+
+        repair_totals = {
+            "updated": 0,
+            "removed_unsafe": 0,
+            "already_present": 0,
+            "missing_asin": 0,
+            "no_cache": 0,
+            "bridge_refetched": 0,
+            "bridge_failed": 0,
+            "total_vine_listings": 0,
+            "processed": 0,
+        }
+        repair_listing_ids: list[int] = []
+
+        def _merge_repair(result: dict | None) -> None:
+            nonlocal repair_listing_ids
+            if not result:
+                return
+            for key in repair_totals:
+                repair_totals[key] += int(result.get(key) or 0)
+            repair_listing_ids.extend(int(listing_id) for listing_id in (result.get("listing_ids") or []) if listing_id)
+
+        if recent_listing_ids:
+            recent_repair = self.repair_vine_listing_images(
+                db,
+                user_id=batch.user_id,
+                batch_id=batch.id,
+                listing_ids=recent_listing_ids,
+                include_archived=False,
+                force_refresh=True,
+                use_bridge_session=True,
+                only_missing_images=False,
+                limit=None,
+                since_order_date=VINE_IMAGE_BACKFILL_CUTOFF,
+            )
+            _merge_repair(recent_repair)
+
+        if older_listing_ids:
+            older_repair = self.repair_vine_listing_images(
+                db,
+                user_id=batch.user_id,
+                batch_id=batch.id,
+                listing_ids=older_listing_ids,
+                include_archived=False,
+                force_refresh=False,
+                use_bridge_session=True,
+                only_missing_images=True,
+                limit=None,
+            )
+            _merge_repair(older_repair)
+
+        if draft_listing_ids:
+            retry_repair = self.repair_vine_listing_images(
+                db,
+                user_id=batch.user_id,
+                batch_id=batch.id,
+                listing_ids=draft_listing_ids,
+                include_archived=False,
+                force_refresh=True,
+                use_bridge_session=True,
+                only_missing_images=True,
+                limit=None,
+            )
+            _merge_repair(retry_repair)
+
+        repair_result = {
+            **repair_totals,
+            "include_archived": False,
+            "force_refresh": True if recent_listing_ids else False,
+            "listing_ids": sorted(set(repair_listing_ids)),
+            "batch_id": batch.id,
+            "recent_listing_ids": recent_listing_ids,
+            "older_listing_ids": older_listing_ids,
+            "retry_listing_ids": draft_listing_ids,
+            "since_order_date": VINE_IMAGE_BACKFILL_CUTOFF.isoformat(),
+        }
+
+        # The normal import path must leave drafts correctly classified on its
+        # first pass.  Background image repair remains a safety net, not the
+        # source of lifecycle truth.
+        preflight_result = self.preflight_batch_drafts(db, batch=batch, listing_ids=draft_listing_ids)
+
+        result = {
+            "batch_id": batch.id,
+            "processed_item_ids": target_item_ids,
+            "listing_ids": draft_listing_ids,
+            "new_only": new_only,
+            "duplicates_skipped": duplicate_count,
+            "draft_result": draft_result,
+            "repair_result": repair_result,
+            "preflight_result": preflight_result,
+        }
+        self._update_batch_stats_json(
+            db,
+            batch=batch,
+            updates={
+                "auto_build_processed": len(target_item_ids),
+                "auto_build_duplicates_skipped": duplicate_count,
+                "auto_build_created": int(draft_result.get("created") or 0),
+                "auto_build_updated": int(draft_result.get("updated") or 0),
+                "auto_build_skipped": int(draft_result.get("skipped") or 0),
+                "auto_build_repair_updated": int(repair_result.get("updated") or 0),
+                "auto_build_bridge_refetched": int(repair_result.get("bridge_refetched") or 0),
+                "auto_build_bridge_failed": int(repair_result.get("bridge_failed") or 0),
+                "auto_build_preflighted": int(preflight_result.get("count") or 0),
+            },
+            commit=True,
+        )
+        return result
+
+    def preflight_batch_drafts(self, db: Session, *, batch: VineImportBatch, listing_ids: list[int] | None = None) -> dict:
+        """Finalize Vine drafts through bounded evidence repair and fresh preflight.
+
+        This is the shared last stage for both normal imports and explicit
+        reconciliation. A clean preflight is necessary but not sufficient:
+        Vine drafts also need a product-specific, original description and
+        stable identity/price/condition/quantity before they enter Needs Review.
+        """
+        from app.services.marketplace_preflight import MarketplacePreflightService
+
+        query = (
+            select(Listing)
+            .join(VineImportItem, or_(VineImportItem.listing_id == Listing.id, VineImportItem.inventory_item_id == Listing.id))
+            .where(VineImportItem.batch_id == batch.id)
+        )
+        if listing_ids:
+            query = query.where(Listing.id.in_(listing_ids))
+        listings = db.execute(query).scalars().unique().all()
+        service = MarketplacePreflightService()
+        results = []
+        for listing in listings:
+            # A deduplicated Vine import can legitimately point at a prior
+            # listing that the operator archived/sold.  Those historical rows
+            # are not unfinished drafts from this batch and must never be
+            # pushed back into retry or have their category/copy rewritten.
+            if self._is_archived_vine_listing(listing):
+                results.append({"listing_id": listing.id, "status": "archived", "blockers": []})
+                continue
+            try:
+                item = db.execute(
+                    select(VineImportItem)
+                    .where((VineImportItem.listing_id == listing.id) | (VineImportItem.inventory_item_id == listing.id))
+                    .order_by(VineImportItem.order_date.desc().nullslast(), VineImportItem.updated_at.desc(), VineImportItem.id.desc())
+                ).scalars().first()
+                if item is not None:
+                    # Draft creation already captured the ASIN facts.  Do not
+                    # re-scrape Amazon for every retry/preflight pass; a
+                    # transient provider stall must not hold an import batch
+                    # in Processing (and this path never calls paid AI).
+                    self._finalize_vine_listing_content(db, listing=listing, item=item, batch_id=batch.id, refresh_remote=False)
+                    # Resolve against the synchronized local EBAY_US and
+                    # EBAY_MOTORS_US trees before asking marketplace preflight
+                    # to validate the payload.  The old Vine path stopped at
+                    # a text suggestion (or a generic category) and left
+                    # otherwise complete products in Processing forever.
+                    # A prior failed pass must not poison the fresh canonical
+                    # readiness calculation.  The current preflight result is
+                    # the only blocker authority; stale text such as an old
+                    # ``Canonical listing work remains incomplete`` or an
+                    # obsolete exception is cleared before rebuilding it.
+                    listing.processing_blocking_reason = None
+                    listing.processing_error_stage = None
+                # Taxonomy resolution uses the local dual-tree snapshot and
+                # stored product facts. Run it even if the import-item link
+                # was lost during deduplication; absence of that join must not
+                # turn an obvious product into a permanent category blocker.
+                self._resolve_vine_local_leaf(db, listing=listing, item=item)
+
+                preflight = service.preflight_listing(db, listing, MarketplaceName.ebay.value)
+                # The cache API uses this explicit key. Do not make lifecycle
+                # decisions from yesterday's persisted blocker JSON.
+                preflight["marketplace"] = MarketplaceName.ebay.value
+                # Keep the canonical readiness calculation on the same fresh
+                # evidence that this preflight just produced.  Older Vine
+                # rows can carry a stale ``readiness_summary`` (including a
+                # historical processing exception); leaving that JSON in
+                # place makes an otherwise clean retry look permanently
+                # incomplete even after the current payload passes.
+                if isinstance(preflight.get("readiness_summary"), dict):
+                    listing.readiness_summary = dict(preflight["readiness_summary"])
+                if self._persist_vine_taxonomy_resolution(listing, preflight):
+                    # A taxonomy suggestion becomes durable only after the
+                    # actual eBay taxonomy path returned a category ID. Since
+                    # that changes the canonical payload, readiness is checked
+                    # once more against the now-persisted category.
+                    preflight = service.preflight_listing(db, listing, MarketplaceName.ebay.value)
+                    preflight["marketplace"] = MarketplaceName.ebay.value
+                    if isinstance(preflight.get("readiness_summary"), dict):
+                        listing.readiness_summary = dict(preflight["readiness_summary"])
+                blockers = list(preflight.get("blockers") or [])
+                quality_issue = self._vine_description_issue(listing)
+                if quality_issue:
+                    blockers.append(quality_issue)
+                if blockers and item is not None:
+                    # One bounded blocker-directed repair pass. All changes are
+                    # evidence-backed and the second fresh preflight is the
+                    # only result allowed to control queue placement.
+                    self._repair_vine_blockers(listing=listing, item=item, blockers=blockers)
+                    preflight = service.preflight_listing(db, listing, MarketplaceName.ebay.value)
+                    preflight["marketplace"] = MarketplaceName.ebay.value
+                    if isinstance(preflight.get("readiness_summary"), dict):
+                        listing.readiness_summary = dict(preflight["readiness_summary"])
+                    if self._persist_vine_taxonomy_resolution(listing, preflight):
+                        preflight = service.preflight_listing(db, listing, MarketplaceName.ebay.value)
+                        preflight["marketplace"] = MarketplaceName.ebay.value
+                        if isinstance(preflight.get("readiness_summary"), dict):
+                            listing.readiness_summary = dict(preflight["readiness_summary"])
+                    blockers = list(preflight.get("blockers") or [])
+                    quality_issue = self._vine_description_issue(listing)
+                    if quality_issue:
+                        blockers.append(quality_issue)
+                preflight["blockers"] = blockers
+                service.cache_preflight_summary(db, listing, preflight)
+                if blockers:
+                    listing.processing_state = "needs_attention"
+                    listing.needs_review = False
+                    first_blocker = blockers[0]
+                    listing.processing_blocking_reason = str(
+                        (
+                            first_blocker.get("message")
+                            or first_blocker.get("user_message")
+                            or first_blocker.get("raw_error")
+                            or first_blocker.get("code")
+                        )
+                        if isinstance(first_blocker, dict)
+                        else first_blocker
+                    )
+                    listing.processing_error_stage = "preflight"
+                else:
+                    canonical = canonical_listing_readiness(listing)
+                    if canonical.get("canonical_product_complete"):
+                        listing.processing_state = "complete"
+                        listing.needs_review = True
+                        listing.processing_blocking_reason = None
+                        listing.processing_error_stage = None
+                    else:
+                        listing.processing_state = "retry"
+                        listing.needs_review = False
+                        listing.processing_stage = "category_resolution" if any("categor" in str(v).lower() for v in canonical.get("blocking_reasons") or []) else "quality_validation"
+                        listing.processing_blocking_reason = str((canonical.get("blocking_reasons") or ["Canonical listing work remains incomplete"])[0])
+                        listing.processing_error_stage = listing.processing_stage
+                db.add(listing)
+                db.add(ListingProcessingEvent(
+                    listing_id=listing.id,
+                    user_id=listing.user_id,
+                    event_type="vine_finalization",
+                    status="completed" if not blockers else "needs_attention",
+                    stage="fresh_preflight",
+                    message="Vine evidence enrichment and current eBay readiness were reconciled.",
+                    details_json={
+                        "marketplace": "ebay",
+                        "preflight_status": preflight.get("status"),
+                        "blockers": [
+                            {"code": b.get("code"), "field": b.get("field"), "message": b.get("message")}
+                            for b in blockers if isinstance(b, dict)
+                        ],
+                        "description_characters": len(str(listing.description or "")),
+                        "amazon_facts_preserved": bool((listing.source_metadata or {}).get("amazon_product_facts")),
+                    },
+                ))
+                results.append({"listing_id": listing.id, "status": preflight.get("status"), "blockers": blockers})
+            except Exception as exc:  # keep import durable; expose exact retry state
+                # A failed provider/database operation aborts the current
+                # PostgreSQL transaction. Roll it back before recording the
+                # item-level failure; otherwise every later Vine row inherits
+                # ``InFailedSqlTransaction`` and is falsely classified as a
+                # generic attention item.
+                listing_id = int(getattr(listing, "id", 0) or 0)
+                db.rollback()
+                listing = db.get(Listing, listing_id) if listing_id else None
+                if listing is None:
+                    results.append({"listing_id": listing_id, "status": "blocked", "blockers": [{"code": "LISTING_RELOAD_FAILED", "message": str(exc)}]})
+                    continue
+                listing.processing_state = "needs_attention"
+                listing.needs_review = False
+                listing.processing_blocking_reason = f"Fresh eBay preflight failed: {exc}"
+                listing.processing_error_stage = "preflight"
+                db.add(listing)
+                results.append({"listing_id": listing.id, "status": "blocked", "blockers": [{"code": "EBAY_PREFLIGHT_FAILED", "message": str(exc)}]})
+        db.commit()
+        return {"batch_id": batch.id, "count": len(results), "results": results}
+
+    @staticmethod
+    def _persist_vine_taxonomy_resolution(listing: Listing, preflight: dict) -> bool:
+        """Persist an actual eBay taxonomy suggestion, never a path-only guess."""
+        from app.services.listing_provenance import is_preserved_field as is_human_owned_field
+
+        source = listing.source_metadata if isinstance(listing.source_metadata, dict) else {}
+        category = preflight.get("category_summary") if isinstance(preflight.get("category_summary"), dict) else {}
+        category_id = str(category.get("category_id") or "").strip()
+        if not category_id.isdigit() or not category.get("metadata_available") or category.get("leaf_verified") is not True:
+            return False
+        if is_human_owned_field(source, "category_id"):
+            return False
+        current = str(listing.category_id or "").strip()
+        if current == category_id:
+            return False
+        listing.category_id = category_id
+        market = dict(listing.marketplace_data or {})
+        market["ebay_last_resolved_category"] = {
+            "category_id": category_id,
+            "category_name": str(category.get("category_name") or category_id),
+            "semantic_category": listing.category_suggestion,
+            "source": "fresh_ebay_taxonomy_suggestion",
+            "metadata_source": category.get("metadata_source"),
+            "metadata_available": True,
+            "leaf_verified": True,
+            "taxonomy_tree_id": category.get("taxonomy_tree_id"),
+            "verification_source": category.get("verification_source"),
+            "resolved_at": datetime.now(UTC).isoformat(),
+        }
+        listing.marketplace_data = market
+        return True
+
+    def _resolve_vine_local_leaf(self, db: Session, *, listing: Listing, item: VineImportItem | None = None) -> bool:
+        """Persist the best evidence-backed local leaf for a Vine product.
+
+        This is deliberately candidate based: it never invents a category ID
+        and it will not replace an operator-owned category.  A generic or
+        missing suggestion is the common import failure, so local taxonomy
+        resolution gets first chance before marketplace preflight.
+        """
+        source = listing.source_metadata if isinstance(listing.source_metadata, dict) else {}
+        facts = _clean_amazon_facts(source.get("amazon_product_facts"))
+        terms = [
+            str(facts.get("product_type") or getattr(item, "product_type", "") or "").strip(),
+            str(facts.get("item_type_keyword") or "").strip(),
+            str(facts.get("category") or "").strip(),
+            " ".join(str(value) for value in (facts.get("breadcrumbs") or []) if str(value or "").strip()),
+        ]
+        terms = [term for term in terms if term]
+        # A deduplicated/reconciled listing can outlive its batch-item link.
+        # The durable listing title and stored Amazon facts are sufficient for
+        # local taxonomy resolution; a missing import row must not strand an
+        # otherwise classifiable product.
+        title = " ".join(v for v in (listing.title, getattr(item, "product_name", None), *terms) if v)
+        current = str(listing.category_id or "").strip()
+        current_check = validate_listing_category(db, listing)
+        # These legacy IDs are known broad/colliding assignments in the
+        # synchronized tree. A local leaf lookup alone cannot establish that
+        # the leaf belongs to this product (e.g. a tablet keyboard case that
+        # inherited Battery Chargers). Keep its existing hint for diagnosis
+        # and force semantic candidate resolution instead of blessing it.
+        unsafe_legacy_ids = {"234", "1277", "1284", "11808", "36956", "48618"}
+        def persist_current_local_validation() -> bool:
+            if not current or current in unsafe_legacy_ids or current_check.get("status") != "valid_local" or current_check.get("flags"):
+                return False
+            metadata = dict(source)
+            existing_validation = metadata.get("category_validation") if isinstance(metadata.get("category_validation"), dict) else {}
+            validation = {
+                "status": "valid_local",
+                "marketplace": current_check.get("marketplace"),
+                "tree_id": current_check.get("tree_id"),
+                "tree_version": current_check.get("tree_version"),
+                "category_id": current,
+                "category_name": current_check.get("category_name"),
+                "full_path": current_check.get("full_path"),
+                "confidence": None,
+                "evidence": {"source": "synchronized_local_taxonomy", "leaf": True, "semantic_flags": []},
+            }
+            changed = existing_validation != validation
+            metadata["category_validation"] = validation
+            metadata["category_path"] = current_check.get("full_path")
+            metadata["taxonomy_marketplace"] = current_check.get("marketplace")
+            metadata["taxonomy_tree_id"] = str(current_check.get("tree_id") or "0")
+            metadata["taxonomy_tree_version"] = str(current_check.get("tree_version") or "")
+            if not is_human_owned_field(source, "category_suggestion") and str(listing.category_suggestion or "") != str(current_check.get("full_path") or ""):
+                listing.category_suggestion = str(current_check.get("full_path") or current_check.get("category_name") or "")
+                changed = True
+            if changed:
+                listing.source_metadata = metadata
+            return changed
+        if is_human_owned_field(source, "category_id"):
+            # Preserve an operator's selected ID, but still validate and record
+            # its exact owning local tree/path so stale prose aliases cannot
+            # leave a valid operator choice stuck in Processing.
+            return persist_current_local_validation()
+        current_path = str(current_check.get("full_path") or "").lower()
+        title_lower = title.lower()
+        contradictory_branch = any(branch in current_path and branch not in title_lower for branch in (
+            "forklift", "lineman", "knockout & punch", "moving blankets", "dish, glass", "v-band kits",
+            "computer monitors", "monitors", "restaurant & food service", "camera collectibles",
+            "dock, wall-mount & tank ladders", "stickers & decals", "straps & tie-downs",
+            "mats & non-slip towels", "basketry handles", "racing radios", "detox & cleansers",
+            "wall repair kits", "rf communication test sets", "home décor > mirrors",
+        ))
+        expected_family_conflicts = (
+            (("microphone", "voice listen", "audio recorder"), ("ladder", "dock", "tank ladder")),
+            (("cue", "billiard", "pool cue"), ("sticker", "decal")),
+            (("bike rack", "bicycle rack"), ("strap", "tie-down")),
+            (("skimboard", "skateboard", "tumbling"), ("mat", "towel")),
+            (("hair shears", "thinning shears", "texturizing scissors"), ("basketry", "hoop", "rim")),
+            (("first aid", "emergency kit"), ("wall repair", "v-band", "automotive")),
+            (("butt plug", "anal dilator"), ("restaurant", "dish", "rf communication")),
+            (("fishing knife", "fillet knife"), ("knockout", "punch set")),
+            (("fuel injector cleaner",), ("lineman", "telephone handset")),
+            (("boy short", "women's shorts"), ("boy scout", "uniform shirt")),
+            (("pulse oximeter",), ("computer", "monitor")),
+            (("heated blanket", "electric blanket"), ("moving blanket", "forklift")),
+        )
+        contradictory_branch = contradictory_branch or any(
+            any(term in title_lower for term in product_terms)
+            and any(path_term in current_path for path_term in wrong_paths)
+            for product_terms, wrong_paths in expected_family_conflicts
+        )
+        generic_current = not current or current in unsafe_legacy_ids or current_check.get("status") != "valid_local" or any(
+            token in str(listing.category_suggestion or "").lower()
+            for token in ("needs category", "review", "other", "collectibles > cameras")
+        )
+        # Legacy substring rules are hints only: broad words such as "pool",
+        # "camera", "monitor", or "wifi" have repeatedly selected a different
+        # product family. Rank local leaves using source product type/category
+        # first, then title and application, and require actual noun agreement.
+        chosen = None
+        candidates = resolve_local_category(db, " ".join(v for v in (listing.title, getattr(item, "product_name", None)) if v), semantic_terms=terms, limit=20)
+        if candidates:
+            top = candidates[0]
+            second_score = float(candidates[1].get("score") or 0) if len(candidates) > 1 else 0
+            top_score = float(top.get("score") or 0)
+            # A valid local ID can still be a semantically wrong legacy leaf.
+            # Replace only when a specific local candidate has product-noun
+            # evidence and a clear score margin; ambiguous siblings are left
+            # untouched for review rather than guessed.
+            if (current and current_check.get("status") == "valid_local"
+                    and str(top.get("category_id")) != current
+                    and (bool(top.get("_concept_match")) or int(top.get("title_name_matches") or 0) >= 1)
+                    and top_score >= 24 and top_score - second_score >= 8):
+                generic_current = True
+        for index, candidate in enumerate(candidates):
+            cid = str(candidate.get("category_id") or "").strip()
+            if not cid or float(candidate.get("score") or 0) < 8:
+                continue
+            # A candidate must match an identity term in its leaf name. A word
+            # appearing only in a far-away ancestor (e.g. "pool" in Pool
+            # Pumps for a pool cue) is not enough to assign automatically.
+            if int(candidate.get("title_name_matches") or 0) < 1 and not candidate.get("_concept_match"):
+                continue
+            if float(candidate.get("score") or 0) < 20 and not candidate.get("_concept_match"):
+                continue
+            probe = type("TaxonomyProbe", (), {"category_id": cid, "title": listing.title, "source_metadata": {**(listing.source_metadata if isinstance(listing.source_metadata, dict) else {}), "category_validation": {"marketplace": candidate.get("marketplace"), "tree_id": candidate.get("category_tree_id"), "category_id": cid}}, "item_specifics": listing.item_specifics or {}})()
+            checked = validate_listing_category(db, probe)
+            if checked.get("status") == "valid_local" and not checked.get("flags"):
+                chosen = {**candidate, "validation": checked}
+                break
+        if not chosen:
+            if (current and current_check.get("status") == "valid_local" and not current_check.get("flags")
+                    and current not in unsafe_legacy_ids and not generic_current and not contradictory_branch):
+                # A real, semantically clean local leaf already satisfies the
+                # field. Preserve it even when the candidate search is sparse.
+                persist_current_local_validation()
+                return True
+            # The strict resolver can reject every candidate for low-confidence
+            # titles. Vine imports still need a concrete leaf ID for review, so
+            # choose the closest leaf from the full local tree and record that
+            # it is a best guess. Semantic flags remain visible and are not
+            # silently converted into a validated/publishable category.
+            fallback = closest_local_category(db, title, terms)
+            if not fallback:
+                return persist_current_local_validation()
+            cid = str(fallback.get("category_id") or "").strip()
+            if not cid:
+                return persist_current_local_validation()
+            probe = type("TaxonomyProbe", (), {"category_id": cid, "title": listing.title, "source_metadata": {**(listing.source_metadata if isinstance(listing.source_metadata, dict) else {}), "category_validation": {"marketplace": fallback.get("marketplace"), "tree_id": fallback.get("category_tree_id"), "category_id": cid}}, "item_specifics": listing.item_specifics or {}})()
+            checked = validate_listing_category(db, probe)
+            listing.category_id = cid
+            listing.category_suggestion = str(fallback.get("category_name") or listing.category_suggestion or "").strip()
+            metadata = dict(listing.source_metadata or {})
+            metadata["category_validation"] = {
+                "status": checked.get("status") or "best_guess",
+                "marketplace": fallback.get("marketplace"),
+                "tree_id": fallback.get("category_tree_id"),
+                "tree_version": fallback.get("category_tree_version"),
+                "category_id": cid,
+                "category_name": fallback.get("category_name"),
+                "full_path": fallback.get("full_path"),
+                "confidence": "best_guess",
+                "flags": checked.get("flags") or [],
+                "evidence": {"source": "full_local_taxonomy_best_guess", "title": title,
+                             "source_terms": terms, "resolver_score": fallback.get("score"),
+                             "title_leaf_name_matches": fallback.get("title_name_matches"),
+                             "source_leaf_name_matches": fallback.get("primary_name_matches")},
+            }
+            metadata["category_path"] = fallback.get("full_path")
+            metadata["taxonomy_marketplace"] = str(fallback.get("marketplace") or "EBAY_US")
+            metadata["taxonomy_tree_id"] = str(fallback.get("category_tree_id") or "0")
+            metadata["taxonomy_tree_version"] = str(fallback.get("category_tree_version") or "")
+            metadata["category_provenance"] = "full_local_taxonomy_best_guess"
+            listing.source_metadata = metadata
+            return True
+        generic = generic_current or contradictory_branch
+        if not generic and current == str(chosen["category_id"]):
+            return persist_current_local_validation()
+        if not generic and current_check.get("status") == "valid_local":
+            # A competing leaf exists, but without the required score margin
+            # it is not safe to replace the operator's/current choice. Keep
+            # that choice and persist the exact synchronized-tree evidence.
+            return persist_current_local_validation()
+        listing.category_id = str(chosen["category_id"])
+        listing.category_suggestion = str(chosen.get("category_name") or listing.category_suggestion or "").strip()
+        metadata = dict(listing.source_metadata or {})
+        metadata["category_validation"] = {
+            "status": "valid_local",
+            "marketplace": chosen.get("marketplace"),
+            "tree_id": chosen.get("category_tree_id"),
+            "tree_version": chosen.get("category_tree_version"),
+            "category_id": str(chosen["category_id"]),
+            "category_name": chosen.get("category_name"),
+            "full_path": chosen.get("full_path"),
+            "confidence": None,
+            "evidence": {"title": listing.title, "source_terms": terms, "title_leaf_name_matches": chosen.get("title_name_matches"), "source_leaf_name_matches": chosen.get("primary_name_matches"), "resolver_score": chosen.get("score"), "concept_match": chosen.get("_concept_match"), "selection": "local_leaf_semantic_rank"},
+        }
+        metadata["category_path"] = chosen.get("full_path")
+        metadata["taxonomy_marketplace"] = str(chosen.get("marketplace") or "EBAY_US")
+        metadata["taxonomy_tree_id"] = str(chosen.get("category_tree_id") or "0")
+        metadata["taxonomy_tree_version"] = str(chosen.get("category_tree_version") or "")
+        metadata["category_provenance"] = "local_taxonomy_resolver"
+        listing.source_metadata = metadata
+        return True
+
+    def _finalize_vine_listing_content(self, db: Session, *, listing: Listing, item: VineImportItem, batch_id: int, refresh_remote: bool = True) -> None:
+        """Normalize a Vine listing from durable structured evidence.
+
+        Fresh page facts fill gaps, never replace a durable value with an empty
+        response. Existing item specifics are a durable evidence container too;
+        older imports often stored Amazon detail rows there instead of in the
+        normalized facts object.
+        """
+        source = dict(listing.source_metadata or {})
+        prior = _clean_amazon_facts(source.get("amazon_product_facts"))
+        facts = self._hydrate_vine_facts(prior, item=item, listing=listing)
+        # If the imported row has no structured facts at all, perform one
+        # supported product lookup before classifying it. Images in the media
+        # cache are not treated as proof that factual enrichment succeeded.
+        useful_structured = [value for key, value in (facts.get("specifications") or {}).items() if self._usable_vine_fact(value) and str(key).strip().lower() not in {"model", "brand", "type"}]
+        price_evidence_current = str(facts.get("price_source") or "").lower() == "asin_product_offer_widget_v2"
+        if refresh_remote and (not price_evidence_current or (len(useful_structured) < 3 and not facts.get("feature_bullets"))) and item.asin:
+            try:
+                provider = AmazonProductMediaProvider(db, owner_user_id=listing.user_id)
+                result = AmazonProductDiscoveryService(provider).discover_for_vine_item(
+                    asin=item.asin,
+                    product_name=item.product_name or listing.title,
+                    manual_url=item.manual_amazon_url,
+                ) or {}
+            except Exception as exc:
+                result = {"status": "fetch_error", "fetch_error": type(exc).__name__}
+            fresh = _clean_amazon_facts(result.get("product_facts"))
+            # Persist a text-specific outcome.  The Amazon media bridge can
+            # legitimately deliver a gallery while Amazon's page returns an
+            # interstitial/empty document; never collapse that into success.
+            fresh_page_text = bool(
+                fresh.get("feature_bullets") or fresh.get("product_description")
+                or any(str(key).strip().lower() not in {"type", "product type", "item type", "brand", "model", "asin"} for key in (fresh.get("specifications") or {}))
+            )
+            previous_text = source.get("amazon_source_text") if isinstance(source.get("amazon_source_text"), dict) else {}
+            if fresh_page_text:
+                source["amazon_source_text"] = {"state": "complete", "retrieved_at": datetime.now(UTC).isoformat()}
+            elif previous_text.get("state") != "complete":
+                source["amazon_source_text"] = {
+                    "state": "inaccessible",
+                    "retrieved_at": datetime.now(UTC).isoformat(),
+                    "reason": "Amazon product page returned no extractable product text; retained existing facts and did not infer text from images.",
+                }
+            # Fresh values fill absent slots; nonempty durable values survive a
+            # blocked/empty Amazon response. Price is specifically refreshed
+            # from the current, ASIN-matched page when present.
+            merged = _merge_amazon_fact_evidence(prior, fresh)
+            if fresh.get("current_price") is not None and fresh.get("price_source") == "asin_product_offer_widget_v2":
+                merged["current_price"] = fresh["current_price"]
+                merged["price_source"] = fresh["price_source"]
+            elif not price_evidence_current and facts.get("current_price") is not None:
+                # Keep the legacy scraped number for provenance, but do not
+                # call it a current offer after discovering that it came from
+                # the old page-wide/whole-dollar parser.
+                history = list(source.get("amazon_price_history") or [])
+                history.append({"value": facts.get("current_price"), "source": "legacy_unverified_page_scrape"})
+                source["amazon_price_history"] = history[-10:]
+                merged["current_price"] = None
+                merged["price_source"] = ""
+            facts = self._hydrate_vine_facts(merged, item=item, listing=listing)
+            if result.get("source_page_url"):
+                item.amazon_source_page_url = result["source_page_url"]
+            if result.get("status"):
+                item.amazon_match_status = str(result.get("status"))
+            db.add(item)
+        else:
+            facts = self._hydrate_vine_facts(facts, item=item, listing=listing)
+
+        if not is_human_owned_field(source, "title") and facts.get("title") and len(str(facts["title"]).split()) >= 3:
+            listing.title = self._generate_title(item.product_name or listing.title, amazon_facts=facts)
+        elif not listing.title and item.product_name and not is_human_owned_field(source, "title"):
+            listing.title = self._generate_title(item.product_name)
+        if str(listing.source_type or "").lower() != "amazon_vine":
+            listing.source_type = "amazon_vine"
+        if not is_human_owned_field(source, "condition"):
+            listing.condition = "New"
+        quantity_source = str((listing.marketplace_data or {}).get("quantity_source") or "").lower() if isinstance(listing.marketplace_data, dict) else ""
+        if int(listing.quantity or 0) <= 0 and quantity_source not in {"manual", "operator"} and not is_human_owned_field(source, "quantity"):
+            listing.quantity = 1
+
+        existing_specifics = dict(listing.item_specifics or {})
+        specifics_provenance = dict((listing.marketplace_data or {}).get("ebay_item_specifics_provenance") or {})
+        raw_capacity = existing_specifics.get("Capacity")
+        invalid_auto_capacity = bool(
+            raw_capacity
+            and str(raw_capacity).strip().lower() not in {"does not apply", "unknown", "n/a", "not applicable"}
+            and not _supported_capacity_value(raw_capacity)
+            and not is_human_owned_field(source, "item_specifics.Capacity")
+            and not is_human_owned_field(source, "item_specifics")
+        )
+        if invalid_auto_capacity:
+            existing_specifics.pop("Capacity", None)
+            specifics_provenance.pop("Capacity", None)
+            listing.item_specifics = existing_specifics
+            market = dict(listing.marketplace_data or {})
+            market["ebay_item_specifics_provenance"] = specifics_provenance
+            listing.marketplace_data = market
+
+        # Avoid clobbering a better existing description when a scrape is
+        # transiently empty. AI is preferred; the factual deterministic
+        # formatter is the safe fallback and never copies Amazon prose.
+        if (self._vine_description_issue(listing) or invalid_auto_capacity) and not is_human_owned_field(source, "description"):
+            generated = self._generate_vine_original_description(
+                db, listing=listing, item=item, facts=facts
+            )
+            if generated and not self._description_source_copy(generated, facts):
+                listing.description = generated
+
+        # Keep a rich canonical source and materialize independent channel
+        # variants. Mercari's limit must never truncate the master/eBay copy.
+        if not is_human_owned_field(source, "description"):
+            listing.canonical_description = str(listing.description or "").strip() or None
+        elif not listing.canonical_description:
+            listing.canonical_description = str(listing.description or "").strip() or None
+        category_validation = source.get("category_validation") if isinstance(source.get("category_validation"), dict) else {}
+        has_current_local_leaf = (
+            str(category_validation.get("status") or "").lower() == "valid_local"
+            and str(category_validation.get("category_id") or "").strip() == str(listing.category_id or "").strip()
+            and bool(str(category_validation.get("full_path") or "").strip())
+        )
+        if has_current_local_leaf:
+            # Keep the synchronized tree's exact owner/path when an import
+            # retry encounters an old numeric Vine category hint.
+            category = str(category_validation["full_path"]).strip()
+            category_source = "synchronized_local_taxonomy"
+        else:
+            category, category_source = self._resolve_category(item, amazon_facts=facts)
+        if category and category != "Other > Needs category review" and not is_human_owned_field(source, "category_suggestion"):
+            listing.category_suggestion = category
+        elif not str(listing.category_suggestion or "").strip() and not is_human_owned_field(source, "category_suggestion"):
+            listing.category_suggestion = category
+
+        specifics = dict(listing.item_specifics or {})
+        provenance = dict((listing.marketplace_data or {}).get("ebay_item_specifics_provenance") or {})
+        for field in ("Brand", "Model", "MPN", "Material", "Color", "Size", "Type", "Capacity"):
+            if is_human_owned_field(source, f"item_specifics.{field}") or is_human_owned_field(source, "item_specifics"):
+                facts.pop(field.lower(), None)
+        _apply_fact_specifics(specifics, provenance, facts)
+        for key, value in (facts.get("specifications") or {}).items():
+            if value and self._usable_vine_fact(value) and not self._usable_vine_fact(specifics.get(key)):
+                specifics[key] = value
+                provenance[key] = "amazon_product_page"
+        _merge_dimension_specifics(specifics, provenance, facts)
+        _remove_vine_specific_noise(specifics, provenance, source)
+        # eBay's Mirrors leaf asks for Item Height/Width, while Amazon often
+        # records the same wall-mounted product as Item Length x Item Width.
+        # For a mirror, preserve those measured axes in the destination's
+        # category vocabulary instead of leaving a required height blank.
+        if "mirror" in str(listing.category_suggestion or "").lower():
+            dimensions = facts.get("dimensions") if isinstance(facts.get("dimensions"), dict) else {}
+            unit = str(dimensions.get("unit") or "in").strip()
+            length = dimensions.get("length")
+            width = dimensions.get("width")
+            if length and not self._usable_vine_fact(specifics.get("Item Height")):
+                specifics["Item Height"] = f"{length:g} {unit}"
+                provenance["Item Height"] = "amazon_product_dimensions_category_mapping"
+            if width and not self._usable_vine_fact(specifics.get("Item Width")):
+                specifics["Item Width"] = f"{width:g} {unit}"
+                provenance["Item Width"] = "amazon_product_dimensions_category_mapping"
+        listing.item_specifics = specifics
+        # Materialize channel variants only after category and structured facts
+        # are finalized so adapters receive the complete canonical evidence.
+        persist_marketplace_description_variants(listing)
+        listing.condition_data = derive_condition_data(
+            listing={"condition": "New", "source_type": "amazon_vine"},
+            source_type="amazon_vine",
+            source_metadata={**source, "amazon_product_facts": facts},
+            existing={
+                **(listing.condition_data or {}),
+                "condition_bucket": "new_in_box", "new_in_box": True, "open_box": False, "used": False,
+                "operator_review_required": True,
+                "item_condition_notes": "Amazon Vine source; verify packaging, completeness, and condition before approval.",
+            },
+        )
+        self._ensure_vine_primary_image(listing)
+
+        current_pricing = ((listing.marketplace_data or {}).get("pricing_analysis") or {}) if isinstance(listing.marketplace_data, dict) else {}
+        pricing_source = str(current_pricing.get("provenance") or "").lower()
+        operator_price = is_human_owned_field(source, "listing_price") or pricing_source in {"manual", "operator", "operator_override"}
+        verified_amazon_price = _positive_price(facts.get("current_price")) if facts.get("price_source") == "asin_product_offer_widget_v2" else None
+        existing_listing_price = _positive_price(listing.listing_price)
+        etv_price = _positive_price(item.estimated_tax_value)
+        if verified_amazon_price is not None:
+            price = verified_amazon_price
+            selected_price_source = "amazon_current_price"
+            selected_price_provenance = "asin_matched_amazon_offer"
+        elif operator_price and existing_listing_price is not None:
+            price = existing_listing_price
+            selected_price_source = current_pricing.get("price_source") or "operator_override"
+            selected_price_provenance = pricing_source or "operator_override"
+        elif existing_listing_price is not None and (etv_price is None or round(existing_listing_price, 2) != round(etv_price, 2)):
+            # A transient/blocked Amazon fetch must not replace an already
+            # selected non-ETV draft price with the stale Vine tax estimate.
+            # Preserve it as durable but unverified until an ASIN-bound offer
+            # is available; never label it as a current Amazon offer.
+            price = existing_listing_price
+            selected_price_source = "durable_prior_listing_price"
+            selected_price_provenance = "durable_prior_listing_price_unverified"
+        else:
+            price = etv_price
+            selected_price_source = "vine_estimated_tax_value_fallback"
+            selected_price_provenance = "vine_etv_fallback"
+        if price is not None and not operator_price:
+            listing.listing_price = price
+            listing.buy_it_now_price = price
+            listing.suggested_price = price
+
+        source.update(self._source_metadata(item, batch_id, amazon_facts=facts))
+        stages = _vine_enrichment_stages(item=item, listing=listing, facts=facts)
+        source["amazon_enrichment"] = {
+            # ``durable_facts`` means buyer-useful page evidence, not merely
+            # title/ASIN identity or a successful photo cache lookup.
+            "state": "durable_facts" if stages["fact_normalization"]["verified_fact_count"] else "source_text_unavailable",
+            "asin": item.asin,
+            "facts_keys": sorted(k for k, v in facts.items() if v not in (None, "", [], {})),
+            "stages": stages,
+        }
+        listing.source_metadata = source
+        market = normalize_marketplace_data(dict(listing.marketplace_data or {}))
+        market["vine_category"] = {"value": listing.category_suggestion, "source": category_source}
+        market["ebay_item_specifics_provenance"] = provenance
+        preflight_state = market.get("marketplace_preflight") if isinstance(market.get("marketplace_preflight"), dict) else {}
+        by_marketplace = dict(preflight_state.get("by_marketplace") or {}) if isinstance(preflight_state.get("by_marketplace"), dict) else {}
+        for marketplace, cached in list(by_marketplace.items()):
+            if marketplace != MarketplaceName.ebay.value and isinstance(cached, dict):
+                # Listing content has changed, so retain non-eBay results as
+                # history but never treat their old blockers as current truth.
+                by_marketplace[marketplace] = {**cached, "stale": True, "stale_reason": "vine_content_reconciled_requires_fresh_destination_preflight"}
+        if by_marketplace:
+            market["marketplace_preflight"] = {**preflight_state, "by_marketplace": by_marketplace}
+        if price is not None:
+            old_pricing = market.get("pricing_analysis") if isinstance(market.get("pricing_analysis"), dict) else {}
+            persisted_price = _positive_price(listing.listing_price) if operator_price else price
+            market["pricing_analysis"] = {
+                **old_pricing,
+                "listing_price": persisted_price,
+                "reference_market_price": verified_amazon_price,
+                "amazon_current_price": verified_amazon_price,
+                "price_source": old_pricing.get("price_source") if operator_price else selected_price_source,
+                "provenance": old_pricing.get("provenance") if operator_price else selected_price_provenance,
+                "price_evidence_version": facts.get("price_source") or "unverified_legacy_price_not_used",
+                "reference_source_url": item.amazon_source_page_url or item.manual_amazon_url,
+            }
+        listing.marketplace_data = market
+        _promote_vine_listing_to_review(listing)
+        db.add(listing)
+
+    @staticmethod
+    def _ensure_vine_primary_image(listing: Listing) -> None:
+        images = [dict(image) for image in (listing.listing_images or []) if isinstance(image, dict)]
+        if not images:
+            return
+        manual_primary = next((index for index, image in enumerate(images) if image.get("is_primary") and str(image.get("primary_selection_source") or image.get("selection_source") or "").upper() in {"MANUAL_OPERATOR", "OPERATOR"}), None)
+        selected = manual_primary
+        if selected is None:
+            selected = next((index for index, image in enumerate(images) if image.get("is_primary") and image.get("operator_state") != "rejected" and not image.get("is_reference")), None)
+        if selected is None:
+            selected = next((index for index, image in enumerate(images) if image.get("operator_state") != "rejected" and not image.get("is_reference")), None)
+        if selected is None:
+            return
+        primary = images.pop(selected)
+        primary["is_primary"] = True
+        primary.setdefault("primary_selection_source", "AUTO_BEST_PHOTO")
+        images.insert(0, primary)
+        for image in images[1:]:
+            image["is_primary"] = False
+        listing.listing_images = images
+        listing.image_urls = [str(image.get("storage_path") or image.get("url") or "").strip() for image in images if image.get("operator_state") != "rejected" and (image.get("storage_path") or image.get("url"))]
+
+    def _hydrate_vine_facts(self, facts: dict, *, item: VineImportItem, listing: Listing) -> dict:
+        result = _clean_amazon_facts(facts)
+        specifics = listing.item_specifics if isinstance(listing.item_specifics, dict) else {}
+        # Canonical facts may be stored in item specifics on older imports.
+        specs = dict(result.get("specifications") or {})
+        for key, value in specifics.items():
+            if self._usable_vine_fact(value) and str(key).lower() not in {"customer reviews", "reviews", "asin"}:
+                scalar = ", ".join(str(part).strip() for part in value if str(part).strip()) if isinstance(value, list) else str(value).strip()
+                if str(key).strip().lower() in {"capacity", "tank capacity", "supported capacity"} and not _supported_capacity_value(scalar):
+                    continue
+                if str(key).strip().lower() == "model" and scalar.upper() == str(item.asin or "").upper():
+                    continue
+                if str(key).strip().lower() == "brand" and scalar.lower() in {str(listing.title or "").lower(), "unbranded"}:
+                    continue
+                if str(key).strip().lower() == "type" and scalar.lower() in {"replacement part", "does not apply"}:
+                    continue
+                if self._usable_vine_fact(scalar):
+                    specs.setdefault(str(key).strip(), scalar[:300])
+        result["specifications"] = specs
+        if not result.get("dimensions"):
+            result["dimensions"] = _normalize_dimension_facts(specs)
+        item_brand = str(item.brand or "").strip()
+        specific_brand = next((str(specifics.get(k) or "").strip() for k in ("Brand Name", "Brand") if self._usable_vine_fact(specifics.get(k))), "")
+        candidate_brand = result.get("brand") or item_brand or specific_brand
+        candidate_valid = bool(candidate_brand and str(candidate_brand).strip().lower() not in {str(listing.title or "").strip().lower(), "unbranded"} and not str(listing.title or "").strip().lower().startswith(str(candidate_brand).strip().lower() + " "))
+        if candidate_valid:
+            result["brand"] = str(candidate_brand).strip()
+        if not result.get("brand"):
+            fallback_brand = specific_brand or item_brand
+            if fallback_brand and str(fallback_brand).strip().lower() not in {str(listing.title or "").strip().lower(), "unbranded"} and not str(listing.title or "").strip().lower().startswith(str(fallback_brand).strip().lower() + " "):
+                result["brand"] = fallback_brand
+        if not result.get("model"):
+            model = next((specs.get(k) for k in ("Model Name", "Model Number", "Manufacturer Model Number") if self._usable_vine_fact(specs.get(k))), None)
+            if model and str(model).strip().upper() != str(item.asin or "").upper():
+                result["model"] = str(model).strip()
+        if not result.get("mpn"):
+            mpn = next((specs.get(k) for k in ("MPN", "Part Number", "Manufacturer Part Number") if self._usable_vine_fact(specs.get(k))), None)
+            if mpn:
+                result["mpn"] = str(mpn).strip()
+        if not result.get("material"):
+            material = next((specs.get(k) for k in ("Material", "Material Type", "Fabric Type", "Frame Material") if self._usable_vine_fact(specs.get(k))), None)
+            if material:
+                result["material"] = str(material).strip()
+        if not result.get("color"):
+            color = next((specs.get(k) for k in ("Color", "Colour") if self._usable_vine_fact(specs.get(k))), None)
+            if color:
+                result["color"] = str(color).strip()
+        if not result.get("capacity"):
+            capacity = next((specs.get(k) for k in ("Capacity", "Tank Capacity", "Supported Capacity") if self._usable_vine_fact(specs.get(k))), None)
+            if capacity:
+                result["capacity"] = _supported_capacity_value(capacity)
+        if not result.get("product_type"):
+            product_type = next((specs.get(k) for k in ("Product Type", "Type", "Item Type") if self._usable_vine_fact(specs.get(k)) and str(specs.get(k)).strip().lower() not in {"replacement part", "general", "other"}), None)
+            if product_type:
+                result["product_type"] = str(product_type).strip()
+        if not result.get("product_type"):
+            identity = " ".join((item.product_name or listing.title or "").lower().split())
+            for marker, inferred in (
+                ("laptop stand", "laptop stand"), ("laptop riser", "laptop riser"),
+                ("roller shade", "motorized roller shade"), ("roller shades", "motorized roller shade"),
+                ("poe splitter", "PoE splitter"), ("kvm switch", "KVM switch"),
+                ("ottoman", "ottoman"), ("bird house", "bird house"), ("birdhouse", "bird house"),
+                ("cpu cooler", "CPU cooler"), ("drip irrigation", "drip irrigation kit"),
+                ("ironing machine", "automatic ironing machine"), ("tote tank carrier", "RV tote tank carrier"),
+            ):
+                if marker in identity:
+                    result["product_type"] = inferred
+                    break
+        if not result.get("feature_bullets"):
+            # Treat individual structured Amazon attributes as facts, not as
+            # listing prose. The formatter will synthesize new sentences.
+            feature_keys = ("Special Feature", "Additional Features", "Features", "Recommended Uses For Product", "Operation Mode", "Mounting Type", "Control Type", "Included Components")
+            result["feature_bullets"] = [f"{key}: {specs[key]}" for key in feature_keys if key in specs and self._usable_vine_fact(specs[key])][:8]
+        if not result.get("weight"):
+            weight = next((specs.get(k) for k in ("Item Weight", "Weight", "Package Weight") if self._usable_vine_fact(specs.get(k))), None)
+            if weight:
+                result["weight"] = str(weight).strip()
+        result["title"] = result.get("title") or item.amazon_match_title or item.product_name or listing.title
+        result["asin"] = item.asin or item.amazon_match_asin or (listing.source_metadata or {}).get("asin")
+        return result
+
+    @staticmethod
+    def _usable_vine_fact(value) -> bool:
+        if value is None:
+            return False
+        text = ", ".join(str(v).strip() for v in value if str(v).strip()) if isinstance(value, list) else str(value).strip()
+        lowered = text.lower()
+        noisy_markers = ("var dpacrhasregistered", "p.when(", "acrLink-click-metrics", "customer reviews", "stars (", "javascript")
+        return bool(
+            text
+            and lowered not in {"does not apply", "unknown", "n/a", "not applicable", "unbranded", "none", "null", "multicolor", "one size", "universal"}
+            and not any(marker in lowered for marker in noisy_markers)
+        )
+
+    def _generate_vine_original_description(self, db: Session, *, listing: Listing, item: VineImportItem, facts: dict) -> str:
+        specifics = dict(listing.item_specifics or {})
+        # Vine recovery must never block on (or spend money on) a hosted AI
+        # rewrite.  The structured-facts formatter below is deterministic,
+        # factual, and available offline; it is the durable fallback used by
+        # the import worker and therefore the safe default for every retry.
+        # Existing operator-owned copy is handled by the caller before this
+        # method is reached.
+        deterministic = self._rewrite_amazon_description(item, amazon_facts=facts)
+        metadata = dict(listing.source_metadata or {})
+        metadata["vine_description_generation"] = {
+            "source": "deterministic_verified_facts",
+            "rewritten_from_verified_amazon_facts": True,
+            "provider": "local",
+            "generated_at": datetime.now(UTC).isoformat(),
+        }
+        listing.source_metadata = metadata
+        return deterministic
+        # The code below is retained in history through source metadata only;
+        # do not reintroduce a remote AI call into the import path.
+        ai_signals = {
+            "title_hint": listing.title or item.product_name,
+            "source_type": "amazon_vine",
+            "quantity": int(listing.quantity or 1),
+            "listing_quantity": int(listing.quantity or 1),
+            "existing_specifics": specifics,
+            "source_facts": {
+                "brand": facts.get("brand"), "model": facts.get("model"), "mpn": facts.get("mpn"),
+                "product_type": facts.get("product_type") or specifics.get("Type"),
+                "feature_bullets": facts.get("feature_bullets") or [],
+                "specifications": facts.get("specifications") or {},
+                "dimensions": facts.get("dimensions") or {}, "weight": facts.get("weight"),
+                "material": facts.get("material"), "color": facts.get("color"),
+                "size": facts.get("size"), "capacity": facts.get("capacity"),
+                "included_components": facts.get("included_components") or [],
+                "copy_constraint": "Create original buyer-facing sales copy from the verified facts. Do not repeat any source sentence or bullet verbatim; include the important features, practical use/application, relevant search terms, a light tasteful product-specific touch of humor where it fits, and a clear call to action. Use factual values only and do not invent unsupported claims or policy/navigation text.",
+            },
+            # The marketplace-draft formatter consumes normalized source
+            # metadata. Keep it alongside the legacy source_facts field so
+            # channel variants use the same verified evidence as the master.
+            "source_metadata": {"source_facts": {
+                "brand": facts.get("brand"), "model": facts.get("model"), "mpn": facts.get("mpn"),
+                "product_type": facts.get("product_type") or specifics.get("Type"),
+                "feature_bullets": facts.get("feature_bullets") or [],
+                "specifications": facts.get("specifications") or {},
+                "dimensions": facts.get("dimensions") or {}, "weight": facts.get("weight"),
+                "material": facts.get("material"), "color": facts.get("color"),
+                "size": facts.get("size"), "capacity": facts.get("capacity"),
+                "included_components": facts.get("included_components") or [],
+            }},
+            "photo_keywords": [str(facts.get(k) or "") for k in ("brand", "model", "product_type") if facts.get(k)],
+            "marketplace_targets": ["ebay"],
+        }
+        try:
+            from app.services.listing_ai import ListingAIService
+            generated = ListingAIService().generate(ai_signals, db=db, user_id=listing.user_id, listing_id=listing.id)
+            apply_generated_marketplace_drafts(listing, generated.get("marketplace_drafts"))
+            ai_description = str(generated.get("description") or "").strip()
+            if generated.get("generation_source") == "openai" and self._vine_description_is_usable(ai_description, listing.title, facts) and not self._description_source_copy(ai_description, facts) and not self._description_contains_source_noise(ai_description):
+                metadata = dict(listing.source_metadata or {})
+                metadata["vine_description_generation"] = {
+                    "source": "openai",
+                    "rewritten_from_verified_amazon_facts": True,
+                    "generated_at": datetime.now(UTC).isoformat(),
+                }
+                listing.source_metadata = metadata
+                return ai_description
+        except Exception as exc:
+            # Keep the deterministic fallback available for diagnostics and a
+            # later retry, but mark it explicitly.  It is not eligible for
+            # Needs Review because only the provider rewrite can guarantee a
+            # full, original, buyer-facing description.
+            metadata = dict(listing.source_metadata or {})
+            metadata["vine_description_generation"] = {
+                "source": "deterministic_fallback",
+                "rewritten_from_verified_amazon_facts": False,
+                "provider_error": str(exc)[:240],
+                "generated_at": datetime.now(UTC).isoformat(),
+            }
+            listing.source_metadata = metadata
+        else:
+            metadata = dict(listing.source_metadata or {})
+            metadata["vine_description_generation"] = {
+                "source": "deterministic_fallback",
+                "rewritten_from_verified_amazon_facts": False,
+                "provider_error": "AI output failed the originality/content gate",
+                "generated_at": datetime.now(UTC).isoformat(),
+            }
+            listing.source_metadata = metadata
+        return self._rewrite_amazon_description(item, amazon_facts=facts)
+
+    @staticmethod
+    def _description_source_copy(description: str, facts: dict) -> bool:
+        source = [str(facts.get("product_description") or ""), *(facts.get("feature_bullets") or [])]
+        candidate = " ".join(re.findall(r"[a-z0-9]+", str(description or "").lower()))
+        for prose in source:
+            tokens = re.findall(r"[a-z0-9]+", str(prose or "").lower())
+            if len(tokens) < 18:
+                continue
+            needle = " ".join(tokens)
+            if needle in candidate or any(" ".join(tokens[i:i + 16]) in candidate for i in range(max(1, len(tokens) - 15))):
+                return True
+        return description_source_similarity(description, source) >= 0.82
+
+    @staticmethod
+    def _description_contains_source_noise(description: str) -> bool:
+        """Reject cached/provider copy that leaked marketplace UI metadata."""
+        return _contains_vine_source_noise(description)
+
+    @staticmethod
+    def _vine_description_is_usable(description: str, title: str | None, facts: dict) -> bool:
+        normalized = " ".join(str(description or "").split()).lower()
+        # Listing titles are commonly capped to 80 characters while Amazon's
+        # canonical product title is longer. Compare against the longest known
+        # title so its truncated remainder cannot masquerade as description
+        # content.
+        reference_title = max(
+            (str(value or "") for value in (title, facts.get("title"))),
+            key=lambda value: len(re.findall(r"[a-z0-9]+", value.lower())),
+        )
+        title_tokens = re.findall(r"[a-z0-9]+", reference_title.lower())
+        forbidden = (
+            "verified amazon product record", "being prepared from", "draft is prepared for manual approval",
+            "review checklist before publish", "var dpacrhasregistered", "p.when(", "product information: the,",
+        )
+        if not normalized or any(marker in normalized for marker in forbidden):
+            return False
+        if len(normalized) < 130 or len(set(re.findall(r"[a-z0-9]+", normalized))) < 18:
+            return False
+        description_tokens = re.findall(r"[a-z0-9]+", normalized)
+        body_tokens = description_tokens
+        if title_tokens and description_tokens[:len(title_tokens)] == title_tokens:
+            body_tokens = description_tokens[len(title_tokens):]
+        body = " ".join(body_tokens)
+        body = re.sub(r"\bcondition\s*:?\s*new\b", " ", body)
+        body_words = set(re.findall(r"[a-z0-9]+", body)) - {"the", "a", "an", "and", "or", "for", "with", "to", "of", "is", "it", "this", "that", "from", "in", "on", "by"}
+        if len(body_words) < 8:
+            return False
+        filler = ("dependable replacement or addition", "review the attached photos", "prepared for manual approval", "product details identify it as", "generic resale")
+        if any(marker in normalized for marker in filler):
+            return False
+        return True
+
+    def _vine_description_issue(self, listing: Listing) -> dict | None:
+        facts = _clean_amazon_facts((listing.source_metadata or {}).get("amazon_product_facts"))
+        text = str(listing.description or "")
+        if not self._vine_description_is_usable(text, listing.title, facts):
+            return {"code": "DESCRIPTION_INADEQUATE", "field": "description", "message": "Vine description lacks sufficient product-specific buyer-facing content."}
+        if self._description_contains_source_noise(text):
+            return {"code": "DESCRIPTION_SOURCE_NOISE", "field": "description", "message": "Vine description contains source-page policy, navigation, or promotional text."}
+        # The local verified-facts formatter intentionally retains exact
+        # technical values (model, dimensions, feature names) so buyers can
+        # search and verify the item without paid AI.  Those values can create
+        # a high lexical overlap score even though no source paragraph was
+        # copied.  Keep the substantive source-copy gate for provider/source
+        # prose, but do not strand a fact-dense deterministic recovery draft.
+        deterministic = str((listing.source_metadata or {}).get("vine_description_generation", {}).get("source") or "") in {"deterministic_verified_facts", "deterministic_fallback"}
+        if self._description_source_copy(text, facts) and not (deterministic and self._vine_description_is_usable(text, listing.title, facts)):
+            return {"code": "DESCRIPTION_SOURCE_COPY_TOO_SIMILAR", "field": "description", "message": "Vine description substantially repeats Amazon source prose."}
+        # A long description that omits nearly all known product evidence is
+        # still not finished listing intelligence. Use token overlap only as a
+        # conservative signal; unknown/opaque source facts do not become a
+        # blocker and the operator can still review the draft.
+        evidence_values = [facts.get("brand"), facts.get("model"), facts.get("product_type"), facts.get("material"), facts.get("color"), facts.get("size"), facts.get("capacity"), facts.get("weight")]
+        evidence_values.extend((facts.get("specifications") or {}).values())
+        evidence_tokens = set(re.findall(r"[a-z0-9]+", " ".join(str(value) for value in evidence_values if self._usable_vine_fact(value)).lower()))
+        description_tokens = set(re.findall(r"[a-z0-9]+", text.lower()))
+        if len(evidence_tokens) >= 3 and len(description_tokens & evidence_tokens) < 2:
+            return {"code": "DESCRIPTION_FACT_COVERAGE_LOW", "field": "description", "message": "Vine description does not reflect enough of the verified product facts."}
+        return None
+
+    def _repair_vine_blockers(self, *, listing: Listing, item: VineImportItem, blockers: list[dict]) -> None:
+        codes = {str(b.get("code") or "").upper() for b in blockers if isinstance(b, dict)}
+        facts = _clean_amazon_facts((listing.source_metadata or {}).get("amazon_product_facts"))
+        # Some generic eBay categories require a Type aspect even when the
+        # source facts use a more specific product noun.  Only fill values
+        # that are explicit in the verified title/facts; never invent a value
+        # for an unresolved product.
+        required_text = " ".join(
+            str((b.get("field") or b.get("message") or ""))
+            for b in blockers if isinstance(b, dict)
+        ).lower()
+        if "type" in required_text and "hardware wallet" in str(listing.title or "").lower():
+            specifics = dict(listing.item_specifics or {})
+            if not specifics.get("Type"):
+                specifics["Type"] = "Hardware Wallet"
+                listing.item_specifics = specifics
+        if "department" in required_text:
+            category_validation = ((listing.source_metadata or {}).get("category_validation") or {}) if isinstance(listing.source_metadata, dict) else {}
+            path = str(category_validation.get("full_path") or listing.category_suggestion or "")
+            segments = [segment.strip().lower() for segment in path.split(">")]
+            department = next((
+                canonical for marker, canonical in (("women", "Women"), ("men", "Men"), ("unisex adult", "Unisex Adult"), ("unisex kids", "Unisex Kids"), ("boys", "Boys"), ("girls", "Girls"))
+                if marker in segments
+            ), None)
+            if department:
+                specifics = dict(listing.item_specifics or {})
+                if not str(specifics.get("Department") or "").strip():
+                    specifics["Department"] = department
+                    listing.item_specifics = specifics
+        if codes & {"DESCRIPTION_MISSING", "DESCRIPTION_INADEQUATE", "DESCRIPTION_SOURCE_NOISE", "DESCRIPTION_SOURCE_COPY_TOO_SIMILAR", "DESCRIPTION_FACT_COVERAGE_LOW"}:
+            listing.description = self._rewrite_amazon_description(item, amazon_facts=facts)
+        if "PRICE_MISSING" in codes:
+            price = _positive_price(facts.get("current_price")) or _positive_price(item.estimated_tax_value)
+            if price:
+                listing.listing_price = listing.buy_it_now_price = listing.suggested_price = price
+        if "QUANTITY_INVALID" in codes:
+            listing.quantity = 1
+        if "CONDITION_MISSING" in codes:
+            listing.condition = "New"
+        if "CATEGORY_MISSING" in codes:
+            category, _ = self._resolve_category(item, amazon_facts=facts)
+            if category and category != "Other > Needs category review":
+                listing.category_suggestion = category
+        if "PRIMARY_IMAGE_MISSING" in codes and listing.image_urls:
+            # Canonical ordering is already materialized by the import image
+            # normalizer; mark its first eligible image as the primary.
+            images = [dict(image) for image in (listing.listing_images or []) if isinstance(image, dict)]
+            first = next((i for i, image in enumerate(images) if image.get("operator_state") != "rejected" and not image.get("is_reference")), None)
+            if first is not None:
+                for index, image in enumerate(images):
+                    image["is_primary"] = index == first
+                listing.listing_images = images
+
+
+    def export_problem_rows_csv(self, items: list[VineImportItem]) -> str:
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["id", "product_name", "asin", "order_number", "eligibility_status", "parse_warnings", "restricted_reasons"])
+        for item in items:
+            if item.eligibility_status == "eligible" and not item.parse_warnings_json and not item.restricted_review_required:
+                continue
+            writer.writerow(
+                [
+                    item.id,
+                    item.product_name or "",
+                    item.asin or "",
+                    item.order_number or "",
+                    item.eligibility_status,
+                    "; ".join(item.parse_warnings_json or []),
+                    "; ".join(item.restricted_reasons or []),
+                ]
+            )
+        return output.getvalue()
+
+    def _refresh_batch_stats(self, db: Session, batch: VineImportBatch) -> None:
+        items = db.execute(select(VineImportItem).where(VineImportItem.batch_id == batch.id)).scalars().all()
+        batch.parsed_count = len(items)
+        batch.eligible_count = sum(1 for item in items if item.eligibility_status == "eligible")
+        batch.locked_count = sum(1 for item in items if item.eligibility_status.startswith("locked_until_"))
+        batch.cancelled_count = sum(1 for item in items if item.eligibility_status == "cancelled")
+        batch.error_count = sum(1 for item in items if item.eligibility_status == "invalid")
+        duplicate_count = sum(1 for item in items if self._is_duplicate_vine_item(item))
+        db.add(batch)
+        self._update_batch_stats_json(
+            db,
+            batch=batch,
+            updates={
+                "rows_total": batch.parsed_count,
+                "rows_eligible": batch.eligible_count,
+                "rows_locked": batch.locked_count,
+                "rows_cancelled": batch.cancelled_count,
+                "rows_invalid": batch.error_count,
+                "rows_duplicate": duplicate_count,
+                "rows_new": max(batch.parsed_count - duplicate_count, 0),
+            },
+            commit=False,
+        )
+
+    def _build_labels(self, item: VineImportItem, *, has_photos: bool) -> list[str]:
+        labels = ["amazon_vine", item.eligibility_status]
+        if item.restricted_review_required:
+            labels.append("restricted_review")
+        if not has_photos:
+            labels.append("needs_photos")
+        return list(dict.fromkeys(labels))
+
+    def _lookup_cached_media_urls(self, db: Session, asin: str | None) -> list[str]:
+        if not asin:
+            return []
+        cache = db.execute(select(ProductMediaCache).where(ProductMediaCache.asin == asin)).scalar_one_or_none()
+        if cache is None:
+            return []
+
+        gallery_urls = self._filter_valid_gallery_urls([str(url) for url in (cache.gallery_image_urls_json or []) if url])
+        if gallery_urls:
+            return gallery_urls
+
+        if cache.primary_image_url:
+            return self._filter_valid_gallery_urls([cache.primary_image_url])
+
+        return []
+
+    def _build_trusted_amazon_listing_images(
+        self,
+        *,
+        image_urls: list[str] | None,
+        source_page_url: str | None,
+        asin: str | None,
+        product_name: str | None,
+    ) -> list[dict]:
+        cleaned_urls = [str(url).strip() for url in (image_urls or []) if str(url).strip()]
+        if not cleaned_urls:
+            return []
+        return normalize_listing_images(
+            listing_images=[
+                {
+                    "storage_path": url,
+                    "source_page_url": source_page_url,
+                    "source_platform": "amazon",
+                    "operator_state": "approved",
+                    "is_reference": False,
+                    "metadata": {
+                        "source": "amazon_vine",
+                        "asin": asin,
+                        "product_name": product_name,
+                        "trusted_catalog_match": True,
+                    },
+                }
+                for url in cleaned_urls
+            ],
+            source_page_url=source_page_url,
+            source_platform="amazon",
+            default_is_reference=False,
+            approved=True,
+        )
+
+    def _to_public_media_path(self, path: str) -> str:
+        marker = "/storage/"
+        if marker in path:
+            return f"/media/{path.split(marker, 1)[1]}"
+        return path
+
+    def _local_media_file_for_url(self, url: str | None) -> Path | None:
+        raw = str(url or "").strip()
+        if not raw or not raw.startswith("/media/"):
+            return None
+        relative = raw.removeprefix("/media/").lstrip("/")
+        return Path(settings.storage_root) / relative
+
+    def _filter_valid_gallery_urls(self, image_urls: list[str] | None) -> list[str]:
+        valid_urls: list[str] = []
+        for url in image_urls or []:
+            cleaned = str(url or "").strip()
+            if not cleaned:
+                continue
+            local_file = self._local_media_file_for_url(cleaned)
+            if local_file is not None and (not local_file.exists() or local_file.stat().st_size <= 0):
+                continue
+            valid_urls.append(cleaned)
+        return valid_urls
+
+    def _is_archived_vine_listing(self, listing: Listing) -> bool:
+        status = str(listing.status or "").strip().lower()
+        labels = {str(value).strip().lower() for value in (listing.custom_labels or [])}
+        return (
+            status in {"archived", "sold", "closed"}
+            or bool(listing.sold_at)
+            or bool({"archived_vine", "archived_sold"} & labels)
+        )
+
+    def repair_vine_listing_images(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        batch_id: int | None = None,
+        listing_ids: list[int] | None = None,
+        since_order_date: date | None = None,
+        include_archived: bool = False,
+        force_refresh: bool = True,
+        use_bridge_session: bool = True,
+        only_missing_images: bool = False,
+        limit: int | None = None,
+    ) -> dict:
+        query = select(Listing).where(Listing.user_id == user_id, Listing.source_type == "amazon_vine")
+        # A batch repair must never spill into another Vine import.  The API
+        # supplies the batch ID for the operator's latest-import repair flow;
+        # join through the durable Vine item relationship rather than relying
+        # on mutable listing metadata. Apply all filters against the same
+        # joined table to avoid duplicate aliases when a caller supplies both
+        # batch_id and since_order_date.
+        if batch_id is not None or since_order_date is not None:
+            query = query.join(VineImportItem, VineImportItem.listing_id == Listing.id)
+            if batch_id is not None:
+                query = query.where(VineImportItem.batch_id == batch_id)
+            if since_order_date is not None:
+                query = query.where(
+                    VineImportItem.order_date.is_not(None),
+                    VineImportItem.order_date >= since_order_date,
+                )
+        if listing_ids:
+            query = query.where(Listing.id.in_(listing_ids))
+        listings = list({listing.id: listing for listing in db.execute(query).scalars().all()}.values())
+        provider = AmazonProductMediaProvider(db, owner_user_id=user_id)
+        discovery = AmazonProductDiscoveryService(provider)
+        updated = 0
+        removed_unsafe = 0
+        already_present = 0
+        missing_asin = 0
+        no_cache = 0
+        bridge_refetched = 0
+        bridge_failed = 0
+        processed = 0
+
+        for listing in listings:
+            if limit is not None and processed >= max(0, limit):
+                break
+            if not include_archived and self._is_archived_vine_listing(listing):
+                continue
+
+            normalized_images = normalize_listing_images(
+                listing_images=listing.listing_images,
+                image_urls=listing.image_urls,
+                source_url=(listing.source_metadata or {}).get("source_image_url") if isinstance(listing.source_metadata, dict) else None,
+                source_page_url=(listing.source_metadata or {}).get("amazon_source_page_url") if isinstance(listing.source_metadata, dict) else None,
+                source_platform=listing.source_type or "amazon",
+                default_is_reference=True,
+                approved=False,
+            )
+            unsafe_images = [image for image in normalized_images if _is_unsafe_vine_image(image)]
+            has_approved_actual = any(
+                not image.get("is_reference") and image.get("operator_state") == "approved"
+                for image in normalized_images
+            )
+            if only_missing_images and normalized_images and not unsafe_images and has_approved_actual:
+                already_present += 1
+                continue
+            if not force_refresh and normalized_images and not unsafe_images:
+                already_present += 1
+                continue
+
+            processed += 1
+            item = (
+                db.execute(
+                    select(VineImportItem)
+                    .where((VineImportItem.listing_id == listing.id) | (VineImportItem.inventory_item_id == listing.id))
+                    .order_by(VineImportItem.updated_at.desc(), VineImportItem.id.desc())
+                )
+                .scalars()
+                .first()
+            )
+            source_metadata = dict(listing.source_metadata or {})
+            asin = str((item.asin if item and item.asin else source_metadata.get("asin") or "")).strip().upper()
+            product_name = str(listing.title or source_metadata.get("product_name") or "").strip() or None
+            manual_url = (
+                str(source_metadata.get("manual_amazon_url") or source_metadata.get("item_url") or "").strip()
+                or (str(item.manual_amazon_url).strip() if item and item.manual_amazon_url else None)
+            )
+            result = {}
+            try:
+                result = discovery.discover_for_vine_item(
+                    asin=asin or None,
+                    product_name=product_name,
+                    manual_url=manual_url,
+                ) if (asin or product_name or manual_url) else {}
+            except Exception:
+                result = {}
+            resolved_asin = str(result.get("asin") or asin or "").strip().upper()
+            if resolved_asin and resolved_asin != asin:
+                asin = resolved_asin
+                if item and not item.asin:
+                    item.asin = resolved_asin
+                    db.add(item)
+
+            if not asin:
+                missing_asin += 1
+                if unsafe_images:
+                    removed_unsafe += len(unsafe_images)
+                listing.listing_images = [image for image in normalized_images if image not in unsafe_images]
+                listing.image_urls = [image.get("storage_path") for image in (listing.listing_images or []) if image.get("operator_state") != "rejected"]
+                if not any(image.get("operator_state") != "rejected" for image in (listing.listing_images or [])):
+                    listing.image_urls = []
+                    labels = set(listing.custom_labels or [])
+                    labels.add("needs_photos")
+                    listing.custom_labels = sorted(labels)
+                    _promote_vine_listing_to_review(listing)
+                db.add(listing)
+                continue
+
+            cache = db.execute(
+                select(ProductMediaCache).where(
+                    ProductMediaCache.asin == asin,
+                    ProductMediaCache.marketplace_region == settings.amazon_marketplace_region.upper(),
+                )
+            ).scalar_one_or_none()
+            if cache is not None and cache.fetch_status == "fetched" and cache.source_provider not in {"manual"}:
+                gallery_urls = self._filter_valid_gallery_urls(
+                    [str(url) for url in (cache.gallery_image_urls_json or []) if str(url).strip()]
+                )
+            else:
+                gallery_urls = []
+                if result and result.get("image_status") in {"cached", "fetched"}:
+                    gallery_urls = self._filter_valid_gallery_urls(
+                        [str(url) for url in (result.get("images") or []) if str(url).strip()]
+                    )
+                if not gallery_urls:
+                    cache = db.execute(
+                        select(ProductMediaCache).where(
+                            ProductMediaCache.asin == asin,
+                            ProductMediaCache.marketplace_region == settings.amazon_marketplace_region.upper(),
+                        )
+                    ).scalar_one_or_none()
+                    if cache is not None and cache.fetch_status == "fetched" and cache.source_provider not in {"manual"}:
+                        gallery_urls = self._filter_valid_gallery_urls(
+                            [str(url) for url in (cache.gallery_image_urls_json or []) if str(url).strip()]
+                        )
+
+            if not gallery_urls and use_bridge_session:
+                cache = self._bridge_capture_for_asin(db, asin, product_name)
+                if cache is not None:
+                    bridge_refetched += 1
+                    gallery_urls = self._filter_valid_gallery_urls(
+                        [str(url) for url in (cache.gallery_image_urls_json or []) if str(url).strip()]
+                    )
+                else:
+                    bridge_failed += 1
+
+            trusted_catalog_images = self._build_trusted_amazon_listing_images(
+                image_urls=gallery_urls,
+                source_page_url=item.item_url if item else source_metadata.get("item_url"),
+                asin=asin,
+                product_name=product_name,
+            ) if gallery_urls else []
+            refreshed_images = [image for image in normalized_images if not _is_unsafe_vine_image(image)]
+            discovered_description = _sanitize_vine_text((result or {}).get("description") or (listing.description or ""))
+            prior_facts = _clean_amazon_facts((listing.source_metadata or {}).get("amazon_product_facts"))
+            fresh_facts = _clean_amazon_facts((result or {}).get("product_facts"))
+            amazon_facts = fresh_facts if _facts_have_content(fresh_facts) else prior_facts
+            if has_approved_actual:
+                merged_images = refreshed_images
+                if trusted_catalog_images:
+                    existing_keys = {
+                        f"{str(img.get('storage_path') or '')}|{str(img.get('source_url') or '')}"
+                        for img in merged_images
+                    }
+                    for image in trusted_catalog_images:
+                        key = f"{str(image.get('storage_path') or '')}|{str(image.get('source_url') or '')}"
+                        if key not in existing_keys:
+                            merged_images.append(image)
+                            existing_keys.add(key)
+                listing.listing_images = normalize_listing_images(listing_images=merged_images)
+                listing.image_urls = [image["storage_path"] for image in (listing.listing_images or []) if image.get("operator_state") != "rejected"]
+            elif trusted_catalog_images:
+                listing.listing_images = normalize_listing_images(listing_images=trusted_catalog_images)
+                listing.image_urls = [image["storage_path"] for image in (listing.listing_images or []) if image.get("operator_state") != "rejected"]
+            else:
+                listing.listing_images = refreshed_images
+                listing.image_urls = [image["storage_path"] for image in (listing.listing_images or []) if image.get("operator_state") != "rejected"]
+
+            if discovered_description or amazon_facts:
+                listing.description = self._generate_description(
+                    item,
+                    amazon_description=discovered_description,
+                    amazon_facts=amazon_facts,
+                )
+            else:
+                listing.description = _sanitize_vine_text(listing.description) or listing.description
+            listing.title = self._generate_title(item.product_name or listing.title, amazon_facts=amazon_facts)
+            if item:
+                category, category_source = self._resolve_category(item, amazon_facts=amazon_facts)
+                pricing = self._pricing_from_amazon(item, amazon_facts=amazon_facts)
+                listing.category_suggestion = category
+                if str(category).strip().isdigit():
+                    listing.category_id = str(category).strip()
+                if pricing["listing_price"] is not None:
+                    listing.suggested_price = pricing["listing_price"]
+                    listing.listing_price = pricing["listing_price"]
+                    listing.buy_it_now_price = pricing["listing_price"]
+                metadata = normalize_marketplace_data(dict(listing.marketplace_data or {}))
+                metadata["vine_category"] = {"value": category, "source": category_source}
+                metadata["pricing_analysis"] = {**pricing, "reference_source_url": result.get("source_page_url") or item.amazon_source_page_url}
+                buyer_pays_shipping = bool(pricing["listing_price"] is not None and pricing["listing_price"] < 10)
+                metadata["shipping"] = {
+                    **(metadata.get("shipping") if isinstance(metadata.get("shipping"), dict) else {}),
+                    "mode": "calculated" if buyer_pays_shipping else "included",
+                    "free_shipping": not buyer_pays_shipping,
+                    "buyer_pays_shipping": buyer_pays_shipping,
+                    "pricing_rule": "buyer_pays_under_10" if buyer_pays_shipping else "seller_pays_10_and_over",
+                }
+                metadata["policy_preferences"] = {
+                    **(metadata.get("policy_preferences") if isinstance(metadata.get("policy_preferences"), dict) else {}),
+                    **_vine_return_policy_preferences(),
+                }
+                listing.marketplace_data = metadata
+                listing.source_metadata = self._source_metadata(item, item.batch_id, amazon_facts=amazon_facts)
+            listing.condition = "New"
+            listing.condition_data = derive_condition_data(
+                listing={"condition": listing.condition, "source_type": "amazon_vine"},
+                source_type="amazon_vine",
+                source_metadata=source_metadata,
+                existing={
+                    **(listing.condition_data or {}),
+                    "condition_bucket": "new_in_box",
+                    "new_in_box": True,
+                    "open_box": False,
+                    "used": False,
+                    "operator_review_required": True,
+                    "item_condition_notes": "Amazon Vine items are listed as New. Confirm packaging, completeness, and condition before publish.",
+                },
+            )
+
+            if unsafe_images:
+                removed_unsafe += len(unsafe_images)
+
+            if not any(image.get("operator_state") != "rejected" for image in (listing.listing_images or [])):
+                labels = set(listing.custom_labels or [])
+                labels.add("needs_photos")
+                listing.custom_labels = sorted(labels)
+            else:
+                labels = [label for label in (listing.custom_labels or []) if label != "needs_photos"]
+                listing.custom_labels = labels or None
+
+            _promote_vine_listing_to_review(listing)
+
+            db.add(listing)
+            updated += 1
+
+        db.commit()
+        return {
+            "updated": updated,
+            "removed_unsafe": removed_unsafe,
+            "already_present": already_present,
+            "missing_asin": missing_asin,
+            "no_cache": no_cache,
+            "bridge_refetched": bridge_refetched,
+            "bridge_failed": bridge_failed,
+            "total_vine_listings": len(listings),
+            "processed": processed,
+            "include_archived": include_archived,
+            "force_refresh": force_refresh,
+            "listing_ids": listing_ids or [],
+            "batch_id": batch_id,
+        }
+
+    def repair_all_vine_listing_images(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        include_archived: bool = False,
+        force_refresh: bool = True,
+        use_bridge_session: bool = True,
+        only_missing_images: bool = True,
+        limit: int | None = None,
+        chunk_size: int = 50,
+    ) -> dict:
+        query = select(Listing.id, Listing.custom_labels, Listing.status, Listing.sold_at).where(
+            Listing.user_id == user_id,
+            Listing.source_type == "amazon_vine",
+        )
+        raw_rows = db.execute(query.order_by(Listing.id.asc())).all()
+        all_listing_ids = []
+        for listing_id, custom_labels, status, sold_at in raw_rows:
+            labels = custom_labels or []
+            normalized_labels = {str(label).strip().lower() for label in labels}
+            archived = (
+                str(status or "").strip().lower() in {"archived", "sold", "closed"}
+                or bool(sold_at)
+                or bool({"archived_vine", "archived_sold"} & normalized_labels)
+            )
+            if not include_archived and archived:
+                continue
+            all_listing_ids.append(int(listing_id))
+        processed_listing_ids: list[int] = []
+        totals = {
+            "updated": 0,
+            "removed_unsafe": 0,
+            "already_present": 0,
+            "missing_asin": 0,
+            "no_cache": 0,
+            "bridge_refetched": 0,
+            "bridge_failed": 0,
+            "total_vine_listings": len(all_listing_ids),
+            "processed": 0,
+        }
+        effective_ids = all_listing_ids
+        if limit is not None:
+            effective_ids = effective_ids[: max(0, limit)]
+        for offset in range(0, len(effective_ids), max(1, chunk_size)):
+            chunk = effective_ids[offset : offset + max(1, chunk_size)]
+            if not chunk:
+                continue
+            result = self.repair_vine_listing_images(
+                db,
+                user_id=user_id,
+                listing_ids=chunk,
+                include_archived=include_archived,
+                force_refresh=force_refresh,
+                use_bridge_session=use_bridge_session,
+                only_missing_images=only_missing_images,
+                limit=None,
+            )
+            processed_listing_ids.extend(int(listing_id) for listing_id in (result.get("listing_ids") or []) if listing_id)
+            for key in totals:
+                if key in {"total_vine_listings"}:
+                    continue
+                totals[key] += int(result.get(key) or 0)
+        totals["listing_ids"] = sorted(set(processed_listing_ids))
+        totals["include_archived"] = include_archived
+        totals["force_refresh"] = force_refresh
+        totals["use_bridge_session"] = use_bridge_session
+        totals["only_missing_images"] = only_missing_images
+        totals["chunk_size"] = max(1, chunk_size)
+        return totals
+
+    def list_recent_vine_listing_ids(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        since_order_date: date,
+        include_archived: bool = False,
+        only_missing_images: bool = True,
+        limit: int | None = None,
+    ) -> list[int]:
+        query = (
+            select(Listing, VineImportItem.order_date)
+            .join(VineImportItem, (VineImportItem.listing_id == Listing.id) | (VineImportItem.inventory_item_id == Listing.id))
+            .where(
+                Listing.user_id == user_id,
+                Listing.source_type == "amazon_vine",
+                VineImportItem.order_date.is_not(None),
+                VineImportItem.order_date >= since_order_date,
+            )
+            .order_by(Listing.id.asc())
+        )
+        rows = db.execute(query).all()
+        listing_ids: list[int] = []
+        for listing, order_date in rows:
+            labels = list(listing.custom_labels or [])
+            normalized_labels = {str(label).strip().lower() for label in labels}
+            archived = (
+                str(listing.status or "").strip().lower() in {"archived", "sold", "closed"}
+                or bool(listing.sold_at)
+                or bool({"archived_vine", "archived_sold"} & normalized_labels)
+            )
+            if not include_archived and archived:
+                continue
+            if only_missing_images:
+                if bool(listing.image_urls or []):
+                    continue
+            listing_ids.append(int(listing.id))
+            if limit is not None and len(listing_ids) >= max(0, limit):
+                break
+        return listing_ids
+
+    def count_recent_vine_image_backlog(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        since_order_date: date,
+        include_archived: bool = False,
+    ) -> int:
+        return len(self.list_recent_vine_listing_ids(
+            db,
+            user_id=user_id,
+            since_order_date=since_order_date,
+            include_archived=include_archived,
+            only_missing_images=True,
+            limit=None,
+        ))
+
+    def _bridge_capture_for_asin(self, db: Session, asin: str, title_hint: str | None) -> ProductMediaCache | None:
+        try:
+            bridge_submission = submit_bridge_job(
+                job_type="import",
+                execution_mode="browser_assist",
+                payload={
+                    "source_marketplace": "amazon",
+                    "asin": asin,
+                    "asins": [asin],
+                    "payload": {
+                        "asin": asin,
+                        "product_name": title_hint,
+                    },
+                },
+            )
+            bridge_job_id = str((((bridge_submission or {}).get("bridge_response") or {}).get("job_id") or "")).strip()
+            if not bridge_job_id:
+                return None
+            bridge_completion = wait_for_bridge_job(job_id=bridge_job_id, timeout_seconds=45, poll_interval_seconds=1.0)
+            if str(bridge_completion.get("status") or "").lower() != "completed":
+                return None
+            captured = ((bridge_completion.get("result") or {}).get("imported_listings") or [])
+            first = captured[0] if captured and isinstance(captured[0], dict) else {}
+            captured_urls = [str(url).strip() for url in (first.get("image_urls") or []) if str(url).strip()]
+            if not captured_urls:
+                return None
+            provider = AmazonProductMediaProvider(db, owner_user_id=None)
+            provider.cache_gallery_from_remote_urls(
+                asin=asin,
+                image_urls=captured_urls,
+                title_hint=title_hint,
+                source_provider="bridge_browser",
+            )
+            return db.execute(
+                select(ProductMediaCache).where(
+                    ProductMediaCache.asin == asin,
+                    ProductMediaCache.marketplace_region == settings.amazon_marketplace_region.upper(),
+                )
+            ).scalar_one_or_none()
+        except Exception:
+            return None
+
+    def _resolve_category(self, item: VineImportItem, *, amazon_facts: dict | None = None) -> tuple[str, str]:
+        """Return a category and its evidence source.
+
+        A category supplied by an export is useful but is never allowed to
+        survive when a decisive product term contradicts it (for example, a
+        pool pump classified as a camera collectible).
+        """
+        facts = _clean_amazon_facts(amazon_facts)
+        # Product identity should come from the source/product title and
+        # structured type fields. Marketing bullets and Amazon navigation
+        # breadcrumbs often mention incidental products and caused broad shared
+        # keyword rules to win over the actual item.
+        identity = " ".join(value for value in (
+            item.product_name, facts.get("title"), facts.get("product_type"), facts.get("item_type_keyword"),
+        ) if value)
+        identity_lower = identity.lower()
+        matching_rules = [
+            (len(keyword.strip()), vine_category)
+            for keywords, vine_category in _VINE_CATEGORY_RULES
+            for keyword in keywords
+            if keyword.strip() and re.search(rf"\b{re.escape(keyword.strip())}\b", identity_lower)
+        ]
+        if matching_rules:
+            # Specific phrases ("battery charger") outrank broad incidental
+            # matches ("charger") regardless of rule-table ordering.
+            _, vine_category = max(matching_rules, key=lambda match: match[0])
+            return vine_category, "keyword_rules"
+
+        category, source = suggest_category_from_text(identity)
+        if source != "needs_review":
+            return category, source
+
+        candidate = str(item.category or "").strip()
+        # Vine exports can contain a bare numeric source category value. It
+        # is not a marketplace breadcrumb and must never overwrite a
+        # verified local tree assignment or be fed back as an invented eBay
+        # category ID during a retry.
+        if candidate.isdigit():
+            candidate = ""
+        searchable_lower = identity_lower
+        contradictory = any(word in searchable_lower for word in ("pool", "pump", "filter", "spa")) and any(
+            word in candidate.lower() for word in ("camera", "collectible")
+        )
+        if candidate and not contradictory and not is_source_noise_category(candidate):
+            return candidate, "vine_export"
+        # Source breadcrumbs are navigation hints, not marketplace taxonomy.
+        # Never persist them as a category path; a later verified taxonomy
+        # lookup may replace the unresolved result with a real leaf ID.
+        return "Other > Needs category review", "needs_review"
+
+    def _pricing_from_amazon(self, item: VineImportItem, *, amazon_facts: dict | None = None) -> dict:
+        facts = _clean_amazon_facts(amazon_facts)
+        current_price = facts.get("current_price")
+        etv = _positive_price(item.estimated_tax_value)
+        # A live Amazon price is the best customer-facing market evidence.  ETV
+        # is only a fallback when the page price is unavailable; it must never
+        # override a lower, current Amazon price.
+        listing_price = current_price if current_price is not None else etv
+        return {
+            "listing_price": listing_price,
+            "quick_sale_price": round(listing_price * 0.85, 2) if listing_price else None,
+            "reference_market_price": current_price,
+            "price_source": "amazon_current_price" if current_price is not None else "vine_estimated_tax_value_fallback" if etv is not None else "needs_price_research",
+            "amazon_current_price": current_price,
+            "needs_price_research": listing_price is None,
+        }
+
+    def _rewrite_amazon_description(self, item: VineImportItem, *, amazon_facts: dict | None = None) -> str:
+        """Create original, evidence-limited draft copy from source facts.
+
+        We retain the Amazon facts in metadata but do not paste source prose
+        into the marketplace description.  Bullets are transformed into an
+        operator-reviewable summary and remain conditional where availability
+        or included contents are not independently confirmed.
+        """
+        facts = _clean_amazon_facts(amazon_facts)
+        name = facts.get("title") or _sanitize_vine_text(item.product_name) or "New retail product"
+        category, _ = self._resolve_category(item, amazon_facts=facts)
+        # Start with product identity and supported use/features. This fallback
+        # synthesizes buyer-facing sentences from structured facts; it never
+        # copies the Amazon description paragraph or a feature sentence.
+        product_type = facts.get("product_type") or "product"
+        brand = facts.get("brand")
+        identity = " ".join(value for value in (brand, product_type) if value and str(value).lower() not in {"product", "replacement part"})
+        intro = f"{identity or name} — {name}." if identity and identity.lower() not in name.lower() else f"{name}."
+        lines = [intro]
+        title_fact_sentence = self._vine_title_fact_sentence(name)
+        if title_fact_sentence:
+            lines.append(title_fact_sentence)
+        # Free-form Amazon bullets are source prose. They may inform the AI
+        # rewrite and similarity gate, but the deterministic fallback uses
+        # structured attribute/value facts below rather than tokenizing prose
+        # into misleading fragments.
+        specifications = facts.get("specifications") or {}
+        excluded_spec_keys = {"customer reviews", "reviews", "asin", "model", "brand", "brand name", "type", "item type", "product type", "best sellers rank", "date first available", "publication date", "customer rating", "department"}
+        useful_specs = []
+        candidate_specs = []
+        seen_spec_keys: set[str] = set()
+        for key, value in specifications.items():
+            normalized_key = re.sub(r"\s+", " ", str(key).strip().lower())
+            if normalized_key in excluded_spec_keys or normalized_key in seen_spec_keys or not self._usable_vine_fact(value):
+                continue
+            # Apparel source tables often contain one row per size (XS, S,
+            # M, ...). Those rows are already represented by the fit table
+            # context below; they must not consume the slots that carry the
+            # buyer-useful construction facts (closure, sleeve, lining, care,
+            # and stretch).
+            if re.fullmatch(r"(?:xxxs|xxs|xs|s|m|l|xl|xxl|xxxl|xxxxl|xxxxxl)", normalized_key):
+                continue
+            # Scalar facts are rendered in their dedicated sections below;
+            # avoid repeating Capacity/Color/Material in both places.
+            if normalized_key in {"capacity", "tank capacity", "supported capacity", "material", "color", "colour", "size", "item weight", "weight"}:
+                continue
+            seen_spec_keys.add(normalized_key)
+            candidate_specs.append((key, value, normalized_key))
+        apparel_context = any(marker in f"{name} {product_type}".lower() for marker in ("jacket", "coat", "shirt", "clothing", "apparel", "varsity", "letterman"))
+        if apparel_context:
+            preferred = ("closure type", "fit type", "sleeve type", "sleeve length description", "collar style", "lining description", "fabric type", "apparel fabric stretch", "product care instructions", "department", "pattern")
+            priority = {name: index for index, name in enumerate(preferred)}
+            candidate_specs.sort(key=lambda row: priority.get(row[2], len(priority)))
+        useful_specs = [(key, value) for key, value, _ in candidate_specs[:12]]
+        if useful_specs:
+            lines.extend(["", "Product details:", *[f"• {key}: {value}" for key, value in useful_specs]])
+        for label, key in (("Material", "material"), ("Color", "color"), ("Size", "size"), ("Capacity", "capacity")):
+            if facts.get(key): lines.append(f"• {label}: {facts[key]}")
+        if facts.get("included_components"):
+            lines.extend(["", f"Included components: {', '.join(facts['included_components'][:5])}."])
+        feature_lines = [
+            f"• {_sanitize_vine_text(bullet)[:220].rstrip(' ,;:')}"
+            for bullet in (facts.get("feature_bullets") or [])[:6]
+            if len(_sanitize_vine_text(bullet)) > 12
+            and _sanitize_vine_text(bullet).strip() != _sanitize_vine_text(facts.get("product_description") or "").strip()
+            and not _sanitize_vine_text(bullet).lower().startswith(("choose this", "buy now", "order now", "don't miss"))
+            and not is_source_noise_category(_sanitize_vine_text(bullet))
+            and not _contains_vine_source_noise(bullet)
+        ]
+        if feature_lines:
+            lines.extend(["", "Key features:", *feature_lines])
+        # Add a useful buyer-facing context section from the verified product
+        # identity.  This keeps deterministic fallback copy helpful when the
+        # AI provider is unavailable without inventing specifications.
+        context = self._vine_buyer_context(name, product_type, facts)
+        if context:
+            lines.extend(["", "Good to know:", context])
+        # Do not paste Amazon product-description prose into customer copy.
+        # Structured facts above remain usable; the provider rewrite path is
+        # responsible for paraphrasing source prose when it is available.
+        if facts.get("weight"):
+            lines.append(f"• Item weight: {facts['weight']}")
+        if facts.get("model") and str(facts["model"]).upper() != str(item.asin or "").upper():
+            lines.append(f"• Model: {facts['model']}")
+        if facts.get("mpn"):
+            lines.append(f"• MPN: {facts['mpn']}")
+        lines.extend(["", "Condition: New. Review package contents and fit before purchase.", "Review the photos for the exact configuration and order while available."])
+        return "\n".join(lines)[:4000]
+
+    @staticmethod
+    def _vine_buyer_context(name: str, product_type: str, facts: dict) -> str | None:
+        """Return concise, evidence-led use context for fallback copy.
+
+        These are category/use-case descriptions, not new technical claims;
+        they are only emitted when the source title identifies the product
+        family clearly enough to make the context useful.
+        """
+        text = " ".join(str(value or "") for value in (name, product_type)).lower()
+        if "selfie stick" in text or "action camera" in text:
+            return "A practical accessory for extending an action-camera setup when a longer reach or a different shooting angle is useful. Confirm the camera connection and the preferred pole length before ordering."
+        if "varsity jacket" in text or "letterman" in text:
+            size = facts.get("size") or (facts.get("specifications") or {}).get("Brand Size")
+            suffix = f" Available sizing information includes {size}." if size and len(str(size)) < 140 else ""
+            return "A casual outer layer suited to everyday wear and team-inspired outfits. Check the measured size information and the stated fleece fabric before ordering." + suffix
+        if "solder" in text or "hot air" in text:
+            return "Designed for bench-top electronics work such as soldering, rework, and component repair. Confirm the included accessories and power requirements for your workspace."
+        if "pulse ox" in text or "oximeter" in text:
+            return "A compact health-monitoring accessory for spot checks at home or while traveling. Follow the manufacturer’s instructions and do not use a consumer reading as a medical diagnosis."
+        if "portable toilet" in text:
+            return "Useful for camping, road trips, emergency preparedness, and other situations where a nearby restroom is not available. Review the stated capacity and included components before packing it for a trip."
+        if "groin protector" in text or "boxing" in text or "mma" in text:
+            return "Protective training equipment for boxing, MMA, and related sports. Confirm the fit, size, and sport-specific coverage before use."
+        return None
+
+    @staticmethod
+    def _vine_title_fact_sentence(title: str) -> str | None:
+        """Paraphrase concise, source-backed product attributes for fallback copy."""
+        lower = " ".join(str(title or "").split()).lower()
+        if "laptop" in lower and ("stand" in lower or "riser" in lower) and "wrist rest" in lower:
+            return "Its adjustable riser format includes wrist-rest support for desk use."
+        if "roller shade" in lower or "roller shades" in lower:
+            details = []
+            if "motorized" in lower:
+                details.append("motorized operation")
+            color = re.search(r"\b(white|black|gray|grey|beige|cream)\b", lower)
+            if color:
+                details.append(f"a {color.group(1)} finish")
+            if "remote" in lower:
+                details.append("remote control")
+            return "The roller shade listing specifies " + " and ".join(details) + "." if details else None
+        if "poe splitter" in lower:
+            configuration = "one input and two outputs" if re.search(r"1\s+in\s+2\s+out", lower) else "PoE power separation"
+            speed = "gigabit network support" if "gigabit" in lower else None
+            return "The splitter is specified for " + " with ".join(value for value in (configuration, speed) if value) + "."
+        if "ottoman" in lower:
+            details = [value for value, marker in (("corduroy upholstery", "corduroy"), ("foam cushioning", "foam"), ("a square profile", "square")) if marker in lower]
+            return "The ottoman listing identifies " + " and ".join(details) + "." if details else None
+        if "kvm switch" in lower:
+            computer_count = re.search(r"(\d+)\s+computers?", lower)
+            monitor_count = re.search(r"(\d+)\s+monitors?", lower)
+            resolution = re.search(r"\b(\d+k\s*@\s*\d+\s*hz)\b", lower)
+            clauses = []
+            if computer_count and monitor_count:
+                clauses.append(f"share {monitor_count.group(1)} monitor{'s' if monitor_count.group(1) != '1' else ''} between {computer_count.group(1)} computers")
+            if resolution:
+                clauses.append(f"supports the stated {resolution.group(1).replace(' ', '')} resolution")
+            if "usb3.0" in lower or "usb 3.0" in lower:
+                clauses.append("includes USB 3.0 connectivity")
+            return "The KVM switch is configured to " + "; it also ".join(clauses) + "." if clauses else None
+        if "bird house" in lower or "birdhouse" in lower:
+            rooms = re.search(r"(\d+)[- ]room", lower)
+            details = ["wooden construction" if "wooden" in lower else None, f"{rooms.group(1)} nesting compartments" if rooms else None]
+            details = [value for value in details if value]
+            return "The bird house is specified with " + " and ".join(details) + "." if details else None
+        if "cpu cooler" in lower:
+            radiator = re.search(r"\b(\d{3})\s*(?:mm)?\s+liquid", lower)
+            fans = re.search(r"(\d+)\s*x\s*(\d+)\s*mm\s+(?:pwm\s+)?fans?", lower)
+            details = []
+            if radiator:
+                details.append(f"a {radiator.group(1)} mm liquid-cooling assembly")
+            if fans:
+                details.append(f"{fans.group(1)} {fans.group(2)} mm fans")
+            if "argb" in lower:
+                details.append("ARGB lighting")
+            return "The cooler listing specifies " + ", ".join(details) + "." if details else None
+        if "ironing machine" in lower and ("hands-free" in lower or "automatic" in lower):
+            return "The listing describes an automatic garment-ironing format for shirts, pants, jackets, and shoes."
+        if "drip irrigation" in lower or "plant waterer" in lower or "irrigation kit" in lower:
+            pots = re.search(r"\bfor\s+(\d+)\s+pots?\b", lower)
+            hose = re.search(r"\b(\d+(?:\.\d+)?)\s*(?:ft|feet|foot)\b", lower)
+            details = []
+            if pots:
+                details.append(f"watering up to {pots.group(1)} pots")
+            if hose:
+                details.append(f"a {hose.group(1)}-foot hose")
+            return "The irrigation kit is specified for " + " and ".join(details) + "." if details else "This kit is designed to deliver water through a drip-irrigation setup for plants."
+        return None
+
+    def _source_metadata(self, item: VineImportItem, batch_id: int, *, amazon_facts: dict | None = None) -> dict:
+        facts = _clean_amazon_facts(amazon_facts)
+        return {
+            "asin": item.asin,
+            "amazon_match_asin": item.amazon_match_asin,
+            "order_number": item.order_number,
+            "estimated_tax_value": item.estimated_tax_value,
+            "order_date": item.order_date.isoformat() if item.order_date else None,
+            "shipped_date": item.shipped_date.isoformat() if item.shipped_date else None,
+            "eligible_after": item.eligible_after.isoformat() if item.eligible_after else None,
+            "eligibility_status": item.eligibility_status,
+            "brand": item.brand,
+            "category": item.category,
+            "source_status": item.source_status,
+            "review_deadline": item.review_deadline.isoformat() if item.review_deadline else None,
+            "item_url": item.item_url,
+            "manual_amazon_url": item.manual_amazon_url,
+            "amazon_source_page_url": item.amazon_source_page_url,
+            "raw_row_json": item.raw_row_json or {},
+            "batch_id": batch_id,
+            "amazon_product_facts": facts,
+        }
+
+    def _generate_title(self, product_name: str | None, *, amazon_facts: dict | None = None) -> str:
+        facts = _clean_amazon_facts(amazon_facts)
+        base = _sanitize_vine_text(facts.get("title") or product_name or "Amazon item")
+        cleaned = " ".join(word for word in base.split() if word.lower() not in {"amazon", "vine"})
+        cleaned = _sanitize_vine_text(cleaned)
+        # eBay's title limit is 80 characters.  Clip on a word boundary so a
+        # buyer never sees a mangled final token (and avoid carrying source
+        # promotional/policy fragments into the title).
+        if len(cleaned) > 80:
+            clipped = cleaned[:80].rsplit(" ", 1)[0].rstrip(" ,;:-")
+            cleaned = clipped or cleaned[:80].rstrip()
+        return cleaned or "Amazon item"
+
+    def _generate_description(self, item: VineImportItem, *, amazon_description: str | None = None, amazon_facts: dict | None = None) -> str:
+        # Never copy Amazon source prose into a marketplace listing.  Even when
+        # Amazon exposes only a description (and no structured facts), the
+        # resulting draft uses a fresh, conservative summary instead.
+        if amazon_facts or amazon_description:
+            return self._rewrite_amazon_description(item, amazon_facts=amazon_facts)
+        name = (item.product_name or "Item").strip()
+        bullet_lines: list[str] = []
+        if item.brand:
+            bullet_lines.append(f"- Brand: {item.brand}")
+        if item.category:
+            bullet_lines.append(f"- Category: {item.category}")
+        if item.estimated_tax_value is not None:
+            bullet_lines.append(f"- Source estimated value: ${float(item.estimated_tax_value):.2f}")
+        if item.asin:
+            bullet_lines.append(f"- Reference ASIN: {item.asin}")
+        if item.amazon_source_page_url:
+            bullet_lines.append(f"- Source URL: {item.amazon_source_page_url}")
+        elif item.item_url:
+            bullet_lines.append(f"- Source URL: {item.item_url}")
+
+        bullets = "\n".join(bullet_lines)
+        header = _sanitize_vine_text(name)
+        body_lines: list[str] = []
+        if header:
+            body_lines.append(header)
+            body_lines.append("")
+        if amazon_description:
+            body_lines.append(_sanitize_vine_text(amazon_description))
+            body_lines.append("")
+        body_lines.append("Condition: New.")
+        body_lines.append("Review checklist before publish:")
+        body_lines.append("- Confirm exact condition, completeness, and accessories.")
+        body_lines.append("- Verify functional testing notes and photo evidence.")
+        body_lines.append("- Adjust pricing and marketplace specifics before approval.")
+        if bullets:
+            body_lines.append("")
+            body_lines.append(bullets)
+        body_lines.append("")
+        body_lines.append("Draft is prepared for manual approval and marketplace handoff.")
+        return _sanitize_vine_text("\n".join(body_lines))
+
+    def _build_item_specifics(
+        self,
+        item: VineImportItem,
+        title: str | None,
+        description: str | None = None,
+        existing: dict | None = None,
+    ) -> tuple[dict, dict[str, str]]:
+        specifics = dict(existing or {})
+        provenance: dict[str, str] = {}
+        title_text = str(title or item.product_name or "").strip()
+        description_text = str(description or "").strip()
+        title_context = " ".join(part for part in (title_text, description_text) if part)
+
+        for key, value in list(specifics.items()):
+            if str(value or "").strip():
+                provenance[str(key)] = provenance.get(str(key), "existing")
+
+        def set_specific(name: str, value: str | None, source: str) -> None:
+            text = str(value or "").strip()
+            if not text:
+                return
+            if str(specifics.get(name) or "").strip():
+                provenance.setdefault(name, "existing")
+                return
+            specifics[name] = _clip_specific_value(text)
+            provenance[name] = source
+
+        # ``Does Not Apply`` was historically persisted as a placeholder for
+        # Type.  It must not block the evidence/category-aware resolver from
+        # deriving a product family from the stable title when that family is
+        # meaningful (the eBay mapper validates it against the category).
+        if str(specifics.get("Type") or "").strip().lower() in {"does not apply", "unknown", "n/a"}:
+            specifics.pop("Type", None)
+            provenance.pop("Type", None)
+
+        set_specific("Brand", item.brand, "existing")
+        set_specific("Type", item.category or item.detected_category_guess or _derive_item_type(title_text), "derived")
+        set_specific("Model", item.asin or None, "derived")
+
+        if not str(specifics.get("Brand") or "").strip():
+            specifics["Brand"] = "Does Not Apply"
+            provenance["Brand"] = "approximate"
+
+        if not str(specifics.get("Type") or "").strip():
+            specifics["Type"] = _derive_item_type(title_context) or "Does Not Apply"
+            provenance["Type"] = "approximate"
+
+        if not str(specifics.get("Model") or "").strip():
+            specifics["Model"] = "Does Not Apply"
+            provenance["Model"] = "approximate"
+
+        for aspect_name in [
+            "MPN",
+            "UPC",
+            "EAN",
+            "ISBN",
+            "Color",
+            "Size",
+            "Material",
+            "Compatible Brand",
+            "Compatible Model",
+            "Style",
+            "Capacity",
+            "Voltage",
+            "Wattage",
+            "Amperage",
+            "Department",
+            "Pattern",
+            "Product Line",
+            "Country/Region of Manufacture",
+            "Features",
+        ]:
+            if str(specifics.get(aspect_name) or "").strip():
+                provenance.setdefault(aspect_name, "existing")
+                continue
+            fallback = _fallback_aspect_value(
+                type("DraftListing", (), {"title": title_text, "description": description_text, "source_type": "amazon_vine", "source_metadata": {"asin": item.asin or "", "brand": item.brand or "", "category": item.category or item.detected_category_guess or ""}, "item_specifics": specifics, "condition": "New"})(),
+                aspect_name,
+                title_context,
+            )
+            if fallback:
+                specifics[aspect_name] = _clip_specific_value(fallback)
+                provenance[aspect_name] = "approximate"
+
+        return specifics, provenance
+
+    def _build_estimated_shipping_profile(
+        self,
+        item: VineImportItem,
+        *,
+        title: str | None,
+        description: str | None = None,
+        existing: dict | None = None,
+        amazon_facts: dict | None = None,
+    ) -> dict:
+        shipping = dict(existing or {})
+        amazon_facts = amazon_facts if isinstance(amazon_facts, dict) else {}
+        title_text = " ".join(part for part in (str(title or item.product_name or "").strip(), str(description or "").strip()) if part).lower()
+        category_text = str(item.category or item.detected_category_guess or "").lower()
+        tokens = f"{title_text} {category_text}".strip()
+
+        def set_if_missing(key: str, value):
+            if shipping.get(key) in (None, "", {}, []):
+                shipping[key] = value
+
+        if any(word in tokens for word in ("charger", "adapter", "cable", "kvm", "controller", "mouse", "keyboard", "dock", "hub", "sensor")):
+            weight = 1.0
+            dimensions = {"length": 10, "width": 8, "height": 4}
+        elif any(word in tokens for word in ("bag", "backpack", "duffel", "purse", "wallet", "shoes", "heels", "sandal", "boot", "skate")):
+            weight = 2.5
+            dimensions = {"length": 14, "width": 12, "height": 6}
+        elif any(word in tokens for word in ("laptop", "tablet", "monitor", "screen", "printer", "router", "wifi", "wifi extender")):
+            weight = 3.5
+            dimensions = {"length": 16, "width": 12, "height": 6}
+        elif any(word in tokens for word in ("bottle", "spray", "liquid", "soap", "cleaner")):
+            weight = 1.5
+            dimensions = {"length": 10, "width": 6, "height": 4}
+        else:
+            weight = 2.0
+            dimensions = {"length": 12, "width": 10, "height": 6}
+
+        specifications = amazon_facts.get("specifications") if isinstance(amazon_facts.get("specifications"), dict) else {}
+        source_weight = next((value for key, value in specifications.items() if str(key).strip().lower() in {"package weight", "item package weight", "item weight", "weight"} and _shipping_number(value)), None)
+        source_weight = source_weight or (amazon_facts.get("weight") if _shipping_number(amazon_facts.get("weight")) else None)
+        weight_was_estimated = shipping.get("package_weight") in (None, "", {}, []) and source_weight is None
+        set_if_missing("package_weight", _shipping_number(source_weight) if source_weight is not None else weight)
+        if not isinstance(shipping.get("package_dimensions"), dict):
+            shipping["package_dimensions"] = {}
+        package_dimensions = dict(shipping.get("package_dimensions") or {})
+        source_dimensions = amazon_facts.get("package_dimensions") if isinstance(amazon_facts.get("package_dimensions"), dict) else amazon_facts.get("dimensions")
+        if isinstance(source_dimensions, dict):
+            normalized_source_dimensions = {str(key).strip().lower(): value for key, value in source_dimensions.items()}
+            if all(_shipping_number(normalized_source_dimensions.get(key)) for key in ("length", "width", "height")):
+                for key in ("length", "width", "height"):
+                    if package_dimensions.get(key) in (None, "", 0):
+                        package_dimensions[key] = _shipping_number(normalized_source_dimensions[key])
+        dimensions_were_estimated = not all(_shipping_number(package_dimensions.get(key)) for key in ("length", "width", "height"))
+        for key, value in dimensions.items():
+            if not _shipping_number(package_dimensions.get(key)):
+                package_dimensions[key] = value
+        shipping["package_dimensions"] = package_dimensions
+        set_if_missing("shipping_class_suggestion", "usps_ground_advantage")
+        estimated_fields = list(shipping.get("estimated_fields") or [])
+        provenance = dict(shipping.get("provenance") or {}) if isinstance(shipping.get("provenance"), dict) else {}
+        if weight_was_estimated:
+            estimated_fields.append("package_weight")
+            provenance.setdefault("package_weight", "estimated_category_profile")
+        elif source_weight is not None and shipping.get("package_weight") == _shipping_number(source_weight):
+            provenance.setdefault("package_weight", "amazon_metadata")
+        if dimensions_were_estimated:
+            estimated_fields.append("package_dimensions")
+            provenance.setdefault("package_dimensions", "estimated_category_profile")
+        elif source_dimensions:
+            provenance.setdefault("package_dimensions", "amazon_metadata")
+        for field_name in ("package_weight", "package_dimensions"):
+            if field_name in estimated_fields and str(provenance.get(field_name) or "").lower() in {"approximate", "estimated", "default"}:
+                provenance[field_name] = "estimated_category_profile"
+        shipping["estimated"] = bool(estimated_fields or shipping.get("estimated"))
+        shipping["manual_measurement_needed"] = bool(shipping.get("shipping_estimate_blocked"))
+        shipping["shipping_notes"] = str(
+            shipping.get("shipping_notes")
+            or "Conservative source/category package profile; replace with measured values if they become available."
+        ).strip()
+        shipping["estimated_fields"] = list(dict.fromkeys(estimated_fields))
+        shipping["provenance"] = {
+            **provenance,
+            "shipping_class_suggestion": provenance.get("shipping_class_suggestion") or "category_profile_default",
+        }
+        shipping["shipping_profile_source"] = "amazon_metadata" if source_weight is not None or source_dimensions else "estimated_category_profile" if shipping["estimated"] else "existing_structured_data"
+        return shipping
+
+    def _build_tags(self, item: VineImportItem, existing: list[str] | None) -> list[str]:
+        tags = [str(tag).strip() for tag in (existing or []) if str(tag).strip()]
+        tags.extend(
+            [
+                "amazon_vine",
+                "review_required",
+                "draft_preview_ready",
+            ]
+        )
+        if item.brand:
+            tags.append(str(item.brand).strip().lower())
+        if item.category:
+            tags.append(str(item.category).strip().lower().replace(" ", "_"))
+        return list(dict.fromkeys(tags))
+
+    def retry_item_discovery(self, db: Session, *, item: VineImportItem) -> dict:
+        provider = AmazonProductMediaProvider(db, owner_user_id=item.user_id)
+        discovery = AmazonProductDiscoveryService(provider)
+        result = discovery.discover_for_item(
+            asin=item.asin,
+            product_name=item.product_name,
+            manual_url=item.manual_amazon_url,
+        )
+        item.amazon_match_status = result.get("status")
+        item.amazon_match_confidence = result.get("confidence")
+        item.amazon_match_asin = result.get("asin") or item.asin
+        item.amazon_match_title = result.get("title") or item.product_name
+        item.amazon_source_page_url = result.get("source_page_url")
+        item.media_status = result.get("image_status")
+        item.image_import_status = result.get("image_status")
+        item.media_asset_ids_json = result.get("local_asset_ids") or []
+        item.image_import_error = None if item.media_status in {"cached", "fetched"} else item.media_status
+        db.add(item)
+        db.commit()
+        db.refresh(item)
+        return {"item_id": item.id, "match_status": item.amazon_match_status, "image_status": item.image_import_status}
+
+    def _find_existing_vine_listing(self, db: Session, item: VineImportItem) -> Listing | None:
+        if item.asin:
+            asin_match = db.execute(
+                select(Listing).where(
+                    Listing.user_id == item.user_id,
+                    Listing.source_type == "amazon_vine",
+                    Listing.source_metadata.is_not(None),
+                )
+            ).scalars().all()
+            same_asin = [
+                listing for listing in asin_match
+                if str((listing.source_metadata or {}).get("asin") or "").upper() == str(item.asin).upper()
+            ]
+            if item.order_number:
+                # ASIN identifies a product, not a particular Vine unit. Reuse
+                # only the same order row; separate orders of the same ASIN
+                # may represent separate physical inventory.
+                same_asin = [
+                    listing for listing in same_asin
+                    if str((listing.source_metadata or {}).get("order_number") or "").strip() == str(item.order_number).strip()
+                ]
+            if same_asin:
+                # If a historic race already made duplicates, consistently
+                # reuse the most complete row and leave all records intact.
+                same_asin.sort(key=lambda listing: (
+                    0 if str(listing.processing_state or "").lower() == "complete" else 1,
+                    0 if str(getattr(listing.status, "value", listing.status) or "").lower() in {"ready", "processed"} else 1,
+                    0 if str(listing.category_id or "").strip() else 1,
+                    0 if listing.image_urls or listing.listing_images else 1,
+                    listing.id,
+                ))
+                return same_asin[0]
+        if item.product_name and item.order_date:
+            normalized_title = " ".join((item.product_name or "").lower().split())
+            candidates = db.execute(
+                select(Listing).where(
+                    Listing.user_id == item.user_id,
+                    Listing.source_type == "amazon_vine",
+                    Listing.title.is_not(None),
+                )
+            ).scalars().all()
+            for listing in candidates:
+                source_metadata = dict(listing.source_metadata or {})
+                listing_order = str(source_metadata.get("order_number") or "").strip()
+                if item.order_number and listing_order and listing_order != str(item.order_number).strip():
+                    continue
+                listing_date = source_metadata.get("order_date")
+                if listing_date != item.order_date.isoformat():
+                    continue
+                listing_title = " ".join(str(listing.title or "").lower().split())
+                if listing_title == normalized_title:
+                    return listing
+        return None
+
+    def reconcile_import_item_listing_links(self, db: Session, *, batch: VineImportBatch) -> int:
+        """Backfill links for historical Vine rows whose Listing already exists.
+
+        Older imports populated ``inventory_item_id`` only, and some legacy
+        rows lost both link columns even though their Vine Listing remained in
+        the catalog.  Match only by the same deterministic identity rules used
+        during creation (ASIN, then exact title + order date), and only when a
+        single candidate is found.  This changes links, never listing content.
+        """
+        items = db.execute(select(VineImportItem).where(VineImportItem.batch_id == batch.id)).scalars().all()
+        changed = 0
+        for item in items:
+            if item.listing_id:
+                continue
+            if item.inventory_item_id:
+                item.listing_id = item.inventory_item_id
+                db.add(item)
+                changed += 1
+                continue
+            match = self._find_existing_vine_listing(db, item)
+            if match is None:
+                continue
+            item.listing_id = match.id
+            item.inventory_item_id = match.id
+            db.add(item)
+            changed += 1
+        if changed:
+            total = db.execute(select(func.count()).select_from(VineImportItem).where(
+                VineImportItem.batch_id == batch.id,
+                or_(VineImportItem.listing_id.is_not(None), VineImportItem.inventory_item_id.is_not(None)),
+            )).scalar_one()
+            batch.drafts_created_count = int(total or 0)
+            db.add(batch)
+            db.commit()
+        return changed
+
+    def _update_batch_stats_json(self, db: Session, *, batch: VineImportBatch, updates: dict, commit: bool) -> None:
+        current = dict(batch.stats_json or {})
+        current.update(updates)
+        batch.stats_json = current
+        db.add(batch)
+        if commit:
+            db.commit()
+
+    def _normalize_vine_fingerprint_value(self, value: object) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, float):
+            return f"{value:.2f}"
+        if isinstance(value, int):
+            return str(value)
+        if hasattr(value, "isoformat"):
+            try:
+                return str(value.isoformat())
+            except Exception:
+                return str(value)
+        text = re.sub(r"\s+", " ", str(value)).strip().lower()
+        parsed_date = parse_date_value(text, allow_excel_serial=True)
+        if parsed_date is not None:
+            return parsed_date.isoformat()
+        return text
+
+    def _vine_row_fingerprint(self, row: ParsedVineRow | VineImportItem | dict | None) -> str:
+        if row is None:
+            return ""
+        if isinstance(row, dict):
+            payload = row
+        elif isinstance(row, VineImportItem):
+            payload = dict(row.raw_row_json or {})
+            payload.setdefault("Order Number", row.order_number)
+            payload.setdefault("ASIN", row.asin)
+            payload.setdefault("Product Name", row.product_name)
+            payload.setdefault("Order Type", row.order_type)
+            payload.setdefault("Order Date", row.order_date)
+            payload.setdefault("Shipped Date", row.shipped_date)
+            payload.setdefault("Cancelled Date", row.cancelled_date)
+            payload.setdefault("Estimated Tax Value", row.estimated_tax_value)
+            payload.setdefault("Brand", row.brand)
+            payload.setdefault("Category", row.category)
+            payload.setdefault("Review Deadline", row.review_deadline)
+            payload.setdefault("Item URL", row.item_url)
+        else:
+            payload = {
+                "Order Number": row.order_number,
+                "ASIN": row.asin,
+                "Product Name": row.product_name,
+                "Order Type": row.order_type,
+                "Order Date": row.order_date,
+                "Shipped Date": row.shipped_date,
+                "Cancelled Date": row.cancelled_date,
+                "Estimated Tax Value": row.estimated_tax_value,
+                "Brand": row.brand,
+                "Category": row.category,
+                "Review Deadline": row.review_deadline,
+                "Item URL": row.item_url,
+            }
+        normalized = {
+            key: self._normalize_vine_fingerprint_value(payload.get(key))
+            for key in (
+                "Order Number",
+                "ASIN",
+                "Product Name",
+                "Order Type",
+                "Order Date",
+                "Shipped Date",
+                "Cancelled Date",
+                "Estimated Tax Value",
+                "Brand",
+                "Category",
+                "Review Deadline",
+                "Item URL",
+            )
+        }
+        fingerprint_source = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(fingerprint_source.encode("utf-8")).hexdigest()
+
+    def _load_existing_vine_fingerprints(self, db: Session, user_id: int) -> dict[str, VineImportItem]:
+        items = db.execute(
+            select(VineImportItem).where(VineImportItem.user_id == user_id).order_by(VineImportItem.id.asc())
+        ).scalars().all()
+        fingerprints: dict[str, VineImportItem] = {}
+        for item in items:
+            fingerprint = self._vine_row_fingerprint(item)
+            if not fingerprint:
+                continue
+            existing = fingerprints.get(fingerprint)
+            if existing is None:
+                fingerprints[fingerprint] = item
+                continue
+            # Prefer a row that already points at its durable listing. Choosing
+            # only the oldest row stranded many duplicate import rows as
+            # "not created" even when a later exact-fingerprint row was linked.
+            existing_linked = bool(existing.listing_id or existing.inventory_item_id)
+            item_linked = bool(item.listing_id or item.inventory_item_id)
+            if item_linked and not existing_linked:
+                fingerprints[fingerprint] = item
+        return fingerprints
+
+    def _is_duplicate_vine_item(self, item: VineImportItem) -> bool:
+        warnings = [str(warning).strip().lower() for warning in (item.parse_warnings_json or [])]
+        return any(warning.startswith("duplicate of prior vine import row") for warning in warnings)
+
+    def _resolve_duplicate_listing_from_map(
+        self,
+        db: Session,
+        item: VineImportItem,
+        previous_items_by_fingerprint: dict[str, VineImportItem],
+    ) -> Listing | None:
+        fingerprint = self._vine_row_fingerprint(item)
+        if not fingerprint:
+            return None
+        candidate = previous_items_by_fingerprint.get(fingerprint)
+        if candidate is not None:
+            if candidate.listing_id:
+                listing = db.get(Listing, candidate.listing_id)
+                if listing is not None:
+                    return listing
+            if candidate.inventory_item_id:
+                listing = db.get(Listing, candidate.inventory_item_id)
+                if listing is not None:
+                    return listing
+        # A duplicate warning may point to a historical row whose listing FK
+        # was lost. Resolve only through the exact ASIN + order identity, never
+        # title similarity or ASIN alone when the order number is available.
+        return self._find_existing_vine_listing(db, item)
+
+    def _detect_report_year(self, rows: list[ParsedVineRow], filename: str) -> int | None:
+        for row in rows:
+            if row.order_date:
+                return row.order_date.year
+        for token in Path(filename).stem.replace("-", " ").split():
+            if token.isdigit() and len(token) == 4:
+                return int(token)
+        return None

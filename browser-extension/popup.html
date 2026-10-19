@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PosterPro Browser Connection</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <p class="eyebrow">PosterPro</p>
+        <h1>Browser connection</h1>
+        <p class="lede">Queue monitoring and form assistance run automatically in this browser. Marketplace credentials stay in your browser profile.</p>
+      </header>
+
+      <section class="card" aria-live="polite">
+        <div class="row"><strong>Status</strong><span id="connectionStatus">Checking…</span></div>
+        <div class="row"><strong>Browser</strong><span id="deviceLabel">—</span></div>
+        <div class="row"><strong>Version</strong><span id="versionLabel">—</span></div>
+        <div class="row"><strong>Last heartbeat</strong><span id="heartbeatLabel">—</span></div>
+        <div class="row"><strong>Current task</strong><span id="activeJobLabel">None</span></div>
+        <p id="jobSummary" class="lede"></p>
+        <p id="agentError" class="error"></p>
+        <button id="openJobButton" class="primary" hidden>Review job in PosterPro</button>
+        <div class="grid">
+          <button id="pauseButton" class="secondary" hidden>Pause automation</button>
+          <button id="openPosterProButton" class="tertiary">Open PosterPro</button>
+        </div>
+      </section>
+
+      <section id="pairingSection" class="card" hidden>
+        <strong>Connect this browser once</strong>
+        <p class="lede">In PosterPro Settings → Browser Automation, create a one-time code and enter it here. You will not need to claim or manage jobs from this popup.</p>
+        <label>One-time pairing code<input id="pairingCode" type="text" autocomplete="one-time-code" placeholder="Paste code from PosterPro Settings" /></label>
+        <button id="pairButton" class="primary">Authorize this browser</button>
+      </section>
+
+      <details class="card">
+        <summary>Diagnostics</summary>
+        <p id="diagnostics" class="lede">No diagnostic events.</p>
+        <button id="probeFacebookDescriptionButton" class="tertiary" hidden>Probe Facebook Description controls (read-only)</button>
+        <pre id="facebookDescriptionProbe" class="lede" hidden></pre>
+        <button id="copyFacebookDescriptionProbeButton" class="tertiary" hidden>Copy probe evidence</button>
+        <button id="retryButton" class="tertiary">Reconnect now</button>
+      </details>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

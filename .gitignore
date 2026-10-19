@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+backend/storage/
+backend/celerybeat-schedule*
+backend/posterpro_test*.db
+posterpro.db
+posterpro_test*.db
+storage/
+frontend/node_modules/
+frontend/.next/
+bridge/app/__pycache__/
+bridge/data/
+.DS_Store

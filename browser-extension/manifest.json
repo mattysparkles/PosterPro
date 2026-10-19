@@ -1,0 +1,70 @@
+{
+  "manifest_version": 3,
+  "name": "PosterPro Marketplace Assistant",
+  "version": "0.3.70",
+  "description": "Pair a browser with PosterPro and execute operator-authorized marketplace jobs with verified results.",
+  "action": {
+    "default_title": "PosterPro Marketplace Assistant",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://posterpro.sparkleserver.site/*",
+        "http://127.0.0.1:3030/*"
+      ],
+      "js": ["posterpro-link.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_page": "options.html",
+  "permissions": [
+    "activeTab",
+    "alarms",
+    "clipboardWrite",
+    "debugger",
+    "scripting",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://posterpro.sparkleserver.site/*",
+    "http://127.0.0.1:3030/*",
+    "http://127.0.0.1:8030/*",
+    "https://www.facebook.com/*",
+    "https://www.mercari.com/*",
+    "https://poshmark.com/*",
+    "https://www.etsy.com/*",
+    "https://www.depop.com/*",
+    "https://www.whatnot.com/*",
+    "https://seller.whatnot.com/*",
+    "https://www.vinted.com/*",
+    "https://www.vinted.co.uk/*",
+    "https://www.vinted.fr/*",
+    "https://www.vinted.de/*",
+    "https://www.vinted.it/*",
+    "https://www.vinted.es/*",
+    "https://www.vinted.pl/*",
+    "https://www.vinted.nl/*",
+    "https://www.vinted.be/*",
+    "https://www.vinted.at/*",
+    "https://www.vinted.cz/*",
+    "https://www.vinted.pt/*",
+    "https://www.vinted.lt/*",
+    "https://www.vinted.lv/*",
+    "https://www.vinted.ee/*",
+    "https://www.vinted.sk/*",
+    "https://www.vinted.hu/*",
+    "https://www.vinted.ro/*",
+    "https://www.vinted.gr/*",
+    "https://www.vinted.se/*",
+    "https://www.vinted.dk/*",
+    "https://www.vinted.fi/*",
+    "https://www.vinted.ie/*",
+    "https://offerup.com/*",
+    "https://www.offerup.com/*"
+  ]
+}

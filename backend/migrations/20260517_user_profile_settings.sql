@@ -1,0 +1,3 @@
+ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS full_name VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS settings_json JSON;

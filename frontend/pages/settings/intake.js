@@ -1,0 +1,432 @@
+import { useCallback, useEffect, useState } from 'react';
+import toast from 'react-hot-toast';
+import { useRouter } from 'next/router';
+
+import AppShell from '../../components/layout/AppShell';
+import GooglePhotosConnectionGuide from '../../components/google/GooglePhotosConnectionGuide';
+import Button from '../../components/ui/button';
+import Input from '../../components/ui/input';
+import PageHeader from '../../components/ui/page-header';
+import SectionPanel from '../../components/ui/section-panel';
+import StatusPill from '../../components/ui/status-pill';
+import Checkbox from '../../components/ui/checkbox';
+import { useAuth } from '../../contexts/AuthContext';
+import { fetchIntakeSettings, getGooglePhotosConnectUrl, runIntakeMonitor, setIntakeDraftingPaused, startGooglePhotosOAuth, updateIntakeSettings, updateServerSettings } from '../../lib/api';
+
+const MARKETPLACE_TARGET_OPTIONS = [
+  { value: 'ebay', label: 'eBay' },
+  { value: 'facebook', label: 'Facebook Marketplace' },
+  { value: 'mercari', label: 'Mercari' },
+  { value: 'poshmark', label: 'Poshmark' },
+  { value: 'etsy', label: 'Etsy' },
+  { value: 'depop', label: 'Depop' },
+  { value: 'whatnot', label: 'Whatnot' },
+];
+
+export default function IntakeSettingsPage() {
+  const router = useRouter();
+  const { user } = useAuth();
+  const googlePhotosConnectUrl = getGooglePhotosConnectUrl();
+  const [form, setForm] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [googleOauthForm, setGoogleOauthForm] = useState({
+    google_photos_client_id: '',
+    google_photos_client_secret: '',
+    google_photos_redirect_uri: '',
+  });
+  const [savingGoogleOauth, setSavingGoogleOauth] = useState(false);
+  // A stale redirect query must not resurrect the platform-admin credential
+  // form for a connected tenant. Platform OAuth is configured server-side;
+  // ordinary users only authorize their Google account.
+  const googlePhotosMissingConfig = router.query.google_photos === 'missing-config'
+    && Boolean(form)
+    && !Boolean(form?.google_photos?.connected)
+    && !Boolean(form?.google_photos?.oauth_ready)
+    && Boolean(user?.is_admin);
+  const defaultGoogleRedirectUri = typeof window !== 'undefined'
+    ? `${window.location.origin}/api/intake/google-photos/callback`
+    : 'https://posterpro.sparkleserver.site/api/intake/google-photos/callback';
+
+  const load = useCallback(async () => {
+    if (!user?.id) return;
+    try {
+      const payload = await fetchIntakeSettings();
+      setForm(payload || null);
+    } catch (error) {
+      toast.error(error.message || 'Failed to load intake settings.');
+    }
+  }, [user?.id]);
+
+  useEffect(() => {
+    load().catch(() => undefined);
+  }, [load]);
+
+  useEffect(() => {
+    if (!googlePhotosMissingConfig) return;
+    const timer = window.setTimeout(() => {
+      const target = document.getElementById('google-photos-oauth');
+      if (target) {
+        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [googlePhotosMissingConfig]);
+
+  const updateField = (key, value) => {
+    setForm((current) => ({ ...current, [key]: value }));
+  };
+
+  const toggleMarketplaceTarget = (target) => {
+    const currentTargets = Array.isArray(form?.marketplace_defaults?.targets) ? form.marketplace_defaults.targets : [];
+    const nextTargets = currentTargets.includes(target)
+      ? currentTargets.filter((value) => value !== target)
+      : [...currentTargets, target];
+    updateField('marketplace_defaults', {
+      ...(form.marketplace_defaults || {}),
+      targets: nextTargets,
+    });
+  };
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      const payload = await updateIntakeSettings(form);
+      setForm(payload || null);
+      toast.success('Intake settings saved.');
+    } catch (error) {
+      toast.error(error.message || 'Failed to save intake settings.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const toggleDraftingPause = async (paused) => {
+    setSaving(true);
+    try {
+      const payload = await setIntakeDraftingPaused(form, paused);
+      setForm(payload || null);
+      toast.success(paused ? 'Drafting paused.' : 'Drafting resumed.');
+    } catch (error) {
+      toast.error(error.message || 'Failed to update drafting state.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveGoogleOauthConfig = async () => {
+    setSavingGoogleOauth(true);
+    try {
+      const payload = {};
+      if (googleOauthForm.google_photos_client_id.trim()) payload.google_photos_client_id = googleOauthForm.google_photos_client_id.trim();
+      if (googleOauthForm.google_photos_client_secret.trim()) payload.google_photos_client_secret = googleOauthForm.google_photos_client_secret.trim();
+      payload.google_photos_redirect_uri = googleOauthForm.google_photos_redirect_uri.trim() || defaultGoogleRedirectUri;
+      await updateServerSettings(payload);
+      toast.success('Google OAuth settings saved.');
+      router.replace('/settings/intake?google_photos=saved', undefined, { shallow: true });
+    } catch (error) {
+      toast.error(error.message || 'Failed to save Google OAuth settings.');
+    } finally {
+      setSavingGoogleOauth(false);
+    }
+  };
+
+  const saveGoogleOauthConfigAndConnect = async () => {
+    setSavingGoogleOauth(true);
+    try {
+      const payload = {};
+      if (googleOauthForm.google_photos_client_id.trim()) payload.google_photos_client_id = googleOauthForm.google_photos_client_id.trim();
+      if (googleOauthForm.google_photos_client_secret.trim()) payload.google_photos_client_secret = googleOauthForm.google_photos_client_secret.trim();
+      payload.google_photos_redirect_uri = googleOauthForm.google_photos_redirect_uri.trim() || defaultGoogleRedirectUri;
+      await updateServerSettings(payload);
+      const authPayload = await startGooglePhotosOAuth();
+      if (authPayload?.auth_url) {
+        window.location.assign(authPayload.auth_url);
+        return;
+      }
+      throw new Error('Google Photos OAuth URL was not returned by the server.');
+    } catch (error) {
+      toast.error(error.message || 'Failed to save Google OAuth settings.');
+      setSavingGoogleOauth(false);
+    }
+  };
+
+  const startGoogleLogin = async () => {
+    try {
+      const authPayload = await startGooglePhotosOAuth();
+      if (authPayload?.auth_url) {
+        window.location.assign(authPayload.auth_url);
+        return;
+      }
+      throw new Error('Google Photos OAuth URL was not returned by the server.');
+    } catch (error) {
+      if (String(error?.message || '').toLowerCase().includes('missing google photos oauth client settings')) {
+        router.replace('/settings/intake?google_photos=missing-config#google-photos-oauth', undefined, { shallow: false });
+      }
+      toast.error(error.message || 'Unable to start Google login.');
+    }
+  };
+
+  const runNow = async () => {
+    setRunning(true);
+    try {
+      await runIntakeMonitor();
+      toast.success('Intake monitor completed.');
+      await load();
+    } catch (error) {
+      toast.error(error.message || 'Intake monitor failed.');
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  if (!form) {
+    return (
+      <AppShell active="/settings" title="Intake Settings">
+        <div className="space-y-6">
+          <PageHeader eyebrow="Settings" title="Intake settings" description="Loading intake settings…" />
+        </div>
+      </AppShell>
+    );
+  }
+
+  return (
+    <AppShell active="/settings" title="Intake Settings">
+      <div className="space-y-6">
+          <GooglePhotosConnectionGuide
+            connected={Boolean(form?.google_photos?.connected)}
+            accountLabel={form?.google_photos?.account_email || form?.google_photos?.account_name || form?.google_photos?.account_subject}
+            albumLabel={form?.album_url || form?.folder_id || 'PosterPro'}
+            albumId={form?.google_photos?.album_id || form?.google_photos?.album_identifier}
+            connectionState={form?.google_photos?.connection_state}
+            platformConfigured={Boolean(form?.google_photos?.oauth_ready)}
+            redirectUri={form?.google_photos?.redirect_uri || defaultGoogleRedirectUri}
+            connectUrl={googlePhotosConnectUrl}
+            apiKeysUrl="/settings/intake?google_photos=missing-config#google-photos-oauth"
+            slateUrl="/intake/slate"
+            onRefresh={load}
+            onSaveConfig={saveGoogleOauthConfig}
+            onStartLogin={startGoogleLogin}
+            onOpenGooglePhotos={() => window.location.assign('/settings/intake?google_photos=missing-config#google-photos-oauth')}
+            missingConfig={googlePhotosMissingConfig}
+          />
+          {googlePhotosMissingConfig ? (
+            <div id="google-photos-oauth" className="rounded-[24px] border border-amber-200 bg-amber-50 p-4 text-amber-950">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold uppercase tracking-[0.16em]">Google Photos OAuth settings are missing</p>
+                  <p className="mt-1 text-sm text-amber-900">
+                    PosterPro cannot open the Google consent flow until the server has a Google OAuth Client ID, Client Secret, and Redirect URI.
+                  </p>
+                </div>
+                <Button href="/settings/intake?google_photos=missing-config#google-photos-oauth" variant="secondary">
+                  Open API keys
+                </Button>
+              </div>
+              <div className="mt-4 grid gap-3 md:grid-cols-3">
+                <label className="grid gap-2 text-sm md:col-span-1">
+                  <span className="font-semibold text-amber-950">Client ID</span>
+                  <Input
+                    value={googleOauthForm.google_photos_client_id}
+                    onChange={(event) => setGoogleOauthForm((current) => ({ ...current, google_photos_client_id: event.target.value }))}
+                    placeholder="Google OAuth client ID"
+                  />
+                </label>
+                <label className="grid gap-2 text-sm md:col-span-1">
+                  <span className="font-semibold text-amber-950">Client Secret</span>
+                  <Input
+                    value={googleOauthForm.google_photos_client_secret}
+                    onChange={(event) => setGoogleOauthForm((current) => ({ ...current, google_photos_client_secret: event.target.value }))}
+                    placeholder="Google OAuth client secret"
+                  />
+                </label>
+                <label className="grid gap-2 text-sm md:col-span-1">
+                  <span className="font-semibold text-amber-950">Redirect URI</span>
+                  <Input
+                    value={googleOauthForm.google_photos_redirect_uri}
+                    onChange={(event) => setGoogleOauthForm((current) => ({ ...current, google_photos_redirect_uri: event.target.value }))}
+                    placeholder={defaultGoogleRedirectUri}
+                  />
+                </label>
+              </div>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <Button onClick={saveGoogleOauthConfigAndConnect} variant="secondary" disabled={savingGoogleOauth}>
+                  {savingGoogleOauth ? 'Saving…' : 'Save and connect'}
+                </Button>
+                <Button onClick={saveGoogleOauthConfig} variant="outline" disabled={savingGoogleOauth}>
+                  {savingGoogleOauth ? 'Saving…' : 'Save Google OAuth settings'}
+                </Button>
+                <Button onClick={startGoogleLogin} variant="outline">
+                  Try connect again
+                </Button>
+              </div>
+            </div>
+          ) : null}
+          {!(form?.google_photos?.connected) ? (
+            <div className="rounded-[24px] border border-red-200 bg-red-50 p-4 text-red-900">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold uppercase tracking-[0.16em]">Google Photos not connected</p>
+                  <p className="mt-1 text-sm text-red-800">PosterPro cannot auto-upload slates until you authorize Google Photos. The album link alone is not enough.</p>
+                </div>
+                <Button onClick={startGoogleLogin} variant="secondary">
+                  Connect Google Photos
+                </Button>
+              </div>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <Button onClick={startGoogleLogin} variant="secondary">
+                  Start Google login
+                </Button>
+                <Button href="/intake/slate" variant="outline">Go to Slate page</Button>
+              </div>
+            </div>
+          ) : null}
+          <PageHeader
+            eyebrow="Settings"
+            title="Configure the Head Slate intake monitor"
+            description="These settings control the monitored Google Photos album or shared Drive link, ID generation, default storage metadata, and whether PosterPro drafts listings automatically after a complete batch is detected."
+            actions={(
+            <>
+              <Button onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save settings'}</Button>
+              <Button
+                onClick={() => toggleDraftingPause(!form?.drafting_paused)}
+                variant={form?.drafting_paused ? 'success' : 'secondary'}
+                disabled={saving}
+              >
+                {form?.drafting_paused ? 'Resume drafting' : 'Pause drafting'}
+              </Button>
+              <Button onClick={runNow} variant="secondary" disabled={running}>{running ? 'Running…' : 'Run monitor now'}</Button>
+            </>
+          )}
+        />
+
+        <div className="grid gap-6 xl:grid-cols-[minmax(0,1.1fr)_minmax(360px,0.9fr)]">
+          <SectionPanel title="Album and monitoring" description="PosterPro stores these settings on the user record and uses them for manual and automatic intake monitor runs." id="album-settings">
+            <div className="mb-4 rounded-[18px] border border-slate-200 bg-slate-50 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Google Photos connection</p>
+                  <p className="mt-1 text-sm text-slate-700">
+                    {form?.google_photos?.connected ? (
+                      <>Connected as <span className="font-semibold">{form.google_photos.account_email || form.google_photos.account_name || form.google_photos.account_subject || 'Google account'}</span>.</>
+                    ) : (
+                      <>No connected Google account yet. Click below to authorize PosterPro.</>
+                    )}
+                  </p>
+                </div>
+                <Button onClick={startGoogleLogin} variant={form?.google_photos?.connected ? 'outline' : 'secondary'}>
+                  {form?.google_photos?.connected ? 'Reconnect Google Photos' : 'Connect Google Photos'}
+                </Button>
+              </div>
+            </div>
+            <div className="grid gap-4 md:grid-cols-2">
+              <label className="grid gap-2 text-sm md:col-span-2">
+                <span className="font-semibold text-[var(--pp-text)]">Google Photos album URL</span>
+                <Input value={form.album_url || ''} onChange={(event) => updateField('album_url', event.target.value)} placeholder="https://photos.app.goo.gl/..." />
+              </label>
+              <label className="grid gap-2 text-sm">
+                <span className="font-semibold text-[var(--pp-text)]">Google Drive folder / shared link</span>
+                <Input value={form.folder_id || ''} onChange={(event) => updateField('folder_id', event.target.value)} placeholder="Optional alternate source link" />
+              </label>
+              <label className="grid gap-2 text-sm">
+                <span className="font-semibold text-[var(--pp-text)]">Polling interval seconds</span>
+                <Input type="number" value={form.poll_interval_seconds || 300} onChange={(event) => updateField('poll_interval_seconds', Number(event.target.value || 300))} />
+              </label>
+              <Checkbox className="md:col-span-2" label="Enable automatic intake monitoring" checked={Boolean(form.enabled)} onChange={(event) => updateField('enabled', event.target.checked)} />
+              <Checkbox className="md:col-span-2" label="Auto-create draft listings when a batch has product photos" checked={Boolean(form.auto_draft_listing)} onChange={(event) => updateField('auto_draft_listing', event.target.checked)} />
+              <Checkbox className="md:col-span-2" label="Automatically queue two box labels when a Slate is created" checked={Boolean(form.auto_print_box_labels)} onChange={(event) => updateField('auto_print_box_labels', event.target.checked)} />
+              <label className="grid gap-2 text-sm"><span className="font-semibold">Default box-label copies</span><Input type="number" min="1" max="10" value={form.default_label_copies || 2} onChange={(event) => updateField('default_label_copies', Number(event.target.value || 2))} /></label>
+              <label className="grid gap-2 text-sm md:col-span-2">
+                <span className="font-semibold text-[var(--pp-text)]">Max new item drafts per run</span>
+                <Input
+                  type="number"
+                  min="1"
+                  value={form.max_new_items_per_run ?? ''}
+                  onChange={(event) => updateField('max_new_items_per_run', event.target.value === '' ? null : Number(event.target.value))}
+                  placeholder="Leave blank for no item cap"
+                />
+                <span className="text-xs text-[var(--pp-muted)]">Use this for testing, such as 25 items at a time. Leave it blank for normal full-run processing.</span>
+              </label>
+              <Checkbox className="md:col-span-2" label="Require manual review before any marketplace publish step" checked={Boolean(form.require_manual_review_before_publish)} onChange={(event) => updateField('require_manual_review_before_publish', event.target.checked)} />
+            </div>
+          </SectionPanel>
+
+          <SectionPanel title="Current status" description="This is the last known intake runtime state.">
+            <div className="flex flex-wrap gap-2">
+              <StatusPill status={form.enabled ? 'success' : 'warning'} label={form.enabled ? 'Monitor enabled' : 'Monitor disabled'} />
+              <StatusPill status={form.drafting_paused ? 'warning' : 'success'} label={form.drafting_paused ? 'Drafting paused' : 'Drafting active'} />
+              <StatusPill status={form.auto_draft_listing ? 'success' : 'default'} label={form.auto_draft_listing ? 'Auto draft on' : 'Auto draft off'} />
+              <StatusPill status={form.max_new_items_per_run ? 'info' : 'default'} label={form.max_new_items_per_run ? `${form.max_new_items_per_run} draft cap` : 'No draft cap'} />
+            </div>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <Button onClick={() => toggleDraftingPause(true)} variant="outline" disabled={saving || form.drafting_paused}>Pause drafting</Button>
+              <Button onClick={() => toggleDraftingPause(false)} variant="secondary" disabled={saving || !form.drafting_paused}>Resume drafting</Button>
+            </div>
+            <dl className="mt-4 space-y-3 text-sm text-[var(--pp-muted)]">
+              <div>
+                <dt className="font-semibold text-[var(--pp-text)]">Last sync</dt>
+                <dd className="mt-1">{form.last_synced_at || 'Never'}</dd>
+              </div>
+              <div>
+                <dt className="font-semibold text-[var(--pp-text)]">Last imported count</dt>
+                <dd className="mt-1">{form.last_imported_count || 0}</dd>
+              </div>
+              <div>
+                <dt className="font-semibold text-[var(--pp-text)]">Last error</dt>
+                <dd className="mt-1">{form.last_error || 'None'}</dd>
+              </div>
+            </dl>
+          </SectionPanel>
+        </div>
+
+        <div className="grid gap-6 xl:grid-cols-2">
+          <SectionPanel title="ID generation defaults" description="Item IDs remain permanent inventory IDs. Box IDs identify the packed physical container.">
+            <div className="grid gap-4 md:grid-cols-2">
+              <label className="grid gap-2 text-sm">
+                <span className="font-semibold text-[var(--pp-text)]">Default item prefix</span>
+                <Input value={form.default_item_prefix || 'SP'} onChange={(event) => updateField('default_item_prefix', event.target.value)} />
+              </label>
+              <label className="grid gap-2 text-sm">
+                <span className="font-semibold text-[var(--pp-text)]">Default box prefix</span>
+                <Input value={form.default_box_prefix || 'BX'} onChange={(event) => updateField('default_box_prefix', event.target.value)} />
+              </label>
+              <label className="grid gap-2 text-sm">
+                <span className="font-semibold text-[var(--pp-text)]">Default location</span>
+                <Input value={form.default_location || ''} onChange={(event) => updateField('default_location', event.target.value)} />
+              </label>
+              <label className="grid gap-2 text-sm">
+                <span className="font-semibold text-[var(--pp-text)]">Session naming pattern</span>
+                <Input value={form.default_session_naming_pattern || '{date}-{location}'} onChange={(event) => updateField('default_session_naming_pattern', event.target.value)} />
+              </label>
+              <Checkbox className="md:col-span-2" label="Auto-increment item IDs" checked={Boolean(form.auto_increment_item_id)} onChange={(event) => updateField('auto_increment_item_id', event.target.checked)} />
+              <Checkbox className="md:col-span-2" label="Auto-increment box IDs" checked={Boolean(form.auto_increment_box_id)} onChange={(event) => updateField('auto_increment_box_id', event.target.checked)} />
+              <Checkbox className="md:col-span-2" label="Default to same box / tote mode" checked={Boolean(form.keep_same_box_mode)} onChange={(event) => updateField('keep_same_box_mode', event.target.checked)} />
+            </div>
+          </SectionPanel>
+
+          <SectionPanel title="Image and publish defaults" description="These defaults decide which images stay internal and how the first generated draft gets staged for marketplace review.">
+            <div className="grid gap-4">
+              <label className="grid gap-2 text-sm">
+                <span className="font-semibold text-[var(--pp-text)]">Image SEO filename pattern</span>
+                <Input value={form.image_seo_filename_pattern || '{item_id}_{seo_title}_{photo_number}'} onChange={(event) => updateField('image_seo_filename_pattern', event.target.value)} />
+              </label>
+              <Checkbox label="Exclude head slate images from public listing photos" checked={Boolean(form.exclude_head_slate_from_public_listing_photos)} onChange={(event) => updateField('exclude_head_slate_from_public_listing_photos', event.target.checked)} />
+              <Checkbox label="Treat packed box / label photos as internal-only by default" checked={Boolean(form.internal_box_photos_default)} onChange={(event) => updateField('internal_box_photos_default', event.target.checked)} />
+              <label className="grid gap-2 text-sm">
+                <span className="font-semibold text-[var(--pp-text)]">Marketplace targets</span>
+                <div className="grid gap-2 rounded-[20px] border border-[var(--pp-border)] bg-[var(--pp-surface-muted)] p-4 sm:grid-cols-2">
+                  {MARKETPLACE_TARGET_OPTIONS.map((target) => {
+                    const checked = (form.marketplace_defaults?.targets || ['ebay', 'facebook']).includes(target.value);
+                    return (
+                      <Checkbox key={target.value} label={target.label} checked={checked} onChange={() => toggleMarketplaceTarget(target.value)} />
+                    );
+                  })}
+                </div>
+              </label>
+            </div>
+          </SectionPanel>
+        </div>
+      </div>
+    </AppShell>
+  );
+}

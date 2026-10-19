@@ -1,0 +1,85 @@
+import io
+import zipfile
+from uuid import uuid4
+
+import pytest
+
+from app.core import database as database_module
+from app.models.models import StorageUnitBatch
+import app.api.routes as routes_api
+
+class DummyTask:
+    id = "batch-task-1"
+
+
+@pytest.mark.anyio
+async def test_storage_batch_from_urls(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "Batch Owner",
+            "email": f"batch-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+
+    def fake_save_from_url(self, _url, prefix="batch_uploads"):
+        return f"./storage/{prefix}/{uuid4()}.jpg"
+
+    monkeypatch.setattr(routes_api.LocalStorage, "save_from_url", fake_save_from_url)
+    monkeypatch.setattr(routes_api, "enqueue_storage_unit_batch_pipeline", lambda batch_id, listing_ids: DummyTask())
+
+    payload = {
+        "image_urls": ["https://example.com/1.jpg", "https://example.com/2.jpg"],
+        "user_id": user_id,
+        "storage_unit_name": "Unit A",
+        "overnight_mode": False,
+    }
+    response = await async_client.post("/batch/storage-unit/from-urls", json=payload)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PROCESSING"
+    assert body["total_items"] == 2
+
+
+@pytest.mark.anyio
+async def test_storage_batch_zip_queued_and_run(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "Batch Owner",
+            "email": f"batch-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    monkeypatch.setattr(routes_api, "enqueue_storage_unit_batch_pipeline", lambda batch_id, listing_ids: DummyTask())
+
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, mode="w") as zf:
+        zf.writestr("photo1.jpg", b"fakejpg")
+        zf.writestr("photo2.png", b"fakepng")
+    archive.seek(0)
+
+    response = await async_client.post(
+        "/batch/storage-unit",
+        data={"user_id": str(user_id), "storage_unit_name": "Unit B", "overnight_mode": "true"},
+        files={"zip_file": ("photos.zip", archive.getvalue(), "application/zip")},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "QUEUED"
+
+    batch_id = body["id"]
+    run_response = await async_client.post(f"/batch/storage-unit/{batch_id}/run-overnight")
+    assert run_response.status_code == 200
+    assert run_response.json()["status"] == "PROCESSING"
+
+    db = database_module.SessionLocal()
+    batch = db.get(StorageUnitBatch, batch_id)
+    assert batch is not None
+    assert batch.pipeline_task_id == "batch-task-1"
+    db.close()

@@ -1,0 +1,1797 @@
+import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/router";
+import { Camera, Sparkles, Trash2, WandSparkles } from "lucide-react";
+
+import MarketplaceStatusPanel from "./MarketplaceStatusPanel";
+import StatusPill from "./StatusPill";
+import Button from "./ui/button";
+import PhotoEditorModal from "./PhotoEditorModal";
+import Input from "./ui/input";
+import Select from "./ui/select";
+import Textarea from "./ui/textarea";
+import Checkbox from "./ui/checkbox";
+import { toPublicImageUrl, searchEbayCategories, browseEbayCategories, fetchOptionPresets, fetchListingVariants, saveListingVariants } from "../lib/api";
+import { formatPosterProDate } from "../lib/dateTime";
+
+const PLATFORM_OPTIONS = [
+  "ebay",
+  "facebook",
+  "etsy",
+  "poshmark",
+  "mercari",
+  "depop",
+  "whatnot",
+  "vinted",
+];
+
+const MARKETPLACE_THEMES = {
+  ebay: { page: "bg-[#f8fbff]", header: "bg-[#00509d]", headerSoft: "bg-[#eff6ff]", accent: "text-[#00509d]", pill: "bg-[#e8f1ff] text-[#004084]" },
+  facebook: { page: "bg-[#f7fbff]", header: "bg-[#1877f2]", headerSoft: "bg-[#eef4ff]", accent: "text-[#1877f2]", pill: "bg-[#edf4ff] text-[#1654b8]" },
+  mercari: { page: "bg-[#fff8f5]", header: "bg-[#ea4c89]", headerSoft: "bg-[#fff1f6]", accent: "text-[#c81e5a]", pill: "bg-[#fff1f6] text-[#c81e5a]" },
+  poshmark: { page: "bg-[#fff7fb]", header: "bg-[#7d3cff]", headerSoft: "bg-[#f6f0ff]", accent: "text-[#6b21a8]", pill: "bg-[#f6f0ff] text-[#6b21a8]" },
+  etsy: { page: "bg-[#fffaf4]", header: "bg-[#f1641e]", headerSoft: "bg-[#fff4eb]", accent: "text-[#b54708]", pill: "bg-[#fff4eb] text-[#b54708]" },
+  depop: { page: "bg-[#f8fafc]", header: "bg-[#111827]", headerSoft: "bg-[#f3f4f6]", accent: "text-[#111827]", pill: "bg-[#f3f4f6] text-[#111827]" },
+  whatnot: { page: "bg-[#f7fbf7]", header: "bg-[#16a34a]", headerSoft: "bg-[#effaf1]", accent: "text-[#15803d]", pill: "bg-[#effaf1] text-[#15803d]" },
+  vinted: { page: "bg-[#f9fafb]", header: "bg-[#0f172a]", headerSoft: "bg-[#f8fafc]", accent: "text-[#0f172a]", pill: "bg-[#f8fafc] text-[#0f172a]" },
+};
+
+function marketplacePreviewTitle(market) {
+  if (market === "facebook") return "Facebook Marketplace";
+  if (market === "ebay") return "eBay";
+  return market;
+}
+
+function marketplaceTheme(market) {
+  return MARKETPLACE_THEMES[market] || MARKETPLACE_THEMES.ebay;
+}
+
+function isMarketplaceCategoryId(value) {
+  return /^\d+$/.test(String(value || "").trim());
+}
+
+function getCategoryPresentation(listing, previewEntry) {
+  const categorySuggestion = String(listing?.category_suggestion || previewEntry?.category_hint || listing?.detected_category_guess || "").trim();
+  const marketplaceCategoryId = isMarketplaceCategoryId(listing?.category_id) ? String(listing.category_id).trim() : "";
+  const legacyCategoryPath = !marketplaceCategoryId && String(listing?.category_id || "").trim() ? String(listing.category_id).trim() : "";
+  return {
+    categorySuggestion,
+    marketplaceCategoryId,
+    legacyCategoryPath,
+    displayCategory: categorySuggestion || legacyCategoryPath || "Category pending",
+  };
+}
+
+function formatShippingRule(price) {
+  const numeric = Number(price);
+  if (!Number.isFinite(numeric) || numeric <= 0) return "Shipping rule pending price";
+  return numeric < 10 ? "Buyer pays shipping under $10" : "Free shipping at $10+";
+}
+
+function deriveListingImages(listing) {
+  const seen = new Set();
+  const rawImages = Array.isArray(listing?.listing_images) ? listing.listing_images : [];
+  const fallbackImages = Array.isArray(listing?.image_urls) ? listing.image_urls : [];
+  const normalized = [];
+  rawImages.forEach((image, index) => {
+    if (!image || !image.storage_path) return;
+    const key = `${image.storage_path}|${image.source_url || ""}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    normalized.push({
+      ...image,
+      display_order: Number.isFinite(Number(image.display_order)) ? Number(image.display_order) : index,
+      role: image.role || (index === 0 ? "primary" : "alternate_angle"),
+      operator_state: image.operator_state || "suggested",
+      source_platform: image.source_platform || listing?.source_type || "upload",
+    });
+  });
+  fallbackImages.forEach((path, index) => {
+    const key = `${path}|`;
+    if (!path || seen.has(key)) return;
+    seen.add(key);
+    normalized.push({
+      storage_path: path,
+      display_order: normalized.length + index,
+      role: normalized.length ? "alternate_angle" : "primary",
+      operator_state: "approved",
+      source_platform: listing?.source_type || "upload",
+      confidence: 1,
+      is_reference: false,
+    });
+  });
+  return normalized.sort((a, b) => (a.display_order || 0) - (b.display_order || 0));
+}
+
+function sourceTone(sourcePlatform) {
+  switch (String(sourcePlatform || "").toLowerCase()) {
+    case "amazon":
+    case "amazon_vine":
+      return "bg-[#fff7ed] text-[#b54708]";
+    case "google_photos":
+      return "bg-[#eef4ff] text-[#2563eb]";
+    case "upload":
+    case "storage_batch":
+      return "bg-[#ecfdf3] text-[#027a48]";
+    default:
+      return "bg-[#f2f4f7] text-[#475467]";
+  }
+}
+
+function provenanceTone(source) {
+  switch (String(source || "").toLowerCase()) {
+    case "approximate":
+    case "default":
+      return "bg-[#fff7ed] text-[#b54708]";
+    case "derived":
+      return "bg-[#eff6ff] text-[#175cd3]";
+    case "existing":
+      return "bg-[#ecfdf3] text-[#027a48]";
+    default:
+      return "bg-[#f2f4f7] text-[#475467]";
+  }
+}
+
+function VariantPanel({ listing }) {
+  const [presets, setPresets] = useState([]);
+  const [data, setData] = useState({ options: [], variants: [] });
+  const [selectedPreset, setSelectedPreset] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  useEffect(() => {
+    let alive = true;
+    Promise.all([fetchOptionPresets(), fetchListingVariants(listing.id)]).then(([presetResult, variantResult]) => {
+      if (!alive) return;
+      setPresets(presetResult?.items || []);
+      setData(variantResult || { options: [], variants: [] });
+    }).catch(() => undefined);
+    return () => { alive = false; };
+  }, [listing.id]);
+  const applyPreset = () => {
+    const preset = presets.find((item) => String(item.id) === String(selectedPreset));
+    const axes = (preset?.axes || []).map((axis) => ({ name: axis.name, values: (axis.values || []).map((value) => ({ value })) }));
+    const first = axes[0];
+    const values = first?.values || [];
+    setData({ options: axes, variants: values.map((entry, index) => ({ values: { [first.name]: entry.value }, quantity_on_hand: 0, price: preset.default_price || listing.listing_price || listing.suggested_price || null, sku: `${String((listing.source_metadata || {}).sku || `PP-${listing.id}`)}-${String(entry.value).replace(/\\W+/g, "-").toUpperCase()}` })) });
+  };
+  const save = async () => {
+    setBusy(true); setMessage("");
+    try { const result = await saveListingVariants(listing.id, data); setData(result); setMessage("Variants saved."); }
+    catch (error) { setMessage(error?.message || "Could not save variants."); }
+    finally { setBusy(false); }
+  };
+  const updateVariant = (index, field, value) => setData((current) => ({ ...current, variants: current.variants.map((row, rowIndex) => rowIndex === index ? { ...row, [field]: field === "quantity_on_hand" ? Math.max(0, Number(value || 0)) : value } : row) }));
+  return <div className="mb-4 rounded-[14px] border border-[#dbeafe] bg-[#f8fbff] p-4">
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <div><p className="pp-editor-section-title">Variants / options</p><p className="pp-editor-section-copy">Canonical quantities, prices, and SKUs are shared across marketplace projections.</p></div>
+      <div className="flex flex-wrap items-center gap-2"><select aria-label="Variant preset" value={selectedPreset} onChange={(event) => setSelectedPreset(event.target.value)} className="h-9 rounded-lg border border-slate-300 bg-white px-2 text-sm"><option value="">Choose preset</option>{presets.map((preset) => <option key={preset.id} value={preset.id}>{preset.scope === "system" ? "System · " : "My preset · "}{preset.name}</option>)}</select><Button type="button" size="sm" variant="outline" onClick={applyPreset} disabled={!selectedPreset}>Apply</Button><Button type="button" size="sm" onClick={save} disabled={busy || !data.variants.length}>{busy ? "Saving…" : "Save variants"}</Button></div>
+    </div>
+    {!data.variants.length ? <p className="mt-3 text-sm text-slate-600">No variants configured. Apply a preset or add variant data when this product has options.</p> : <div className="mt-4 overflow-x-auto"><table className="min-w-full text-sm"><thead><tr className="border-b border-slate-200 text-left text-xs uppercase tracking-wide text-slate-500"><th className="px-2 py-2">Options</th><th className="px-2 py-2">SKU</th><th className="px-2 py-2">On hand</th><th className="px-2 py-2">Price</th><th className="px-2 py-2">Available</th></tr></thead><tbody>{data.variants.map((row, index) => <tr key={`${row.id || "new"}-${index}`} className="border-b border-slate-100"><td className="px-2 py-2 font-semibold">{Object.entries(row.values || {}).map(([key, value]) => `${key}: ${value}`).join(" / ")}</td><td className="px-2 py-2"><input className="h-8 w-40 rounded border border-slate-300 px-2" value={row.sku || ""} onChange={(event) => updateVariant(index, "sku", event.target.value)} /></td><td className="px-2 py-2"><input className="h-8 w-20 rounded border border-slate-300 px-2" type="number" min="0" value={row.quantity_on_hand ?? 0} onChange={(event) => updateVariant(index, "quantity_on_hand", event.target.value)} /></td><td className="px-2 py-2"><input className="h-8 w-24 rounded border border-slate-300 px-2" type="number" min="0" step="0.01" value={row.price ?? ""} onChange={(event) => updateVariant(index, "price", event.target.value)} /></td><td className="px-2 py-2">{Math.max(0, Number(row.quantity_on_hand || 0) - Number(row.quantity_reserved || 0))}</td></tr>)}</tbody></table></div>}
+    {message ? <p className="mt-2 text-sm text-slate-600">{message}</p> : null}
+  </div>;
+}
+
+function provenanceLabel(source) {
+  switch (String(source || "").toLowerCase()) {
+    case "approximate":
+      return "Approximate";
+    case "default":
+      return "Fallback";
+    case "derived":
+      return "Derived";
+    case "existing":
+      return "Exact";
+    default:
+      return "Unknown";
+  }
+}
+
+function MarketplacePreviewFrame({ market, listing, previewEntry, previewImages, statusMap, crosspostPreviewLoading }) {
+  const theme = marketplaceTheme(market);
+  const title = listing.title || "Draft title pending";
+  const price = listing.listing_price || listing.suggested_price || previewEntry?.price || 0;
+  const priceLabel = Number.isFinite(Number(price)) ? Number(price).toFixed(0) : String(price || "0");
+  const imageCount = previewImages.length;
+  const marketplaceName = marketplacePreviewTitle(market);
+  const notes = (previewEntry?.notes || []).slice(0, 4);
+  const imageColumns = previewImages.slice(1, 5);
+  const condition = listing.condition || previewEntry?.condition || "Condition pending";
+  const categoryPresentation = getCategoryPresentation(listing, previewEntry);
+  const shipping = previewEntry?.shipping_policy || previewEntry?.shipping || {};
+  const packageWeight = listing.shipping_profile?.package_weight || shipping?.package_weight || shipping?.weight || null;
+  const packageDimensions = listing.shipping_profile?.package_dimensions || shipping?.package_dimensions || null;
+  const dimensionText = packageDimensions && typeof packageDimensions === "object"
+    ? ["length", "width", "height"].map((key) => packageDimensions[key]).filter(Boolean).join(" × ")
+    : "";
+  const shippingRule = formatShippingRule(listing.listing_price || listing.suggested_price || previewEntry?.price);
+
+  return (
+    <div className="overflow-hidden rounded-[20px] border border-[#d0d5dd] bg-white shadow-[0_18px_50px_rgba(16,24,40,0.08)]">
+      <div className={`border-b px-4 py-3 ${theme.headerSoft}`}>
+        <div className="flex items-center gap-3">
+          <div className={`h-3 w-3 rounded-full ${theme.header}`} />
+          <div className="min-w-0">
+            <p className={`text-[11px] font-semibold uppercase tracking-[0.14em] ${theme.accent}`}>{marketplaceName} preview</p>
+            <p className="truncate text-sm font-semibold text-[#101828]">{title}</p>
+          </div>
+          <span className={`ml-auto rounded-full border px-2.5 py-1 text-[11px] font-semibold ${theme.pill}`}>
+            {crosspostPreviewLoading ? "Loading…" : statusMap[market] || "Draft"}
+          </span>
+        </div>
+      </div>
+
+      <div className={`px-4 py-4 ${theme.page}`}>
+        <div className="rounded-[16px] border border-[#d0d5dd] bg-white shadow-sm">
+          <div className={`flex items-center gap-2 border-b px-3 py-2 text-[11px] uppercase tracking-[0.14em] ${theme.headerSoft} ${theme.accent}`}>
+            <span className={`h-2.5 w-2.5 rounded-full ${theme.header}`} />
+            {marketplaceName} listing page
+          </div>
+          <div className="grid gap-0 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]">
+            <div className="border-b lg:border-b-0 lg:border-r">
+              <div className={`${theme.header} px-4 py-3 text-white`}>
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-sm font-semibold">{market === "ebay" ? "eBay" : "Marketplace"}</p>
+                  <div className="rounded-full bg-white/10 px-2 py-1 text-[11px] font-medium">
+                    {market === "ebay" ? "Buy It Now" : "Marketplace listing"}
+                  </div>
+                </div>
+                <div className="mt-3 flex items-center gap-2">
+                  <div className="h-2.5 flex-1 rounded-full bg-white/10" />
+                  <div className="h-2.5 w-16 rounded-full bg-white/20" />
+                </div>
+              </div>
+              <div className="p-4">
+                <div className="overflow-hidden rounded-[16px] border border-[#e5e7eb] bg-[#f9fafb]">
+                  {previewImages.length ? (
+                    <img
+                      src={toPublicImageUrl(previewImages[0])}
+                      alt={title}
+                      className="h-72 w-full object-cover"
+                    />
+                  ) : (
+                    <div className="flex h-72 items-center justify-center text-sm text-[#667085]">No listing image yet</div>
+                  )}
+                </div>
+                {imageColumns.length ? (
+                  <div className="mt-3 grid grid-cols-4 gap-2">
+                    {imageColumns.map((imageUrl, index) => (
+                      <div key={`${market}-${imageUrl}-${index}`} className="overflow-hidden rounded-[10px] border border-[#e5e7eb] bg-[#f9fafb]">
+                        <img src={toPublicImageUrl(imageUrl)} alt={`${title} image ${index + 2}`} className="h-16 w-full object-cover" />
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="space-y-4 p-4">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">{market === "ebay" ? "Item details" : "Marketplace summary"}</p>
+                <h3 className="mt-1 text-xl font-semibold text-[#101828]">{title}</h3>
+                <p className="mt-1 text-sm text-[#667085]">Listing #{listing.id} · {imageCount} image{imageCount === 1 ? '' : 's'}</p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <span className="pp-chip">${priceLabel}</span>
+                  <span className="pp-chip">{condition}</span>
+                  <span className="pp-chip">Category path {categoryPresentation.displayCategory}</span>
+                  {categoryPresentation.marketplaceCategoryId ? <span className="pp-chip">Marketplace category ID {categoryPresentation.marketplaceCategoryId}</span> : null}
+                  {packageWeight ? <span className="pp-chip">{packageWeight} lb</span> : null}
+                  {dimensionText ? <span className="pp-chip">{dimensionText} in</span> : null}
+                  <span className="pp-chip">{shippingRule}</span>
+                  {listing.quantity ? <span className="pp-chip">Qty {listing.quantity}</span> : null}
+                </div>
+                {categoryPresentation.legacyCategoryPath ? (
+                  <div className="mt-3 rounded-[12px] border border-[#fecdca] bg-[#fff6ed] px-3 py-2 text-xs text-[#b54708]">
+                    Legacy category text is currently stored in the marketplace category ID field. Move that value into Suggested category path and keep the marketplace category ID numeric.
+                  </div>
+                ) : null}
+              </div>
+
+              <div className={`rounded-[16px] border px-4 py-3 ${market === "ebay" ? "border-[#dbeafe] bg-[#eff6ff]" : "border-[#dbeafe] bg-[#eff6ff]"}`}>
+                <p className="text-sm font-semibold text-[#101828]">{market === "ebay" ? "About this item" : "Description"}</p>
+                <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-[#475467]">
+                  {listing.description || previewEntry?.description || "Description not generated yet."}
+                </p>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-2">
+                <div className="rounded-[14px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">Status</p>
+                  <p className="mt-2 text-sm font-semibold text-[#101828]">
+                    {crosspostPreviewLoading ? "Loading preview…" : statusMap[market] || "Draft"}
+                  </p>
+                </div>
+                <div className="rounded-[14px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">Shipping / delivery</p>
+                  <p className="mt-2 text-sm text-[#101828]">
+                    {market === "facebook"
+                      ? previewEntry?.delivery_method || "manual"
+                      : shipping?.service || shipping?.domestic_service || "Standard shipping"}
+                  </p>
+                  <p className="mt-2 text-xs font-medium text-[#667085]">{shippingRule}</p>
+                  {packageWeight || dimensionText ? (
+                    <p className="mt-2 text-xs text-[#667085]">
+                      {packageWeight ? `Weight ${packageWeight} lb` : ""}
+                      {packageWeight && dimensionText ? " · " : ""}
+                      {dimensionText ? `Size ${dimensionText} in` : ""}
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="rounded-[14px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">
+                  {market === "ebay" ? "Item specifics" : "Pickup / delivery"}
+                </p>
+                {market === "ebay" ? (
+                  <div className="mt-3 grid gap-2">
+                    {Object.entries(listing.item_specifics || {}).slice(0, 4).length ? (
+                      Object.entries(listing.item_specifics || {}).slice(0, 4).map(([key, value]) => (
+                        <div key={`${market}-${key}`} className="flex items-center justify-between gap-3 rounded-[10px] border border-[#eaecf0] bg-white px-3 py-2">
+                          <span className="text-sm text-[#667085]">{key}</span>
+                          <span className="text-sm font-semibold text-[#101828]">{String(value)}</span>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="text-sm text-[#667085]">Item specifics will appear here once the draft is enriched.</p>
+                    )}
+                  </div>
+                ) : (
+                  <p className="mt-2 text-sm text-[#475467]">
+                    {previewEntry?.meetup_notes || shipping?.facebook_meetup_notes || "Pickup and delivery details will appear here for Facebook Marketplace."}
+                  </p>
+                )}
+              </div>
+
+              {notes.length ? (
+                <div className="rounded-[14px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#667085]">Preview notes</p>
+                  <div className="mt-2 space-y-2">
+                    {notes.map((note) => (
+                      <p key={`${market}-${note}`} className="text-sm text-[#475467]">{note}</p>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default function ListingEditor({
+  listing,
+  pricingRecommendation,
+  listingIntelligence,
+  marketplacePreflights = {},
+  marketplacePayloadPreviews = {},
+  workflowPreferences,
+  templates = [],
+  onApplyTemplate,
+  onSaveTemplate,
+  onSave,
+  onGenerate,
+  onApprove,
+  onApproveAndNext,
+  onPublish,
+  onDelete,
+  onPhotoUpdated,
+  onRefreshPricing,
+  onApplyPricing,
+  onPricingDecision,
+  onRefreshMarketplacePreflight,
+  onSyncEbayListing,
+  onUploadPhotos,
+  onApprovePhotos,
+  onRejectPhotos,
+  onSetPrimaryPhoto,
+  publishState,
+  statuses,
+  crosspostPreview = [],
+  crosspostPreviewLoading = false,
+}) {
+  const [openEditor, setOpenEditor] = useState(false);
+  const [selectedTemplateId, setSelectedTemplateId] = useState("");
+  const [selectedPlatforms, setSelectedPlatforms] = useState(["ebay"]);
+  const [activePreviewMarket, setActivePreviewMarket] = useState("ebay");
+  const [showExcludedComps, setShowExcludedComps] = useState(false);
+  const [manualComp, setManualComp] = useState({ title: "", price: "", source_marketplace: "manual", condition: "" });
+  const [operatorPrice, setOperatorPrice] = useState(listing.listing_price || "");
+  const [operatorPriceReason, setOperatorPriceReason] = useState("");
+  const [newItemSpecific, setNewItemSpecific] = useState({ key: "", value: "" });
+  const [categoryQuery, setCategoryQuery] = useState("");
+  const [categoryResults, setCategoryResults] = useState([]);
+  const [browseNodes, setBrowseNodes] = useState([]);
+  const [browseTrail, setBrowseTrail] = useState([]);
+  const [conditionValue, setConditionValue] = useState(listing.condition || "");
+  const [pricingDecisionBusy, setPricingDecisionBusy] = useState(false);
+  const [pricingDecisionMessage, setPricingDecisionMessage] = useState("");
+  // Do not reset an explicit operator selection when the compact catalog
+  // refreshes and returns a stale summary row; the PATCH response is the
+  // authoritative value for this open editor.
+  useEffect(() => setConditionValue(listing.condition || ""), [listing.id]);
+  const persistCondition = async (value) => {
+    setConditionValue(value);
+    try { await onSave(listing.id, { condition: value }); }
+    catch (error) { setConditionValue(listing.condition || ""); }
+  };
+  const decidePricingRisk = async (action) => {
+    if (!onPricingDecision) return;
+    setPricingDecisionBusy(true);
+    setPricingDecisionMessage("");
+    try {
+      const result = await onPricingDecision(listing.id, action);
+      setPricingDecisionMessage(result?.status === "PAUSED_FOR_REVIEW" && result?.manual_end_required?.length
+        ? `Publishing is paused. ${result.manual_end_required.length} live marketplace listing(s) still require manual ending.`
+        : action === "auto_fix_price" && result?.jobs?.length
+          ? `Protected price applied. ${result.jobs.length} exact existing marketplace listing(s) queued for UPDATE; none will be recreated.`
+          : action === "auto_fix_price" ? "Protected price applied to this PosterPro listing." : action === "leave_price_as_is" ? "Your current price is preserved and this evidence has been acknowledged." : "Publishing is paused for this item.");
+    } catch (error) {
+      setPricingDecisionMessage(error?.message || "PosterPro could not complete that pricing action. Try again or review the item manually.");
+    } finally { setPricingDecisionBusy(false); }
+  };
+  const router = useRouter();
+  const requiresApproval = workflowPreferences?.review_before_publish ?? true;
+  const intelligence = listingIntelligence?.intelligence || {};
+  const draftMeta = listingIntelligence?.draft_meta || {};
+  const pricingAnalysis = listingIntelligence?.pricing_analysis || pricingRecommendation || {};
+  const readiness = listingIntelligence?.readiness || {};
+  const listingImages = useMemo(() => deriveListingImages(listing), [listing]);
+  const approvedActualImages = useMemo(() => listingImages.filter((image) => !image.is_reference && image.operator_state === "approved"), [listingImages]);
+  const pendingActualImages = useMemo(() => listingImages.filter((image) => !image.is_reference && image.operator_state !== "approved" && image.operator_state !== "rejected"), [listingImages]);
+  const referenceImages = useMemo(() => listingImages.filter((image) => image.is_reference && image.operator_state !== "rejected"), [listingImages]);
+  const rejectedImages = useMemo(() => listingImages.filter((image) => image.operator_state === "rejected"), [listingImages]);
+  const readinessSummary = readiness.review_summary || listing.readiness_summary || {};
+  const conditionData = listing.condition_data || {};
+  const shippingProfile = listing.shipping_profile || {};
+  const qualitySummary = readiness.quality_summary || listing.quality_summary || {};
+  const latestPublishAttempt = listing.latest_publish_attempt || null;
+  const preflightMap = marketplacePreflights || {};
+  const payloadPreviewMap = marketplacePayloadPreviews || {};
+  const categoryOptions = useMemo(() => {
+    const options = [];
+    const seen = new Set();
+    const push = (value, label) => {
+      const normalized = String(value || "").trim();
+      if (!normalized || seen.has(normalized)) return;
+      seen.add(normalized);
+      options.push({ value: normalized, label: label || normalized });
+    };
+    const categoryPresentation = getCategoryPresentation(listing, null);
+    push(categoryPresentation.categorySuggestion, `Suggested category path: ${categoryPresentation.categorySuggestion}`);
+    if (categoryPresentation.marketplaceCategoryId) {
+      push(categoryPresentation.marketplaceCategoryId, `Marketplace category ID: ${categoryPresentation.marketplaceCategoryId}`);
+    }
+    if (categoryPresentation.legacyCategoryPath) {
+      push(categoryPresentation.legacyCategoryPath, `Legacy category path: ${categoryPresentation.legacyCategoryPath}`);
+    }
+    push(intelligence.category_suggestion, `Intelligence: ${intelligence.category_suggestion}`);
+    push((listing.marketplace_data || {}).ebay_last_resolved_category?.category_id, `Resolved eBay ID: ${(listing.marketplace_data || {}).ebay_last_resolved_category?.category_id}`);
+    return options;
+  }, [intelligence.category_suggestion, listing.category_id, listing.category_suggestion, listing.marketplace_data]);
+  const runCategorySearch = async () => {
+    if (categoryQuery.trim().length < 2) return;
+    try { const result = await searchEbayCategories(categoryQuery.trim()); setCategoryResults(result.results || []); }
+    catch (error) { setCategoryResults([]); }
+  };
+  const openCategoryBrowser = async (parent = "", label = "All Categories", trail = browseTrail) => {
+    try { const result = await browseEbayCategories(parent); setBrowseNodes(result.categories || []); setBrowseTrail(parent ? [...trail, { id: parent, label }] : []); } catch (error) { setBrowseNodes([]); }
+  };
+  const persistManualCategory = async (node, path) => {
+    const breadcrumb = path.filter(Boolean).join(" > ");
+    await onSave(listing.id, { category_id: String(node.category_id), category_suggestion: breadcrumb || node.category_name, source_metadata: { ...(listing.source_metadata || {}), category_name: node.category_name, category_path: breadcrumb || node.category_name, taxonomy_tree_id: node.taxonomy_tree_id || listing.source_metadata?.taxonomy_tree_id, leaf_verified: node.leaf_verified !== false, publishable: node.publishable !== false, category_provenance: "MANUAL_OPERATOR", category_selected_at: new Date().toISOString() } });
+    setBrowseNodes([]); setBrowseTrail([]); setCategoryResults([]);
+  };
+  const conditionOptions = [
+    "New",
+    "Used",
+    "Open box",
+    "Refurbished",
+    "Pre-owned",
+    "For parts or not working",
+    "Parts only",
+    "Unknown",
+  ];
+  const ebaySpecificsProvenance = useMemo(
+    () => ({
+      ...((latestPublishAttempt?.payload_snapshot && latestPublishAttempt.payload_snapshot.item_specifics_provenance) || {}),
+      ...((listing?.marketplace_data && listing.marketplace_data.ebay_item_specifics_provenance) || {}),
+      ...((payloadPreviewMap?.ebay && payloadPreviewMap.ebay.item_specifics_provenance) || {}),
+    }),
+    [latestPublishAttempt?.payload_snapshot, listing?.marketplace_data, payloadPreviewMap],
+  );
+  const approximateSpecificFields = useMemo(
+    () => new Set([
+      ...((latestPublishAttempt?.payload_snapshot && latestPublishAttempt.payload_snapshot.item_specifics_approximate) || []),
+      ...((listing?.marketplace_data && listing.marketplace_data.ebay_item_specifics_approximate) || []),
+      ...((payloadPreviewMap?.ebay && payloadPreviewMap.ebay.item_specifics_approximate) || []),
+    ].filter(Boolean)),
+    [latestPublishAttempt?.payload_snapshot, listing?.marketplace_data, payloadPreviewMap],
+  );
+
+  const statusMap = useMemo(() => {
+    const map = {};
+    (statuses || []).forEach((row) => {
+      map[row.marketplace] = row.status;
+    });
+    return map;
+  }, [statuses]);
+  const previewMap = useMemo(() => {
+    const map = {};
+    (crosspostPreview || []).forEach((entry) => {
+      if (!entry?.marketplace) return;
+      map[entry.marketplace] = entry;
+    });
+    return map;
+  }, [crosspostPreview]);
+  const previewImages = useMemo(() => {
+    return listingImages
+      .filter((image) => image.operator_state !== "rejected")
+      .map((image) => image.storage_path)
+      .filter(Boolean);
+  }, [listingImages]);
+  const activePreviewEntry = previewMap[activePreviewMarket] || null;
+  const visibleComps = showExcludedComps
+    ? [...(pricingAnalysis?.included_comps || []), ...(pricingAnalysis?.excluded_comps || [])]
+    : (pricingAnalysis?.included_comps || pricingAnalysis?.comparables || []);
+
+  const uploadActualPhotos = async (files) => {
+    const validFiles = Array.from(files || []);
+    if (!validFiles.length || !onUploadPhotos) return;
+    await onUploadPhotos(listing.id, validFiles);
+  };
+
+  const approvePhoto = async (storagePath) => {
+    if (onApprovePhotos) {
+      await onApprovePhotos(listing.id, [storagePath]);
+      return;
+    }
+    await persistListingImages(listingImages.map((entry) => String(entry.storage_path) === String(storagePath) ? { ...entry, operator_state: "approved", operator_approved: true, operator_rejected: false, is_reference: false } : entry));
+  };
+
+  const rejectPhoto = async (storagePath) => {
+    if (onRejectPhotos) {
+      await onRejectPhotos(listing.id, [storagePath]);
+      return;
+    }
+    await persistListingImages(listingImages.map((entry) => String(entry.storage_path) === String(storagePath) ? { ...entry, operator_state: "rejected", operator_approved: false, operator_rejected: true } : entry));
+  };
+
+  const setPrimaryPhoto = async (storagePath, index) => {
+    if (onSetPrimaryPhoto) {
+      await onSetPrimaryPhoto(listing.id, storagePath);
+      return;
+    }
+    await persistListingImages([listingImages[index], ...listingImages.filter((_, entryIndex) => entryIndex !== index)]);
+  };
+
+  const renderImageCard = (image, index, groupLabel) => (
+    <div key={`${image.storage_path}-${index}-${groupLabel}`} className="rounded-[14px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+      <div className="overflow-hidden rounded-[12px] border border-[#e5e7eb] bg-white">
+        <img src={toPublicImageUrl(image.storage_path)} alt={`${listing.title || "Listing"} image ${index + 1}`} style={{ width: "100%", height: 112, maxHeight: 112, objectFit: "cover", display: "block" }} className="w-full object-cover" />
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${sourceTone(image.source_platform)}`}>{image.source_platform || "upload"}</span>
+        <span className="rounded-full bg-[#f2f4f7] px-2.5 py-1 text-[11px] font-semibold text-[#475467]">{image.role || "alternate_angle"}</span>
+        <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${image.is_reference ? "bg-[#fff7ed] text-[#b54708]" : "bg-[#ecfdf3] text-[#027a48]"}`}>
+          {image.is_reference ? "Reference image, not publishable" : image.operator_state === "approved" ? "Actual item photo, approved" : image.operator_state === "rejected" ? "Rejected" : "Actual item photo, pending review"}
+        </span>
+      </div>
+      <p className="mt-2 text-xs text-[#667085]">
+        Source: {image.source_platform || "upload"} · State: {image.operator_state || "suggested"} · Reference: {image.is_reference ? "yes" : "no"}
+      </p>
+      {image.warning ? <p className="mt-2 text-xs text-[#b54708]">{image.warning}</p> : null}
+      <div className="mt-3 flex flex-wrap gap-2">
+        {image.operator_state !== "approved" ? <Button size="sm" variant="outline" onClick={() => approvePhoto(image.storage_path)}>Approve</Button> : null}
+        {image.operator_state !== "rejected" ? <Button size="sm" variant="outline" onClick={() => rejectPhoto(image.storage_path)}>Reject</Button> : null}
+        <Button size="sm" variant="outline" onClick={() => setPrimaryPhoto(image.storage_path, listingImages.findIndex((entry) => entry.storage_path === image.storage_path))}>Set primary</Button>
+      </div>
+    </div>
+  );
+
+  const persistListingImages = async (nextImages) => {
+    const normalized = nextImages.map((image, index) => ({
+      ...image,
+      display_order: index,
+      role: index === 0 ? "primary" : (image.role === "primary" ? "alternate_angle" : (image.role || "alternate_angle")),
+    }));
+    await onSave(listing.id, {
+      listing_images: normalized,
+      image_urls: normalized.filter((image) => image.operator_state !== "rejected").map((image) => image.storage_path).filter(Boolean),
+    });
+  };
+
+  const updateConditionField = async (field, value) => {
+    await onSave(listing.id, {
+      condition_data: {
+        ...conditionData,
+        [field]: value,
+      },
+    });
+  };
+
+  const updateShippingField = async (field, value) => {
+    const nextProfile = { ...shippingProfile, [field]: value };
+    if (field === "parcel_measurement_confirmed" || field === "package_weight" || field === "package_dimensions") {
+      const confirmed = field === "parcel_measurement_confirmed" && Boolean(value);
+      const provenance = { ...(shippingProfile.provenance || {}) };
+      const estimatedFields = (shippingProfile.estimated_fields || []).filter((name) => !["package_weight", "package_dimensions"].includes(name));
+      const hasWeight = nextProfile.package_weight !== null && nextProfile.package_weight !== undefined && String(nextProfile.package_weight).trim() !== "";
+      const dimensions = nextProfile.package_dimensions || {};
+      const hasDimensions = ["length", "width", "height"].every((key) => Number(dimensions[key]) > 0);
+      if (confirmed) {
+        if (hasWeight) provenance.package_weight = "operator_measured_packed_parcel";
+        if (hasDimensions) provenance.package_dimensions = "operator_measured_packed_parcel";
+        nextProfile.estimated_fields = estimatedFields;
+        nextProfile.estimated = estimatedFields.length > 0;
+        nextProfile.manual_measurement_needed = !hasWeight || !hasDimensions;
+      } else {
+        if (hasWeight) {
+          provenance.package_weight = "operator_entered_unverified";
+          estimatedFields.push("package_weight");
+        } else delete provenance.package_weight;
+        if (hasDimensions) {
+          provenance.package_dimensions = "operator_entered_unverified";
+          estimatedFields.push("package_dimensions");
+        } else delete provenance.package_dimensions;
+        nextProfile.parcel_measurement_confirmed = false;
+        nextProfile.estimated_fields = [...new Set(estimatedFields)];
+        nextProfile.estimated = nextProfile.estimated_fields.length > 0;
+        nextProfile.manual_measurement_needed = true;
+      }
+      nextProfile.provenance = provenance;
+    }
+    await onSave(listing.id, {
+      shipping_profile: nextProfile,
+    });
+  };
+
+  const updateItemSpecificField = async (field, value) => {
+    const nextSpecifics = { ...(listing.item_specifics || {}) };
+    if (value === null || value === undefined || String(value).trim() === "") {
+      delete nextSpecifics[field];
+    } else {
+      nextSpecifics[field] = value;
+    }
+    await onSave(listing.id, {
+      item_specifics: nextSpecifics,
+    });
+  };
+
+  const addItemSpecificField = async () => {
+    const key = String(newItemSpecific.key || "").trim();
+    const value = String(newItemSpecific.value || "").trim();
+    if (!key || !value) return;
+    await updateItemSpecificField(key, value);
+    setNewItemSpecific({ key: "", value: "" });
+  };
+
+  const addManualComp = async () => {
+    if (!manualComp.title || !manualComp.price) return;
+    const existingManual = Array.isArray(listing?.marketplace_data?.pricing_manual_comps)
+      ? listing.marketplace_data.pricing_manual_comps
+      : [];
+    await onSave(listing.id, {
+      marketplace_data: {
+        ...(listing.marketplace_data || {}),
+        pricing_manual_comps: [
+          ...existingManual,
+          {
+            ...manualComp,
+            price: Number(manualComp.price),
+            comp_type: "manual",
+          },
+        ],
+      },
+    });
+    setManualComp({ title: "", price: "", source_marketplace: "manual", condition: "" });
+    if (onRefreshPricing) {
+      await onRefreshPricing(listing.id);
+    }
+  };
+
+  const syncListingWithEbay = async () => {
+    if (!onSyncEbayListing || !listing.ebay_listing_id) return;
+    await onSyncEbayListing(listing.id);
+  };
+
+  const togglePlatform = (platform) => {
+    setSelectedPlatforms((prev) =>
+      prev.includes(platform)
+        ? prev.filter((p) => p !== platform)
+        : [...prev, platform],
+    );
+  };
+
+  const scrollToSection = (sectionId) => {
+    if (typeof document === "undefined") return;
+    const node = document.getElementById(sectionId);
+    if (node) {
+      node.scrollIntoView({ behavior: "smooth", block: "start" });
+      if (typeof node.focus === "function") {
+        node.focus({ preventScroll: true });
+      }
+    }
+  };
+
+  const handlePreflightFix = async (issue, market) => {
+    const code = String(issue?.code || "").toUpperCase();
+    if (code.includes("TITLE")) {
+      scrollToSection("listing-title-field");
+      return;
+    }
+    if (code.includes("PRICE") || code.includes("PRICING")) {
+      scrollToSection("listing-pricing-section");
+      if (code.includes("WEAK")) {
+        await onRefreshPricing?.(listing.id);
+      }
+      return;
+    }
+    if (code.includes("PHOTO") || code.includes("IMAGE")) {
+      scrollToSection("listing-image-section");
+      return;
+    }
+    if (code.includes("CONDITION")) {
+      scrollToSection("listing-condition-section");
+      return;
+    }
+    if (code.includes("SHIPPING") || code.includes("WEIGHT") || code.includes("DIMENSION")) {
+      scrollToSection("listing-shipping-section");
+      return;
+    }
+    if (code.includes("CATEGORY")) {
+      scrollToSection("listing-category-section");
+      return;
+    }
+    if (code.includes("ASPECT") || code.includes("SPECIFIC")) {
+      scrollToSection("listing-item-specifics-section");
+      return;
+    }
+    if (code.includes("POLICY")) {
+      await router.push("/settings?tab=ebay");
+    }
+    if (market === "facebook" && code.includes("BRIDGE")) {
+      await router.push("/settings?tab=marketplaces");
+    }
+  };
+
+  const renderPreflightIssue = (issue, market, type = "blocker") => {
+    const tone = type === "warning" ? "border-[#fef0c7] bg-[#fffaeb] text-[#8a4b10]" : "border-[#fecdca] bg-[#fff6ed] text-[#7a2e0b]";
+    return (
+      <div key={`${market}-${type}-${issue.code}`} className={`rounded-[10px] border p-3 text-sm ${tone}`}>
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="font-semibold">{issue.message}</p>
+            {issue.fix_hint ? <p className="mt-1 text-xs opacity-90">{issue.fix_hint}</p> : null}
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            {issue.retryable ? <span className="rounded-full border border-current px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.08em]">Retryable</span> : null}
+            {typeof handlePreflightFix === "function" ? (
+              <Button size="sm" variant="outline" onClick={() => handlePreflightFix(issue, market)}>
+                Fix
+              </Button>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderPublishAttemptStatus = (attempt) => {
+    const status = String(attempt?.marketplace_status || '').toLowerCase();
+    if (['posted', 'published', 'completed'].includes(status)) return 'success';
+    if (['queued', 'running', 'posting'].includes(status)) return 'info';
+    if (status === 'failed') return 'danger';
+    if (attempt?.dry_run || status.startsWith('dry_run')) return 'warning';
+    if (status === 'skipped') return 'default';
+    return 'default';
+  };
+
+  return (
+    <div className="h-full" data-tour="view-inventory">
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <h3 className="text-base font-semibold text-[#101828]">Listing #{listing.id}</h3>
+        <StatusPill status={listing.ebay_publish_status || listing.status} />
+      </div>
+      <p className="mb-4 text-sm text-[#667085]">
+        Tighten the draft, set pricing, and publish when it is ready.
+      </p>
+
+      <div className="mb-4 grid gap-4 rounded-[16px] border border-[#d9e2ef] bg-gradient-to-br from-[#f8fbff] to-white p-4 lg:grid-cols-[180px_1fr] lg:items-center">
+        <div className="h-36 overflow-hidden rounded-[12px] border border-[#dbe4f0] bg-[#eef3f8]">
+          {listingImages[0]?.storage_path ? <img src={toPublicImageUrl(listingImages[0].storage_path)} alt="Primary listing image" className="h-full w-full object-contain" /> : <div className="flex h-full items-center justify-center px-3 text-center text-xs font-semibold uppercase tracking-wide text-[#667085]">Add primary photo</div>}
+        </div>
+        <div className="min-w-0">
+          <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#667085]">Listing identity</p>
+          <h2 className="mt-1 truncate text-xl font-bold tracking-tight text-[#101828]">{listing.title || "Draft title pending"}</h2>
+          <div className="mt-3 grid gap-2 text-sm sm:grid-cols-3"><div><span className="pp-editor-field-label">Brand</span><p className="font-semibold">{listing.brand || "Pending"}</p></div><div><span className="pp-editor-field-label">Condition</span><p className="font-semibold">{listing.condition || "Pending"}</p></div><div><span className="pp-editor-field-label">Price</span><p className="font-semibold">{listing.listing_price || listing.suggested_price ? `$${Number(listing.listing_price || listing.suggested_price).toFixed(2)}` : "Pending"}</p></div></div>
+        </div>
+      </div>
+
+      <div className="mb-4 grid gap-3 md:grid-cols-2">
+        <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-4">
+          <p className="text-sm font-semibold text-[#101828]">Review gate</p>
+          <p className="mt-2 text-sm text-[#667085]">
+            {requiresApproval
+              ? 'This workspace requires an approval step before publish.'
+              : 'This workspace allows direct publish from draft or ready states.'}
+          </p>
+        </div>
+        <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-4">
+          <p className="text-sm font-semibold text-[#101828]">Current preview mode</p>
+          <p className="mt-2 text-sm text-[#667085]">
+            {workflowPreferences?.listing_preview_mode === 'marketplace' ? 'Marketplace-style listing preview' : 'Editor-first draft layout'}
+          </p>
+        </div>
+        <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-4">
+          <p className="text-sm font-semibold text-[#101828]">Listing quality</p>
+          <p className="mt-2 text-sm text-[#667085]">
+            {qualitySummary.score != null ? `${qualitySummary.score}/100 · ${String(qualitySummary.status || 'needs_review').replaceAll('_', ' ')}` : 'Quality scoring pending'}
+          </p>
+        </div>
+        <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-4">
+          <p className="text-sm font-semibold text-[#101828]">Shipping rule</p>
+          <p className="mt-2 text-sm text-[#667085]">
+            {Number(listing.listing_price || listing.suggested_price || 0) > 0 && Number(listing.listing_price || listing.suggested_price || 0) < 10
+              ? 'Under $10: buyer pays shipping by default.'
+              : 'At $10 or above: free shipping is the default.'}
+          </p>
+        </div>
+      </div>
+
+      {latestPublishAttempt ? (
+        <div id="listing-publish-attempt" className="mb-4 rounded-[14px] border border-[#e5e7eb] bg-white p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold text-[#101828]">Latest publish attempt</p>
+              <p className="mt-1 text-sm text-[#667085]">
+                Shows the most recent queued, dry-run, or live attempt so operators can see what happened without opening raw job JSON.
+              </p>
+            </div>
+            <StatusPill
+              status={renderPublishAttemptStatus(latestPublishAttempt)}
+              label={String(latestPublishAttempt.marketplace_status || (latestPublishAttempt.dry_run ? 'dry_run' : 'unknown')).replaceAll('_', ' ')}
+            />
+          </div>
+          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+              <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Marketplace</p>
+              <p className="mt-2 text-sm font-semibold text-[#101828]">{latestPublishAttempt.marketplace || 'unknown'}</p>
+            </div>
+            <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+              <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Marketplace listing id</p>
+              <p className="mt-2 text-sm font-semibold text-[#101828]">{latestPublishAttempt.marketplace_listing_id || 'pending'}</p>
+            </div>
+            <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+              <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Payload hash</p>
+              <p className="mt-2 break-all text-xs text-[#101828]">{latestPublishAttempt.payload_hash || 'not recorded'}</p>
+            </div>
+            <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+              <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Retry count</p>
+              <p className="mt-2 text-sm font-semibold text-[#101828]">{latestPublishAttempt.retry_count || 0}</p>
+            </div>
+          </div>
+          <div className="mt-3 grid gap-3 md:grid-cols-2">
+            <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+              <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Translated error</p>
+              <p className="mt-2 text-sm text-[#101828]">
+                {latestPublishAttempt.translated_error?.user_message || latestPublishAttempt.translated_error?.fix_hint || latestPublishAttempt.raw_error || 'No error recorded.'}
+              </p>
+              {latestPublishAttempt.translated_error?.fix_hint ? (
+                <p className="mt-2 text-sm text-[#667085]">{latestPublishAttempt.translated_error.fix_hint}</p>
+              ) : null}
+            </div>
+            <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+              <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Timing</p>
+              <p className="mt-2 text-sm text-[#101828]">
+                {latestPublishAttempt.started_at ? `Started ${formatPosterProDate(latestPublishAttempt.started_at)}` : 'Start time unavailable'}
+              </p>
+              <p className="mt-1 text-sm text-[#101828]">
+                {latestPublishAttempt.finished_at ? `Finished ${formatPosterProDate(latestPublishAttempt.finished_at)}` : 'Still running or not finished'}
+              </p>
+            </div>
+          </div>
+          {latestPublishAttempt.retryable ? (
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button size="sm" variant="outline" onClick={() => onPublish(listing.id, [latestPublishAttempt.marketplace])}>
+                Retry latest attempt
+              </Button>
+            </div>
+          ) : null}
+          <details className="mt-3 rounded-[10px] border border-[#eaecf0] bg-white p-3">
+            <summary className="cursor-pointer text-sm font-semibold text-[#101828]">Raw diagnostics</summary>
+            <div className="mt-3 space-y-2 text-xs text-[#667085]">
+              <p>Attempt ID: {latestPublishAttempt.id}</p>
+              <p>Preflight status: {latestPublishAttempt.preflight_status || 'unknown'}</p>
+              <p>Inventory SKU: {latestPublishAttempt.inventory_item_sku || 'unknown'}</p>
+              <p>Offer ID: {latestPublishAttempt.offer_id || 'unknown'}</p>
+              <pre className="overflow-auto rounded-[10px] bg-[#0b1120] p-3 text-[11px] text-[#cbd5e1]">
+                {JSON.stringify(latestPublishAttempt, null, 2)}
+              </pre>
+            </div>
+          </details>
+        </div>
+      ) : null}
+
+      <div id="listing-image-section" className="mb-4 rounded-[14px] border border-[#e5e7eb] bg-white p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold text-[#101828]">Marketplace readiness</p>
+            <p className="mt-1 text-sm text-[#667085]">Inspect exactly what each marketplace still needs before eBay publish or Facebook assisted handoff.</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" variant="outline" onClick={() => onRefreshMarketplacePreflight?.(listing.id)}>Refresh preflight</Button>
+            {listing.ebay_listing_id ? (
+              <Button size="sm" variant="outline" onClick={syncListingWithEbay}>
+                Push updates to eBay
+              </Button>
+            ) : null}
+            <Button size="sm" variant="ghost" onClick={() => onRefreshPricing?.(listing.id)}>Refresh pricing</Button>
+          </div>
+        </div>
+        <div className="mt-4 grid gap-3 xl:grid-cols-2">
+          {['ebay', 'facebook', 'mercari', 'vinted', 'offerup', 'poshmark', 'etsy', 'depop'].map((market) => {
+            const preflight = preflightMap[market] || null;
+            const payloadPreview = payloadPreviewMap[market] || null;
+            const blockers = preflight?.preparation_blockers || preflight?.blockers || [];
+            const warnings = preflight?.preparation_warnings || preflight?.warnings || [];
+            const connectionBlockers = preflight?.connection_blockers || [];
+            const preparationStatus = preflight?.preparation_status || preflight?.status || 'pending';
+            const category = preflight?.category_summary || {};
+            const policy = preflight?.policy_summary || {};
+            return (
+              <div key={`preflight-${market}`} className="rounded-[14px] border border-[#e5e7eb] bg-[#fcfcfd] p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold capitalize text-[#101828]">{market}</p>
+                    <p className="mt-1 text-xs text-[#667085]">
+                      {`Listing data: ${preparationStatus.replaceAll('_', ' ')} · Publish access: ${preflight?.execution_status || preflight?.status || 'not checked'}`}
+                      {category?.category_name ? ` · ${category.category_name}` : ''}
+                    </p>
+                  </div>
+                  <StatusPill status={preparationStatus === 'blocked' ? 'danger' : preparationStatus === 'ready_with_warnings' ? 'warning' : preparationStatus === 'ready' ? 'success' : 'info'} label={preparationStatus.replaceAll('_', ' ')} />
+                </div>
+                <div className="mt-3 grid gap-2 md:grid-cols-2">
+                  <div className="rounded-[10px] border border-[#eaecf0] bg-white p-3">
+                    <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Blockers</p>
+                    <p className="mt-1 text-lg font-semibold text-[#101828]">{blockers.length}</p>
+                  </div>
+                  <div className="rounded-[10px] border border-[#eaecf0] bg-white p-3">
+                    <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Warnings</p>
+                    <p className="mt-1 text-lg font-semibold text-[#101828]">{warnings.length}</p>
+                  </div>
+                </div>
+                <div className="mt-3 grid gap-2">
+                  {connectionBlockers.map((issue, index) => <p key={`connection-${issue.code || index}`} className="rounded-[10px] border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900"><span className="font-semibold">Not publishable through this account yet:</span> {issue.message || issue.code}</p>)}
+                  {(preflight?.missing_fields || []).length ? (
+                    <div className="rounded-[10px] border border-[#fecdca] bg-[#fff6ed] p-3">
+                      <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#b54708]">Missing fields</p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {preflight.missing_fields.map((field) => <span key={`${market}-${field}`} className="pp-chip">{field}</span>)}
+                      </div>
+                    </div>
+                  ) : null}
+                  {(blockers || []).slice(0, 4).map((issue) => renderPreflightIssue(issue, market, "blocker"))}
+                  {(!blockers || !blockers.length) && !(warnings || []).length ? (
+                    <p className="text-sm text-[#667085]">No blockers detected for this marketplace.</p>
+                  ) : null}
+                  {(warnings || []).slice(0, 2).map((issue) => renderPreflightIssue(issue, market, "warning"))}
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Button size="sm" variant="outline" onClick={() => onRefreshMarketplacePreflight?.(listing.id)}>Rerun preflight</Button>
+                  <Button size="sm" variant="secondary" onClick={() => setActivePreviewMarket(market)}>Open preview</Button>
+                </div>
+                <div className="mt-3 grid gap-2 text-xs text-[#667085]">
+                  {market === 'ebay' ? (
+                    <>
+                      <p>Payment policy: {policy.payment_policy_id || 'missing'}</p>
+                      <p>Fulfillment policy: {policy.fulfillment_policy_id || 'missing'}</p>
+                      <p>Return policy: {policy.return_policy_id || 'missing'}</p>
+                      <p>Merchant location: {policy.merchant_location_key || 'missing'}</p>
+                    </>
+                  ) : (
+                    <>
+                      <p>Assisted workflow: {policy.assisted_publish ? 'yes' : 'manual'}</p>
+                      <p>Bridge required: {policy.browser_bridge_required ? 'yes' : 'no'}</p>
+                      <p>Final submit: {policy.final_submit_supported ? 'yes' : 'handoff only'}</p>
+                    </>
+                  )}
+                </div>
+                <details className="mt-3 rounded-[10px] border border-[#eaecf0] bg-white p-3">
+                  <summary className="cursor-pointer text-sm font-semibold text-[#101828]">Advanced payload preview</summary>
+                  <pre className="mt-3 overflow-auto rounded-[10px] bg-[#0b1120] p-3 text-xs text-[#cbd5e1]">{JSON.stringify(payloadPreview, null, 2)}</pre>
+                </details>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <VariantPanel listing={listing} />
+
+      <div className="mb-4 rounded-[14px] border border-[#e5e7eb] bg-white p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="pp-editor-section-title">Image review</p>
+            <p className="pp-editor-section-copy">Approve the actual item photos, keep source/reference images clearly labeled, and set the primary image before publish.</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <span className="pp-chip">{listingImages.length} attached</span>
+            <span className="pp-chip">{Number(readinessSummary.actual_image_count || 0)} actual item</span>
+            <span className="pp-chip">{Number(readinessSummary.reference_image_count || 0)} reference</span>
+            <label className="inline-flex cursor-pointer items-center rounded-[10px] border border-[#d0d5dd] bg-white px-3 py-2 text-sm font-medium text-[#101828]">
+              Upload actual photos
+              <input
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                multiple
+                className="hidden"
+                onChange={async (event) => {
+                  const files = event.target.files;
+                  await uploadActualPhotos(files);
+                  event.target.value = "";
+                }}
+              />
+            </label>
+          </div>
+        </div>
+        {readinessSummary.manual_photo_needed ? (
+          <div className="mt-3 rounded-[12px] border border-[#fecdca] bg-[#fff6ed] px-3 py-2 text-sm text-[#b54708]">
+            Only source/reference photos are attached right now. Add or approve actual item photos before publishing.
+          </div>
+        ) : null}
+        <div className="mt-4 space-y-4">
+          <div>
+            <p className="mb-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Actual item photos, approved</p>
+            <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+              {approvedActualImages.map((image, index) => renderImageCard(image, index, "approved"))}
+            </div>
+          </div>
+          <div>
+            <p className="mb-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Actual item photos, pending review</p>
+            <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+              {pendingActualImages.map((image, index) => renderImageCard(image, index, "pending"))}
+            </div>
+          </div>
+          <div>
+            <p className="mb-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Reference/source images</p>
+            <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+              {referenceImages.map((image, index) => renderImageCard(image, index, "reference"))}
+            </div>
+          </div>
+          {rejectedImages.length ? (
+            <div>
+              <p className="mb-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Rejected images</p>
+              <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+                {rejectedImages.map((image, index) => renderImageCard(image, index, "rejected"))}
+              </div>
+            </div>
+          ) : null}
+          {!listingImages.length ? (
+            <div className="rounded-[12px] border border-dashed border-[#d0d5dd] bg-[#fcfcfd] p-4 text-sm text-[#667085]">
+              No images attached yet. Upload item photos or import source/reference images before publishing.
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="mb-4 grid gap-4 xl:grid-cols-2">
+        <div id="listing-condition-section" className="rounded-[14px] border border-[#e5e7eb] bg-white p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold text-[#101828]">Condition review</p>
+              <p className="mt-1 text-sm text-[#667085]">Do not assume new condition. Keep imported/open-box items cautious until verified.</p>
+            </div>
+            <span className="pp-chip">{Math.round(Number(conditionData.condition_confidence || 0) * 100)}% confidence</span>
+          </div>
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+          <div>
+            <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Condition label</label>
+            <Select
+              className="mt-1 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]"
+              value={conditionValue}
+              onChange={(e) => { void persistCondition(e.target.value); }}
+            >
+              <option value="">Select condition</option>
+              {conditionOptions.map((option) => (
+                <option key={option} value={option}>{option}</option>
+              ))}
+            </Select>
+            <Input
+              className="mt-3"
+              value={conditionValue}
+              placeholder="Needs review / Used / Open box"
+              onChange={(e) => { void persistCondition(e.target.value); }}
+            />
+          </div>
+            <div>
+              <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Condition bucket</label>
+              <Select className="mt-1" value={conditionData.condition_bucket || "needs_review"} onChange={(e) => updateConditionField("condition_bucket", e.target.value)}>
+                {["needs_review","open_box_or_used_unknown","open_box","used","new_in_box","parts_only","import_condition_unverified"].map((option) => (
+                  <option key={option} value={option}>{option.replaceAll("_", " ")}</option>
+                ))}
+              </Select>
+            </div>
+          </div>
+          <div className="mt-3 grid gap-2 md:grid-cols-2">
+            {[
+              ["open_box", "Open box"],
+              ["new_in_box", "New in box"],
+              ["used", "Used"],
+              ["parts_only", "Parts only"],
+              ["missing_accessories", "Missing accessories"],
+            ].map(([key, label]) => (
+              <Checkbox key={key} checked={Boolean(conditionData[key])} onChange={(e) => updateConditionField(key, e.target.checked)} label={label} className="rounded-[10px] border border-[#e5e7eb] bg-[#fcfcfd] px-3 py-2" />
+            ))}
+          </div>
+          <div className="mt-3">
+            <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Condition notes</label>
+            <Textarea
+              defaultValue={conditionData.item_condition_notes || ""}
+              className="mt-1 min-h-24"
+              placeholder="Describe wear, testing status, packaging condition, and included accessories."
+              onBlur={(e) => updateConditionField("item_condition_notes", e.target.value)}
+            />
+          </div>
+        </div>
+
+        <div id="listing-shipping-section" className="rounded-[14px] border border-[#e5e7eb] bg-white p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold text-[#101828]">Shipping readiness</p>
+              <p className="mt-1 text-sm text-[#667085]">Track estimated versus verified package data before eBay publish.</p>
+            </div>
+            <span className="pp-chip">
+              {shippingProfile.estimated
+                ? "Estimated shipping"
+                : shippingProfile.manual_measurement_needed
+                  ? "Needs measurement"
+                  : "Measurements present"}
+            </span>
+          </div>
+          {shippingProfile.estimated ? (
+            <div className="mt-3 rounded-[12px] border border-[#fecdca] bg-[#fff6ed] px-3 py-2 text-xs text-[#b54708]">
+              Shipping values are estimated from Vine draft data and should be reviewed before final publish.
+            </div>
+          ) : null}
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            <div className="md:col-span-2 rounded-lg border border-amber-200 bg-amber-50 p-3">
+              <Checkbox
+                checked={Boolean(shippingProfile.parcel_measurement_confirmed)}
+                onChange={(event) => updateShippingField("parcel_measurement_confirmed", event.target.checked)}
+                label="I measured the final packed parcel (not just the item)"
+              />
+              <p className="mt-1 text-xs text-amber-900">Changing weight or dimensions clears this confirmation. Estimated/default values cannot be sent as measured shipping facts.</p>
+            </div>
+            <div>
+              <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Package weight</label>
+              <Input type="number" defaultValue={shippingProfile.package_weight || ""} placeholder="lb" onBlur={(e) => updateShippingField("package_weight", e.target.value ? Number(e.target.value) : null)} />
+            </div>
+            <div>
+              <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Shipping class</label>
+              <Select className="mt-1" value={shippingProfile.shipping_class_suggestion || "usps_ground_advantage"} onChange={(e) => updateShippingField("shipping_class_suggestion", e.target.value)}>
+                {["usps_ground_advantage","standard_ground","priority_mail","ups_ground","local_pickup_only","manual_review"].map((option) => (
+                  <option key={option} value={option}>{option === "usps_ground_advantage" ? "USPS Ground Advantage" : option.replaceAll("_", " ")}</option>
+                ))}
+              </Select>
+            </div>
+          </div>
+          <div className="mt-3 grid gap-3 md:grid-cols-3">
+            {["length","width","height"].map((key) => (
+              <div key={key}>
+                <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Package {key}</label>
+                <Input
+                  type="number"
+                  defaultValue={(shippingProfile.package_dimensions || {})[key] || ""}
+                  placeholder="in"
+                  onBlur={(e) => updateShippingField("package_dimensions", {
+                    ...(shippingProfile.package_dimensions || {}),
+                    [key]: e.target.value ? Number(e.target.value) : null,
+                  })}
+                />
+              </div>
+            ))}
+          </div>
+          <div className="mt-3 grid gap-2 md:grid-cols-2">
+            {[
+              ["fragile", "Fragile"],
+              ["oversize", "Oversized"],
+              ["battery", "Battery"],
+              ["liquid", "Liquid"],
+              ["hazmat", "Hazmat review"],
+              ["local_pickup_recommended", "Local pickup recommended"],
+            ].map(([key, label]) => (
+              <Checkbox key={key} checked={Boolean(shippingProfile[key])} onChange={(e) => updateShippingField(key, e.target.checked)} label={label} className="rounded-[10px] border border-[#e5e7eb] bg-[#fcfcfd] px-3 py-2" />
+            ))}
+          </div>
+          <div className="mt-4 grid gap-2">
+            {Object.entries(readinessSummary.shipping_checklist || {}).map(([key, value]) => (
+              <div key={key} className="flex items-center justify-between rounded-[10px] border border-[#e5e7eb] bg-[#fcfcfd] px-3 py-2 text-sm">
+                <span className="text-[#475467]">{key.replaceAll("_", " ")}</span>
+                <span className={value ? "text-[#027a48]" : "text-[#b42318]"}>{value ? "Yes" : "No"}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="mb-4 flex flex-wrap items-center gap-2 rounded-[12px] border border-[#e5e7eb] bg-[#f9fafb] p-3">
+        <Select
+          className="h-10 rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828] outline-none transition focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+          value={selectedTemplateId}
+          onChange={(e) => setSelectedTemplateId(e.target.value)}
+        >
+          <option value="">Use Template…</option>
+          {templates.map((template) => (
+            <option key={template.id} value={String(template.id)}>
+              {template.name}
+            </option>
+          ))}
+        </Select>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={!selectedTemplateId}
+          onClick={() =>
+            onApplyTemplate(listing.id, Number(selectedTemplateId))
+          }
+        >
+          Apply Template
+        </Button>
+        <Button
+          size="sm"
+          variant="secondary"
+          onClick={() =>
+            onSaveTemplate({
+              user_id: listing.user_id,
+              name: `${listing.category_suggestion || listing.category_id || "General"} Defaults`,
+              category_id: listing.category_id || null,
+              is_category_default: true,
+              fields: {
+                title: listing.title,
+                description: listing.description,
+                condition: listing.condition,
+                listing_price: listing.listing_price || listing.suggested_price,
+              },
+            })
+          }
+        >
+          Save as Default
+        </Button>
+      </div>
+
+      <div className="space-y-3">
+        <Input
+          id="listing-title-field"
+          defaultValue={listing.title || ""}
+          placeholder="Short clear title (ex: Vintage Canon camera with lens)"
+          onBlur={(e) => onSave(listing.id, { title: e.target.value })}
+          title="This is the headline buyers see first."
+        />
+        <Textarea
+          id="listing-description-field"
+          defaultValue={listing.description || ""}
+          placeholder="Describe condition, size, defects, accessories, and what is included."
+          className="min-h-56"
+          onBlur={(e) => onSave(listing.id, { description: e.target.value })}
+          title="Explain the item in plain words so anyone can understand quickly."
+        />
+        <Input
+          id="listing-price-field"
+          type="number"
+          defaultValue={listing.listing_price ?? listing.suggested_price ?? ""}
+          placeholder="Current listing price"
+          onBlur={(e) =>
+            onSave(listing.id, { listing_price: Number(e.target.value) })
+          }
+          title="Set the current asking price used by the listing and marketplace payload."
+        />
+      </div>
+
+      <div id="listing-category-section" className="mt-4 rounded-[14px] border border-[#e5e7eb] bg-white p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold text-[#101828]">Category</p>
+            <p className="mt-1 text-sm text-[#667085]">Category suggestion/path is the human-readable review path. Marketplace category ID is the publish-time taxonomy value.</p>
+          </div>
+          <span className="pp-chip">{getCategoryPresentation(listing, null).displayCategory}</span>
+        </div>
+        <div className="mt-3 rounded-[12px] border border-blue-100 bg-blue-50 p-3">
+          <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#175cd3]">Search or browse real eBay taxonomy</label>
+          <div className="mt-2 flex gap-2"><Input value={categoryQuery} onChange={(e)=>setCategoryQuery(e.target.value)} placeholder="electronic project kit" onKeyDown={(e)=>{if(e.key==='Enter'){e.preventDefault();runCategorySearch();}}}/><Button type="button" variant="outline" onClick={runCategorySearch}>Search</Button></div>
+          <Button type="button" className="mt-2" variant="outline" onClick={() => openCategoryBrowser()}>Browse categories</Button>
+          {categoryResults.length ? <div className="mt-2 space-y-2">{categoryResults.map((result)=><div key={result.category_id} className="rounded-lg border bg-white p-2 text-left text-sm"><b>{result.category_name}</b><span className="block text-xs text-slate-500">{result.breadcrumb} · ID {result.category_id}</span>{result.publishable && result.leaf_verified ? <Button type="button" size="sm" className="mt-2" onClick={() => persistManualCategory(result, [result.breadcrumb || result.category_name])}>Select verified leaf</Button> : <span className="mt-2 block text-xs text-amber-700">{result.leaf_verified === false ? "Non-leaf / not publishable" : "Taxonomy verification unavailable"} — browse to resolve</span>}</div>)}</div>:null}
+          {browseNodes.length ? <div className="mt-2 space-y-2"><div className="flex flex-wrap items-center gap-1 text-xs text-slate-500"><Button type="button" size="sm" variant="outline" onClick={() => openCategoryBrowser()}>All Categories</Button>{browseTrail.map((x, index) => <span key={x.id} className="flex items-center gap-1">›<Button type="button" size="sm" variant="outline" onClick={() => openCategoryBrowser(x.id, x.label, browseTrail.slice(0, index))}>{x.label}</Button></span>)}{browseTrail.length ? <Button type="button" size="sm" variant="outline" onClick={() => { const parent = browseTrail.length > 1 ? browseTrail[browseTrail.length - 2] : null; openCategoryBrowser(parent?.id || "", parent?.label || "All Categories", browseTrail.slice(0, -2)); }}>Back</Button> : null}</div>{browseNodes.map((node) => <div key={node.category_id} className="flex items-center justify-between rounded-lg border bg-white p-2 text-sm"><span><b>{node.category_name}</b> <small className="text-slate-500">ID {node.category_id} · {node.publishable && node.leaf ? "verified leaf" : node.has_children ? "parent" : "verification unknown"}</small></span>{node.has_children ? <Button type="button" size="sm" variant="outline" onClick={() => openCategoryBrowser(node.category_id, node.category_name)}>Open</Button> : node.publishable && node.leaf ? <Button type="button" size="sm" onClick={() => persistManualCategory(node, ['All Categories', ...browseTrail.map((x) => x.label), node.category_name])}>Select</Button> : <span className="text-xs text-amber-700">Not verified</span>}</div>)}</div> : null}
+        </div>
+        <div className="mt-4 grid gap-3 md:grid-cols-2">
+          <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+            <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Suggested category path</label>
+            {categoryOptions.length ? (
+              <Select
+                id="listing-category-suggestion-field"
+                className="mt-1 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]"
+                value={getCategoryPresentation(listing, null).categorySuggestion || getCategoryPresentation(listing, null).legacyCategoryPath || ""}
+                onChange={(e) => onSave(listing.id, { category_suggestion: e.target.value })}
+                title="Pick the closest reviewed category suggestion."
+              >
+                <option value="">Select a category suggestion</option>
+                {categoryOptions.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </Select>
+            ) : null}
+            <Input
+              className="mt-3"
+              defaultValue={getCategoryPresentation(listing, null).categorySuggestion || getCategoryPresentation(listing, null).legacyCategoryPath || ""}
+              placeholder="Toys & Games > Educational Toys"
+              onBlur={(e) => onSave(listing.id, { category_suggestion: e.target.value })}
+              title="Human-readable category suggestion used during review."
+            />
+          </div>
+          <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+            <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Marketplace category ID</label>
+            <Select
+              id="listing-category-field"
+              className="mt-1 h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828]"
+              value={getCategoryPresentation(listing, null).marketplaceCategoryId}
+              onChange={(e) => onSave(listing.id, { category_id: e.target.value })}
+              title="Marketplace-specific category ID used for publishing."
+            >
+              <option value="">Select marketplace category ID</option>
+              {categoryOptions.filter((option) => /^\d+$/.test(option.value)).map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </Select>
+            {!getCategoryPresentation(listing, null).marketplaceCategoryId && getCategoryPresentation(listing, null).legacyCategoryPath ? (
+              <p className="mt-2 text-xs text-[#b54708]">Current value looks like a category path, not a numeric marketplace category ID.</p>
+            ) : (
+              <p className="mt-2 text-xs text-[#667085]">Leave blank until the marketplace taxonomy ID is known.</p>
+            )}
+          </div>
+        </div>
+        <p className="mt-3 text-xs text-[#667085]">
+          If the review path looks better than the current marketplace category ID, keep the suggestion field updated and resolve the numeric category ID separately before publish.
+        </p>
+      </div>
+
+      <div className="mt-4 rounded-[14px] border border-[#e5e7eb] bg-white p-4">
+        <div className="mb-4 grid gap-3 md:grid-cols-3">
+          <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Draft quality</p>
+            <p className="mt-2 text-lg font-semibold text-[#101828]">{draftMeta.draft_quality || intelligence.draft_quality || 'Pending'}</p>
+          </div>
+          <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Generation source</p>
+            <p className="mt-2 text-lg font-semibold capitalize text-[#101828]">{draftMeta.generation_source || intelligence.generation_source || 'Fallback'}</p>
+          </div>
+          <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Readiness</p>
+            <p className="mt-2 text-lg font-semibold text-[#101828]">{readiness.ready_for_publish ? 'Publishable' : 'Review required'}</p>
+          </div>
+        </div>
+
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+          <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+            <p className="text-sm font-semibold text-[#101828]">Missing information</p>
+            <div className="mt-3 space-y-2">
+              {(intelligence.missing_information || []).length ? (
+                intelligence.missing_information.map((item) => (
+                  <div key={item} className="rounded-[10px] border border-[#e5e7eb] bg-white px-3 py-2 text-sm text-[#667085]">
+                    {item}
+                  </div>
+                ))
+              ) : (
+                <p className="text-sm text-[#667085]">No missing-information checklist has been generated yet.</p>
+              )}
+            </div>
+          </div>
+          <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+            <p className="text-sm font-semibold text-[#101828]">Photo review notes</p>
+            <div className="mt-3 space-y-2">
+              {(intelligence.photo_notes || []).length ? (
+                intelligence.photo_notes.map((item) => (
+                  <div key={item} className="rounded-[10px] border border-[#e5e7eb] bg-white px-3 py-2 text-sm text-[#667085]">
+                    {item}
+                  </div>
+                ))
+              ) : (
+                <p className="text-sm text-[#667085]">No photo review notes available.</p>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div id="listing-item-specifics-section" className="mt-4 rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+          <p className="text-sm font-semibold text-[#101828]">Suggested item specifics</p>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[#667085]">
+            <span>Edit the actual values here so the eBay preflight can clear required aspects.</span>
+            {approximateSpecificFields.size ? <span className="pp-chip">{approximateSpecificFields.size} approximated</span> : null}
+          </div>
+          <div className="mt-3 grid gap-2 md:grid-cols-2">
+            {Object.entries(listing.item_specifics || {}).length ? (
+              Object.entries(listing.item_specifics || {}).map(([key, value]) => (
+                <div key={key} className="rounded-[10px] border border-[#e5e7eb] bg-white px-3 py-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">{key}</p>
+                    <span className={`rounded-full px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] ${provenanceTone(ebaySpecificsProvenance[key] || (approximateSpecificFields.has(key) ? "approximate" : ""))}`}>
+                      {provenanceLabel(ebaySpecificsProvenance[key] || (approximateSpecificFields.has(key) ? "approximate" : ""))}
+                    </span>
+                    <Button size="sm" variant="ghost" onClick={() => updateItemSpecificField(key, "")}>Clear</Button>
+                  </div>
+                  <Input
+                    className="mt-2"
+                    defaultValue={String(value)}
+                    placeholder={`Value for ${key}`}
+                    onBlur={(e) => updateItemSpecificField(key, e.target.value)}
+                  />
+                </div>
+              ))
+            ) : (
+              <p className="text-sm text-[#667085]">No structured specifics generated yet.</p>
+            )}
+          </div>
+          <div className="mt-4 grid gap-2 md:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)_auto]">
+            <Input
+              value={newItemSpecific.key}
+              placeholder="Specific name"
+              onChange={(e) => setNewItemSpecific((current) => ({ ...current, key: e.target.value }))}
+            />
+            <Input
+              value={newItemSpecific.value}
+              placeholder="Specific value"
+              onChange={(e) => setNewItemSpecific((current) => ({ ...current, value: e.target.value }))}
+            />
+            <Button variant="outline" onClick={addItemSpecificField}>Add item specific</Button>
+          </div>
+        </div>
+
+        <div className="mt-4 rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+          <p className="text-sm font-semibold text-[#101828]">Sold-comps search prompts</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {(intelligence.research_queries || []).length ? (
+              intelligence.research_queries.map((query) => (
+                <span key={query} className="pp-chip">{query}</span>
+              ))
+            ) : (
+              <p className="text-sm text-[#667085]">No search prompts generated yet.</p>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div id="listing-pricing-section" className="mt-4 rounded-[14px] border border-[#e5e7eb] bg-white p-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold text-[#101828]">Pricing reasoning</p>
+            <p className="mt-1 text-sm text-[#667085]">Use this before approving or changing the asking price.</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {pricingAnalysis?.recommended_price ? (
+              <span className="rounded-full border border-[#dbe7ff] bg-[#eef4ff] px-3 py-1 text-xs font-semibold text-[#2563eb]">
+                Recommend ${pricingAnalysis.recommended_price}
+              </span>
+            ) : null}
+            {pricingAnalysis?.warning ? (
+              <span className="rounded-full border border-[#fecdca] bg-[#fff6ed] px-3 py-1 text-xs font-semibold text-[#b54708]">
+                {pricingAnalysis.warning}
+              </span>
+            ) : null}
+            {pricingAnalysis?.stale ? (
+              <span className="rounded-full border border-[#fecdca] bg-[#fff6ed] px-3 py-1 text-xs font-semibold text-[#b54708]">
+                Pricing stale
+              </span>
+            ) : null}
+          </div>
+        </div>
+        {pricingAnalysis?.underpricing_risk && ["POTENTIAL", "SEVERE"].includes(pricingAnalysis.underpricing_risk.level) ? (
+          <div role="alert" className={`mt-4 rounded-xl border p-4 ${pricingAnalysis.underpricing_risk.level === "SEVERE" ? "border-red-300 bg-red-50" : "border-amber-300 bg-amber-50"}`}>
+            <p className="font-semibold text-slate-950">{pricingAnalysis.underpricing_risk.acknowledged ? "Price risk acknowledged" : pricingAnalysis.underpricing_risk.level === "SEVERE" ? "Severe underpricing risk" : "Potential underpricing detected"}</p>
+            <p className="mt-1 text-sm text-slate-700">Current ${pricingAnalysis.underpricing_risk.current_price} is {pricingAnalysis.underpricing_risk.percent_below_sold_median}% below the ${pricingAnalysis.underpricing_risk.sold_median} median of {pricingAnalysis.underpricing_risk.sold_comparable_count} relevant sold comparables. These are evidence-backed matches, not an AI-only estimate.</p>
+            {!pricingAnalysis.underpricing_risk.acknowledged ? <div className="mt-3 flex flex-wrap gap-2"><Button disabled={pricingDecisionBusy} variant="outline" onClick={() => decidePricingRisk("leave_price_as_is")}>LEAVE PRICE AS IS</Button><Button disabled={pricingDecisionBusy} onClick={() => decidePricingRisk("auto_fix_price")}>AUTO-FIX PRICE</Button><Button disabled={pricingDecisionBusy} variant="danger" onClick={() => decidePricingRisk("pause_listing")}>PAUSE LISTING</Button></div> : null}
+            {pricingDecisionMessage ? <p aria-live="polite" className="mt-3 text-sm font-medium text-slate-800">{pricingDecisionMessage}</p> : null}
+          </div>
+        ) : null}
+        {pricingAnalysis?.external_research_status ? (
+          <div className="mt-3 rounded-[12px] border border-[#e5e7eb] bg-[#f8fafc] p-3 text-sm">
+            <p className="font-medium text-[#344054]">External price research · {pricingAnalysis.external_research_status}</p>
+            <p className="mt-1 text-[#667085]">Source: {pricingAnalysis.external_research_source || 'unavailable'}{pricingAnalysis.external_research_query ? ` · query: ${pricingAnalysis.external_research_query}` : ''}{pricingAnalysis.external_research_date ? ` · ${pricingAnalysis.external_research_date}` : ''}</p>
+            <p className="mt-1 text-[#667085]">Active asking results: {pricingAnalysis.external_active_asking_count ?? 0} · external sold results: {pricingAnalysis.external_sold_comparable_count ?? 0}. Active asking prices are not sold evidence.</p>
+            {pricingAnalysis.external_research_warning ? <p className="mt-1 text-amber-800">{pricingAnalysis.external_research_warning}</p> : null}
+            {pricingAnalysis.external_research_error ? <p role="alert" className="mt-1 text-red-700">{pricingAnalysis.external_research_error}</p> : null}
+          </div>
+        ) : null}
+        <div className="mt-4 grid gap-3 md:grid-cols-3">
+          <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Current price</p>
+            <p className="mt-2 text-lg font-semibold text-[#101828]">${listing.listing_price ?? pricingAnalysis?.current_price ?? listing.suggested_price ?? '0'}</p>
+          </div>
+          <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Sold comps baseline</p>
+            <p className="mt-2 text-lg font-semibold text-[#101828]">${pricingAnalysis?.market_avg_sold ?? '0'}</p>
+          </div>
+          <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Confidence</p>
+            <p className="mt-2 text-lg font-semibold text-[#101828]">{pricingAnalysis?.price_confidence ? `${Math.round(pricingAnalysis.price_confidence * 100)}%` : pricingAnalysis?.confidence ? `${Math.round(pricingAnalysis.confidence * 100)}%` : 'Pending'}</p>
+          </div>
+        </div>
+        <div className="mt-3 grid gap-3 md:grid-cols-2">
+          <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Comparable sales used</p>
+            <p className="mt-2 text-lg font-semibold text-[#101828]">
+              {pricingAnalysis?.comp_count_used ?? ((pricingAnalysis?.historical_comparable_count || 0) + (pricingAnalysis?.external_comparable_count || 0))}
+            </p>
+          </div>
+          <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">External market avg</p>
+            <p className="mt-2 text-lg font-semibold text-[#101828]">${pricingAnalysis?.external_market_avg_sold ?? '0'}</p>
+          </div>
+        </div>
+        <div className="mt-3 grid gap-3 md:grid-cols-4">
+          <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Quick sale</p>
+            <p className="mt-2 text-lg font-semibold text-[#101828]">${pricingAnalysis?.quick_sale_price ?? '0'}</p>
+          </div>
+          <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Floor</p>
+            <p className="mt-2 text-lg font-semibold text-[#101828]">${pricingAnalysis?.floor_price ?? '0'}</p>
+          </div>
+          <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Stretch</p>
+            <p className="mt-2 text-lg font-semibold text-[#101828]">${pricingAnalysis?.stretch_price ?? '0'}</p>
+          </div>
+          <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Marketplace priority</p>
+            <p className="mt-2 text-lg font-semibold capitalize text-[#101828]">{pricingAnalysis?.recommended_marketplace_priority || 'ebay'}</p>
+          </div>
+        </div>
+        {pricingAnalysis?.recommendation_eligible === false ? (
+          <div role="alert" className="mt-3 rounded-xl border border-amber-300 bg-amber-50 p-3">
+            <p className="text-sm font-medium text-amber-950">Not a researched price recommendation</p>
+            <p className="mt-1 text-sm text-amber-900">{pricingAnalysis.publication_price_blocker || pricingAnalysis.fallback_reason || 'Comparable or source-price evidence is missing. Do not treat this estimate as a market price.'}</p>
+            <div className="mt-3 grid gap-2 md:grid-cols-[160px_1fr_auto]">
+              <Input type="number" min="0.01" step="0.01" aria-label="Operator-entered price" placeholder="Your price" value={operatorPrice} onChange={(event) => setOperatorPrice(event.target.value)} />
+              <Input aria-label="Reason for operator-entered price" placeholder="Why this price is reasonable" value={operatorPriceReason} onChange={(event) => setOperatorPriceReason(event.target.value)} />
+              <Button size="sm" disabled={!Number(operatorPrice) || !operatorPriceReason.trim()} onClick={() => onApplyPricing?.(listing.id, { operator_entered_price: Number(operatorPrice), override_reason: operatorPriceReason.trim() })}>Save operator price</Button>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button size="sm" variant="outline" onClick={() => onApplyPricing?.(listing.id, { strategy: 'recommended' })}>Apply list price</Button>
+            <Button size="sm" variant="outline" onClick={() => onApplyPricing?.(listing.id, { strategy: 'quick_sale' })}>Apply quick-sale</Button>
+            <Button size="sm" variant="outline" onClick={() => onApplyPricing?.(listing.id, { strategy: 'floor' })}>Apply floor</Button>
+            <Button size="sm" variant="secondary" onClick={() => onRefreshPricing?.(listing.id)}>Rerun pricing</Button>
+            <Button size="sm" variant="ghost" onClick={() => setShowExcludedComps((value) => !value)}>
+              {showExcludedComps ? 'Hide excluded comps' : 'Show excluded comps'}
+            </Button>
+          </div>
+        )}
+        <div className="mt-3 rounded-[12px] border border-[#e5e7eb] bg-[#f8fafc] p-3">
+          <p className="text-sm text-[#475467]">
+            {pricingAnalysis?.pricing_explanation || pricingAnalysis?.reasoning || 'Pricing reasoning becomes richer once historical sold data and external comps are available for this item.'}
+          </p>
+        </div>
+        {pricingAnalysis?.condition_adjustment_explanation ? (
+          <p className="mt-3 text-sm text-[#667085]">{pricingAnalysis.condition_adjustment_explanation}</p>
+        ) : null}
+        {pricingAnalysis?.shipping_price_interaction_note ? (
+          <p className="mt-1 text-sm text-[#667085]">{pricingAnalysis.shipping_price_interaction_note}</p>
+        ) : null}
+        {(pricingAnalysis?.comparable_titles || []).length ? (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {pricingAnalysis.comparable_titles.map((title) => (
+              <span key={title} className="pp-chip">{title}</span>
+            ))}
+          </div>
+        ) : null}
+        <div className="mt-4 rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm font-semibold text-[#101828]">Comparable listings</p>
+            <span className="text-xs text-[#667085]">{visibleComps.length} shown</span>
+          </div>
+          <div className="mt-3 space-y-2">
+            {visibleComps.length ? visibleComps.map((comp, index) => (
+              <div key={`${comp.source_marketplace}-${comp.title}-${index}`} className="rounded-[10px] border border-[#e5e7eb] bg-white px-3 py-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-medium text-[#101828]">{comp.title}</p>
+                    <p className="text-xs text-[#667085]">
+                      {comp.source_marketplace} · {comp.comp_type} · {comp.condition || 'condition unknown'}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-sm font-semibold text-[#101828]">${comp.price} {comp.currency || 'USD'}</p>
+                    <p className="text-xs text-[#667085]">{comp.shipping_price == null ? 'shipping not returned' : `+ $${comp.shipping_price} shipping`}</p>
+                    <p className="text-xs text-[#667085]">{Math.round(Number(comp.relevance_score || comp.confidence || 0) * 100)}% relevance</p>
+                  </div>
+                </div>
+                <p className="mt-2 text-xs text-[#667085]">
+                  {comp.include ? (comp.reason_included || 'Included') : (comp.reason_excluded || 'Excluded')}{comp.research_date ? ` · researched ${comp.research_date}` : ''}
+                </p>
+                {comp.match_rationale ? <p className="mt-1 text-xs text-[#667085]">Evidence: {comp.match_rationale}</p> : null}
+                {comp.source_url && /^https:\/\//i.test(comp.source_url) ? <a className="mt-1 inline-block text-xs text-blue-700 underline" href={comp.source_url} target="_blank" rel="noreferrer">Open source listing</a> : null}
+              </div>
+            )) : (
+              <p className="text-sm text-[#667085]">No comparable listings available yet.</p>
+            )}
+          </div>
+        </div>
+        <div className="mt-4 rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
+          <p className="text-sm font-semibold text-[#101828]">Manual comp entry</p>
+          <div className="mt-3 grid gap-3 md:grid-cols-4">
+            <Input value={manualComp.title} placeholder="Comp title" onChange={(e) => setManualComp((current) => ({ ...current, title: e.target.value }))} />
+            <Input type="number" value={manualComp.price} placeholder="Price" onChange={(e) => setManualComp((current) => ({ ...current, price: e.target.value }))} />
+            <Input value={manualComp.condition} placeholder="Condition" onChange={(e) => setManualComp((current) => ({ ...current, condition: e.target.value }))} />
+            <Button size="sm" onClick={addManualComp}>Add manual comp</Button>
+          </div>
+        </div>
+      </div>
+
+      {workflowPreferences?.listing_preview_mode === 'marketplace' ? (
+        <div className="mt-4 rounded-[14px] border border-[#e5e7eb] bg-white p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold text-[#101828]">Marketplace preview</p>
+              <p className="text-xs text-[#667085]">These are styled like the live marketplace pages so you can review before approval/publish.</p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {PLATFORM_OPTIONS.map((market) => {
+                const selected = activePreviewMarket === market;
+                const mode = previewMap[market]?.execution_mode || null;
+                return (
+                  <Button
+                    key={`preview-${market}`}
+                    type="button"
+                    onClick={() => setActivePreviewMarket(market)}
+                    variant="tertiary"
+                    className={`rounded-full border px-3 py-1 text-xs font-semibold capitalize transition ${
+                      selected ? 'border-[#2563eb] !bg-[#eef4ff] !text-[#2563eb]' : 'border-[#e5e7eb] !bg-white !text-[#475467]'
+                    }`}
+                  >
+                    {market}
+                    {mode ? ` · ${String(mode).replace('_', ' ')}` : ''}
+                  </Button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-4 xl:grid-cols-2">
+            <MarketplacePreviewFrame
+              market="ebay"
+              listing={listing}
+              previewEntry={previewMap.ebay || activePreviewEntry}
+              previewImages={previewImages}
+              statusMap={statusMap}
+              crosspostPreviewLoading={crosspostPreviewLoading}
+            />
+          <MarketplacePreviewFrame
+            market="facebook"
+            listing={listing}
+            previewEntry={previewMap.facebook || activePreviewEntry}
+            previewImages={previewImages}
+            statusMap={statusMap}
+            crosspostPreviewLoading={crosspostPreviewLoading}
+          />
+        </div>
+        <div className="mt-4 grid gap-4 xl:grid-cols-3">
+          {['etsy', 'mercari', 'poshmark', 'depop', 'whatnot', 'vinted']
+            .filter((market) => previewMap[market] || selectedPlatforms.includes(market))
+            .slice(0, 3)
+            .map((market) => (
+              <div key={`extra-preview-${market}`} className="overflow-hidden rounded-[16px] border border-[#e5e7eb] bg-white shadow-sm">
+                <div className={`px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.14em] ${market === 'mercari' ? 'bg-[#f0f9ff] text-[#2563eb]' : market === 'etsy' ? 'bg-[#fff7ed] text-[#b54708]' : 'bg-[#f9fafb] text-[#667085]'}`}>
+                  {marketplacePreviewTitle(market)} mock preview
+                </div>
+                <div className="grid grid-cols-[88px_minmax(0,1fr)] gap-3 p-3">
+                  <div className="overflow-hidden rounded-[12px] border border-[#e5e7eb] bg-[#f9fafb]">
+                    {previewImages.length ? (
+                      <img src={toPublicImageUrl(previewImages[0])} alt={`${market} preview`} className="h-24 w-full object-cover" />
+                    ) : (
+                      <div className="flex h-24 items-center justify-center text-xs text-[#667085]">No photo</div>
+                    )}
+                  </div>
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-[#101828]">{title}</p>
+                    <p className="mt-1 text-sm font-semibold text-[#2563eb]">${priceLabel}</p>
+                    <p className="mt-1 text-xs text-[#667085]">{category}</p>
+                    <p className="mt-2 line-clamp-3 text-xs leading-5 text-[#475467]">
+                      {previewMap[market]?.description || listing.description || 'Marketplace-specific preview will appear here when data is available.'}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            ))}
+        </div>
+      </div>
+      ) : null}
+
+      <div className="mt-4 flex flex-wrap gap-2">
+        <Button
+          variant="outline"
+          onClick={() => setOpenEditor(true)}
+          title="Open premium photo editor."
+        >
+          <Camera size={16} /> Edit photos
+        </Button>
+        <Button
+          variant="secondary"
+          onClick={() => onGenerate(listing.id)}
+          title="Use AI to improve title and description."
+        >
+          <WandSparkles size={16} /> AI Enhance
+        </Button>
+        {listing.needs_review || listing.restricted_review_required || listing.status === 'draft' ? (
+          <>
+            <Button variant="outline" onClick={() => onApprove(listing.id)} title="Move this draft from review into the ready queue.">
+              Approve Draft
+            </Button>
+            <Button variant="outline" onClick={() => (onApproveAndNext ? onApproveAndNext(listing.id) : onApprove(listing.id))} title="Approve this draft and move to the next listing in the current queue.">
+              Approve & Next
+            </Button>
+          </>
+        ) : null}
+        {onDelete ? (
+          <Button
+            variant="danger"
+            onClick={() => onDelete(listing.id)}
+            title="Permanently delete this listing and its attached media."
+          >
+            <Trash2 size={16} /> Delete
+          </Button>
+        ) : null}
+        <Button
+          disabled={publishState.loading || !selectedPlatforms.length || (requiresApproval && listing.status !== 'ready')}
+          onClick={() => onPublish(listing.id, selectedPlatforms)}
+          data-tour="publish"
+          title="Publish this listing to selected marketplaces."
+        >
+          <Sparkles size={16} />{" "}
+          {publishState.loading ? "Publishing..." : "Publish Selected"}
+        </Button>
+      </div>
+
+      <div className="mt-4">
+        <p className="mb-2 text-sm font-semibold text-[#101828]">Choose marketplaces</p>
+        <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
+          {PLATFORM_OPTIONS.map((market) => {
+            const enabled = selectedPlatforms.includes(market);
+            const status = statusMap[market] || "Not published";
+            return (
+              <label
+                key={market}
+                className={`cursor-pointer rounded-[10px] border p-3 text-left transition ${
+                  enabled ? 'border-[#2563eb] bg-[#eef4ff]' : 'border-[#e5e7eb] bg-white'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    checked={enabled}
+                    onChange={() => togglePlatform(market)}
+                    className="h-4 w-4 rounded border-[#d0d5dd] text-[#2563eb] focus:ring-[#dbeafe]"
+                  />
+                  <span className="text-sm font-semibold capitalize text-[#101828]">{market}</span>
+                </div>
+                <span className="mt-2 inline-block rounded-full border border-[#e5e7eb] bg-[#f9fafb] px-2 py-0.5 text-xs font-medium text-[#667085]">
+                  {status}
+                </span>
+              </label>
+            );
+          })}
+        </div>
+      </div>
+
+      {publishState.error && (
+        <p className="mt-3 text-sm text-[#b42318]">{publishState.error}</p>
+      )}
+      <MarketplaceStatusPanel statuses={statuses} />
+
+      <PhotoEditorModal
+        open={openEditor}
+        listing={listing}
+        onClose={() => setOpenEditor(false)}
+        onApply={onPhotoUpdated}
+      />
+    </div>
+  );
+}

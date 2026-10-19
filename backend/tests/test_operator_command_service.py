@@ -1,0 +1,433 @@
+from __future__ import annotations
+
+import asyncio
+
+import math
+from datetime import UTC, datetime, timedelta
+
+from app.models.enums import EbayPublishStatus, ListingStatus, MarketplaceListingStatus, MarketplaceName
+from app.models.models import Listing, MarketplaceListing, User
+from app.services.operator_command_service import (
+    OperatorCommandService,
+    get_operator_tool_registry,
+)
+
+
+def test_compound_operation_plan_preserves_independent_marketplace_targets():
+    plan = OperatorCommandService().parse_operation_plan(
+        "Lower items 1, 2, and 3 by 10% on eBay and Facebook; give items 3 and 5 free eBay shipping; end item 5 on Poshmark"
+    )
+    assert [(entry.items, entry.marketplaces, entry.field, entry.action, entry.value) for entry in plan] == [
+        ([1, 2, 3], ["ebay", "facebook"], "price", "percentage_change", -10.0),
+        ([3, 5], ["ebay"], "shipping", "set", "free"),
+        ([5], ["poshmark"], "listing", "end", None),
+    ]
+
+
+def test_compound_operation_plan_supports_canonical_target():
+    plan = OperatorCommandService().parse_operation_plan("Change item 7 canonical description")
+    assert plan == []  # unsupported free-form description edits are not guessed
+
+
+def test_compound_operation_plan_supports_description_regeneration_clause():
+    plan = OperatorCommandService().parse_operation_plan(
+        "Regenerate Facebook descriptions for items 101 and 103; lower items 101 and 103 by 12% on eBay."
+    )
+    assert [(entry.items, entry.marketplaces, entry.field, entry.action) for entry in plan] == [
+        ([101, 103], ["facebook"], "description", "regenerate"),
+        ([101, 103], ["ebay"], "price", "percentage_change"),
+    ]
+
+
+def test_compound_operation_plan_supports_destination_absolute_price():
+    plan = OperatorCommandService().parse_operation_plan("Set items 8 and 9 price to $39.99 on eBay and Facebook")
+    assert [(entry.items, entry.marketplaces, entry.field, entry.action, entry.value) for entry in plan] == [
+        ([8, 9], ["ebay", "facebook"], "price", "set", 39.99),
+    ]
+
+
+def test_compound_operation_plan_supports_marketplace_specific_price_increase():
+    plan = OperatorCommandService().parse_operation_plan("Raise items 101 and 103 by 8% on Mercari; leave eBay unchanged")
+    assert [(entry.items, entry.marketplaces, entry.field, entry.action, entry.value) for entry in plan] == [
+        ([101, 103], ["mercari"], "price", "percentage_change", 8.0),
+    ]
+
+
+def test_compound_operation_diagnostics_never_silently_drop_clause():
+    service = OperatorCommandService()
+    plan, unsupported = service.parse_operation_plan_with_diagnostics(
+        "Lower items 1 and 2 by 10% on eBay; change item 3 canonical title"
+    )
+    assert [(entry.items, entry.marketplaces, entry.field) for entry in plan] == [([1, 2], ["ebay"], "price")]
+    assert unsupported == ["change item 3 canonical title"]
+
+
+def test_compound_operation_diagnostics_accepts_all_supported_clauses():
+    plan, unsupported = OperatorCommandService().parse_operation_plan_with_diagnostics(
+        "Lower items 1 and 2 by 10% on eBay; give items 3 and 5 free eBay shipping; end item 5 on Poshmark"
+    )
+    assert len(plan) == 3
+    assert unsupported == []
+
+
+def test_compound_operation_diagnostics_treats_explicit_preservation_as_noop():
+    plan, unsupported = OperatorCommandService().parse_operation_plan_with_diagnostics(
+        "Raise items 10 and 11 by 8% on Mercari; leave eBay unchanged"
+    )
+    assert len(plan) == 1
+    assert plan[0].marketplaces == ["mercari"]
+    assert unsupported == []
+
+
+def test_operator_command_parses_pi_weekday_odd_id_and_flat_shipping_filters():
+    parsed = OperatorCommandService().parse_prompt(
+        "Find every item posted to eBay on Tuesday whose item number is odd. Reduce their prices by pi percent to the 17th digit and change them to $5 flat shipping."
+    )
+    assert parsed is not None
+    assert parsed.percent == math.pi
+    assert parsed.weekday == 1
+    assert parsed.odd_remote_id is True
+    assert parsed.shipping_flat == 5.0
+
+
+def test_cross_marketplace_calendar_reprice_uses_remote_publication_and_platform_prices(db_session):
+    user = User(email="operator-command-cross-market@example.com", role="owner", is_admin=True)
+    db_session.add(user); db_session.commit()
+    listing = Listing(user_id=user.id, title="Cross market match", listing_price=99, status=ListingStatus.ready)
+    db_session.add(listing); db_session.flush()
+    db_session.add_all([
+        MarketplaceListing(
+            listing_id=listing.id, marketplace=MarketplaceName.ebay, marketplace_listing_id="EB-1",
+            status=MarketplaceListingStatus.PUBLISHED,
+            raw_response={"published_at": "2026-10-05T15:00:00Z", "current_price": 100},
+        ),
+        MarketplaceListing(
+            listing_id=listing.id, marketplace=MarketplaceName.facebook, marketplace_listing_id="FB-1",
+            status=MarketplaceListingStatus.PUBLISHED,
+            raw_response={"current_price": 90},
+        ),
+    ])
+    db_session.commit()
+    result = asyncio.run(OperatorCommandService().handle_prompt(
+        db_session,
+        user=user,
+        prompt=("Reduce the price of every eBay item published on a Monday that was an odd-numbered day of the month, "
+                "currently priced above $50, and also published to Facebook Marketplace. Reduce the eBay price by 5% "
+                "and the Facebook Marketplace price by 3%."),
+    ))
+    assert result["parsed"] is True
+    assert result["command_type"] == "cross_market_calendar_reprice_preview"
+    assert result["summary"]["eligible_count"] == 1
+    assert result["listings"][0]["ebay"]["proposed_price"] == 95.0
+    assert result["listings"][0]["facebook"]["proposed_price"] == 87.3
+    assert result["apply_live"] is False
+
+
+def test_operator_command_accepts_posted_weekday_without_on():
+    parsed = OperatorCommandService().parse_prompt(
+        "Find every eBay listing posted Tuesday whose item number is odd. Reduce their prices by pi percent and set $5 flat shipping."
+    )
+    assert parsed is not None
+    assert parsed.weekday == 1
+    assert parsed.percent == math.pi
+
+
+def test_operator_tool_registry_exposes_structured_scoped_actions():
+    tools = {entry["name"]: entry for entry in get_operator_tool_registry()}
+    assert tools["update_price"]["kind"] == "mutation"
+    assert tools["update_price"]["execution"] == "queued"
+    assert tools["publish_listing"]["execution"] == "confirmation_required"
+    assert tools["query_sales"]["execution"] == "preview"
+
+
+def _seed_live_ebay_listing(db_session, *, user: User, title: str, price: float, posted_days_ago: int) -> Listing:
+    listing = Listing(
+        user_id=user.id,
+        status=ListingStatus.ready,
+        title=title,
+        description="Test listing",
+        listing_price=price,
+        suggested_price=price,
+        condition="New",
+        quantity=1,
+        ebay_listing_id=f"ebay-{title.lower().replace(' ', '-')}",
+        ebay_publish_status=EbayPublishStatus.POSTED,
+    )
+    db_session.add(listing)
+    db_session.flush()
+    row = MarketplaceListing(
+        listing_id=listing.id,
+        marketplace=MarketplaceName.ebay,
+        marketplace_listing_id=listing.ebay_listing_id,
+        status=MarketplaceListingStatus.PUBLISHED,
+        raw_response={"status": "PUBLISHED"},
+    )
+    posted_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=posted_days_ago)
+    row.created_at = posted_at
+    row.updated_at = posted_at
+    db_session.add(row)
+    db_session.commit()
+    db_session.refresh(listing)
+    return listing
+
+
+def test_operator_command_preview_finds_old_live_ebay_listings(db_session):
+    user = User(email="operator-command-preview@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    _seed_live_ebay_listing(db_session, user=user, title="Old Listing", price=100.0, posted_days_ago=10)
+    _seed_live_ebay_listing(db_session, user=user, title="Fresh Listing", price=80.0, posted_days_ago=2)
+
+    result = asyncio.run(
+        OperatorCommandService().handle_prompt(
+            db_session,
+            user=user,
+            prompt="lower all item prices by ten percent if they have been posted for more than 1 week on ebay",
+            dry_run=True,
+            apply_live=False,
+        )
+    )
+
+    assert result["parsed"] is True
+    assert result["command_type"] == "ebay_reprice_by_listing_age"
+    assert result["summary"]["eligible_count"] == 1
+    assert result["listings"][0]["title"] == "Old Listing"
+    assert result["listings"][0]["new_price"] == 90.0
+
+
+def test_operator_command_preview_accepts_price_threshold_phrase(db_session):
+    user = User(email="operator-command-price-threshold@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    _seed_live_ebay_listing(db_session, user=user, title="High Price", price=120.0, posted_days_ago=1)
+    _seed_live_ebay_listing(db_session, user=user, title="Low Price", price=40.0, posted_days_ago=1)
+
+    result = asyncio.run(
+        OperatorCommandService().handle_prompt(
+            db_session,
+            user=user,
+            prompt="reduce all ebay items above $50.00 by 10%",
+            dry_run=True,
+            apply_live=False,
+        )
+    )
+
+    assert result["parsed"] is True
+    assert result["command_type"] == "ebay_reprice_by_listing_price"
+    assert result["summary"]["minimum_price"] == 50.0
+    assert result["summary"]["eligible_count"] == 1
+    assert result["listings"][0]["title"] == "High Price"
+    assert result["listings"][0]["new_price"] == 108.0
+
+
+def test_operator_command_recent_age_and_price_filters_are_conjunctive(db_session):
+    user = User(email="operator-command-recent-price@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+    _seed_live_ebay_listing(db_session, user=user, title="Recent High", price=80, posted_days_ago=1)
+    _seed_live_ebay_listing(db_session, user=user, title="Old High", price=80, posted_days_ago=5)
+    _seed_live_ebay_listing(db_session, user=user, title="Recent Low", price=40, posted_days_ago=1)
+
+    result = asyncio.run(OperatorCommandService().handle_prompt(
+        db_session, user=user,
+        prompt="any items posted less than 3 days ago and over $50 reduce by 10%",
+        dry_run=True, apply_live=False,
+    ))
+
+    assert result["parsed"] is True
+    assert result["summary"]["maximum_age_days"] == 3
+    assert result["summary"]["minimum_price"] == 50
+    assert [row["title"] for row in result["listings"]] == ["Recent High"]
+
+
+def test_operator_command_exact_posted_dates_are_filters_not_global_reprice(db_session):
+    user = User(email="operator-command-posted-date@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+    matching = _seed_live_ebay_listing(db_session, user=user, title="Date Match", price=80, posted_days_ago=1)
+    other = _seed_live_ebay_listing(db_session, user=user, title="Date Other", price=80, posted_days_ago=4)
+    matching.marketplace_listings[0].created_at = datetime(2026, 10, 14, 12)
+    other.marketplace_listings[0].created_at = datetime(2026, 10, 12, 12)
+    db_session.commit()
+
+    result = asyncio.run(OperatorCommandService().handle_prompt(
+        db_session, user=user,
+        prompt="any items posted on 10/13/2026 or 10/14/2026 reduce it by 10%",
+        dry_run=True, apply_live=False,
+    ))
+
+    assert result["parsed"] is True
+    assert result["summary"]["posted_on_dates"] == ["2026-10-13", "2026-10-14"]
+    assert [row["title"] for row in result["listings"]] == ["Date Match"]
+
+
+def test_operator_command_unknown_price_history_filter_fails_closed(db_session):
+    user = User(email="operator-command-price-history@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+    _seed_live_ebay_listing(db_session, user=user, title="Never Proven", price=80, posted_days_ago=1)
+
+    result = asyncio.run(OperatorCommandService().handle_prompt(
+        db_session, user=user,
+        prompt="items never had a price reduction and over $50 reduce by 12%",
+        dry_run=False, apply_live=True, confirm_live_apply=True,
+    ))
+
+    assert result["parsed"] is False
+    assert result["summary"]["eligible_count"] == 0
+    assert "complete historical price-change evidence" in result["unsupported_constraints"][0]
+
+
+def test_operator_command_variant_and_scheduled_prompt_fails_closed():
+    service = OperatorCommandService()
+    result = asyncio.run(service.handle_prompt(
+        None, user=None,
+        prompt="make the red medium variation half off for 6 hours on the next full moon",
+        dry_run=False, apply_live=True,
+    ))
+    assert result["parsed"] is False
+    assert len(result["unsupported_constraints"]) >= 2
+
+
+def test_operator_command_preview_accepts_generic_price_reduction_phrase(db_session):
+    user = User(email="operator-command-generic@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    _seed_live_ebay_listing(db_session, user=user, title="Generic One", price=20.0, posted_days_ago=1)
+    _seed_live_ebay_listing(db_session, user=user, title="Generic Two", price=30.0, posted_days_ago=1)
+
+    result = asyncio.run(
+        OperatorCommandService().handle_prompt(
+            db_session,
+            user=user,
+            prompt="reduce all item prices by 10%",
+            dry_run=True,
+            apply_live=False,
+        )
+    )
+
+    assert result["parsed"] is True
+    assert result["command_type"] == "ebay_reprice_all"
+    assert result["summary"]["eligible_count"] == 2
+
+
+def test_operator_command_live_apply_requires_confirmation(db_session):
+    user = User(email="operator-command-confirm@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    _seed_live_ebay_listing(db_session, user=user, title="Needs Confirmation", price=120.0, posted_days_ago=14)
+
+    result = asyncio.run(
+        OperatorCommandService().handle_prompt(
+            db_session,
+            user=user,
+            prompt="lower all item prices by 10 percent if they have been listed for more than 1 week on ebay",
+            dry_run=False,
+            apply_live=True,
+            confirm_live_apply=False,
+            confirmation_phrase="wrong phrase",
+        )
+    )
+
+    assert result["parsed"] is True
+    assert result["summary"]["eligible_count"] == 1
+    assert "requires confirmation" in (result["message"] or "")
+
+
+def test_operator_command_live_apply_updates_listing_prices(db_session, monkeypatch):
+    user = User(email="operator-command-live@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    listing = _seed_live_ebay_listing(db_session, user=user, title="Live Update", price=50.0, posted_days_ago=9)
+
+    async def _fake_revise(listing_obj, db):  # noqa: ARG001
+        db.commit()
+        return {"status": "UPDATED", "listing_id": listing_obj.id}
+
+    monkeypatch.setattr("app.services.operator_command_service.revise_ebay_listing", _fake_revise)
+
+    result = asyncio.run(
+        OperatorCommandService().handle_prompt(
+            db_session,
+            user=user,
+            prompt="lower all item prices by 10 percent if they have been listed for more than 1 week on ebay",
+            dry_run=False,
+            apply_live=True,
+            confirm_live_apply=True,
+        )
+    )
+
+    refreshed = db_session.get(Listing, listing.id)
+    assert result["summary"]["updated_count"] == 1
+    assert refreshed is not None
+    assert refreshed.listing_price == 45.0
+    assert refreshed.suggested_price == 45.0
+    applied_actions = (((refreshed.marketplace_data or {}).get("operator_bulk_actions") or {}).get("applied") or [])
+    assert any(str(action.get("signature") or "").startswith("ebay_reprice") for action in applied_actions)
+
+
+def test_operator_command_live_apply_is_idempotent_for_same_discount(db_session, monkeypatch):
+    user = User(email="operator-command-idempotent@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    listing = _seed_live_ebay_listing(db_session, user=user, title="Idempotent Update", price=100.0, posted_days_ago=9)
+
+    async def _fake_revise(listing_obj, db):  # noqa: ARG001
+        db.commit()
+        return {"status": "UPDATED", "listing_id": listing_obj.id}
+
+    monkeypatch.setattr("app.services.operator_command_service.revise_ebay_listing", _fake_revise)
+
+    first = asyncio.run(
+        OperatorCommandService().handle_prompt(
+            db_session,
+            user=user,
+            prompt="reduce all ebay items above $49 by 18%",
+            dry_run=False,
+            apply_live=True,
+            confirm_live_apply=True,
+        )
+    )
+    second = asyncio.run(
+        OperatorCommandService().handle_prompt(
+            db_session,
+            user=user,
+            prompt="reduce all ebay items above $49 by 18%",
+            dry_run=False,
+            apply_live=True,
+            confirm_live_apply=True,
+        )
+    )
+
+    refreshed = db_session.get(Listing, listing.id)
+    assert first["summary"]["updated_count"] == 1
+    assert second["summary"]["updated_count"] == 0
+    assert second["summary"]["already_applied_count"] == 1
+
+
+def test_compound_operation_plan_keeps_item_and_marketplace_matrix():
+    plan = OperatorCommandService().parse_operation_plan(
+        "Lower items 1, 2, and 3 by 10% on eBay and Facebook; give 3 and 5 free eBay shipping; end 5 on Poshmark."
+    )
+    assert [(op.items, op.field, op.action, op.value) for op in plan] == [
+        ([1, 2, 3], "price", "percentage_change", -10.0),
+        ([3, 5], "shipping", "set", "free"),
+        ([5], "listing", "end", None),
+    ]
+    assert plan[0].marketplaces == ["ebay", "facebook"]
+    assert plan[2].marketplaces == ["poshmark"]

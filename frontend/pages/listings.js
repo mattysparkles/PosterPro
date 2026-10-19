@@ -1,0 +1,3460 @@
+import Link from 'next/link';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { BriefcaseBusiness, ListChecks, Rocket, ShieldAlert, Sparkles } from 'lucide-react';
+import toast from 'react-hot-toast';
+import { useRouter } from 'next/router';
+
+import AppShell from '../components/layout/AppShell';
+import { PageAside, PageBand, PageFrame, PageMain, PageSplit } from '../components/layout/PageFrame';
+import ListingEditor from '../components/ListingEditor';
+import Button from '../components/ui/button';
+import Input from '../components/ui/input';
+import Select from '../components/ui/select';
+import Checkbox from '../components/ui/checkbox';
+import MetricCard from '../components/ui/metric-card';
+import DataTable from '../components/ui/data-table';
+import Drawer from '../components/ui/drawer';
+import PageHeader from '../components/ui/page-header';
+import SectionPanel from '../components/ui/section-panel';
+import ListingsReportPanel from '../components/listings/panels/ListingsReportPanel';
+import ListingsStatusCell from '../components/listings/table/ListingsStatusCell';
+import ListingsCollapsibleSection from '../components/listings/workspace/ListingsCollapsibleSection';
+import ListingsTitleCell from '../components/listings/table/ListingsTitleCell';
+import ListingsBulkActionBar from '../components/listings/workspace/ListingsBulkActionBar';
+import ListingsGridCard from '../components/listings/workspace/ListingsGridCard';
+import ListingsOverviewBand from '../components/listings/workspace/ListingsOverviewBand';
+import ListingsThumbnail from '../components/listings/workspace/ListingsThumbnail';
+import ListingsWorkspaceEmptyState from '../components/listings/workspace/ListingsWorkspaceEmptyState';
+import ListingsWorkspaceErrorBoundary from '../components/listings/workspace/ListingsWorkspaceErrorBoundary';
+import ListingsLaunchCandidatesPanel from '../components/listings/panels/ListingsLaunchCandidatesPanel';
+import ListingsPreflightPanel from '../components/listings/panels/ListingsPreflightPanel';
+import ListingsRepairQueuePanel from '../components/listings/panels/ListingsRepairQueuePanel';
+import ListingsStatusGrid from '../components/listings/panels/ListingsStatusGrid';
+import ListingsToolbar from '../components/listings/toolbar/ListingsToolbar';
+import ListingsQueueTabs from '../components/listings/workspace/ListingsQueueTabs';
+import { useAuth } from '../contexts/AuthContext';
+import { useMarketplacePublish } from '../hooks/useMarketplacePublish';
+import useDashboardData from '../hooks/useDashboardData';
+import { formatPublishFailureMessage } from '../lib/publish-status';
+import {
+  applyListingTemplate,
+  applyPricingRecommendation,
+  decideUnderpricing,
+  bulkPricingAction,
+  createListingTemplate,
+  fetchListing,
+  fetchCrosspostPreview,
+  fetchMarketplaceJobsOverview,
+  fetchPricingRecommendation,
+  fetchListingIntelligence,
+  searchEbayCategories,
+  fetchMarketplacePreflight,
+  refreshListingReadiness,
+  fetchSettingsPanels,
+  refreshPricingRecommendation,
+  backfillVineListingImages,
+  repairAllVineListingImages,
+  refreshVineListingMetadata,
+  deleteListing as deleteListingApi,
+  deleteListingsBulk as deleteListingsBulkApi,
+  generateListing,
+  processListingPhoto,
+  approveListing as approveListingApi,
+  approveListingsBulk,
+  approveAndQueueListings,
+  exportMarketplacePreflightCsv,
+  fetchEbayAccountReadiness,
+  fetchEbayLaunchRepairQueue,
+  fetchLaunchCandidates,
+  fetchMarketplacePreflightBulk,
+  approveListingPhotos,
+  publishListingsBulk,
+  publishMarketplaceReadyBulk,
+  bulkQueueMarketplaceCrossposts,
+  rejectListingPhotos,
+  runLaunchDrillDryRun,
+  setPrimaryListingPhoto,
+  syncEbayListing,
+  applyEbayLaunchRepair,
+  publishListingEbay,
+  toggleAutonomousMode,
+  toThumbnailImageUrl,
+  uploadListingPhotos,
+  updateListing,
+  unpublishAndArchiveListings,
+} from '../lib/api';
+
+const LISTING_TABS = [
+  { value: 'all', label: 'All Listings', description: 'Show every listing that matches the source and other filters.' },
+  { value: 'review', label: 'Needs Review', description: 'Machine-finished listings waiting for operator inspection or approval.' },
+  { value: 'attention', label: 'Needs Attention', description: 'Listings with a real product or workflow blocker requiring intervention.' },
+  { value: 'publisher_unsupported', label: 'Publisher Unsupported', description: 'Listings blocked by a marketplace route PosterPro does not currently support.' },
+  { value: 'reconciliation', label: 'Reconciliation', description: 'Remote publication state is uncertain; reconcile before any retry.' },
+  { value: 'policy_blocked', label: 'Policy / Compliance', description: 'Listings awaiting marketplace policy or compliance resolution.' },
+  { value: 'provider_retry', label: 'Provider Retry', description: 'Transient provider failures scheduled for retry.' },
+  { value: 'processing', label: 'Processing', description: 'Listings with active or queued machine work still running.' },
+  { value: 'drafts', label: 'Drafts', description: 'Listings that are not yet complete or approved for publishing.' },
+  { value: 'ready', label: 'Ready', description: 'Listings approved locally and ready for an available publish route.' },
+  { value: 'published', label: 'Published', description: 'Listings with a confirmed live marketplace listing.' },
+  { value: 'archived', label: 'Archived', description: 'Listings intentionally kept but removed from active selling queues; media is retained.' },
+  { value: 'sold', label: 'Sold', description: 'Listings whose inventory has been confirmed sold or has no remaining quantity.' },
+  { value: 'failed', label: 'Failed', description: 'Listings whose latest publish or workflow attempt failed.' },
+];
+
+const PREPARED_MARKETPLACES = ['ebay', 'facebook', 'mercari', 'vinted', 'offerup', 'poshmark', 'etsy', 'depop'];
+
+function categorySearchSeed(listing) {
+  const title = String(listing?.title || '').toLowerCase();
+  if (title.includes('home security') && title.includes('camera')) return 'Security Cameras';
+  if (title.includes('access control') || title.includes('smart door lock') || title.includes('fingerprint card')) return 'Smart Door Locks';
+  if (title.includes('surface pro') && (title.includes('hub') || title.includes('docking'))) return 'Laptop Docking Stations';
+  if (title.includes('patio heater')) return 'Patio Heaters';
+  if (title.includes('space heater')) return 'Space Heaters';
+  if (title.includes('pillow')) return 'Bed Pillows';
+  const words = title.match(/[a-z0-9]+/g) || [];
+  return words.slice(0, 4).join(' ');
+}
+
+const FILTER_OPTIONS = [
+  { value: 'all', label: 'All marketplaces' },
+  { value: 'ebay', label: 'eBay' },
+  { value: 'facebook', label: 'Facebook Marketplace' },
+  { value: 'etsy', label: 'Etsy' },
+  { value: 'poshmark', label: 'Poshmark' },
+  { value: 'mercari', label: 'Mercari' },
+  { value: 'depop', label: 'Depop' },
+  { value: 'whatnot', label: 'Whatnot' },
+  { value: 'vinted', label: 'Vinted' },
+];
+
+const SOURCE_OPTIONS = [
+  { value: 'all', label: 'All sources' },
+  { value: 'amazon_vine', label: 'Amazon Vine' },
+  { value: 'media_inventory_recovery', label: 'Google Photos / Recovery' },
+  { value: 'ebay_history_reconciliation', label: 'eBay History Recovery' },
+  { value: 'manual', label: 'Manual' },
+];
+
+const CROSSPOST_DESTINATIONS = [
+  ['ebay', 'eBay'],
+  ['facebook', 'Facebook'],
+  ['mercari', 'Mercari'],
+  ['poshmark', 'Poshmark'],
+  ['vinted', 'Vinted'],
+  ['etsy', 'Etsy'],
+  ['offerup', 'OfferUp'],
+];
+
+const READINESS_FILTER_OPTIONS = [
+  { value: 'all', label: 'All readiness states' },
+  { value: 'missing_photos', label: 'Missing actual photos' },
+  { value: 'reference_only', label: 'Reference-only images' },
+  { value: 'missing_weight', label: 'Missing weight' },
+  { value: 'missing_dimensions', label: 'Missing dimensions' },
+  { value: 'missing_condition', label: 'Missing condition review' },
+  { value: 'missing_category', label: 'Missing category' },
+  { value: 'missing_price', label: 'Missing price' },
+  { value: 'weak_pricing', label: 'Weak pricing confidence' },
+  { value: 'stale_pricing', label: 'Stale pricing' },
+  { value: 'ready_for_ebay', label: 'Ready for eBay' },
+  { value: 'ready_for_facebook', label: 'Ready for Facebook' },
+  { value: 'ebay_ready', label: 'eBay ready' },
+  { value: 'ebay_blocked', label: 'eBay blocked' },
+  { value: 'ebay_warning_only', label: 'eBay warning-only' },
+  { value: 'ebay_missing_category', label: 'eBay missing category' },
+  { value: 'ebay_missing_aspects', label: 'eBay missing aspects' },
+  { value: 'ebay_missing_policies', label: 'eBay missing policies' },
+  { value: 'ebay_missing_shipping', label: 'eBay missing shipping' },
+  { value: 'ebay_missing_photos', label: 'eBay missing photos' },
+  { value: 'facebook_ready', label: 'Facebook ready' },
+  { value: 'facebook_blocked', label: 'Facebook blocked' },
+  { value: 'facebook_warning_only', label: 'Facebook warning-only' },
+  { value: 'facebook_missing_photos', label: 'Facebook missing photos' },
+  { value: 'facebook_missing_price', label: 'Facebook missing price' },
+  { value: 'facebook_missing_category', label: 'Facebook missing category' },
+  { value: 'high_confidence_ready', label: 'High-confidence ready' },
+  { value: 'likely_low_value', label: 'Likely low value' },
+  { value: 'oversize_low_margin', label: 'Oversize / margin risk' },
+  { value: 'ready_except_shipping', label: 'Ready except shipping' },
+  { value: 'ready_except_photos', label: 'Ready except photos' },
+  { value: 'ready_except_policies', label: 'Ready except policies' },
+];
+
+function isAmazonVineSource(listing) {
+  const source = String(listing?.source_type || '').toLowerCase();
+  const hint = String(listing?.source || listing?.ingest_source || listing?.marketplace_source || '').toLowerCase();
+  return source.includes('vine') || hint.includes('vine');
+}
+
+function getCatalogAttentionReason(listing) {
+  const direct = Array.isArray(listing?.attention_reasons) ? listing.attention_reasons : [];
+  const canonical = listing?.marketplace_data?.canonical_readiness?.blocking_reasons;
+  const preflight = listing?.marketplace_data?.marketplace_preflight?.by_marketplace || {};
+  const destination = Object.values(preflight).flatMap((entry) => Array.isArray(entry?.blockers) ? entry.blockers : [])
+    .map((blocker) => blocker?.message || blocker?.reason || blocker?.code);
+  const reason = [...direct, ...(Array.isArray(canonical) ? canonical : []), ...destination]
+    .map((item) => typeof item === 'string' ? item : item?.message || item?.reason || item?.code)
+    .find((item) => String(item || '').trim());
+  return String(reason || '').trim();
+}
+
+function isArchivedListing(listing) {
+  const archiveState = String(listing?.marketplace_data?.archive_state?.status || '').toUpperCase();
+  // An in-flight/unknown/partial remote end must never render as ordinary
+  // Archived. Legacy local-only archive labels remain supported unless an
+  // explicit remote lifecycle state says the operation is incomplete.
+  if (archiveState && archiveState !== 'ARCHIVED') return false;
+  if (String(listing.status || '').toLowerCase() === 'archived') {
+    return !archiveState || archiveState === 'ARCHIVED';
+  }
+  return (listing.custom_labels || []).some((label) => ['archived_vine', 'archived_sold'].includes(String(label).toLowerCase()))
+    && (!archiveState || archiveState === 'ARCHIVED');
+}
+
+function isSoldListing(listing) {
+  return Boolean(listing?.sold_at) || Number(listing?.quantity ?? 1) <= 0;
+}
+
+function getListingThumbnail(listing) {
+  const sourceMetadata = listing?.source_metadata || {};
+  if (Array.isArray(listing?.listing_images) && listing.listing_images.length) {
+    const approved = listing.listing_images.filter((image) => image?.operator_state !== 'rejected');
+    const actual = approved.find((image) => image?.role === 'primary' && !image?.is_reference)
+      || approved.find((image) => !image?.is_reference)
+      || approved.find((image) => image?.role === 'primary')
+      || approved[0];
+    if (actual?.storage_path) {
+      return actual.storage_path;
+    }
+  }
+  // For Vine rows, prefer explicit listing images only to avoid mismatched legacy source previews.
+  if (isAmazonVineSource(listing)) {
+    return listing?.image_urls?.[0] || '';
+  }
+  return (
+    listing?.image_urls?.[0]
+    || sourceMetadata?.original_image_urls?.[0]
+    || sourceMetadata?.image_urls?.[0]
+    || sourceMetadata?.primary_image_url
+    || sourceMetadata?.source_image_url
+    || ''
+  );
+}
+
+function getListingBucket(listing) {
+  // Prefer the server's canonical readiness result when present.  The queue
+  // endpoint and listing detail used to derive separate buckets, which could
+  // make the same row appear in Needs Attention in one view and Needs Review
+  // in another.  Keep the explicit queue_bucket as a compatibility fallback
+  // for older responses.
+  const readinessQueue = String(listing?.canonical_readiness?.queue || '').trim().toLowerCase();
+  const canonicalBucket = readinessQueue || String(listing?.queue_bucket || '').trim().toLowerCase();
+  if (canonicalBucket) {
+    return ({needs_attention: 'attention', needs_review: 'review', processing: 'processing', ready: 'ready'}[canonicalBucket] || canonicalBucket);
+  }
+  if (isSoldListing(listing)) return 'sold';
+  if (isArchivedListing(listing)) return 'archived';
+  if (listing.ebay_publish_status === 'POSTED' || listing.ebay_listing_id) return 'published';
+  if (listing.status === 'error' || listing.ebay_publish_status === 'FAILED') return 'failed';
+  if (['needs_attention', 'blocked'].includes(String(listing?.processing_state || '').toLowerCase())) return 'attention';
+  if (listing.status === 'archived') return 'archived';
+  const preflight = listing?.marketplace_data?.marketplace_preflight;
+  const byMarketplace = preflight?.by_marketplace && typeof preflight.by_marketplace === 'object' ? preflight.by_marketplace : {};
+  if (Object.values(byMarketplace).some((entry) => Array.isArray(entry?.blockers) && entry.blockers.some((blocker) => !(isAmazonVineSource(listing) && /no usable amazon\/product image/i.test(`${blocker?.code || ''} ${blocker?.message || ''} ${blocker?.reason || ''}`))))) return 'attention';
+  const isRecovery = listing?.source_type === 'media_inventory_recovery';
+  const explicitlyApproved = Boolean(listing?.source_metadata?.operator_approved_at);
+  const reviewReady = isCompleteForOperatorReview(listing);
+  if (isRecovery && !explicitlyApproved) return 'drafts';
+  if (listing.restricted_review_required || listing.needs_review) {
+    return String(listing.status || '').toLowerCase() === 'ready'
+      ? (explicitlyApproved && reviewReady ? 'ready' : 'attention')
+      : (reviewReady ? 'review' : 'attention');
+  }
+  if (String(listing.status || '').toLowerCase() === 'ready') {
+    return explicitlyApproved && reviewReady ? 'ready' : (explicitlyApproved ? 'attention' : 'drafts');
+  }
+  if (reviewReady) return 'review';
+  if (listing.status === 'draft') return 'drafts';
+  return 'drafts';
+}
+
+function formatListingBucket(bucket) {
+  return ({
+    review: 'Needs Review',
+    attention: 'Needs Attention',
+    drafts: 'Drafts',
+    ready: 'Ready',
+    published: 'Published',
+    sold: 'Sold',
+    archived: 'Archived',
+    failed: 'Failed',
+    processing: 'Processing',
+  }[bucket] || String(bucket || 'Drafts').replaceAll('_', ' '));
+}
+
+function isCompleteForOperatorReview(listing) {
+  const readiness = getReadinessSummary(listing);
+  const qualityReady = Boolean(listing?.quality_summary?.ready_for_publish_queue);
+  const preflightReady = Boolean(
+    readiness?.status && ['ready', 'ready_with_warnings', 'published'].includes(String(readiness.status).toLowerCase()),
+  );
+  const hasPrice = Boolean(listing?.listing_price || listing?.suggested_price || listing?.price);
+  const hasCategory = Boolean(listing?.category_id || listing?.category_suggestion || listing?.detected_category_guess);
+  const hasCondition = Boolean(listing?.condition || listing?.condition_data?.condition_bucket);
+  const imageCount = Number(readiness?.actual_image_count || getListingImageCount(listing) || 0);
+  return Boolean(
+    qualityReady
+      && preflightReady
+      && (listing?.title || listing?.suggested_title)
+      && listing?.description
+      && hasPrice
+      && hasCategory
+      && hasCondition
+      && imageCount > 0,
+  );
+}
+
+function matchesTab(listing, tab) {
+  if (tab === 'sold') return isSoldListing(listing);
+  if (tab === 'archived') return isArchivedListing(listing);
+  if (isSoldListing(listing)) return false;
+  if (isArchivedListing(listing)) return false;
+  if (tab === 'all') return true;
+  if (tab === 'drafts') return getListingBucket(listing) === 'drafts';
+  if (tab === 'review') return getListingBucket(listing) === 'review';
+  if (tab === 'attention') return getListingBucket(listing) === 'attention';
+  if (tab === 'processing') return getListingBucket(listing) === 'processing';
+  if (tab === 'ready') return getListingBucket(listing) === 'ready';
+  if (tab === 'published') return getListingBucket(listing) === 'published';
+  if (tab === 'failed') return getListingBucket(listing) === 'failed';
+  return false;
+}
+
+function getListingTitle(listing) {
+  return listing.title || listing.suggested_title || `Listing #${listing.id}`;
+}
+
+function getListingPrice(listing) {
+  return Number(listing.suggested_price || listing.price || 0).toFixed(0);
+}
+
+function getListingImageCount(listing) {
+  if (Number.isFinite(Number(listing?.listing_image_count))) return Number(listing.listing_image_count);
+  if (Array.isArray(listing?.listing_images) && listing.listing_images.length) {
+    return listing.listing_images.filter((image) => image?.operator_state !== 'rejected').length;
+  }
+  const sourceMetadata = listing?.source_metadata || {};
+  const urls = [
+    ...(Array.isArray(listing?.image_urls) ? listing.image_urls : []),
+    ...(Array.isArray(sourceMetadata?.image_urls) ? sourceMetadata.image_urls : []),
+    ...(Array.isArray(sourceMetadata?.original_image_urls) ? sourceMetadata.original_image_urls : []),
+  ];
+  return new Set(urls.filter(Boolean)).size;
+}
+
+function getReadinessSummary(listing) {
+  return listing?.readiness_summary || {};
+}
+
+function getMarketplacePreflightSummary(listing, marketplace) {
+  const root = listing?.marketplace_preflight_summary || listing?.marketplace_data?.marketplace_preflight || {};
+  const byMarketplace = root?.by_marketplace || root;
+  if (!byMarketplace || typeof byMarketplace !== 'object') return null;
+  return byMarketplace[marketplace] || null;
+}
+
+function getMarketplacePreflightStatus(listing, marketplace) {
+  const summary = getMarketplacePreflightSummary(listing, marketplace);
+  if (!summary) return 'not_checked';
+  const status = String(summary.status || '').toLowerCase();
+  if (!status) return 'not_checked';
+  return status;
+}
+
+function getMarketplacePreflightAgeLabel(summary) {
+  if (!summary?.last_checked_at) return 'not checked';
+  const checkedAt = new Date(summary.last_checked_at);
+  if (Number.isNaN(checkedAt.getTime())) return 'not checked';
+  const deltaMs = Date.now() - checkedAt.getTime();
+  if (deltaMs < 60_000) return 'just now';
+  const minutes = Math.round(deltaMs / 60_000);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  return `${days}d ago`;
+}
+
+function getMarketplacePreflightTone(summary) {
+  const status = String(summary?.status || '').toLowerCase();
+  if (!summary) return 'info';
+  if (status === 'blocked' || (summary.blocker_count || 0) > 0) return 'danger';
+  if (status === 'ready_with_warnings' || (summary.warning_count || 0) > 0) return 'warning';
+  if (status === 'needs_review') return 'warning';
+  if (status === 'ready' || status === 'published') return 'success';
+  if (status === 'failed') return 'danger';
+  return 'info';
+}
+
+function getMarketplaceTopBlocker(summary) {
+  if (!summary) return '';
+  return summary.top_blocker_code || summary.blocker_codes?.[0] || summary.top_blocker_message || '';
+}
+
+function getMarketplaceTopWarning(summary) {
+  if (!summary) return '';
+  return summary.top_warning_code || summary.warning_codes?.[0] || summary.top_warning_message || '';
+}
+
+function isMarketplaceReady(summary) {
+  return Boolean(summary && ['ready', 'ready_with_warnings', 'published'].includes(String(summary.status || '').toLowerCase()));
+}
+
+function isMarketplaceBlocked(summary) {
+  return Boolean(summary && (String(summary.status || '').toLowerCase() === 'blocked' || (summary.blocker_count || 0) > 0));
+}
+
+function isMarketplaceWarningOnly(summary) {
+  if (!summary) return false;
+  const status = String(summary.status || '').toLowerCase();
+  return status === 'ready_with_warnings' || (!(summary.blocker_count || 0) && (summary.warning_count || 0) > 0);
+}
+
+function getBulkScopeRows(selectedRows, filteredListings) {
+  return selectedRows.length ? selectedRows : filteredListings;
+}
+
+function summarizeBlockerCodes(rows, marketplace = null) {
+  const counter = new Map();
+  rows.forEach((listing) => {
+    const markets = marketplace ? [marketplace] : ['ebay', 'facebook'];
+    markets.forEach((market) => {
+      const summary = getMarketplacePreflightSummary(listing, market);
+      if (!summary) return;
+      (summary.blocker_codes || []).forEach((code) => {
+        if (!code) return;
+        counter.set(code, (counter.get(code) || 0) + 1);
+      });
+    });
+  });
+  return Array.from(counter.entries()).sort((a, b) => b[1] - a[1]);
+}
+
+function getListingMarketplaces(listing, enabledPlatforms, { allowFallback = true } = {}) {
+  const names = new Set();
+  if (listing.ebay_publish_status || listing.ebay_listing_id) names.add('ebay');
+  (listing.marketplace_data?.targets || []).forEach((target) => names.add(target));
+  if (!names.size && allowFallback) {
+    (enabledPlatforms || ['ebay']).slice(0, 2).forEach((platform) => names.add(platform));
+  }
+  return Array.from(names).slice(0, 2);
+}
+
+function isMarketplacePublished(listing, marketplace) {
+  const market = String(marketplace || '').toLowerCase();
+  if (market === 'ebay' && (listing?.ebay_publish_status === 'POSTED' || listing?.ebay_listing_id)) return true;
+  return (listing?.marketplace_statuses || []).some((entry) => String(entry?.marketplace || '').toLowerCase() === market && ['PUBLISHED', 'UPDATED'].includes(String(entry?.status || '').toUpperCase()) && entry?.marketplace_listing_id);
+}
+
+function formatMarketplace(name) {
+  if (name === 'ebay') return 'eBay';
+  if (name === 'unassigned') return 'Unassigned';
+  if (!name) return 'Draft';
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
+
+function getQuickPublishTargets(listing, enabledPlatforms) {
+  const marketplaces = getListingMarketplaces(listing, enabledPlatforms);
+  const alreadyPostedToEbay = listing?.ebay_publish_status === 'POSTED' || Boolean(listing?.ebay_listing_id);
+  if (!alreadyPostedToEbay) return marketplaces.length ? marketplaces : ['ebay'];
+  const secondaryTargets = marketplaces.filter((market) => market !== 'ebay');
+  return secondaryTargets.length ? secondaryTargets : ['ebay'];
+}
+
+function getListingFailureMessage(listing) {
+  if (listing.ebay_publish_status === 'FAILED') {
+    return formatPublishFailureMessage(listing.marketplace_data?.error, 'ebay');
+  }
+  return listing.marketplace_data?.error || '';
+}
+
+function formatAggregateListingValue(value) {
+  if (value == null || value === '') return 'Unknown';
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 'Unknown';
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Math.round(numeric * 100) / 100);
+}
+
+function formatCompactRange(min, max) {
+  if (min == null || max == null) return 'Unknown';
+  const low = Number(min);
+  const high = Number(max);
+  if (!Number.isFinite(low) || !Number.isFinite(high)) return 'Unknown';
+  return Math.abs(low - high) < 0.01 ? formatAggregateListingValue(low) : `${formatAggregateListingValue(low)}–${formatAggregateListingValue(high)}`;
+}
+
+function formatShippingService(value) {
+  return String(value || 'USPS Ground Advantage').replace(/_/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function formatTaxCollected(value) {
+  return value == null ? 'not recorded' : formatAggregateListingValue(value);
+}
+
+function feeReferenceLine(costs = {}) {
+  return Object.entries(costs).map(([market, cost]) => {
+    if (!cost) return null;
+    const label = market === 'ebay' ? 'Expected eBay Sold Fee' : formatMarketplace(market);
+    const rate = cost.fee_percent == null ? 'policy unavailable' : `${Number(cost.fee_percent).toFixed(2).replace(/\.00$/, '')}% + ${formatAggregateListingValue(cost.fixed_fee || 0)}`;
+    const amount = cost.fee_amount == null ? '—' : formatAggregateListingValue(cost.fee_amount);
+    return <span key={market} className={`min-w-0 truncate whitespace-nowrap rounded-md px-1 py-0.5 text-[11px] leading-5 ${cost.configured ? 'text-[#344054]' : 'text-[#98a2b3]'}`} title={`${label}: ${amount} · fee base ${formatAggregateListingValue(cost.fee_base || 0)} · ${cost.rule_label || cost.fee_basis || 'Marketplace fee reference'}`}>
+      <strong className={cost.configured ? 'font-bold text-[#101828]' : 'font-semibold text-[#98a2b3]'}>{label}</strong>{' '}{rate}{' · '}<strong className={cost.configured ? 'font-bold text-[#175CD3]' : 'font-semibold text-[#98a2b3]'}>{amount}</strong>
+    </span>;
+  }).filter(Boolean);
+}
+
+function catalogPreflightLabel(listing) {
+  const values = Object.entries(listing?.catalog_preflight || {});
+  if (!values.length) return 'not checked';
+  const failed = values.find(([, value]) => ['blocked', 'failed', 'error'].includes(String(value?.status || '').toLowerCase()));
+  if (failed) return `${formatMarketplace(failed[0])}: failed${failed[1]?.reason ? ` · ${failed[1].reason}` : ''}`;
+  const pending = values.find(([, value]) => String(value?.status || '').toLowerCase() === 'not_checked');
+  if (pending) return `${formatMarketplace(pending[0])}: not checked`;
+  const warning = values.find(([, value]) => String(value?.status || '').toLowerCase() === 'ready_with_warnings');
+  if (warning) return `${formatMarketplace(warning[0])}: warning`;
+  return 'passed';
+}
+
+function buildListingsQuery({
+  tab = 'all',
+  page = 1,
+  pageSize = 25,
+  search = '',
+  market = 'all',
+  source = 'all',
+  readiness = 'all',
+  sortBy = 'updated',
+  sortDir = 'desc',
+  view = 'table',
+  workspace = 'results',
+  refresh = false,
+}) {
+  const query = {
+    ...(tab && tab !== 'all' ? { tab } : {}),
+    ...(Number(page) > 1 ? { page: String(page) } : {}),
+    ...(Number(pageSize) !== 25 ? { page_size: String(pageSize) } : {}),
+    ...(search ? { q: search } : {}),
+    ...(market && market !== 'all' ? { market } : {}),
+    ...(source && source !== 'all' ? { source } : {}),
+    ...(readiness && readiness !== 'all' ? { readiness } : {}),
+    ...(sortBy && sortBy !== 'updated' ? { sort: `${sortBy}:${sortDir || 'desc'}` } : (sortDir && sortDir !== 'desc' ? { sort: `${sortBy}:${sortDir}` } : {})),
+    ...(view && view !== 'table' ? { view } : {}),
+    ...(workspace && workspace !== 'results' ? { workspace } : {}),
+    ...(refresh ? { refresh: '1' } : {}),
+  };
+  return query;
+}
+
+function sameListingsQuery(left = {}, right = {}) {
+  // Normalize state-shaped and router-shaped values through the same stable
+  // representation.  Detecting URL state from a small subset of keys caused
+  // status/page/sort-only URLs to be rebuilt with defaults during hydration.
+  const stateKeys = new Set(['tab', 'catalogPage', 'page', 'catalogPageSize', 'pageSize', 'search', 'market', 'source', 'readiness', 'sortBy', 'sortDir', 'view', 'workspace', 'refresh']);
+  const urlKeys = new Set(['tab', 'page', 'page_size', 'q', 'market', 'marketplace', 'source', 'readiness', 'status', 'queue', 'lifecycle', 'sort', 'view', 'workspace', 'refresh', 'attention']);
+  const normalize = (value) => Array.isArray(value) ? value.join(',') : value == null ? '' : String(value);
+  const canonical = (value) => {
+    const input = value || {};
+    const isState = Object.keys(input).some((key) => stateKeys.has(key) && !urlKeys.has(key));
+    const query = isState ? buildListingsQuery({
+      tab: input.tab || 'all', page: input.catalogPage ?? input.page ?? 1,
+      pageSize: input.catalogPageSize ?? input.pageSize ?? input.page_size ?? 25,
+      search: input.search ?? input.q ?? '', market: input.market ?? input.marketplace ?? 'all',
+      source: input.source || 'all', readiness: input.readiness || input.status || input.lifecycle || 'all',
+      sortBy: input.sortBy || 'updated', sortDir: input.sortDir || 'desc', view: input.view || 'table', workspace: input.workspace || 'results', refresh: input.refresh === true || input.refresh === '1',
+    }) : input;
+    return Object.keys(query).sort().reduce((out, key) => { const v = normalize(query[key]); if (v !== '') out[key] = v; return out; }, {});
+  };
+  const a = canonical(left); const b = canonical(right);
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  return [...keys].every((key) => a[key] === b[key]);
+}
+
+export default function ListingsPage() {
+  const { user } = useAuth();
+  const vineFeaturesEnabled = !!user?.can_access_vine_import && user?.profile_preferences?.vine_features_enabled !== false;
+  const sourceOptions = !vineFeaturesEnabled
+    ? SOURCE_OPTIONS.filter((option) => option.value !== 'amazon_vine')
+    : SOURCE_OPTIONS;
+  const router = useRouter();
+  const { publish, publishing, errors, statusByListing, refreshStatus } = useMarketplacePublish();
+  const [catalogPage, setCatalogPage] = useState(1);
+  const [catalogPageSize, setCatalogPageSize] = useState(25);
+  // These filters are inputs to the paginated catalog request, so they must
+  // exist before useDashboardData builds that request.  Keeping them below
+  // the hook caused a temporal-dead-zone render failure on /listings.
+  const [activeTab, setActiveTab] = useState('all');
+  const [queryStateHydrated, setQueryStateHydrated] = useState(false);
+  const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [marketFilter, setMarketFilter] = useState('all');
+  const [sourceFilter, setSourceFilter] = useState('all');
+  const [readinessFilter, setReadinessFilter] = useState('all');
+  const [sortBy, setSortBy] = useState('updated');
+  const [sortDir, setSortDir] = useState('desc');
+  const {
+    listings,
+    listingError,
+    listingPagination,
+    listingBucketCounts,
+    autonomousConfig,
+    enabledPlatforms,
+    listingTemplates,
+    reload,
+  } = useDashboardData(user?.id, {
+    includeClusters: false,
+    includeMarketplaces: false,
+    includeAnalytics: false,
+    includeAlerts: false,
+    includeAutonomousConfig: false,
+    includeOfferDashboard: false,
+    includePlatformConfig: false,
+    includeStorageBatches: false,
+    includeListingTemplates: false,
+    paginateListings: true,
+    listingPage: catalogPage,
+    listingPageSize: catalogPageSize,
+    listingSourceType: sourceFilter,
+    listingMarketplace: marketFilter,
+    listingReadiness: readinessFilter,
+    listingSearch: debouncedSearch,
+    listingQueue: activeTab,
+    listingSortBy: sortBy,
+    listingSortDir: sortDir,
+    // Keep the catalog transport compact; the full editor record is fetched
+    // only after an operator opens a specific listing.
+    listingSummaryOnly: true,
+  });
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [selectedRecords, setSelectedRecords] = useState({});
+  const [crosspostDestinations, setCrosspostDestinations] = useState([]);
+  const [bulkCrosspostBusy, setBulkCrosspostBusy] = useState(false);
+  const [bulkCrosspostReport, setBulkCrosspostReport] = useState(null);
+  const [bulkSendTarget, setBulkSendTarget] = useState('drafts');
+  const [selectedListingId, setSelectedListingId] = useState(null);
+  const [quickFixMode, setQuickFixMode] = useState(false);
+  const [selectedListingDetails, setSelectedListingDetails] = useState(null);
+  const [selectedListingDetailsLoading, setSelectedListingDetailsLoading] = useState(false);
+  const [quickFixCategories, setQuickFixCategories] = useState([]);
+  const [quickFixCategoriesLoading, setQuickFixCategoriesLoading] = useState(false);
+  const [quickFixSavingCategory, setQuickFixSavingCategory] = useState(false);
+  const [quickFixPreflightResult, setQuickFixPreflightResult] = useState(null);
+  const [viewMode, setViewMode] = useState('table');
+  const [workspaceMode, setWorkspaceMode] = useState('results');
+  const [pricingRecommendation, setPricingRecommendation] = useState(null);
+  const [listingIntelligence, setListingIntelligence] = useState(null);
+  const [crosspostPreview, setCrosspostPreview] = useState([]);
+  const [crosspostPreviewLoading, setCrosspostPreviewLoading] = useState(false);
+  const [marketplacePreflights, setMarketplacePreflights] = useState({});
+  const [marketplacePayloadPreviews, setMarketplacePayloadPreviews] = useState({});
+  const [jobsOverview, setJobsOverview] = useState({ import_jobs: [], crosspost_jobs: [] });
+  const [bulkPreflightReport, setBulkPreflightReport] = useState(null);
+  const [bulkPreflightLoading, setBulkPreflightLoading] = useState(false);
+  const [bulkPreflightProgress, setBulkPreflightProgress] = useState(null);
+  const [bulkPublishReport, setBulkPublishReport] = useState(null);
+  const [pendingBulkPublish, setPendingBulkPublish] = useState(null);
+  const [bulkPublishAcknowledged, setBulkPublishAcknowledged] = useState(false);
+  const [bulkPublishSubmitting, setBulkPublishSubmitting] = useState(false);
+  const [launchCandidatesReport, setLaunchCandidatesReport] = useState(null);
+  const [launchCandidatesLoading, setLaunchCandidatesLoading] = useState(false);
+  const [ebayAccountReadiness, setEbayAccountReadiness] = useState(null);
+  const [repairQueueReport, setRepairQueueReport] = useState(null);
+  const [repairQueueLoading, setRepairQueueLoading] = useState(false);
+  const [repairQueueImageStatusFilter, setRepairQueueImageStatusFilter] = useState('all');
+  const [pageInput, setPageInput] = useState('1');
+  const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(false);
+  const [workflowPreferences, setWorkflowPreferences] = useState({
+    review_before_publish: true,
+    auto_publish_after_approval: false,
+    bulk_approval_enabled: true,
+    listing_preview_mode: 'marketplace',
+  });
+  const listingsReturnUrl = useMemo(() => {
+    const current = typeof router.asPath === 'string' && router.asPath.startsWith('/listings')
+      ? router.asPath
+      : '/listings';
+    return current || '/listings';
+  }, [router.asPath]);
+
+  const loadMarketplacePreviewData = useCallback(async (listingId) => {
+    if (!listingId) return;
+    const entries = await Promise.all(PREPARED_MARKETPLACES.map(async (marketplace) => {
+      try {
+        const result = await fetchMarketplacePreflight(listingId, marketplace);
+        return [marketplace, result];
+      } catch (error) {
+        return [marketplace, {
+          marketplace,
+          preparation_status: 'unavailable',
+          preparation_blockers: [{
+            code: 'PREFLIGHT_UNAVAILABLE',
+            message: error?.message || 'Destination preflight could not be completed.',
+          }],
+          execution_status: 'not checked',
+          connection_blockers: [],
+        }];
+      }
+    }));
+    const nextPreflights = Object.fromEntries(entries);
+    setMarketplacePreflights(nextPreflights);
+    setMarketplacePayloadPreviews(Object.fromEntries(entries.map(([marketplace, result]) => [
+      marketplace,
+      result?.payload_preview?.payload || null,
+    ])));
+  }, []);
+
+  useEffect(() => {
+    setSearch(typeof router.query.q === 'string' ? router.query.q : '');
+  }, [router.query.q]);
+
+  useEffect(() => {
+    if (!router.isReady) return;
+    const rawTab = typeof router.query.tab === 'string'
+      ? router.query.tab
+      : (typeof router.query.status === 'string' ? router.query.status : (typeof router.query.queue === 'string' ? router.query.queue : (typeof router.query.lifecycle === 'string' ? router.query.lifecycle : '')));
+    const legacyVineTab = {
+      vine_review: 'review',
+      vine_attention: 'attention',
+      vine_processing: 'processing',
+      vine_drafts: 'drafts',
+      vine_ready: 'ready',
+      vine_published: 'published',
+      vine_sold: 'sold',
+      vine_archived: 'archived',
+      vine_failed: 'failed',
+    };
+    const tab = legacyVineTab[rawTab] || (rawTab === 'needs_attention' ? 'attention' : rawTab);
+    if (legacyVineTab[rawTab] && router.isReady && router.query.source !== 'amazon_vine') {
+      setSourceFilter('amazon_vine');
+    }
+    if (tab && LISTING_TABS.some((item) => item.value === tab)) {
+      setActiveTab(tab);
+    }
+    // Do not let the state -> URL effect serialize the initial defaults before
+    // Next has exposed the incoming deep-link query to these controls.
+    setQueryStateHydrated(true);
+  }, [router.isReady, router.query.lifecycle, router.query.queue, router.query.source, router.query.status, router.query.tab]);
+
+  useEffect(() => {
+    // URL state is an override, not a continuously re-applied default.  When
+    // a shallow route update temporarily omits page_size, falling back to 25
+    // here races the user's selected value (for example 100) and creates an
+    // alternating 25/100 fetch loop.  Only apply a query value when it is
+    // explicitly present; local state remains authoritative otherwise.
+    if (Object.prototype.hasOwnProperty.call(router.query, 'page')) {
+      const pageValue = Number(router.query.page);
+      if (Number.isFinite(pageValue) && pageValue > 0) setCatalogPage(pageValue);
+    }
+    if (Object.prototype.hasOwnProperty.call(router.query, 'page_size')) {
+      const pageSizeValue = Number(router.query.page_size);
+      if (Number.isFinite(pageSizeValue) && pageSizeValue > 0) setCatalogPageSize(Math.min(250, Math.max(1, pageSizeValue)));
+    }
+    const marketValue = typeof router.query.market === 'string' ? router.query.market : '';
+    if (marketValue) setMarketFilter(marketValue);
+    const sourceValue = typeof router.query.source === 'string' ? router.query.source : (typeof router.query.source_type === 'string' ? router.query.source_type : '');
+    if (sourceValue) setSourceFilter(sourceValue);
+    const readinessValue = typeof router.query.readiness === 'string' ? router.query.readiness : '';
+    if (readinessValue) setReadinessFilter(readinessValue);
+    const sortValue = typeof router.query.sort === 'string' ? router.query.sort : '';
+    if (sortValue) {
+      const [field, direction] = sortValue.split(':');
+      if (field) setSortBy(field);
+      if (direction === 'asc' || direction === 'desc') setSortDir(direction);
+    }
+    const viewValue = typeof router.query.view === 'string' ? router.query.view : '';
+    if (viewValue === 'table' || viewValue === 'grid') setViewMode(viewValue);
+    const workspaceValue = typeof router.query.workspace === 'string' ? router.query.workspace : '';
+    if (workspaceValue && ['results', 'repair', 'launch', 'queue', 'all'].includes(workspaceValue)) setWorkspaceMode(workspaceValue);
+    const refreshValue = typeof router.query.refresh === 'string' ? router.query.refresh : '';
+    setAutoRefreshEnabled(refreshValue === '1' || refreshValue === 'true' || refreshValue === 'on');
+  }, [router.query.market, router.query.page, router.query.page_size, router.query.readiness, router.query.refresh, router.query.source, router.query.source_type, router.query.sort, router.query.view, router.query.workspace]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedSearch(search.trim()), 250);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+
+  useEffect(() => {
+    if (!router.isReady || !queryStateHydrated) return;
+    setPageInput(String(catalogPage));
+  }, [catalogPage, router.isReady]);
+
+  useEffect(() => {
+    if (!router.isReady || !queryStateHydrated) return;
+    const nextQuery = buildListingsQuery({
+      tab: activeTab,
+      page: catalogPage,
+      pageSize: catalogPageSize,
+      search: debouncedSearch,
+      market: marketFilter,
+      source: sourceFilter,
+      readiness: readinessFilter,
+      sortBy,
+      sortDir,
+      view: viewMode,
+      workspace: workspaceMode,
+      refresh: autoRefreshEnabled,
+    });
+    if (sameListingsQuery(nextQuery, router.query)) return;
+    router.push({ pathname: router.pathname, query: nextQuery }, undefined, { shallow: true, scroll: false });
+  }, [activeTab, autoRefreshEnabled, catalogPage, catalogPageSize, debouncedSearch, marketFilter, router, queryStateHydrated, readinessFilter, sortBy, sortDir, sourceFilter, viewMode, workspaceMode]);
+
+  const commitPageChange = useCallback((nextPage) => {
+    const safePage = Number.isFinite(nextPage) ? Math.max(1, nextPage) : 1;
+    const totalPages = Math.max(1, Number(listingPagination.total_pages || 1));
+    const clamped = Math.min(totalPages, safePage);
+    setCatalogPage(clamped);
+  }, [listingPagination.total_pages]);
+
+  const commitPageInput = useCallback(() => {
+    const parsed = Number(pageInput);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      setPageInput(String(catalogPage));
+      return;
+    }
+    commitPageChange(parsed);
+  }, [catalogPage, commitPageChange, pageInput]);
+
+  const selectTab = (nextTab) => {
+    setActiveTab((current) => {
+      if (nextTab === 'all') return 'all';
+      const next = new Set(String(current || 'all').split(',').filter((value) => value && value !== 'all'));
+      if (next.has(nextTab)) next.delete(nextTab); else next.add(nextTab);
+      return next.size ? Array.from(next).join(',') : 'all';
+    });
+    setCatalogPage(1);
+    setSelectedIds([]);
+  };
+
+  const clearAllFilters = () => {
+    setActiveTab('all');
+    setSearch('');
+    setMarketFilter('all');
+    setSourceFilter('all');
+    setReadinessFilter('all');
+    setSelectedIds([]);
+    setCatalogPage(1);
+  };
+
+  useEffect(() => {
+    if (!user?.id) return;
+    fetchSettingsPanels()
+      .then((panels) => setWorkflowPreferences(panels.workflow || workflowPreferences))
+      .catch(() => undefined);
+  }, [user?.id]);
+
+  useEffect(() => {
+    if (!user?.id) return;
+    fetchEbayAccountReadiness()
+      .then((data) => setEbayAccountReadiness(data))
+      .catch(() => setEbayAccountReadiness(null));
+  }, [user?.id]);
+
+  useEffect(() => {
+    if (!autoRefreshEnabled) return undefined;
+    const timer = window.setInterval(() => {
+      reload().catch(() => undefined);
+    }, 15000);
+    return () => window.clearInterval(timer);
+  }, [autoRefreshEnabled, reload]);
+
+  useEffect(() => {
+    let active = true;
+    const loadJobs = async () => {
+      try {
+        const overview = await fetchMarketplaceJobsOverview({ limit: 40, compact: true });
+        if (active) {
+          setJobsOverview(overview || { import_jobs: [], crosspost_jobs: [] });
+        }
+      } catch {
+        if (active) setJobsOverview({ import_jobs: [], crosspost_jobs: [] });
+      }
+    };
+    loadJobs();
+    // Queue state is supporting context on the catalog page. Polling it every
+    // five seconds made the page feel as though it was constantly reloading.
+    const timer = setInterval(loadJobs, 30000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, []);
+
+  const filteredListings = listings;
+
+  const baseFilteredListings = listings;
+
+  const selectedListing = useMemo(
+    () => selectedListingDetails?.id === selectedListingId
+      ? selectedListingDetails
+      : listings.find((listing) => listing.id === selectedListingId) || null,
+    [listings, selectedListingDetails, selectedListingId],
+  );
+
+  useEffect(() => {
+    if (!selectedListingId) {
+      setSelectedListingDetails(null);
+      setSelectedListingDetailsLoading(false);
+      return undefined;
+    }
+    let cancelled = false;
+    setSelectedListingDetails(null);
+    setSelectedListingDetailsLoading(true);
+    fetchListing(selectedListingId)
+      .then((listing) => { if (!cancelled) setSelectedListingDetails(listing); })
+      .catch((error) => { if (!cancelled) toast.error(error?.message || 'Could not load listing details.'); })
+      .finally(() => { if (!cancelled) setSelectedListingDetailsLoading(false); });
+    return () => { cancelled = true; };
+  }, [selectedListingId]);
+
+  useEffect(() => {
+    if (!quickFixMode || !selectedListing) {
+      setQuickFixCategories([]);
+      return undefined;
+    }
+    let cancelled = false;
+    setQuickFixCategoriesLoading(true);
+    searchEbayCategories(categorySearchSeed(selectedListing), { treeIds: ['0', '100'] })
+      .then((response) => {
+        if (!cancelled) setQuickFixCategories((response?.results || []).filter((row) => row.leaf_verified === true));
+      })
+      .catch(() => { if (!cancelled) setQuickFixCategories([]); })
+      .finally(() => { if (!cancelled) setQuickFixCategoriesLoading(false); });
+    return () => { cancelled = true; };
+  }, [quickFixMode, selectedListing]);
+
+  const saveQuickFixCategory = async (category) => {
+    if (!selectedListing || !category?.category_id || category.leaf_verified !== true) return;
+    setQuickFixSavingCategory(true);
+    try {
+      const treeId = String(category.category_tree_id || '0');
+      const marketplace = category.marketplace || (treeId === '100' ? 'EBAY_MOTORS_US' : 'EBAY_US');
+      const validation = {
+        status: 'valid_local', marketplace, tree_id: treeId,
+        tree_version: String(category.category_tree_version || ''),
+        category_id: String(category.category_id), category_name: category.category_name,
+        full_path: category.full_path || category.breadcrumb, confidence: null,
+        evidence: { source: 'operator_selected_local_taxonomy_leaf', leaf: true },
+      };
+      const changes = {
+        category_id: String(category.category_id),
+        category_suggestion: category.full_path || category.breadcrumb || category.category_name,
+        source_metadata: { ...(selectedListing.source_metadata || {}), category_validation: validation },
+        marketplace_data: { ...(selectedListing.marketplace_data || {}), taxonomy_marketplace: marketplace, taxonomy_tree_id: treeId, taxonomy_tree_version: String(category.category_tree_version || ''), category_path: validation.full_path, leaf_verified: true, category_provenance: 'MANUAL_OPERATOR' },
+      };
+      const saved = await updateListing(selectedListing.id, changes);
+      setSelectedListingDetails((current) => current?.id === selectedListing.id ? { ...current, ...(saved || {}), ...changes } : current);
+      const freshPreflight = await refreshListingReadiness(selectedListing.id, 'ebay');
+      setQuickFixPreflightResult(freshPreflight);
+      await reload();
+      const blockerCount = (Array.isArray(freshPreflight?.blockers) ? freshPreflight.blockers.length : 0) + (Array.isArray(freshPreflight?.canonical?.blocking_reasons) ? freshPreflight.canonical.blocking_reasons.length : 0);
+      if (freshPreflight?.publishable) toast.success(`Category saved and eBay readiness passed: ${category.category_name}`);
+      else toast.success(`Category saved. Fresh eBay readiness found ${blockerCount || 1} remaining blocker${blockerCount === 1 ? '' : 's'}.`);
+    } catch (error) {
+      toast.error(error?.message || 'Could not save this category.');
+    } finally {
+      setQuickFixSavingCategory(false);
+    }
+  };
+
+  const selectedRows = useMemo(
+    () => selectedIds.map((id) => selectedRecords[id] || listings.find((listing) => listing.id === id)).filter(Boolean),
+    [listings, selectedIds, selectedRecords],
+  );
+  useEffect(() => {
+    if (!listings.length) return;
+    setSelectedRecords((current) => {
+      const next = { ...current };
+      listings.forEach((listing) => { if (selectedIds.includes(listing.id)) next[listing.id] = listing; });
+      return next;
+    });
+  }, [listings, selectedIds]);
+  const selectedVineRows = useMemo(
+    () => selectedRows.filter((listing) => isAmazonVineSource(listing)),
+    [selectedRows],
+  );
+  const selectedAggregate = useMemo(() => {
+    const snapshots = selectedRows.map((row) => row.listing_financials || {}).filter(Boolean);
+    const priced = snapshots.map((item) => Number(item.item_value)).filter((value) => Number.isFinite(value) && value > 0);
+    const total = priced.reduce((sum, value) => sum + value, 0);
+    const shippingMin = snapshots.reduce((sum, item) => sum + Number(item.shipping?.min || 0), 0);
+    const shippingMax = snapshots.reduce((sum, item) => sum + Number(item.shipping?.max || 0), 0);
+    const listingFees = snapshots.reduce((sum, item) => sum + Number(item.listing_fee_total || 0), 0);
+    const soldFees = snapshots.reduce((sum, item) => sum + Number(item.sold_item_fee_total || 0), 0);
+    const netBeforeShipping = total - listingFees - soldFees;
+    return {
+      count: selectedRows.length,
+      total,
+      average: priced.length ? total / priced.length : 0,
+      missing: selectedRows.length - priced.length,
+      shippingMin,
+      shippingMax,
+      listingFees,
+      soldFees,
+      netBeforeShipping,
+      netMin: netBeforeShipping - shippingMax,
+      netMax: netBeforeShipping - shippingMin,
+    };
+  }, [selectedRows]);
+  const publishedDestinationState = useMemo(
+    () => Object.fromEntries(CROSSPOST_DESTINATIONS.map(([market]) => [market, selectedRows.length > 0 && selectedRows.every((listing) => isMarketplacePublished(listing, market))])),
+    [selectedRows],
+  );
+
+  const isAlreadyPostedToEbay = useCallback(
+    (listing) => listing?.ebay_publish_status === 'POSTED' || Boolean(listing?.ebay_listing_id),
+    [],
+  );
+
+  const selectedReviewRows = useMemo(
+    () => selectedRows.filter((listing) => getListingBucket(listing) === 'review' || listing.status === 'draft'),
+    [selectedRows],
+  );
+
+  const selectedPublishableRows = useMemo(() => {
+    return selectedRows.filter((listing) => {
+      const bucket = getListingBucket(listing);
+      const isReadyRow = bucket === 'ready' || listing?.status === 'ready';
+      const isDraftRow = bucket === 'drafts' || listing?.status === 'draft';
+      const hasCrosspostTargets = getQuickPublishTargets(listing, enabledPlatforms).length > 0;
+      const crosspostOnly = isAlreadyPostedToEbay(listing) && hasCrosspostTargets;
+      if (crosspostOnly) return true;
+      if (workflowPreferences.review_before_publish) {
+        return isReadyRow;
+      }
+      return isDraftRow || isReadyRow;
+    });
+  }, [enabledPlatforms, isAlreadyPostedToEbay, selectedRows, workflowPreferences.review_before_publish]);
+
+  const selectedNeedsApprovalRows = useMemo(() => {
+    return selectedRows.filter((listing) => getListingBucket(listing) === 'review' || listing.status === 'draft');
+  }, [selectedRows]);
+
+  const tabCounts = useMemo(
+    () => Object.fromEntries(LISTING_TABS.map((tab) => [tab.value, Number(listingBucketCounts?.[tab.value] || 0)])),
+    [listingBucketCounts],
+  );
+  const activeTabLabel = LISTING_TABS.find((tab) => tab.value === activeTab)?.label || 'Listings';
+  const activeTabSet = useMemo(() => new Set(String(activeTab || 'all').split(',').filter((value) => value && value !== 'all')), [activeTab]);
+  const aggregateMissingPriceCount = Number(listingPagination.missing_price_count || 0);
+  const aggregatePricedCount = Number(listingPagination.priced_count || 0);
+  const aggregatePopulationCount = Number(listingPagination.total || 0);
+  const averagePriceLabel = aggregateMissingPriceCount > 0 ? 'Avg. priced listing' : 'Avg. listing price';
+
+  const listingMetrics = useMemo(() => {
+    const visibleDrafts = baseFilteredListings.filter((listing) => !isArchivedListing(listing) && matchesTab(listing, 'drafts'));
+    const readyToPublish = baseFilteredListings.filter((listing) => !isArchivedListing(listing) && matchesTab(listing, 'ready'));
+    const reviewQueue = baseFilteredListings.filter((listing) => !isArchivedListing(listing) && matchesTab(listing, 'review'));
+
+    const sumAmount = (rows) => rows.reduce((total, row) => total + Number(row.listing_price || row.suggested_price || row.price || 0), 0);
+    const byMarket = {};
+    baseFilteredListings
+      .filter((listing) => !isArchivedListing(listing) && (getListingBucket(listing) === 'drafts' || getListingBucket(listing) === 'ready' || getListingBucket(listing) === 'published'))
+      .forEach((listing) => {
+        const explicitMarkets = getListingMarketplaces(listing, enabledPlatforms, { allowFallback: false });
+        if (!explicitMarkets.length) {
+          if (!byMarket.unassigned) byMarket.unassigned = { count: 0, amount: 0 };
+          byMarket.unassigned.count += 1;
+          byMarket.unassigned.amount += Number(listing.listing_price || listing.suggested_price || listing.price || 0);
+          return;
+        }
+        explicitMarkets.forEach((market) => {
+          if (!byMarket[market]) byMarket[market] = { count: 0, amount: 0 };
+          byMarket[market].count += 1;
+          byMarket[market].amount += Number(listing.listing_price || listing.suggested_price || listing.price || 0);
+        });
+      });
+
+    return {
+      reviewCount: reviewQueue.length,
+      reviewAmount: sumAmount(reviewQueue),
+      draftCount: visibleDrafts.length,
+      draftAmount: sumAmount(visibleDrafts),
+      readyCount: readyToPublish.length,
+      readyAmount: sumAmount(readyToPublish),
+      blockedCount: baseFilteredListings.filter((listing) => (listing.readiness_summary?.blockers || []).length > 0).length,
+      weakPricingCount: baseFilteredListings.filter((listing) => Number(listing?.marketplace_data?.pricing_analysis?.price_confidence || listing?.marketplace_data?.pricing_analysis?.confidence || 0) < 0.45).length,
+      stalePricingCount: baseFilteredListings.filter((listing) => Boolean(listing?.marketplace_data?.pricing_analysis?.stale)).length,
+      readyForEbayCount: baseFilteredListings.filter((listing) => Boolean(listing?.quality_summary?.ready_for_ebay)).length,
+      byMarket,
+    };
+  }, [baseFilteredListings, enabledPlatforms]);
+
+  const bulkScopeRows = useMemo(() => (selectedRows.length ? selectedRows : filteredListings), [filteredListings, selectedRows]);
+  const bulkPreflightSummary = useMemo(() => {
+    const ebayReadyCount = bulkScopeRows.filter((listing) => isMarketplaceReady(getMarketplacePreflightSummary(listing, 'ebay'))).length;
+    const facebookReadyCount = bulkScopeRows.filter((listing) => isMarketplaceReady(getMarketplacePreflightSummary(listing, 'facebook'))).length;
+    const blockedCount = bulkScopeRows.filter((listing) => isMarketplaceBlocked(getMarketplacePreflightSummary(listing, 'ebay')) || isMarketplaceBlocked(getMarketplacePreflightSummary(listing, 'facebook'))).length;
+    const warningOnlyCount = bulkScopeRows.filter((listing) => {
+      const ebay = getMarketplacePreflightSummary(listing, 'ebay');
+      const facebook = getMarketplacePreflightSummary(listing, 'facebook');
+      return (isMarketplaceWarningOnly(ebay) || isMarketplaceWarningOnly(facebook)) && !isMarketplaceBlocked(ebay) && !isMarketplaceBlocked(facebook);
+    }).length;
+    const checkedCount = bulkScopeRows.filter((listing) => getMarketplacePreflightSummary(listing, 'ebay') || getMarketplacePreflightSummary(listing, 'facebook')).length;
+    const readyToQueueCount = bulkScopeRows.filter((listing) => Boolean(listing?.quality_summary?.ready_for_publish_queue)).length;
+    const common = summarizeBlockerCodes(bulkScopeRows);
+    return {
+      selectedCount: selectedRows.length,
+      checkedCount,
+      ebayReadyCount,
+      facebookReadyCount,
+      blockedCount,
+      warningOnlyCount,
+      readyToQueueCount,
+      mostCommonBlocker: common[0]?.[0] || '',
+      mostCommonBlockerCount: common[0]?.[1] || 0,
+    };
+  }, [bulkScopeRows, selectedRows.length]);
+
+  const publishJobStats = useMemo(() => {
+    const queued = Number(jobsOverview.crosspost_summary?.queued || 0) + Number(jobsOverview.crosspost_summary?.running || 0);
+    const completed = Number(jobsOverview.crosspost_summary?.completed || 0);
+    const failed = Number(jobsOverview.crosspost_summary?.failed || 0);
+    const total = Number(jobsOverview.crosspost_summary?.total || 0);
+    const progress = total ? Math.round((completed / total) * 100) : 0;
+    return { queued, completed, failed, total, progress };
+  }, [jobsOverview]);
+
+  const workspaceModes = useMemo(() => ([
+    {
+      key: 'results',
+      label: 'Results',
+      description: 'Focus on the active queue first.',
+      icon: ListChecks,
+      count: filteredListings.length,
+    },
+    {
+      key: 'repair',
+      label: 'Repair',
+      description: 'Preflight blockers, readiness, and fix queues.',
+      icon: ShieldAlert,
+      count: listingMetrics.blockedCount,
+    },
+    {
+      key: 'launch',
+      label: 'Launch',
+      description: 'Dry-run launch QA and publish readiness.',
+      icon: Rocket,
+      count: launchCandidatesReport?.candidates?.length || 0,
+    },
+    {
+      key: 'queue',
+      label: 'Queue',
+      description: 'Queued jobs and publish progress.',
+      icon: BriefcaseBusiness,
+      count: publishJobStats.queued,
+    },
+    {
+      key: 'all',
+      label: 'All',
+      description: 'Open the full operator workspace.',
+      icon: Sparkles,
+      count: tabCounts[activeTab] || 0,
+    },
+  ]), [
+    activeTab,
+    filteredListings.length,
+    launchCandidatesReport?.candidates?.length,
+    listingMetrics.blockedCount,
+    publishJobStats.queued,
+    tabCounts,
+  ]);
+
+  useEffect(() => {
+    if (!selectedListingId) return;
+    if (quickFixMode) {
+      // The repair drawer needs the authoritative listing row only. Loading
+      // every marketplace preflight, pricing report and intelligence panel
+      // first made a one-field fix wait on a fan-out of unrelated requests.
+      setCrosspostPreview([]);
+      setMarketplacePreflights({});
+      setMarketplacePayloadPreviews({});
+      setPricingRecommendation(null);
+      setListingIntelligence(null);
+      setCrosspostPreviewLoading(false);
+      return;
+    }
+    refreshStatus(selectedListingId).catch(() => undefined);
+    setCrosspostPreviewLoading(true);
+    loadMarketplacePreviewData(selectedListingId);
+    fetchCrosspostPreview(selectedListingId, enabledPlatforms || [])
+      .then((rows) => setCrosspostPreview(Array.isArray(rows) ? rows : []))
+      .catch(() => setCrosspostPreview([]))
+      .finally(() => setCrosspostPreviewLoading(false));
+    fetchPricingRecommendation(selectedListingId)
+      .then(setPricingRecommendation)
+      .catch(() => setPricingRecommendation(null));
+    fetchListingIntelligence(selectedListingId)
+      .then(setListingIntelligence)
+      .catch(() => setListingIntelligence(null));
+  }, [enabledPlatforms, loadMarketplacePreviewData, quickFixMode, refreshStatus, selectedListingId]);
+
+  const listingsSubnav = useMemo(
+    () => ({
+      eyebrow: 'Listings CMS',
+      title: 'Listings Manager',
+      description: 'Navigate review queues, draft states, and editor workflows from a dedicated listings rail.',
+      sections: [
+        {
+          label: 'Queues',
+          items: LISTING_TABS.map((tab) => ({
+            key: tab.value,
+            label: tab.label,
+            active: activeTabSet.has(tab.value),
+            badge: tabCounts[tab.value] || 0,
+            description:
+              tab.value === 'review'
+                ? 'Items waiting for approval'
+                : tab.value === 'drafts'
+                ? 'Editable in-progress listings'
+                : tab.value === 'ready'
+                ? 'Publishable listings'
+                : tab.value === 'published'
+                ? 'Live marketplace records'
+                : tab.value === 'archived'
+                ? 'Archived records'
+                : 'Rows with publish problems',
+            onClick: () => selectTab(tab.value),
+          })),
+        },
+        {
+          label: 'Listing actions',
+          items: [
+            { key: 'all-listings', label: 'All listings', active: false, description: 'Open the full listings table.', onClick: () => router.push('/listings') },
+            { key: 'new-listing', label: 'Create new listing', active: false, description: 'Start a blank listing draft.', onClick: () => router.push('/listings/new') },
+            { key: 'import-listings', label: 'Import marketplace listings', active: false, description: 'Import existing marketplace listings.', onClick: () => router.push('/settings?tab=marketplaces') },
+            { key: 'intake-photos', label: 'Intake photos', active: false, description: 'Upload photos and create new draft rows.', onClick: () => router.push('/intake') },
+            ...(vineFeaturesEnabled
+              ? [
+                  {
+                    key: 'vine-import',
+                    label: 'Import Vine data',
+                    active: false,
+                    description: 'Create listing drafts from Vine files.',
+                    onClick: () => router.push('/imports/vine'),
+                  },
+                ]
+              : []),
+          ],
+        },
+        {
+          label: 'Sections',
+          items: [
+            { key: 'listing-toolbar', label: 'Filters', active: false, description: 'Search and filter controls', onClick: () => document.getElementById('listing-toolbar')?.scrollIntoView({ behavior: 'smooth', block: 'start' }) },
+            { key: 'listing-status', label: 'Workflow Status', active: false, description: 'Approval and preview policy', onClick: () => document.getElementById('listing-status')?.scrollIntoView({ behavior: 'smooth', block: 'start' }) },
+            { key: 'listing-results', label: 'Results', active: false, description: 'Table or grid listing results', onClick: () => document.getElementById('listing-results')?.scrollIntoView({ behavior: 'smooth', block: 'start' }) },
+          ],
+        },
+      ],
+    }),
+    [activeTab, router, tabCounts, vineFeaturesEnabled],
+  );
+
+  const approveListing = async (listingId) => {
+    await approveListingApi(listingId);
+    await reload();
+  };
+
+  const approveListingAndMoveNext = async (listingId) => {
+    await approveListing(listingId);
+    const orderedVisibleIds = filteredListings.map((listing) => listing.id);
+    const currentIndex = orderedVisibleIds.indexOf(listingId);
+    if (currentIndex === -1) {
+      setSelectedListingId(null);
+      return;
+    }
+    const nextId = orderedVisibleIds[currentIndex + 1];
+    setSelectedListingId(nextId || null);
+  };
+
+  const liveEbayConfirmationPhrase = 'QUEUE LIVE EBAY READY LISTINGS';
+
+  const confirmLiveEbayQueue = ({ count, marketplaces, allowWarnings, skipAlreadyQueued, context = 'queue live eBay listings' }) => {
+    const marketLabel = Array.isArray(marketplaces) && marketplaces.length ? marketplaces.join(', ') : 'ebay';
+    const message = [
+      `You are about to LIVE QUEUE ${count} listing${count === 1 ? '' : 's'} for ${marketLabel.toUpperCase()}.`,
+      `This can publish real eBay listings.`,
+      `Warnings allowed: ${allowWarnings ? 'yes' : 'no'}.`,
+      `Skip already queued: ${skipAlreadyQueued ? 'yes' : 'no'}.`,
+      `Confirmation phrase required: ${liveEbayConfirmationPhrase}`,
+      ``,
+      `Type exactly: ${liveEbayConfirmationPhrase}`,
+      context ? `Context: ${context}` : '',
+    ].filter(Boolean).join('\n');
+    const typed = window.prompt(message, '');
+    return String(typed || '').trim() === liveEbayConfirmationPhrase;
+  };
+
+  const syncListingWithEbay = async (listingId) => {
+    const listing = listings.find((row) => row.id === listingId);
+    if (!listing?.ebay_listing_id) {
+      toast.error('This listing does not have an eBay listing id yet.');
+      return null;
+    }
+    const confirmed = confirmLiveEbayQueue({
+      count: 1,
+      marketplaces: ['ebay'],
+      allowWarnings: false,
+      skipAlreadyQueued: false,
+      context: `Push listing #${listingId} updates back to eBay`,
+    });
+    if (!confirmed) {
+      toast.error('Live eBay update canceled.');
+      return null;
+    }
+    try {
+      const result = await syncEbayListing(listingId, {
+        confirm_live_publish: true,
+        confirmation_phrase: liveEbayConfirmationPhrase,
+      });
+      await reload();
+      if (selectedListingId === listingId) {
+        await loadMarketplacePreviewData(listingId);
+      }
+      toast.success(`Pushed updates for ${getListingTitle(listing)} to eBay.`);
+      return result;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'eBay sync failed.');
+      return null;
+    }
+  };
+
+  const publishSingleListing = async (listing, event) => {
+    event?.stopPropagation?.();
+    try {
+      const targets = getQuickPublishTargets(listing, enabledPlatforms);
+      if (targets.length === 1 && targets[0] === 'ebay') {
+        if (!confirmLiveEbayQueue({ count: 1, marketplaces: ['ebay'], allowWarnings: false, skipAlreadyQueued: false, context: `Listing #${listing.id} · ${getListingTitle(listing)}` })) {
+          toast.error('Live eBay publish canceled.');
+          return;
+        }
+        const result = await publishListingEbay(listing.id, {
+          confirm_live_publish: true,
+          confirmation_phrase: liveEbayConfirmationPhrase,
+        });
+        if (result?.status === 'POSTED') {
+          await refreshStatus(listing.id).catch(() => undefined);
+          await reload();
+          toast.success(`Published ${getListingTitle(listing)} to eBay.`);
+          return;
+        }
+      }
+      const { failed } = await queuePublishRows([listing]);
+      if (failed) {
+        toast.error(`${failed} publish action${failed === 1 ? '' : 's'} failed.`);
+        return;
+      }
+      await reload();
+      toast.success(`Queued ${getListingTitle(listing)} for publish${targets.length ? ` to ${targets.map(formatMarketplace).join(', ')}` : ''}.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Publish request failed.';
+      toast.error(message);
+    }
+  };
+
+  const toggleRow = (id) => {
+    const listing = listings.find((row) => row.id === id);
+    setSelectedIds((current) => (current.includes(id) ? current.filter((item) => item !== id) : [...current, id]));
+    if (listing) setSelectedRecords((current) => ({ ...current, [id]: listing }));
+  };
+
+  const queuePublishRows = async (rows, { ebayConfirmationAlreadyGranted = false } = {}) => {
+    const publishableRows = rows.filter(Boolean);
+    if (!publishableRows.length) {
+      return { failed: 0, total: 0 };
+    }
+
+    const targetSets = publishableRows.map((listing) => {
+      const targets = getQuickPublishTargets(listing, enabledPlatforms);
+      return JSON.stringify(targets.length ? targets : ['ebay']);
+    });
+    const uniqueTargetSets = new Set(targetSets);
+    if (uniqueTargetSets.size === 1) {
+      const marketplaces = JSON.parse(targetSets[0]);
+      if (marketplaces.includes('ebay') && !ebayConfirmationAlreadyGranted) {
+        const confirmed = confirmLiveEbayQueue({
+          count: publishableRows.length,
+          marketplaces,
+          allowWarnings: false,
+          skipAlreadyQueued: true,
+          context: `Bulk publish ${publishableRows.length} row${publishableRows.length === 1 ? '' : 's'}`,
+        });
+        if (!confirmed) {
+          toast.error('Live eBay publish canceled.');
+          return { failed: 0, total: publishableRows.length, canceled: true };
+        }
+      }
+      const response = await publishListingsBulk(
+        publishableRows.map((listing) => listing.id),
+        marketplaces,
+        marketplaces.includes('ebay')
+          ? {
+              confirm_live_publish: true,
+              confirmation_phrase: liveEbayConfirmationPhrase,
+            }
+          : {},
+      );
+      const failed = Array.isArray(response?.results)
+        ? response.results.filter((item) => item && item.error).length
+        : 0;
+      const queueResults = Array.isArray(response?.results) ? response.results : [];
+      const marketplaceResults = queueResults.flatMap((item) => Array.isArray(item?.results) ? item.results : []);
+      const queued = marketplaceResults.filter((item) => item?.status === 'QUEUED').length;
+      const blocked = marketplaceResults.filter((item) => item?.status === 'BLOCKED').length;
+      const alreadyQueued = marketplaceResults.filter((item) => item?.status === 'SKIPPED_ALREADY_QUEUED').length;
+      setBulkPublishReport({
+        dry_run: false,
+        direct_queue: true,
+        summary: { queued, skipped_blocked: blocked, skipped_already_queued: alreadyQueued, failed },
+        items: queueResults.map((item) => ({
+          listing_id: item?.listing_id,
+          marketplaces: Object.fromEntries((item?.results || []).map((result) => [result.marketplace || 'unknown', result])),
+          error: item?.error || null,
+        })),
+      });
+      return { failed, total: publishableRows.length, queued, blocked, alreadyQueued };
+    }
+
+    const results = await Promise.allSettled(
+      publishableRows.map((listing) => publish(
+        listing.id,
+        getQuickPublishTargets(listing, enabledPlatforms),
+      )),
+    );
+    const failed = results.filter((result) => result.status === 'rejected').length;
+    setBulkPublishReport({
+      dry_run: false,
+      direct_queue: true,
+      summary: { queued: publishableRows.length - failed, skipped_blocked: 0, skipped_already_queued: 0, failed },
+      items: results.map((result, index) => ({ listing_id: publishableRows[index]?.id, marketplaces: {}, error: result.status === 'rejected' ? String(result.reason || 'Publish request failed') : null })),
+    });
+    return { failed, total: publishableRows.length, queued: publishableRows.length - failed };
+  };
+
+  const publishSelected = async () => {
+    if (!selectedRows.length) {
+      toast.error('Select one or more listings first.');
+      return;
+    }
+
+    if (workflowPreferences.review_before_publish && selectedNeedsApprovalRows.length) {
+      await approveAndPublishSelected();
+      return;
+    }
+
+    if (!selectedPublishableRows.length) {
+      toast.error('No selected listings are publishable.');
+      return;
+    }
+
+    const { failed, total, queued = 0, blocked = 0, canceled } = await queuePublishRows(selectedPublishableRows);
+    if (canceled) return;
+    if (failed) toast.error(`${failed} publish action${failed === 1 ? '' : 's'} failed.`);
+    if (queued) toast.success(`Queued ${queued} of ${total} listing${total === 1 ? '' : 's'} for publish.${blocked ? ` ${blocked} blocked.` : ''}`);
+    else if (!failed) toast.error(`Nothing was queued.${blocked ? ` ${blocked} listing${blocked === 1 ? '' : 's'} was blocked.` : ''}`);
+    await reload();
+  };
+
+  const approveSelected = async () => {
+    if (!selectedReviewRows.length) {
+      toast.error('Select one or more draft/review listings first.');
+      return;
+    }
+    await approveListingsBulk(selectedReviewRows.map((listing) => listing.id));
+    await reload();
+    toast.success(`Approved ${selectedReviewRows.length} listing${selectedReviewRows.length === 1 ? '' : 's'}.`);
+    setSelectedIds([]);
+  };
+
+  const approveAndPublishSelected = async ({ confirmedEbay = false, targetIds = null } = {}) => {
+    const targetRows = Array.isArray(targetIds) && targetIds.length
+      ? listings.filter((listing) => targetIds.includes(listing.id))
+      : selectedRows;
+    if (!targetRows.length) {
+      toast.error('Select one or more listings first.');
+      return;
+    }
+    // An explicit operator destination selection is authoritative. Older
+    // Vine rows often retain historical Facebook targets in marketplace_data.
+    // Those are preparation metadata, not an instruction to publish there.
+    // A plain "Publish" from the review queue means the primary live channel
+    // (eBay); secondary destinations must be explicitly selected by the
+    // operator. This prevents an unconfigured Facebook target from blocking a
+    // valid eBay publish.
+    const explicitTargets = Array.from(new Set((crosspostDestinations || [])
+      .map((market) => String(market || '').trim().toLowerCase())
+      .filter(Boolean)));
+    const requestedMarketplaces = explicitTargets.length ? explicitTargets : ['ebay'];
+    if (requestedMarketplaces.includes('ebay') && !confirmedEbay) {
+      setBulkPublishAcknowledged(false);
+      setPendingBulkPublish({ listingIds: targetRows.map((listing) => listing.id), marketplaces: requestedMarketplaces });
+      return;
+    }
+    setBulkPublishSubmitting(true);
+    try {
+      setPendingBulkPublish(null);
+      const response = await approveAndQueueListings(targetRows.map((listing) => listing.id), requestedMarketplaces);
+      const outcomes = Array.isArray(response?.results) ? response.results : [];
+      const queued = outcomes.filter((item) => String(item?.status || '').toLowerCase() === 'queued').length;
+      const blockedListings = outcomes.filter((item) => String(item?.status || '').toLowerCase() === 'blocked').length;
+      const blockedTargets = outcomes.reduce((count, item) => count + (Array.isArray(item?.results)
+        ? item.results.filter((result) => String(result?.status || '').toLowerCase() === 'blocked').length
+        : 0), 0);
+      const failed = outcomes.filter((item) => String(item?.status || '').toLowerCase() === 'failed').length;
+      const total = targetRows.length;
+      setBulkPublishReport({ dry_run: false, direct_queue: true, summary: { queued, skipped_blocked: blockedListings, blocked_targets: blockedTargets, skipped_already_queued: 0, failed }, items: outcomes.map((item) => ({ listing_id: item.listing_id, marketplaces: Object.fromEntries((item.results || []).map((result) => [result.marketplace || 'unknown', result])), error: item.status === 'queued' ? null : item.status })) });
+      await reload();
+      const blockedMessage = blockedListings ? ` ${blockedListings} listing${blockedListings === 1 ? '' : 's'} remain blocked (${blockedTargets} destination target${blockedTargets === 1 ? '' : 's'}).` : '';
+      const destinationLabel = requestedMarketplaces.map((marketplace) => marketplace.toUpperCase()).join(' + ');
+      if (queued) toast.success(`Approved ${total} listing${total === 1 ? '' : 's'}; ${queued} have at least one ${destinationLabel} publish job queued. Queued is not confirmed live.${blockedMessage}${failed ? ` ${failed} failed.` : ''}`);
+      else toast.error(`Approved the selected listings, but nothing was queued.${blockedMessage}${failed ? ` ${failed} failed.` : ''}`);
+      setSelectedIds([]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'The approval and publish queue request failed.';
+      setBulkPublishReport({ dry_run: false, direct_queue: true, summary: { queued: 0, skipped_blocked: 0, blocked_targets: 0, skipped_already_queued: 0, failed: targetRows.length }, items: targetRows.map((listing) => ({ listing_id: listing.id, marketplaces: {}, error: message })) });
+      toast.error(message);
+    } finally {
+      setBulkPublishSubmitting(false);
+    }
+  };
+
+  const confirmDeleteListings = (count) => {
+    if (!count) return false;
+    const noun = count === 1 ? 'listing' : 'listings';
+    return window.confirm(
+      `Delete ${count} ${noun}? This will permanently remove the listing record, marketplace rows, and attached media. This cannot be undone.`,
+    );
+  };
+
+  const archiveListing = async (listingId, { silent = false } = {}) => {
+    const listing = listings.find((row) => row.id === listingId);
+    if (!listing) return;
+    const currentLabels = Array.isArray(listing.custom_labels) ? listing.custom_labels : [];
+    const labels = Array.from(new Set([...currentLabels, 'archived_vine']));
+    await updateListing(listingId, {
+      custom_labels: labels,
+      needs_review: false,
+      status: listing.status === 'draft' ? 'draft' : listing.status,
+    });
+    if (!silent) {
+      await reload();
+      toast.success('Listing archived.');
+    }
+  };
+
+  const unarchiveListing = async (listingId, { silent = false } = {}) => {
+    const listing = listings.find((row) => row.id === listingId);
+    if (!listing) return;
+    const currentLabels = Array.isArray(listing.custom_labels) ? listing.custom_labels : [];
+    const labels = currentLabels.filter((label) => !['archived_vine', 'archived_sold'].includes(String(label).toLowerCase()));
+    const currentStatus = String(listing.status || '').toLowerCase();
+    await updateListing(listingId, {
+      custom_labels: labels,
+      needs_review: true,
+      status: ['archived', 'sold', 'closed'].includes(currentStatus) ? 'draft' : (listing.status || 'draft'),
+    });
+    if (!silent) {
+      await reload();
+      toast.success('Listing restored.');
+    }
+  };
+
+  const archiveSelected = async () => {
+    const targetRows = selectedRows.filter((listing) => !isArchivedListing(listing));
+    if (!targetRows.length) {
+      toast.error('Select one or more active listings to archive.');
+      return;
+    }
+    if (activeTab === 'published') {
+      if (!window.confirm(`This will attempt to end the selected ${targetRows.length} listing${targetRows.length === 1 ? '' : 's'} on every active marketplace, then archive them in PosterPro. Archived records and marketplace history will be preserved so they can be restored and republished later.`)) return;
+      try {
+        const result = await unpublishAndArchiveListings(targetRows.map((listing) => listing.id));
+        const summary = result?.summary || {};
+        setSelectedIds([]);
+        await reload();
+        const unknown = Number(summary.remote_state_unknown_count || summary.remote_state_unknown || 0);
+        const partial = Number(summary.partial_count || summary.partially_unpublished || 0);
+        if (Number(summary.blocked || 0) > 0 || unknown > 0 || partial > 0) {
+          toast.error(`Unpublish did not complete for all destinations (${unknown ? `${unknown} remote state unknown` : `${partial || summary.blocked} partial/failed`}). Review the batch in Jobs.`);
+        }
+        else toast.success(`End listings and archive queued for ${targetRows.length} listing${targetRows.length === 1 ? '' : 's'}.`);
+      } catch (error) {
+        toast.error(error?.message || 'Could not end listings and archive them.');
+      }
+      return;
+    }
+    let archived = 0;
+    let failed = 0;
+    const chunkSize = 20;
+    for (let i = 0; i < targetRows.length; i += chunkSize) {
+      const chunk = targetRows.slice(i, i + chunkSize);
+      const results = await Promise.allSettled(chunk.map((listing) => archiveListing(listing.id, { silent: true })));
+      results.forEach((result) => {
+        if (result.status === 'fulfilled') archived += 1;
+        else failed += 1;
+      });
+    }
+    setSelectedIds([]);
+    await reload();
+    if (failed) {
+      toast.error(`Archived ${archived}, failed ${failed}. Please retry failed rows.`);
+    } else {
+      toast.success(`Archived ${archived} listing${archived === 1 ? '' : 's'}.`);
+    }
+  };
+
+  const sendSelectedTo = async (destination) => {
+    const normalizedDestination = String(destination || '').trim().toLowerCase();
+    const targetRows = selectedRows;
+    if (!targetRows.length) {
+      toast.error('Select one or more listings first.');
+      return;
+    }
+
+    let updatedCount = 0;
+    let failed = 0;
+    const chunkSize = 20;
+    for (let i = 0; i < targetRows.length; i += chunkSize) {
+      const chunk = targetRows.slice(i, i + chunkSize);
+      const results = await Promise.allSettled(
+        chunk.map((listing) => {
+          const currentLabels = Array.isArray(listing.custom_labels) ? listing.custom_labels : [];
+          const labelsWithoutArchive = currentLabels.filter((label) => !['archived_vine', 'archived_sold'].includes(label));
+          const updater = (() => {
+            switch (normalizedDestination) {
+              case 'ready':
+                return {
+                  status: 'ready',
+                  needs_review: false,
+                  custom_labels: labelsWithoutArchive,
+                };
+              case 'review':
+                return {
+                  status: listing.status || 'draft',
+                  needs_review: true,
+                  custom_labels: labelsWithoutArchive,
+                };
+              case 'archived':
+                return {
+                  status: listing.status === 'draft' ? 'draft' : listing.status,
+                  needs_review: false,
+                  custom_labels: Array.from(new Set([...currentLabels, 'archived_vine'])),
+                };
+              case 'drafts':
+              default:
+                return {
+                  status: 'draft',
+                  needs_review: false,
+                  custom_labels: labelsWithoutArchive,
+                };
+            }
+          })();
+          return updateListing(listing.id, updater);
+        }),
+      );
+      results.forEach((result) => {
+        if (result.status === 'fulfilled') updatedCount += 1;
+        else failed += 1;
+      });
+    }
+
+    await reload();
+    if (failed) {
+      toast.error(`Sent ${updatedCount}, failed ${failed}. Please retry failed rows.`);
+    } else {
+      const label = normalizedDestination === 'review' ? 'needs review' : normalizedDestination;
+      toast.success(`Sent ${updatedCount} listing${updatedCount === 1 ? '' : 's'} to ${label}.`);
+    }
+  };
+
+  const queueSelectedCrossposts = async () => {
+    const listingIds = selectedIds.slice();
+    if (!listingIds.length) {
+      toast.error('Select one or more listings first.');
+      return;
+    }
+    const availableDestinations = (crosspostDestinations || []).filter((market) => !publishedDestinationState[market]);
+    if (!availableDestinations.length) {
+      toast.error('All selected destinations are already published for these listings.');
+      return;
+    }
+    if (listingIds.length > 500) {
+      toast.error('Bulk crosspost is limited to 500 listings per durable queue request.');
+      return;
+    }
+    const includesEbay = availableDestinations.includes('ebay');
+    let confirmationPhrase;
+    if (includesEbay) {
+      confirmationPhrase = window.prompt('This queues live eBay publishing for eligible selected listings. Type QUEUE LIVE EBAY READY LISTINGS to continue.');
+      if (confirmationPhrase !== 'QUEUE LIVE EBAY READY LISTINGS') return;
+    }
+    setBulkCrosspostBusy(true);
+    try {
+      const result = await bulkQueueMarketplaceCrossposts({
+        listing_ids: listingIds,
+        marketplaces: availableDestinations,
+        requested_mode: 'bulk_operator_queue',
+        confirm_live_ebay: includesEbay,
+        confirmation_phrase: confirmationPhrase,
+      });
+      setBulkCrosspostReport(result);
+      const queued = Number(result?.queued || 0);
+      toast.success(`${queued} durable crosspost job${queued === 1 ? '' : 's'} queued. Check Jobs for per-marketplace results.`);
+    } catch (error) {
+      toast.error(error?.message || 'Could not queue crosspost jobs.');
+    } finally {
+      setBulkCrosspostBusy(false);
+    }
+  };
+
+  const unarchiveSelected = async () => {
+    const targetRows = selectedRows.filter((listing) => isArchivedListing(listing));
+    if (!targetRows.length) {
+      toast.error('Select one or more archived listings to restore.');
+      return;
+    }
+    let restored = 0;
+    let failed = 0;
+    const chunkSize = 20;
+    for (let i = 0; i < targetRows.length; i += chunkSize) {
+      const chunk = targetRows.slice(i, i + chunkSize);
+      const results = await Promise.allSettled(chunk.map((listing) => unarchiveListing(listing.id, { silent: true })));
+      results.forEach((result) => {
+        if (result.status === 'fulfilled') restored += 1;
+        else failed += 1;
+      });
+    }
+    setSelectedIds([]);
+    await reload();
+    if (failed) {
+      toast.error(`Restored ${restored}, failed ${failed}. Please retry failed rows.`);
+    } else {
+      toast.success(`Restored ${restored} archived listing${restored === 1 ? '' : 's'}.`);
+    }
+  };
+
+  const retrySelectedVineImages = async () => {
+    if (!selectedVineRows.length) {
+      toast.error('Select one or more Vine listings first.');
+      return;
+    }
+    const result = await backfillVineListingImages({
+      includeArchived: false,
+      forceRefresh: true,
+      strictMatch: true,
+      onlyMissingImages: false,
+      listingIds: selectedVineRows.map((listing) => listing.id),
+    });
+    await reload();
+    toast.success(
+      `Retried image fetch for ${Number(result?.updated || 0)} listing${Number(result?.updated || 0) === 1 ? '' : 's'} across ${selectedVineRows.length} selected Vine row${selectedVineRows.length === 1 ? '' : 's'}.`,
+    );
+  };
+
+  const deleteListing = async (listingId, { silent = false } = {}) => {
+    await deleteListingApi(listingId);
+    if (!silent) {
+      setSelectedIds((current) => current.filter((id) => id !== listingId));
+      if (selectedListingId === listingId) {
+        setSelectedListingId(null);
+      }
+      await reload();
+      toast.success('Listing deleted.');
+    }
+  };
+
+  const deleteSelected = async () => {
+    const targetRows = selectedRows;
+    if (!targetRows.length) {
+      toast.error('Select one or more listings to delete.');
+      return;
+    }
+    if (!confirmDeleteListings(targetRows.length)) {
+      return;
+    }
+    const deletedIds = targetRows.map((listing) => listing.id);
+    await deleteListingsBulkApi(deletedIds);
+    setSelectedIds([]);
+    if (selectedListingId && deletedIds.includes(selectedListingId)) {
+      setSelectedListingId(null);
+    }
+    await reload();
+    toast.success(`Deleted ${targetRows.length} listing${targetRows.length === 1 ? '' : 's'}.`);
+  };
+
+  const updateSelectedListings = async (updater, successMessage) => {
+    const targetRows = selectedRows;
+    if (!targetRows.length) {
+      toast.error('Select one or more listings first.');
+      return;
+    }
+    const results = await Promise.allSettled(
+      targetRows.map((listing) => updateListing(listing.id, updater(listing))),
+    );
+    const failed = results.filter((result) => result.status === 'rejected').length;
+    await reload();
+    if (failed) {
+      toast.error(`${successMessage} partially completed. ${failed} rows failed.`);
+    } else {
+      toast.success(successMessage);
+    }
+  };
+
+  const runBulkPricingAction = async (action, successMessage) => {
+    const targetIds = selectedIds.slice();
+    if (!targetIds.length) {
+      toast.error('Select one or more listings first.');
+      return;
+    }
+    await bulkPricingAction({ listing_ids: targetIds, action });
+    await reload();
+    toast.success(successMessage);
+  };
+
+  const runBulkMarketplacePreflight = async (marketplaces, options = {}) => {
+    const targetIds = Array.isArray(options.targetIds) && options.targetIds.length
+      ? options.targetIds.slice()
+      : selectedIds.length
+        ? selectedIds.slice()
+        : filteredListings.map((listing) => listing.id);
+    if (!targetIds.length) {
+      toast.error('Select one or more listings first.');
+      return null;
+    }
+    setBulkPreflightLoading(true);
+    setBulkPreflightProgress({ completed: 0, total: targetIds.length, marketplaces });
+    const marketLabel = (marketplaces || []).map((market) => formatMarketplace(market)).join(', ') || 'Marketplace';
+    const loadingToastId = toast.loading(`Running ${marketLabel} preflight for ${targetIds.length} listing${targetIds.length === 1 ? '' : 's'}...`);
+    try {
+      // eBay plan validation can make remote policy/category calls. Keep each
+      // browser request deliberately small so a 25-row review cannot exceed a
+      // proxy timeout; surface progress after every completed chunk.
+      const chunkSize = (marketplaces || []).includes('ebay') ? 2 : 8;
+      const reports = [];
+      for (let offset = 0; offset < targetIds.length; offset += chunkSize) {
+        const listingIds = targetIds.slice(offset, offset + chunkSize);
+        try {
+          reports.push(await fetchMarketplacePreflightBulk({
+            listing_ids: listingIds,
+            marketplaces,
+            force_refresh: Boolean(options.forceRefresh),
+            only_drafts: Boolean(options.onlyDrafts),
+            selected_statuses: options.selectedStatuses || null,
+            only_missing_preflight: Boolean(options.onlyMissingPreflight),
+            only_stale_preflight: Boolean(options.onlyStalePreflight),
+            only_ready_candidates: Boolean(options.onlyReadyCandidates),
+            only_blocked_candidates: Boolean(options.onlyBlockedCandidates),
+          }));
+        } catch (error) {
+          reports.push({
+            items: listingIds.map((listingId) => ({ listing_id: listingId, marketplaces: {}, error: error instanceof Error ? error.message : 'Preflight request failed.' })),
+            marketplaces,
+            summary: { total_listings_checked: listingIds.length, total_marketplaces_checked: listingIds.length * (marketplaces || []).length, preflight_failed: listingIds.length },
+          });
+        }
+        const completed = Math.min(offset + listingIds.length, targetIds.length);
+        setBulkPreflightProgress({ completed, total: targetIds.length, marketplaces });
+        toast.loading(`Running ${marketLabel} preflight: ${completed} of ${targetIds.length} checked…`, { id: loadingToastId });
+      }
+      const report = reports.reduce((combined, current) => {
+        combined.items.push(...(current?.items || []));
+        Object.entries(current?.summary || {}).forEach(([key, value]) => {
+          if (typeof value === 'number') combined.summary[key] = (combined.summary[key] || 0) + value;
+          else if (key === 'blocker_codes' || key === 'warning_codes') {
+            combined.summary[key] = { ...(combined.summary[key] || {}) };
+            Object.entries(value || {}).forEach(([code, count]) => { combined.summary[key][code] = (combined.summary[key][code] || 0) + Number(count || 0); });
+          }
+        });
+        return combined;
+      }, { items: [], marketplaces, summary: {} });
+      setBulkPreflightReport(report);
+      await reload();
+      const summary = report?.summary || {};
+      toast.success(
+        `${marketLabel} preflight finished. ${summary.ready_listings || 0} ready, ${summary.warning_only_listings || 0} warning-only, ${summary.blocked_listings || 0} blocked.`,
+        { id: loadingToastId },
+      );
+      return report;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Bulk marketplace preflight failed.', { id: loadingToastId });
+      return null;
+    } finally {
+      setBulkPreflightLoading(false);
+      setBulkPreflightProgress(null);
+    }
+  };
+
+  const exportBulkPreflightCsv = async () => {
+    const targetIds = selectedIds.length ? selectedIds.slice() : filteredListings.map((listing) => listing.id);
+    if (!targetIds.length) {
+      toast.error('Select one or more listings first.');
+      return;
+    }
+    try {
+      const csv = await exportMarketplacePreflightCsv({
+        listing_ids: targetIds,
+        marketplaces: ['ebay', 'facebook'],
+        force_refresh: false,
+      });
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = 'posterpro-preflight-report.csv';
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      toast.success('Downloaded blocker report CSV.');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'CSV export failed.');
+    }
+  };
+
+  const copyBulkBlockerSummary = async () => {
+    const scopeRows = getBulkScopeRows(selectedRows, filteredListings);
+    if (!scopeRows.length) {
+      toast.error('Select one or more listings first.');
+      return;
+    }
+    const eBayCodes = summarizeBlockerCodes(scopeRows, 'ebay').slice(0, 5).map(([code, count]) => `${code} (${count})`).join(', ');
+    const fbCodes = summarizeBlockerCodes(scopeRows, 'facebook').slice(0, 5).map(([code, count]) => `${code} (${count})`).join(', ');
+    const text = [
+      `Listings: ${scopeRows.length}`,
+      `eBay blockers: ${eBayCodes || 'none'}`,
+      `Facebook blockers: ${fbCodes || 'none'}`,
+    ].join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success('Copied blocker summary to clipboard.');
+    } catch {
+      toast.error('Clipboard copy failed.');
+    }
+  };
+
+  const runBulkPublishReady = async (marketplaces, { dryRun = true, allowWarnings = false, forceRefresh = false, skipAlreadyQueued = true } = {}) => {
+    const targetIds = selectedIds.length ? selectedIds.slice() : filteredListings.map((listing) => listing.id);
+    if (!targetIds.length) {
+      toast.error('Select one or more listings first.');
+      return null;
+    }
+    if (!dryRun && marketplaces.includes('ebay')) {
+      const confirmed = confirmLiveEbayQueue({
+        count: targetIds.length,
+        marketplaces,
+        allowWarnings,
+        skipAlreadyQueued,
+        context: 'Ready-only bulk publish queue',
+      });
+      if (!confirmed) {
+        toast.error('Live eBay publish canceled.');
+        return null;
+      }
+    }
+    try {
+      const report = await publishMarketplaceReadyBulk({
+        listing_ids: targetIds,
+        marketplaces,
+        allow_warnings: Boolean(allowWarnings),
+        dry_run: Boolean(dryRun),
+        force_preflight_refresh: Boolean(forceRefresh),
+        skip_already_queued: Boolean(skipAlreadyQueued),
+        confirm_live_publish: !dryRun && marketplaces.includes('ebay'),
+        confirmation_phrase: !dryRun && marketplaces.includes('ebay') ? liveEbayConfirmationPhrase : undefined,
+      });
+      setBulkPublishReport(report);
+      await reload();
+      const summary = report?.summary || {};
+      if (dryRun) {
+        toast.success(`Dry run complete. ${summary.dry_run_ready || 0} ready, ${summary.dry_run_blocked || 0} blocked.`);
+      } else {
+        toast.success(`Queued ${summary.queued || 0} marketplace listing${(summary.queued || 0) === 1 ? '' : 's'}.`);
+      }
+      return report;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Bulk publish-ready failed.');
+      return null;
+    }
+  };
+
+  const refreshLaunchCandidates = async () => {
+    setLaunchCandidatesLoading(true);
+    try {
+      const report = await fetchLaunchCandidates({
+        marketplace: 'ebay',
+        max_items: 10,
+        max_price: 50,
+        include_warning_only: false,
+        include_local_pickup: false,
+        include_risky_shipping: false,
+      });
+      setLaunchCandidatesReport(report);
+      return report;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Launch candidate refresh failed.');
+      return null;
+    } finally {
+      setLaunchCandidatesLoading(false);
+    }
+  };
+
+  const refreshRepairQueue = async () => {
+    setRepairQueueLoading(true);
+    try {
+      const report = await fetchEbayLaunchRepairQueue({
+        max_items: 25,
+        max_price: 50,
+        image_status: repairQueueImageStatusFilter !== 'all' ? repairQueueImageStatusFilter : undefined,
+      });
+      setRepairQueueReport(report);
+      return report;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Repair queue refresh failed.');
+      return null;
+    } finally {
+      setRepairQueueLoading(false);
+    }
+  };
+
+  const applyRepairAction = async (listingId, action) => {
+    try {
+      const payload =
+        action === 'category'
+          ? { apply_category_suggestion: true }
+          : { validate_images: true };
+      const result = await applyEbayLaunchRepair(listingId, payload);
+      await reload();
+      await refreshRepairQueue();
+      toast.success(
+        action === 'category'
+          ? `Applied suggested category for listing #${listingId}.`
+          : `Validated image metadata for listing #${listingId}.`,
+      );
+      return result;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Repair action failed.');
+      return null;
+    }
+  };
+
+  const exportRepairQueueCsv = async () => {
+    const report = repairQueueReport || await refreshRepairQueue();
+    const rows = report?.items || [];
+    if (!rows.length) {
+      toast.error('Repair queue is empty.');
+      return;
+    }
+    const header = ['listing_id', 'title', 'price', 'blockers', 'suggested_category', 'image_status', 'recommended_action'];
+    const csv = [
+      header.join(','),
+      ...rows.map((item) => [
+        item.listing_id,
+        `"${String(item.title || '').replaceAll('"', '""')}"`,
+        Number(item.price || 0).toFixed(2),
+        `"${(item.blocker_codes || []).join('|')}"`,
+        `"${String(item.suggested_category?.label || '').replaceAll('"', '""')}"`,
+        item.image_status || '',
+        `"${String(item.recommended_next_repair_action || '').replaceAll('"', '""')}"`,
+      ].join(',')),
+    ].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'posterpro-ebay-launch-repair-queue.csv';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    toast.success('Downloaded eBay repair queue CSV.');
+  };
+
+  const uploadActualPhotosToListing = async (listingId, files) => {
+    if (!files?.length) return null;
+    try {
+      await uploadListingPhotos(listingId, {
+        files,
+        source: 'actual_upload',
+        operatorState: 'suggested',
+      });
+      await reload();
+      await refreshRepairQueue();
+      if (selectedListingId === listingId) {
+        await Promise.allSettled([
+          fetchPricingRecommendation(listingId).then(setPricingRecommendation),
+          fetchListingIntelligence(listingId).then(setListingIntelligence),
+          loadMarketplacePreviewData(listingId),
+        ]);
+      }
+      toast.success(`Uploaded ${files.length} actual photo${files.length === 1 ? '' : 's'} to listing #${listingId}.`);
+      return true;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Photo upload failed.');
+      return null;
+    }
+  };
+
+  const approvePhotosForListing = async (listingId, storagePaths) => {
+    if (!storagePaths?.length) return null;
+    try {
+      await approveListingPhotos(listingId, storagePaths);
+      await reload();
+      await refreshRepairQueue();
+      toast.success(`Approved ${storagePaths.length} actual photo${storagePaths.length === 1 ? '' : 's'} for listing #${listingId}.`);
+      return true;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Approve photo failed.');
+      return null;
+    }
+  };
+
+  const rejectPhotosForListing = async (listingId, storagePaths) => {
+    if (!storagePaths?.length) return null;
+    try {
+      await rejectListingPhotos(listingId, storagePaths);
+      await reload();
+      await refreshRepairQueue();
+      toast.success(`Rejected ${storagePaths.length} photo${storagePaths.length === 1 ? '' : 's'} for listing #${listingId}.`);
+      return true;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Reject photo failed.');
+      return null;
+    }
+  };
+
+  const setPrimaryPhotoForListing = async (listingId, storagePath) => {
+    if (!storagePath) return null;
+    try {
+      await setPrimaryListingPhoto(listingId, storagePath);
+      await reload();
+      await refreshRepairQueue();
+      toast.success(`Set primary photo for listing #${listingId}.`);
+      return true;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Set primary photo failed.');
+      return null;
+    }
+  };
+
+  const approvePendingRepairQueuePhotos = async (listingId) => {
+    const targetListing = listings.find((row) => row.id === listingId);
+    const pendingPaths = (targetListing?.listing_images || [])
+      .filter((image) => !image?.is_reference && image?.operator_state !== 'approved' && image?.operator_state !== 'rejected')
+      .map((image) => image.storage_path)
+      .filter(Boolean);
+    await approvePhotosForListing(listingId, pendingPaths);
+  };
+
+  const runLaunchDrillForCandidates = async () => {
+    const report = launchCandidatesReport || await refreshLaunchCandidates();
+    const candidateIds = (report?.candidates || []).slice(0, 5).map((item) => item.listing_id);
+    if (!candidateIds.length) {
+      toast.error('No launch candidates available.');
+      return;
+    }
+    try {
+      const drill = await runLaunchDrillDryRun({
+        listing_ids: candidateIds,
+        marketplace: 'ebay',
+        max_items: 5,
+        require_ready: true,
+        include_payload_preview: true,
+      });
+      setBulkPublishReport((current) => current ? { ...current, launch_drill: drill } : { launch_drill: drill });
+      toast.success(`Launch drill complete for ${candidateIds.length} candidate${candidateIds.length === 1 ? '' : 's'}.`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Launch drill failed.');
+    }
+  };
+
+  const runPreflightOnLaunchCandidates = async () => {
+    const candidateIds = (launchCandidatesReport?.candidates || []).map((item) => item.listing_id);
+    if (!candidateIds.length) {
+      toast.error('Run the candidate selector first.');
+      return;
+    }
+    setSelectedIds(candidateIds);
+    await runBulkMarketplacePreflight(['ebay', 'facebook'], { forceRefresh: true, targetIds: candidateIds });
+  };
+
+  const openFirstLaunchCandidate = () => {
+    const first = launchCandidatesReport?.candidates?.[0];
+    if (!first?.listing_id) {
+      toast.error('Run the candidate selector first.');
+      return;
+    }
+    setSelectedListingId(first.listing_id);
+    document.getElementById('listing-results')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
+  const exportLaunchCandidatesCsv = async () => {
+    const candidateIds = (launchCandidatesReport?.candidates || []).map((item) => item.listing_id);
+    if (!candidateIds.length) {
+      toast.error('Run the candidate selector first.');
+      return;
+    }
+    try {
+      const csv = await exportMarketplacePreflightCsv({
+        listing_ids: candidateIds,
+        marketplaces: ['ebay'],
+        force_refresh: false,
+        only_drafts: false,
+      });
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = 'posterpro-launch-candidates.csv';
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      toast.success('Downloaded launch candidate QA CSV.');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Launch candidate CSV export failed.');
+    }
+  };
+
+  // The catalog route is an entry point, not an operations dashboard. Keep
+  // first paint deliberately small and isolated from expensive legacy
+  // preflight/repair widgets; those tools remain available from the detail
+  // workspace and their dedicated routes.
+  const compactCatalog = true;
+  if (compactCatalog) {
+    return (
+      <AppShell
+        active="/listings"
+        title="Listings"
+        autonomousConfig={autonomousConfig}
+        onToggleAutonomous={async () => {
+          await toggleAutonomousMode(!autonomousConfig.autonomous_mode);
+          await reload();
+        }}
+      >
+        <PageHeader
+          eyebrow="Catalog"
+          breadcrumbs={[{ label: 'Workspace' }, { label: 'Listings', active: true }]}
+          title="Listings"
+          description="A fast, paginated catalog for reviewing drafts, live listings, imports, and recovered inventory."
+          actions={<div className="flex flex-wrap gap-2"><Button href="/listings/new">New listing</Button><Button href="/settings" variant="outline">Settings</Button></div>}
+        />
+        <PageFrame>
+          <SectionPanel title="Catalog filters" description={`${listingPagination.total.toLocaleString()} records`}>
+            <div className="flex flex-wrap items-center gap-2">
+              <Input
+                value={search}
+                onChange={(event) => { setSearch(event.target.value); setCatalogPage(1); }}
+                placeholder="Search listings"
+                className="h-9 w-full sm:w-[220px]"
+              />
+              <Select title="Choose which inventory source to show" aria-label="Listings source" value={sourceFilter} onChange={(event) => { setSourceFilter(event.target.value); setCatalogPage(1); }} className="h-9 w-auto rounded-xl border-amber-300 bg-amber-50 font-semibold text-amber-900">
+                {sourceOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </Select>
+              <Select title="Choose the field used to sort listings" aria-label="Listings sort" value={sortBy} onChange={(event) => { setSortBy(event.target.value); setCatalogPage(1); }} className="h-9 w-auto rounded-xl">
+                <option value="updated">Sort: Date updated</option><option value="created">Sort: Date created</option><option value="price">Sort: Price</option><option value="title">Sort: Title</option><option value="source">Sort: Source</option><option value="status">Sort: Status</option>
+              </Select>
+              <Button size="sm" variant="ghost" onClick={() => { setSortDir(sortDir === 'asc' ? 'desc' : 'asc'); setCatalogPage(1); }}>{sortDir === 'asc' ? '↑' : '↓'}</Button>
+              <div className="flex flex-wrap items-center gap-1" aria-label="Listing status filters">
+                {LISTING_TABS.filter((tab) => tab.value !== 'all').map((tab) => {
+                  const active = activeTabSet.has(tab.value);
+                  return <Button key={tab.value} size="sm" type="button" title={tab.description} aria-pressed={active} variant={active ? 'default' : 'secondary'} className={active ? '!bg-[#0b4f8a] !text-white ring-2 ring-[#93c5fd] ring-offset-1' : 'hover:!border-[#2563eb] hover:!text-[#0b4f8a]'} onClick={() => selectTab(tab.value)}>{tab.label}</Button>;
+                })}
+              </div>
+              <Button size="sm" variant="ghost" onClick={clearAllFilters}>Clear</Button>
+            </div>
+            <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-[#eaecf0] pt-3">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={!filteredListings.length}
+                onClick={() => {
+                  const pageIds = filteredListings.map((listing) => listing.id);
+                  const pageIsSelected = pageIds.length > 0 && pageIds.every((id) => selectedIds.includes(id));
+                  setSelectedIds((current) => pageIsSelected
+                    ? current.filter((id) => !pageIds.includes(id))
+                    : Array.from(new Set([...current, ...pageIds])));
+                }}
+              >
+                {filteredListings.length && filteredListings.every((listing) => selectedIds.includes(listing.id)) ? 'Clear page selection' : 'Select all on this page'}
+              </Button>
+              <p className="text-xs text-[#667085]">Select all applies to the current paginated page ({filteredListings.length} listings), not the entire catalog.</p>
+            </div>
+          </SectionPanel>
+          {selectedIds.length ? (
+            <SectionPanel
+              title={`${selectedIds.length} listing${selectedIds.length === 1 ? '' : 's'} selected`}
+              description="Approval changes only the selected local draft records. Publishing always asks for a separate explicit confirmation and remains subject to marketplace preflight and duplicate safeguards."
+            >
+              <div className="mb-3 rounded-lg border border-[#d0d5dd] bg-[#f9fafb] p-3">
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-semibold text-[#101828]">Bulk crosspost</p>
+                    <p className="text-xs text-[#667085]">Choose destinations, or leave all unchecked to use this tenant&apos;s routing rules/listing targets. Assisted destinations create durable jobs and stop for operator review.</p>
+                  </div>
+                  <Button variant="outline" size="sm" disabled={bulkCrosspostBusy || selectedIds.length > 500} onClick={queueSelectedCrossposts}>
+                    {bulkCrosspostBusy ? 'Queueing…' : `Queue ${selectedIds.length} crosspost${selectedIds.length === 1 ? '' : 's'}`}
+                  </Button>
+                </div>
+                <div className="flex flex-wrap gap-x-4 gap-y-2">
+                  {CROSSPOST_DESTINATIONS.map(([value, label]) => (
+                    <Checkbox
+                      key={value}
+                      label={publishedDestinationState[value] ? `${label} · already published` : label}
+                      checked={crosspostDestinations.includes(value) && !publishedDestinationState[value]}
+                      disabled={Boolean(publishedDestinationState[value])}
+                      onChange={(event) => setCrosspostDestinations((current) => event.target.checked ? [...current, value] : current.filter((item) => item !== value))}
+                      className={`border-0 bg-transparent p-0 text-xs ${publishedDestinationState[value] ? 'opacity-45' : ''}`}
+                    />
+                  ))}
+                </div>
+                {selectedIds.length > 500 && <p className="mt-2 text-xs font-medium text-amber-800">Select 500 or fewer listings for one request.</p>}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                {workflowPreferences.bulk_approval_enabled && selectedReviewRows.length ? <Button variant="outline" size="sm" onClick={approveSelected}>Approve selected</Button> : null}
+                <Button variant="outline" size="sm" onClick={approveAndPublishSelected}>{selectedReviewRows.length ? 'Approve & queue publish' : 'Queue selected for publishing'}</Button>
+                <Button variant="outline" size="sm" onClick={() => runBulkMarketplacePreflight(['ebay'])} disabled={bulkPreflightLoading}>Run eBay preflight</Button>
+                <div className="flex items-center gap-2 rounded-lg border border-[#d0d5dd] bg-white px-2 py-1">
+                  <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Send selected to</span>
+                  <Select
+                    value={bulkSendTarget}
+                    onChange={(event) => setBulkSendTarget(event.target.value)}
+                    className="h-9 w-auto py-1 text-sm"
+                  >
+                    <option value="drafts">Drafts</option>
+                    <option value="review">Needs review</option>
+                    <option value="ready">Ready</option>
+                    <option value="archived">Archived</option>
+                  </Select>
+                  <Button variant="outline" size="sm" onClick={() => sendSelectedTo(bulkSendTarget)}>
+                    Send
+                  </Button>
+                </div>
+                {activeTab !== 'archived' ? (
+                  <Button variant="outline" size="sm" onClick={archiveSelected}>
+                    {activeTab === 'published' ? 'End listings and archive' : 'Archive locally'}
+                  </Button>
+                ) : (
+                  <Button variant="outline" size="sm" onClick={unarchiveSelected}>
+                    Unarchive selected
+                  </Button>
+                )}
+                <Button variant="outline" size="sm" onClick={() => setSelectedIds([])}>Clear selection</Button>
+              </div>
+            </SectionPanel>
+          ) : null}
+          {bulkCrosspostReport ? (
+            <SectionPanel title="Latest bulk crosspost queue" description={`${bulkCrosspostReport.queued || 0} of ${bulkCrosspostReport.requested || 0} selected listings created durable crosspost jobs. The Jobs page has per-listing progress and failures.`}>
+              <div className="flex flex-wrap items-center gap-3 text-sm">
+                <Link className="font-semibold text-blue-700 underline" href="/jobs">Open Jobs</Link>
+                <span>Queued: {bulkCrosspostReport.queued || 0}</span>
+                <span>Not queued: {(bulkCrosspostReport.results || []).filter((row) => row.status !== 'QUEUED').length}</span>
+              </div>
+              <ul className="mt-3 grid gap-1 text-xs text-[#475467] sm:grid-cols-2 lg:grid-cols-3">
+                {(bulkCrosspostReport.results || []).map((row) => <li key={`${row.listing_id}-${row.job_id || row.status}`}>#{row.listing_id}: {row.status}{row.reason ? ` — ${row.reason}` : ''}{row.dispatch_error ? ` — dispatch pending: ${row.dispatch_error}` : ''}</li>)}
+              </ul>
+            </SectionPanel>
+          ) : null}
+          {pendingBulkPublish ? (
+            <SectionPanel title="Confirm live eBay queue" tone="warning" description={`${pendingBulkPublish.listingIds.length} selected listing${pendingBulkPublish.listingIds.length === 1 ? '' : 's'} will be approved where needed, then sent to the eBay publishing worker. This is a real marketplace action; the result panel and Jobs page will show the actual outcome.`}>
+              <div className="flex max-w-xl flex-col gap-3 sm:flex-row sm:items-end">
+                <Checkbox className="flex-1 border-0 bg-transparent p-0" checked={bulkPublishAcknowledged} onChange={(event) => setBulkPublishAcknowledged(event.target.checked)} label="Confirm live eBay queue" description="I understand this queues real eBay publication work. I will review resulting job statuses before assuming any listing is live." />
+                <Button
+                  size="sm"
+                  disabled={!bulkPublishAcknowledged || bulkPublishSubmitting}
+                  onClick={() => approveAndPublishSelected({ confirmedEbay: true, targetIds: pendingBulkPublish.listingIds })}
+                >
+                  {bulkPublishSubmitting ? 'Queueing…' : `Confirm & queue ${pendingBulkPublish.listingIds.length}`}
+                </Button>
+                <Button variant="outline" size="sm" disabled={bulkPublishSubmitting} onClick={() => { setPendingBulkPublish(null); setBulkPublishAcknowledged(false); }}>Cancel</Button>
+              </div>
+            </SectionPanel>
+          ) : null}
+          {bulkPublishReport ? (
+            <SectionPanel
+              title={bulkPublishReport.direct_queue ? 'Latest publish queue result' : 'Latest ready-only publish result'}
+              description={bulkPublishReport.direct_queue
+                ? 'Queued means PosterPro handed the work to a marketplace worker. Open Jobs to see whether the marketplace accepted, blocked, or failed the remote action.'
+                : 'This report shows the outcome of the latest marketplace-ready queue run.'}
+            >
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <MetricCard label="Queued" value={bulkPublishReport?.summary?.queued || 0} detail="Worker tasks created." />
+                <MetricCard label="Blocked" value={bulkPublishReport?.summary?.skipped_blocked || 0} detail="Preflight or duplicate safeguard stopped these." />
+                <MetricCard label="Already queued" value={bulkPublishReport?.summary?.skipped_already_queued || 0} detail="Existing work was retained." />
+                <MetricCard label="Failed" value={bulkPublishReport?.summary?.failed || 0} detail="Could not be queued." />
+              </div>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <Button href="/jobs" variant="outline" size="sm">Open Jobs &amp; progress</Button>
+                <Button variant="outline" size="sm" onClick={() => setBulkPublishReport(null)}>Dismiss</Button>
+              </div>
+            </SectionPanel>
+          ) : null}
+          {bulkPreflightProgress ? (
+            <SectionPanel title="Marketplace preflight in progress" description={`Checking ${bulkPreflightProgress.completed} of ${bulkPreflightProgress.total} selected listing${bulkPreflightProgress.total === 1 ? '' : 's'} in small timeout-safe batches.`}>
+              <div className="h-2 overflow-hidden rounded-full bg-[#eaecf0]" aria-label="Preflight progress">
+                <div className="h-full rounded-full bg-[#2563eb] transition-all" style={{ width: `${Math.max(3, Math.round((bulkPreflightProgress.completed / Math.max(1, bulkPreflightProgress.total)) * 100))}%` }} />
+              </div>
+            </SectionPanel>
+          ) : null}
+          {listingError ? <SectionPanel tone="danger" title="Catalog could not load" action={<Button size="sm" variant="outline" onClick={() => reload()}>Retry catalog</Button>}><p className="text-sm">{listingError}</p></SectionPanel> : null}
+          <SectionPanel title={`${activeTabLabel} · page ${listingPagination.page} of ${listingPagination.total_pages}`} description="Select listings for approval or publishing, or open one to review its marketplace preview, photos, details, and readiness.">
+            <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-[10px] border border-[#dbeafe] bg-[#f8fbff] px-3 py-2.5">
+              <p className="text-sm font-semibold text-[#123a63]">
+                {aggregatePopulationCount.toLocaleString()} {aggregatePopulationCount === 1 ? 'listing' : 'listings'} totaling {formatAggregateListingValue(listingPagination.aggregate_value)} <span className="font-normal text-[#475467]">• {averagePriceLabel} {formatAggregateListingValue(listingPagination.average_value)} ({aggregatePricedCount.toLocaleString()} of {aggregatePopulationCount.toLocaleString()} priced)</span>
+              </p>
+              <Button size="sm" variant="outline" onClick={() => reload()} className="ml-auto">Reload Catalog</Button>
+              <p className="w-full text-xs text-[#475467]">
+                Estimated operator shipping cost {formatCompactRange(listingPagination.shipping_min_total, listingPagination.shipping_max_total)} · Expected sold-item fees {formatCompactRange(listingPagination.expected_sold_fee_min_total, listingPagination.expected_sold_fee_max_total)} · Net before shipping {formatAggregateListingValue(listingPagination.net_before_shipping_total)} · Net range {formatCompactRange(listingPagination.net_after_shipping_min_total, listingPagination.net_after_shipping_max_total)}
+              </p>
+              {aggregateMissingPriceCount > 0 ? <p role="alert" className="text-xs font-semibold text-[#b42318]">{activeTabSet.has('review') ? 'Data integrity alert: ' : ''}{aggregateMissingPriceCount.toLocaleString()} listings missing a valid price</p> : null}
+              {selectedAggregate.count ? <p className="w-full text-xs font-semibold text-[#2563eb]">Selected: {selectedAggregate.count} listings totaling {formatAggregateListingValue(selectedAggregate.total)} • Avg. {formatAggregateListingValue(selectedAggregate.average)} · Operator shipping {formatCompactRange(selectedAggregate.shippingMin, selectedAggregate.shippingMax)} · Listing fees {formatAggregateListingValue(selectedAggregate.listingFees)} · Sold-item fees {formatAggregateListingValue(selectedAggregate.soldFees)} · Net before shipping {formatAggregateListingValue(selectedAggregate.netBeforeShipping)} · Net range {formatCompactRange(selectedAggregate.netMin, selectedAggregate.netMax)}{selectedAggregate.missing ? ` · ${selectedAggregate.missing} missing price` : ''}</p> : null}
+            </div>
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3 border-b border-[#eaecf0] pb-3">
+              <p className="text-sm text-[#667085]">Showing {filteredListings.length} records on this page.</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <Select aria-label="Listings per page" value={catalogPageSize} onChange={(event) => { setCatalogPageSize(Number(event.target.value)); setCatalogPage(1); }} className="h-8 w-auto rounded-lg py-1 text-xs">
+                  {[25, 50, 100, 250].map((size) => <option key={size} value={size}>{size} per page</option>)}
+                </Select>
+                <Button size="sm" variant="outline" disabled={listingPagination.page <= 1} onClick={() => { commitPageChange(listingPagination.page - 1); }}>Previous</Button>
+                <div className="flex items-center gap-2 rounded-[10px] border border-[#d0d5dd] bg-white px-2 py-1.5">
+                  <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]" htmlFor="listings-page-input">Page</label>
+                  <Input
+                    id="listings-page-input"
+                    type="number"
+                    min={1}
+                    max={listingPagination.total_pages || 1}
+                    value={pageInput}
+                    onChange={(event) => setPageInput(event.target.value)}
+                    onBlur={commitPageInput}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        commitPageInput();
+                      }
+                    }}
+                    className="h-8 w-20 rounded-[8px] border border-[#d0d5dd] bg-white px-2 text-sm font-semibold text-[#101828] outline-none focus:border-[#2563eb]"
+                  />
+                  <span className="text-sm font-semibold text-[#344054]">/ {listingPagination.total_pages}</span>
+                </div>
+                <Button size="sm" variant="outline" disabled={listingPagination.page >= listingPagination.total_pages} onClick={() => { commitPageChange(listingPagination.page + 1); }}>Next</Button>
+              </div>
+            </div>
+            <div className="grid gap-3">
+              {filteredListings.map((listing) => (
+                <article key={listing.id} className={`grid gap-3 rounded-[16px] border bg-white p-3 transition md:grid-cols-2 md:items-start ${selectedIds.includes(listing.id) ? 'border-[#2563eb] ring-2 ring-[#dbeafe]' : 'border-[#e5e7eb] hover:border-[#a9c5ff] hover:shadow-[0_10px_24px_rgba(37,99,235,0.08)]'}`}>
+                  <div className="flex min-w-0 gap-2">
+                    <Checkbox className="mt-1 w-5 shrink-0 border-0 bg-transparent p-0" checked={selectedIds.includes(listing.id)} onChange={() => toggleRow(listing.id)} aria-label={`Select ${getListingTitle(listing)}`} />
+                    <Link href={`/listings/${listing.id}?mode=preview&return_to=${encodeURIComponent(listingsReturnUrl)}`} className="group min-w-0 flex-1">
+                      <div className="flex min-w-0 gap-3">
+                        <div className="h-20 w-20 shrink-0 overflow-hidden rounded-[10px] bg-[#f2f4f7]">
+                          {getListingThumbnail(listing) ? <img src={toThumbnailImageUrl(getListingThumbnail(listing), 240, 240)} alt="" loading="lazy" decoding="async" className="h-full w-full object-cover" /> : <div className="flex h-full items-center justify-center text-xs text-[#98a2b3]">No image</div>}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="line-clamp-2 text-sm font-semibold text-[#101828]">{getListingTitle(listing)}</p>
+                          <p className="mt-1 text-base font-bold text-[#101828]">${getListingPrice(listing)}</p>
+                          <p className="mt-1 text-xs text-[#667085]">#{listing.id} · {formatListingBucket(getListingBucket(listing))}</p>
+                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            {(getListingMarketplaces(listing, enabledPlatforms, { allowFallback: false }).length ? getListingMarketplaces(listing, enabledPlatforms, { allowFallback: false }) : ['unassigned']).map((market) => <span key={market} className="rounded-full bg-[#f2f4f7] px-2 py-1 text-[11px] font-semibold text-[#475467]">{formatMarketplace(market)}</span>)}
+                          </div>
+                        </div>
+                      </div>
+                    </Link>
+                  </div>
+                  <div className="grid grid-cols-2 content-start gap-x-3 gap-y-1 border-t border-[#f2f4f7] pt-2 text-xs leading-5 text-[#475467] md:border-l md:border-t-0 md:pl-3 md:pt-0">
+                    <span className="truncate" title={listing.catalog_category?.label || ''}><strong className="text-[#475467]">Category:</strong> {listing.catalog_category?.label || 'not assigned'}</span>
+                    <span className={`truncate ${catalogPreflightLabel(listing).includes('failed') ? 'text-[#b42318]' : 'text-[#475467]'}`} title={catalogPreflightLabel(listing)}><strong>Preflight:</strong> {catalogPreflightLabel(listing)}</span>
+                    <span className="truncate" title="Buyer-facing shipping policy"><strong className="text-[#475467]">Shipping policy:</strong> {listing.catalog_shipping?.mode === 'free' ? 'Free to buyer' : listing.catalog_shipping?.mode || 'Calculated'}</span>
+                    <span className="truncate" title="Selected carrier/service"><strong className="text-[#475467]">Shipping method:</strong> {formatShippingService(listing.catalog_shipping?.service)}</span>
+                    <span className="truncate" title="Estimated or recorded operator carrier cost"><strong className="text-[#475467]">Shipping cost:</strong> {formatCompactRange(listing.catalog_shipping?.min, listing.catalog_shipping?.max)}</span>
+                    <span className="truncate"><strong className="text-[#475467]">Handling:</strong> {listing.catalog_shipping?.handling_time_days || 1} day{Number(listing.catalog_shipping?.handling_time_days || 1) === 1 ? '' : 's'}</span>
+                    <span className="col-span-2 grid grid-cols-2 items-start gap-x-4 gap-y-1 text-xs" title="Reference marketplace fee estimates; gray channels are not configured">{feeReferenceLine(listing.listing_financials?.marketplace_costs)}</span>
+                    <span className="col-span-2 truncate"><strong className="text-[#475467]">Sales tax collected:</strong> {formatTaxCollected(listing.listing_financials?.sales_tax_collected)}</span>
+                    <span className="col-span-2 truncate"><strong className="text-[#475467]">Insert:</strong> {formatAggregateListingValue(listing.listing_financials?.marketplace_costs?.ebay?.listing_fee || 0)} · 250 free/mo</span>
+                    <span className="col-span-2 text-[10px] leading-4 text-[#98a2b3]">Reference only; taxes, shipping rates, and marketplace fees can change and are controlled by the providers.</span>
+                  </div>
+                  {getListingBucket(listing) === 'attention' ? (
+                    <div className="col-span-full flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2">
+                      <p className="min-w-0 flex-1 text-sm text-amber-950">
+                        <strong>Needs attention:</strong> {getCatalogAttentionReason(listing) || 'Review the listing’s readiness details.'}
+                      </p>
+                      <Button size="sm" variant="outline" onClick={() => { setQuickFixPreflightResult(null); setQuickFixMode(true); setSelectedListingId(listing.id); }}>
+                        Fix this
+                      </Button>
+                    </div>
+                  ) : null}
+                </article>
+              ))}
+              {!filteredListings.length ? <p className="col-span-full rounded-[12px] border border-dashed border-[#d0d5dd] p-6 text-center text-sm text-[#667085]">No listings match this page’s filters.</p> : null}
+            </div>
+            <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-[#eaecf0] pt-4">
+              <p className="text-sm text-[#667085]">Showing {filteredListings.length} records on this page.</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button size="sm" variant="outline" disabled={listingPagination.page <= 1} onClick={() => { commitPageChange(listingPagination.page - 1); }}>Previous</Button>
+                <div className="flex items-center gap-2 rounded-[10px] border border-[#d0d5dd] bg-white px-2 py-1.5">
+                  <label className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]" htmlFor="listings-page-input-bottom">Page</label>
+                  <Input
+                    id="listings-page-input-bottom"
+                    type="number"
+                    min={1}
+                    max={listingPagination.total_pages || 1}
+                    value={pageInput}
+                    onChange={(event) => setPageInput(event.target.value)}
+                    onBlur={commitPageInput}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        commitPageInput();
+                      }
+                    }}
+                    className="h-8 w-20 rounded-[8px] border border-[#d0d5dd] bg-white px-2 text-sm font-semibold text-[#101828] outline-none focus:border-[#2563eb]"
+                  />
+                  <span className="text-sm font-semibold text-[#344054]">/ {listingPagination.total_pages}</span>
+                </div>
+                <Button size="sm" variant="outline" disabled={listingPagination.page >= listingPagination.total_pages} onClick={() => { commitPageChange(listingPagination.page + 1); }}>Next</Button>
+              </div>
+            </div>
+          </SectionPanel>
+        </PageFrame>
+        <Drawer
+          open={Boolean(quickFixMode && selectedListingId)}
+          title={selectedListingDetailsLoading ? 'Loading quick repair' : `Fix listing #${selectedListingId || ''}`}
+          description={selectedListing ? (getCatalogAttentionReason(selectedListing) || 'Correct the identified field, save, then refresh its readiness.') : 'Loading this listing only; unrelated marketplace reports are skipped.'}
+          onClose={() => { setQuickFixMode(false); setSelectedListingId(null); setQuickFixPreflightResult(null); }}
+          widthClassName="xl:w-[960px]"
+        >
+          {selectedListingDetailsLoading || selectedListingDetails?.id !== selectedListingId ? (
+            <div className="p-6 text-sm text-slate-600" role="status">Loading listing…</div>
+          ) : selectedListing ? (
+            <>
+            {getListingBucket(selectedListing) === 'attention' ? (
+              <section className="mb-4 rounded-xl border border-amber-300 bg-amber-50 p-4" aria-label="Quick repair">
+                <h3 className="text-sm font-bold text-amber-950">Quick repair</h3>
+                <p className="mt-1 text-sm text-amber-900">{getCatalogAttentionReason(selectedListing) || 'Select the missing or incorrect field below.'}</p>
+                <div className="mt-3 flex items-center gap-2">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-amber-900">Local category matches</span>
+                  {quickFixCategoriesLoading ? <span className="text-xs text-slate-600" role="status">Searching both saved eBay trees…</span> : null}
+                </div>
+                {quickFixCategories.length ? (
+                  <div className="mt-2 grid gap-2">
+                    {quickFixCategories.slice(0, 5).map((category) => (
+                      <div key={`${category.marketplace}:${category.category_tree_id}:${category.category_id}`} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-200 bg-white p-2">
+                        <div className="min-w-0">
+                          <p className="text-sm font-semibold text-slate-900">{category.category_name} <span className="font-normal text-slate-500">· {category.marketplace} · tree {category.category_tree_id}</span></p>
+                          <p className="text-xs text-slate-600">{category.full_path || category.breadcrumb} · verified leaf</p>
+                        </div>
+                        <Button size="sm" disabled={quickFixSavingCategory} onClick={() => saveQuickFixCategory(category)}>{quickFixSavingCategory ? 'Saving…' : 'Apply category'}</Button>
+                      </div>
+                    ))}
+                  </div>
+                ) : !quickFixCategoriesLoading ? (
+                  <p className="mt-2 text-xs text-slate-700">No direct local match. Use the category search in the editor below; it searches both synchronized trees and only lets verified leaves be selected.</p>
+                ) : null}
+                {quickFixPreflightResult ? (
+                  <div className={`mt-3 rounded-lg border p-3 ${quickFixPreflightResult.blockers?.length ? 'border-rose-200 bg-rose-50' : 'border-emerald-200 bg-emerald-50'}`} role="status">
+                    <p className="text-sm font-semibold">Fresh eBay readiness: {quickFixPreflightResult.publishable ? 'Needs Review' : 'Blocked'}</p>
+                    {(quickFixPreflightResult.blockers || []).map((blocker, index) => <p key={`${blocker.code || blocker.field || 'blocker'}-${index}`} className="mt-1 text-xs">{blocker.message || blocker.user_message || blocker.code}</p>)}
+                    {(quickFixPreflightResult.canonical?.blocking_reasons || []).map((reason, index) => <p key={`canonical-${index}`} className="mt-1 text-xs">{reason}</p>)}
+                  </div>
+                ) : null}
+              </section>
+            ) : null}
+            <ListingEditor
+              listing={selectedListing}
+              workflowPreferences={workflowPreferences}
+              marketplacePreflights={{}}
+              marketplacePayloadPreviews={{}}
+              crosspostPreview={[]}
+              crosspostPreviewLoading={false}
+              onSave={async (id, changes) => {
+                const saved = await updateListing(id, changes);
+                setSelectedListingDetails((current) => current?.id === id ? { ...current, ...(saved || {}), ...changes } : current);
+                // Keep the drawer responsive; the paginated catalog refreshes
+                // in the background after the durable PATCH succeeds.
+                reload().catch(() => undefined);
+                toast.success('Listing saved');
+              }}
+              onApprove={async (id) => { await approveListing(id); setQuickFixMode(false); setSelectedListingId(null); }}
+              onDelete={async (id) => { if (confirmDeleteListings(1)) { await deleteListing(id); setQuickFixMode(false); setSelectedListingId(null); } }}
+              publishState={{ loading: false, error: '' }}
+            />
+            </>
+          ) : <p className="p-6 text-sm text-rose-700">Could not load this listing. Close and try again.</p>}
+        </Drawer>
+      </AppShell>
+    );
+  }
+
+  return (
+    <AppShell
+      active="/listings"
+      title="Listings"
+      autonomousConfig={autonomousConfig}
+      onToggleAutonomous={async () => {
+        await toggleAutonomousMode(!autonomousConfig.autonomous_mode);
+        await reload();
+      }}
+    >
+      <PageHeader
+        eyebrow="Listings workspace"
+        breadcrumbs={[{ label: 'Workspace' }, { label: 'Listings', active: true }]}
+        title="Listings"
+        description="Manage all listing drafts in one workspace: create, import, intake photos, preview per marketplace, approve, and publish."
+        actions={
+          <div className="flex flex-wrap gap-2">
+            <label className="flex items-center gap-2 rounded-[10px] border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-xs font-semibold text-amber-900">
+              <span>Source</span>
+              <Select aria-label="Listings source modifier" value={sourceFilter} onChange={(event) => { setSourceFilter(event.target.value); setCatalogPage(1); }} className="h-8 w-auto py-1 text-xs">
+                {sourceOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </Select>
+            </label>
+            <label className="flex items-center gap-2 rounded-[10px] border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700">
+              <span>Sort</span>
+              <Select aria-label="Listings sort" value={sortBy} onChange={(event) => setSortBy(event.target.value)} className="h-8 w-auto py-1 text-xs">
+                <option value="updated">Date updated</option><option value="created">Date created</option><option value="price">Price</option><option value="title">Title</option><option value="source">Source</option><option value="status">Status</option>
+              </Select>
+            </label>
+            <Button href="/listings/new" variant="outline">
+              New item
+            </Button>
+            <Button href="/settings?tab=marketplaces" variant="outline">
+              Import listings
+            </Button>
+            <Button href="/intake">
+              Import photos
+            </Button>
+            {vineFeaturesEnabled ? (
+              <Button href="/imports/vine" variant="outline">
+                Import Vine data
+              </Button>
+            ) : null}
+          </div>
+        }
+      />
+
+      <ListingsWorkspaceErrorBoundary
+        resetKey={[
+          activeTab,
+          viewMode,
+          filteredListings.length,
+          selectedListingId || 'none',
+          selectedIds.length,
+          workspaceMode,
+        ].join(':')}
+      >
+      <PageFrame>
+      <PageBand id="listing-toolbar" className="overflow-hidden bg-[radial-gradient(circle_at_top_left,#fff1e6_0%,#ffffff_42%,#eef4ff_100%)]">
+      <ListingsOverviewBand
+        activeTabLabel={activeTabLabel}
+        filteredCount={filteredListings.length}
+        selectedCount={selectedIds.length}
+        viewMode={viewMode}
+        listingMetrics={listingMetrics}
+        bulkPreflightSummary={bulkPreflightSummary}
+        publishJobStats={publishJobStats}
+        tabs={(
+          <ListingsQueueTabs
+            listingTabs={LISTING_TABS}
+            tabCounts={tabCounts}
+            activeTab={activeTab}
+            selectTab={selectTab}
+            sourceOptions={sourceOptions}
+            sourceFilter={sourceFilter}
+            selectSource={setSourceFilter}
+          />
+        )}
+        toolbar={(
+          <ListingsToolbar
+            search={search}
+            setSearch={setSearch}
+            marketFilter={marketFilter}
+            setMarketFilter={setMarketFilter}
+            sourceFilter={sourceFilter}
+            setSourceFilter={setSourceFilter}
+            readinessFilter={readinessFilter}
+            setReadinessFilter={setReadinessFilter}
+            sortBy={sortBy}
+            setSortBy={setSortBy}
+            sortDir={sortDir}
+            setSortDir={setSortDir}
+            activeTab={activeTab}
+            setActiveTab={selectTab}
+            setSelectedIds={setSelectedIds}
+            filteredListingsLength={filteredListings.length}
+            viewMode={viewMode}
+            setViewMode={setViewMode}
+            workspaceMode={workspaceMode}
+            autoRefreshEnabled={autoRefreshEnabled}
+            setAutoRefreshEnabled={setAutoRefreshEnabled}
+            onBulkRetryFetchImages={vineFeaturesEnabled ? async () => {
+              const result = await backfillVineListingImages({
+                includeArchived: false,
+                forceRefresh: true,
+                strictMatch: true,
+              });
+              await reload();
+              toast.success(
+                `Vine image retry complete: ${Number(result?.updated || 0)} updated across ${Number(result?.processed || 0)} drafts, ${Number(result?.discovered || 0)} discovered, ${Number(result?.no_cache || 0)} still missing.`,
+              );
+            } : undefined}
+            onForceRecentVineImages={vineFeaturesEnabled ? async () => {
+              const result = await backfillVineListingImages({
+                includeArchived: false,
+                forceRefresh: true,
+                strictMatch: true,
+                onlyMissingImages: false,
+                sinceOrderDate: '2026-06-15',
+              });
+              await reload();
+              toast.success(
+                `Recent Vine backfill complete: ${Number(result?.updated || 0)} updated across ${Number(result?.processed || 0)} drafts, ${Number(result?.bridge_refetched || 0)} bridge refresh(es).`,
+              );
+            } : undefined}
+            onRetryMissingVineImages={vineFeaturesEnabled ? async () => {
+              const result = await backfillVineListingImages({
+                includeArchived: false,
+                forceRefresh: true,
+                strictMatch: true,
+                onlyMissingImages: true,
+              });
+              await reload();
+              toast.success(
+                `Missing-image retry complete: ${Number(result?.updated || 0)} updated across ${Number(result?.processed || 0)} drafts, ${Number(result?.no_cache || 0)} still missing.`,
+              );
+            } : undefined}
+            onRefreshVineMetadata={vineFeaturesEnabled ? async () => {
+              const result = await refreshVineListingMetadata({
+                includeArchived: false,
+                sinceOrderDate: '2026-06-15',
+              });
+              await reload();
+              toast.success(
+                `Vine metadata refresh complete: ${Number(result?.updated || 0)} drafts updated, ${Number(result?.missing_facts || 0)} rows still missing stored Amazon facts.`,
+              );
+            } : undefined}
+            onRepairAllVineImages={vineFeaturesEnabled ? async () => {
+              const result = await repairAllVineListingImages({
+                includeArchived: false,
+                forceRefresh: true,
+                useBridgeSession: true,
+                onlyMissingImages: true,
+              });
+              await reload();
+              toast.success(
+                `Full Vine repair complete: ${Number(result?.updated || 0)} updated across ${Number(result?.processed || 0)} drafts, ${Number(result?.bridge_refetched || 0)} bridge refresh(es), ${Number(result?.no_cache || 0)} still missing.`,
+              );
+            } : undefined}
+            filterOptions={FILTER_OPTIONS}
+            sourceOptions={sourceOptions}
+            readinessFilterOptions={READINESS_FILTER_OPTIONS}
+            listingTabs={LISTING_TABS}
+            onClearAllFilters={clearAllFilters}
+            onFiltersChanged={() => setCatalogPage(1)}
+            catalogTotal={listingPagination.total}
+            catalogPage={listingPagination.page}
+            catalogPageSize={catalogPageSize}
+            onCatalogPageSizeChange={(nextSize) => {
+              setCatalogPageSize(nextSize);
+              setCatalogPage(1);
+            }}
+          />
+        )}
+      />
+      <div className="border-t border-[#e5e7eb] bg-white/82 px-5 py-4 lg:px-6">
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] xl:items-center">
+          <div>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#667085]">Workspace mode</p>
+            <h3 className="mt-1 text-lg font-semibold tracking-[-0.03em] text-[#101828]">Choose a focused workspace</h3>
+            <p className="mt-1 max-w-xl text-sm leading-6 text-[#667085]">
+              Results stays primary; repair, launch, and queue tools stay available without consuming the whole screen.
+            </p>
+            <div className="mt-3 inline-flex rounded-full border border-[#dbe5f5] bg-white px-3 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-[#2563eb]">
+              Current mode: {workspaceModes.find((mode) => mode.key === workspaceMode)?.label}
+            </div>
+          </div>
+        <div className="grid grid-cols-2 gap-2 md:grid-cols-5">
+          {workspaceModes.map((mode) => {
+            const Icon = mode.icon;
+            const active = workspaceMode === mode.key;
+            return (
+              <Button
+                key={mode.key}
+                type="button"
+                onClick={() => setWorkspaceMode(mode.key)}
+                variant={active ? 'subtle' : 'secondary'}
+                size="sm"
+                className={[
+                  'h-auto min-h-[120px] w-full justify-start rounded-[14px] border p-3 text-left transition',
+                  active
+                    ? 'border-[#bfd2ff] bg-[#f4f8ff] shadow-[0_14px_40px_rgba(37,99,235,0.12)]'
+                    : 'border-[#e5e7eb] bg-white hover:border-[#cdd8ea] hover:bg-[#fbfcff]',
+                ].join(' ')}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <span className={`inline-flex h-9 w-9 items-center justify-center rounded-xl border ${active ? 'border-[#bfd2ff] bg-white text-[#2563eb]' : 'border-[#e5e7eb] bg-[#f8fafc] text-[#667085]'}`}>
+                    <Icon size={16} />
+                  </span>
+                  <span className="text-2xl font-semibold tracking-[-0.03em] text-[#101828]">{mode.count}</span>
+                </div>
+                <p className="mt-2 text-sm font-semibold text-[#101828]">{mode.label}</p>
+                <p className="mt-1 hidden text-xs leading-5 text-[#667085] xl:block">{mode.description}</p>
+              </Button>
+            );
+          })}
+        </div>
+        </div>
+      </div>
+      </PageBand>
+
+      {(workspaceMode === 'results' || workspaceMode === 'all') ? (
+      <SectionPanel
+        id="listing-results"
+        title={`${activeTabLabel} workspace`}
+        description={`Showing ${filteredListings.length} ${filteredListings.length === 1 ? 'listing' : 'listings'} in the current queue. This mode keeps the working list primary and pushes everything else out of the way.`}
+        className="overflow-hidden"
+      >
+      <ListingsBulkActionBar
+        selectedCount={selectedIds.length}
+        left={<p className="text-sm font-medium text-[#101828]">{selectedIds.length} selected</p>}
+        actions={
+          <>
+              {workflowPreferences.bulk_approval_enabled ? (
+                <Button variant="outline" size="sm" onClick={approveSelected}>
+                  Approve selected
+                </Button>
+              ) : null}
+              <Button variant="outline" size="sm" onClick={approveAndPublishSelected}>
+                Approve &amp; publish selected
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => runBulkMarketplacePreflight(['ebay'], { forceRefresh: true })} disabled={bulkPreflightLoading}>
+                Run eBay preflight
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => runBulkMarketplacePreflight(['facebook'], { forceRefresh: true })} disabled={bulkPreflightLoading}>
+                Run Facebook preflight
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => runBulkMarketplacePreflight(['ebay', 'facebook'], { forceRefresh: true })} disabled={bulkPreflightLoading}>
+                Run both preflights
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => runBulkPublishReady(['ebay', 'facebook'], { dryRun: true, forceRefresh: true })}>
+                Dry-run publish-ready
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => runBulkPublishReady(['ebay'], { dryRun: false, forceRefresh: true })}>
+                Queue eBay-ready only
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => runBulkPublishReady(['facebook'], { dryRun: false, forceRefresh: true })}>
+                Facebook assisted handoff
+              </Button>
+              {vineFeaturesEnabled && selectedVineRows.length ? (
+                <Button variant="outline" size="sm" onClick={retrySelectedVineImages}>
+                  Retry image fetch
+                </Button>
+              ) : null}
+              <Button variant="outline" size="sm" onClick={exportBulkPreflightCsv}>
+                Export blocker CSV
+              </Button>
+              <Button variant="outline" size="sm" onClick={copyBulkBlockerSummary}>
+                Copy blocker summary
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => updateSelectedListings(
+                  (listing) => ({
+                    condition: 'Open Box',
+                    condition_data: {
+                      ...(listing.condition_data || {}),
+                      open_box: true,
+                      used: false,
+                      new_in_box: false,
+                      operator_review_required: true,
+                      condition_bucket: 'open_box',
+                    },
+                  }),
+                  'Marked selected drafts as open box.',
+                )}
+              >
+                Mark open box
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => updateSelectedListings(
+                  (listing) => ({
+                    condition: 'Used',
+                    condition_data: {
+                      ...(listing.condition_data || {}),
+                      open_box: false,
+                      used: true,
+                      new_in_box: false,
+                      operator_review_required: true,
+                      condition_bucket: 'used',
+                    },
+                  }),
+                  'Marked selected drafts as used.',
+                )}
+              >
+                Mark used
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => updateSelectedListings(
+                  (listing) => ({
+                    shipping_profile: {
+                      ...(listing.shipping_profile || {}),
+                      manual_measurement_needed: true,
+                    },
+                  }),
+                  'Marked selected drafts as needing weighing.',
+                )}
+              >
+                Needs weighing
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => updateSelectedListings(
+                  (listing) => ({
+                    shipping_profile: {
+                      ...(listing.shipping_profile || {}),
+                      local_pickup_recommended: true,
+                      shipping_class_suggestion: 'local_pickup_only',
+                    },
+                  }),
+                  'Marked selected drafts as local-pickup ready.',
+                )}
+              >
+                Local pickup only
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => updateSelectedListings(
+                  (listing) => ({
+                    listing_images: (listing.listing_images || []).map((image) => ({
+                      ...image,
+                      operator_state: image.operator_state === 'rejected' ? 'rejected' : 'approved',
+                    })),
+                  }),
+                  'Approved selected image suggestions.',
+                )}
+              >
+                Approve image suggestions
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => runBulkPricingAction('refresh', 'Refreshed pricing for selected drafts.')}>
+                Price selected
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => runBulkPricingAction('apply_recommended', 'Applied suggested list pricing to selected drafts.')}>
+                Apply list pricing
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => runBulkPricingAction('apply_quick_sale', 'Applied quick-sale pricing to selected drafts.')}>
+                Apply quick-sale
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => runBulkPricingAction('apply_floor', 'Applied floor pricing to selected drafts.')}>
+                Apply floor
+              </Button>
+              <div className="flex items-center gap-2 rounded-lg border border-[#d0d5dd] bg-white px-2 py-1">
+                <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Send selected to</span>
+                <Select
+                  value={bulkSendTarget}
+                  onChange={(event) => setBulkSendTarget(event.target.value)}
+                  aria-label="Move selected listings to queue"
+                  className="h-9 min-w-[150px] rounded-lg px-2 py-1 text-sm"
+                >
+                  <option value="drafts">Drafts</option>
+                  <option value="review">Needs review</option>
+                  <option value="ready">Ready</option>
+                  <option value="archived">Archived</option>
+                </Select>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => sendSelectedTo(bulkSendTarget)}
+                >
+                  Send
+                </Button>
+              </div>
+              {activeTab !== 'archived' ? (
+                <Button variant="outline" size="sm" onClick={archiveSelected}>
+                  {activeTab === 'published' ? 'End listings and archive' : 'Archive locally'}
+                </Button>
+              ) : (
+                <Button variant="outline" size="sm" onClick={unarchiveSelected}>
+                  Unarchive selected
+                </Button>
+              )}
+              <Button variant="danger" size="sm" onClick={deleteSelected}>
+                Delete selected
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => setSelectedIds([])}>
+                Clear
+              </Button>
+              <Button size="sm" onClick={publishSelected}>
+                Publish selected
+              </Button>
+          </>
+        }
+      />
+
+      <div className={`grid gap-5 ${selectedListing ? 'xl:grid-cols-[minmax(0,1fr)_480px]' : 'grid-cols-1'}`}>
+        {viewMode === 'table' ? (
+          <DataTable
+          density="compact"
+          columns={[
+            {
+              key: 'thumbnail',
+              label: 'Thumbnail',
+              render: (listing) => (
+                <ListingsThumbnail src={getListingThumbnail(listing)} alt={getListingTitle(listing)} />
+              ),
+            },
+            {
+              key: 'title',
+              label: 'Title',
+              cellClassName: 'min-w-[280px]',
+              render: (listing) => (
+                <ListingsTitleCell
+                  listing={listing}
+                  getListingTitle={getListingTitle}
+                  getReadinessSummary={getReadinessSummary}
+                  getListingImageCount={getListingImageCount}
+                  isAmazonVineSource={isAmazonVineSource}
+                  getListingBucket={getListingBucket}
+                  publishSingleListing={publishSingleListing}
+                  publishing={publishing}
+                  approveListing={approveListing}
+                  deleteListing={deleteListing}
+                  confirmDeleteListings={confirmDeleteListings}
+                  archiveListing={archiveListing}
+                  isArchivedListing={isArchivedListing}
+                  router={router}
+                  listingsReturnUrl={listingsReturnUrl}
+                  getMarketplacePreflightSummary={getMarketplacePreflightSummary}
+                  getMarketplacePreflightStatus={getMarketplacePreflightStatus}
+                  getMarketplacePreflightTone={getMarketplacePreflightTone}
+                  getMarketplaceTopBlocker={getMarketplaceTopBlocker}
+                  getMarketplacePreflightAgeLabel={getMarketplacePreflightAgeLabel}
+                />
+              ),
+            },
+            {
+              key: 'price',
+              label: 'Price',
+              render: (listing) => `$${getListingPrice(listing)}`,
+            },
+            {
+              key: 'quantity',
+              label: 'Quantity',
+              render: (listing) => listing.quantity ?? 1,
+            },
+            {
+              key: 'images',
+              label: 'Images',
+              render: (listing) => `${getListingImageCount(listing)} image${getListingImageCount(listing) === 1 ? '' : 's'}`,
+            },
+            {
+              key: 'marketplaces',
+              label: 'Marketplaces',
+              render: (listing) => (
+                <div className="flex flex-wrap gap-2">
+                  {(getListingMarketplaces(listing, enabledPlatforms, { allowFallback: false }).length
+                    ? getListingMarketplaces(listing, enabledPlatforms, { allowFallback: false })
+                    : ['unassigned']).map((marketplace) => (
+                    <span key={`${listing.id}-${marketplace}`} className="pp-chip">
+                      {formatMarketplace(marketplace)}
+                    </span>
+                  ))}
+                </div>
+              ),
+            },
+            {
+              key: 'status',
+              label: 'Status',
+              render: (listing) => (
+                <ListingsStatusCell
+                  listing={listing}
+                  getListingBucket={getListingBucket}
+                  errors={errors}
+                  getListingFailureMessage={getListingFailureMessage}
+                />
+              ),
+            },
+            {
+              key: 'updated',
+              label: 'Updated',
+              render: (listing) => new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(new Date(listing.updated_at || listing.created_at || Date.now())),
+            },
+          ]}
+          rows={filteredListings}
+          rowKey={(row) => row.id}
+          selectedRows={selectedIds}
+          onToggleRow={toggleRow}
+          allSelected={filteredListings.length > 0 && selectedIds.length === filteredListings.length}
+          onToggleAll={() => setSelectedIds(selectedIds.length === filteredListings.length ? [] : filteredListings.map((listing) => listing.id))}
+          onRowClick={(listing) => setSelectedListingId(listing.id)}
+          emptyState={<ListingsWorkspaceEmptyState activeTabLabel={LISTING_TABS.find((t) => t.value === activeTab)?.label} compact />}
+          />
+        ) : (
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {filteredListings.length ? (
+              filteredListings.map((listing) => {
+                const selected = selectedIds.includes(listing.id);
+                return (
+                  <ListingsGridCard
+                    key={listing.id}
+                    listing={listing}
+                    selected={selected}
+                    setSelectedListingId={setSelectedListingId}
+                    toggleRow={toggleRow}
+                    getListingThumbnail={getListingThumbnail}
+                    getListingTitle={getListingTitle}
+                    getReadinessSummary={getReadinessSummary}
+                    getListingImageCount={getListingImageCount}
+                    getMarketplacePreflightSummary={getMarketplacePreflightSummary}
+                    getMarketplacePreflightStatus={getMarketplacePreflightStatus}
+                    getMarketplacePreflightTone={getMarketplacePreflightTone}
+                    getMarketplaceTopBlocker={getMarketplaceTopBlocker}
+                    getMarketplacePreflightAgeLabel={getMarketplacePreflightAgeLabel}
+                    getListingBucket={getListingBucket}
+                    getListingMarketplaces={getListingMarketplaces}
+                    enabledPlatforms={enabledPlatforms}
+                    formatMarketplace={formatMarketplace}
+                    workflowPreferences={workflowPreferences}
+                    publishSingleListing={publishSingleListing}
+                    publishing={publishing}
+                    approveListing={approveListing}
+                    isAmazonVineSource={isAmazonVineSource}
+                    isArchivedListing={isArchivedListing}
+                    archiveListing={archiveListing}
+                    deleteListing={deleteListing}
+                    confirmDeleteListings={confirmDeleteListings}
+                    router={router}
+                    listingsReturnUrl={listingsReturnUrl}
+                    errors={errors}
+                    getListingFailureMessage={getListingFailureMessage}
+                    getListingPrice={getListingPrice}
+                  />
+                );
+              })
+            ) : (
+              <ListingsWorkspaceEmptyState activeTabLabel={LISTING_TABS.find((t) => t.value === activeTab)?.label} />
+            )}
+          </div>
+        )}
+
+        <Drawer
+          open={!!selectedListing}
+          title={workflowPreferences.listing_preview_mode === 'marketplace' ? 'Listing review preview' : 'Listing editor'}
+          description="Inspect, review pricing reasoning, edit listing data, and approve or publish the draft."
+          onClose={() => setSelectedListingId(null)}
+          widthClassName="xl:w-[1100px]"
+        >
+          {selectedListingDetailsLoading || selectedListingDetails?.id !== selectedListingId ? (
+            <div className="p-8 text-sm text-slate-600" role="status">Loading full listing details…</div>
+          ) : selectedListing ? (
+            <ListingEditor
+              listing={selectedListing}
+              pricingRecommendation={pricingRecommendation}
+              listingIntelligence={listingIntelligence}
+              marketplacePreflights={marketplacePreflights}
+              marketplacePayloadPreviews={marketplacePayloadPreviews}
+              workflowPreferences={workflowPreferences}
+              onRefreshMarketplacePreflight={loadMarketplacePreviewData}
+              onSyncEbayListing={syncListingWithEbay}
+              templates={listingTemplates.filter((tpl) => !tpl.category_id || tpl.category_id === selectedListing.category_id)}
+              statuses={statusByListing[selectedListing.id] || []}
+              crosspostPreview={crosspostPreview}
+              crosspostPreviewLoading={crosspostPreviewLoading}
+              publishState={{
+                loading: !!publishing[selectedListing.id],
+                error: errors[selectedListing.id] || '',
+              }}
+              onApprove={async (id) => {
+                await approveListing(id);
+              }}
+              onApproveAndNext={async (id) => {
+                await approveListingAndMoveNext(id);
+              }}
+              onDelete={async (id) => {
+                if (!confirmDeleteListings(1)) return;
+                await deleteListing(id);
+              }}
+              onSave={async (id, form) => {
+                await updateListing(id, form);
+                await reload();
+              }}
+              onApplyTemplate={async (id, templateId) => {
+                await applyListingTemplate(id, templateId);
+                await reload();
+              }}
+              onSaveTemplate={async (payload) => {
+                await createListingTemplate(payload);
+                await reload();
+              }}
+              onRefreshPricing={async (id) => {
+                await refreshPricingRecommendation(id);
+                setPricingRecommendation(await fetchPricingRecommendation(id));
+                setListingIntelligence(await fetchListingIntelligence(id));
+                await reload();
+              }}
+              onApplyPricing={async (id, payload) => {
+                await applyPricingRecommendation(id, payload);
+                setPricingRecommendation(await fetchPricingRecommendation(id));
+                setListingIntelligence(await fetchListingIntelligence(id));
+                await reload();
+              }}
+              onPricingDecision={async (id, action) => {
+                await decideUnderpricing(id, action);
+                setPricingRecommendation(await fetchPricingRecommendation(id));
+                setListingIntelligence(await fetchListingIntelligence(id));
+                await reload();
+              }}
+              onGenerate={async (id) => {
+                await generateListing(id);
+                setPricingRecommendation(await fetchPricingRecommendation(id));
+                setListingIntelligence(await fetchListingIntelligence(id));
+                await reload();
+              }}
+              onPublish={async (id, targets) => {
+                await publish(id, targets);
+                await reload();
+              }}
+              onPhotoUpdated={async ({ listingId, sourceImage, file, removeBackground, edits }) => {
+                await processListingPhoto({ listingId, sourceImage, file, removeBackground, edits });
+                await reload();
+              }}
+              onUploadPhotos={uploadActualPhotosToListing}
+              onApprovePhotos={approvePhotosForListing}
+              onRejectPhotos={rejectPhotosForListing}
+              onSetPrimaryPhoto={setPrimaryPhotoForListing}
+            />
+          ) : null}
+        </Drawer>
+      </div>
+      <div className="mt-5 flex flex-col gap-3 rounded-[16px] border border-[#e5e7eb] bg-white px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+        <p className="text-sm text-[#475467]">
+          Showing page {listingPagination.page} of {listingPagination.total_pages} · {listingPagination.total.toLocaleString()} listings in this catalog.
+        </p>
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="outline" disabled={listingPagination.page <= 1} onClick={() => { setCatalogPage(Math.max(1, listingPagination.page - 1)); }}>
+            Previous
+          </Button>
+          <span className="rounded-[8px] bg-[#f2f4f7] px-3 py-2 text-xs font-semibold text-[#344054]">
+            {listingPagination.page} / {listingPagination.total_pages}
+          </span>
+          <Button size="sm" variant="outline" disabled={listingPagination.page >= listingPagination.total_pages} onClick={() => { setCatalogPage(Math.min(listingPagination.total_pages, listingPagination.page + 1)); }}>
+            Next
+          </Button>
+        </div>
+      </div>
+      </SectionPanel>
+      ) : null}
+
+      {(workspaceMode === 'repair' || workspaceMode === 'all') ? (
+      <ListingsCollapsibleSection
+        id="listing-status"
+        title="Workspace signals and repair tools"
+        description="Pricing posture, readiness counts, eBay preflight summary, and the repair queue live together here instead of crowding the first screen."
+        badge={`${listingMetrics.blockedCount} blocked`}
+        defaultOpen={false}
+      >
+        <PageSplit columnsClassName="xl:grid-cols-[minmax(0,1fr)_380px]">
+      <PageMain>
+        {listingError ? (
+          <SectionPanel
+            title="Catalog load needs attention"
+            description="PosterPro did not receive a listings response, so it is intentionally not presenting the catalog as empty."
+            tone="danger"
+            action={<Button size="sm" variant="outline" onClick={() => reload()}>Retry catalog</Button>}
+          >
+            <p className="text-sm text-[var(--pp-text-muted)]">
+              {listingError} Signed-in account: #{user?.id || 'unknown'}.
+            </p>
+          </SectionPanel>
+        ) : null}
+        {!listingError && listings.length === 0 ? (
+          <SectionPanel
+            title="No listings belong to this signed-in account"
+            description="PosterPro is showing the complete catalog for the current account; it has not applied a hidden recovery or Vine filter."
+            action={<Button size="sm" variant="outline" href="/login">Switch account</Button>}
+          >
+            <p className="text-sm text-[var(--pp-text-muted)]">
+              Signed-in account: #{user?.id || 'unknown'}. If you expected recovered inventory or Amazon Vine drafts here, sign out and use the recovery operator account, then select Clear all filters.
+            </p>
+          </SectionPanel>
+        ) : null}
+            <ListingsStatusGrid workflowPreferences={workflowPreferences} listingMetrics={listingMetrics} formatMarketplace={formatMarketplace} />
+          </PageMain>
+
+          <PageAside>
+            <ListingsPreflightPanel bulkPreflightSummary={bulkPreflightSummary} selectedRowsLength={selectedRows.length} />
+            <ListingsRepairQueuePanel
+              repairQueueImageStatusFilter={repairQueueImageStatusFilter}
+              setRepairQueueImageStatusFilter={setRepairQueueImageStatusFilter}
+              refreshRepairQueue={refreshRepairQueue}
+              repairQueueLoading={repairQueueLoading}
+              exportRepairQueueCsv={exportRepairQueueCsv}
+              repairQueueReport={repairQueueReport}
+              setSelectedListingId={setSelectedListingId}
+              runSingleListingPreflight={(listingId) => runBulkMarketplacePreflight(['ebay'], { forceRefresh: true, targetIds: [listingId] })}
+              applyRepairAction={applyRepairAction}
+              uploadActualPhotosToListing={uploadActualPhotosToListing}
+              approvePendingPhotos={approvePendingRepairQueuePhotos}
+            />
+          </PageAside>
+        </PageSplit>
+      </ListingsCollapsibleSection>
+      ) : null}
+
+      {(workspaceMode === 'launch' || workspaceMode === 'all') ? (
+      <ListingsCollapsibleSection
+        title="Launch drill and publish readiness"
+        description="Candidate selection, dry-run launch QA, and the latest publish-ready reports are grouped here so they stay available without owning the first screen."
+        badge={launchCandidatesReport?.candidates?.length ? `${launchCandidatesReport.candidates.length} launch candidates` : 'Launch QA'}
+        defaultOpen={false}
+      >
+        <div className="space-y-6">
+          <ListingsLaunchCandidatesPanel
+            launchCandidatesLoading={launchCandidatesLoading}
+            refreshLaunchCandidates={refreshLaunchCandidates}
+            runPreflightOnCandidates={runPreflightOnLaunchCandidates}
+            runLaunchDrillForCandidates={runLaunchDrillForCandidates}
+            openFirstCandidate={openFirstLaunchCandidate}
+            exportLaunchCandidatesCsv={exportLaunchCandidatesCsv}
+            ebayAccountReadiness={ebayAccountReadiness}
+            launchCandidatesReport={launchCandidatesReport}
+          />
+          {bulkPreflightReport ? (
+            <ListingsReportPanel
+              title="Last bulk preflight report"
+              description="Review the latest bulk run without opening every listing."
+              metrics={[
+                { label: 'Ready for eBay', value: bulkPreflightReport?.summary?.ready_for_ebay || 0, detail: 'Rows whose current preflight is ready for eBay queueing.' },
+                { label: 'Ready for Facebook', value: bulkPreflightReport?.summary?.ready_for_facebook || 0, detail: 'Rows whose current preflight is ready for Facebook assisted handoff.' },
+                { label: 'Blocked', value: bulkPreflightReport?.summary?.blocked || 0, detail: 'Rows blocked by at least one marketplace.' },
+                { label: 'Preflight failed', value: bulkPreflightReport?.summary?.preflight_failed || 0, detail: 'Rows that returned a backend validation or provider failure.' },
+              ]}
+              items={(bulkPreflightReport?.items || []).slice(0, 6)}
+              itemKeyPrefix="bulk-preflight"
+              renderMarketStatus={(item, market, data) => (
+                <span key={`${item.listing_id}-${market}`} className="pp-chip">
+                  {market.toUpperCase()}: {String(data?.status || 'unknown').replaceAll('_', ' ')}
+                </span>
+              )}
+              renderFooter={(item) => (
+                item.top_blocker_code ? <p className="mt-2 text-xs text-[#b42318]">Top blocker: {item.top_blocker_code}</p> : null
+              )}
+            />
+          ) : null}
+
+          {bulkPublishReport ? (
+            <ListingsReportPanel
+              title="Last bulk publish-ready run"
+              description={`Dry-run ${bulkPublishReport?.dry_run ? 'preview' : 'live queue'} for ready-only marketplace publishing.`}
+              metrics={[
+                { label: 'Queued', value: bulkPublishReport?.summary?.queued || 0, detail: 'Listings queued successfully in live mode.' },
+                { label: 'Skipped blocked', value: bulkPublishReport?.summary?.skipped_blocked || 0, detail: 'Listings blocked by a marketplace preflight issue.' },
+                { label: 'Warnings need confirm', value: bulkPublishReport?.summary?.skipped_warning_requires_confirmation || 0, detail: 'Warning-only listings that were not allowed into live mode.' },
+                { label: 'Already queued', value: bulkPublishReport?.summary?.skipped_already_queued || 0, detail: 'Listings already had pending marketplace work.' },
+              ]}
+              items={(bulkPublishReport?.items || []).slice(0, 6)}
+              itemKeyPrefix="bulk-publish"
+              renderMarketStatus={(item, market, data) => (
+                <span key={`${item.listing_id}-${market}`} className="pp-chip">
+                  {market.toUpperCase()}: {String(data?.status || 'unknown').replaceAll('_', ' ')}
+                </span>
+              )}
+              renderFooter={(item) => (
+                <>
+                  {item.blocked_marketplaces?.length ? (
+                    <p className="mt-2 text-xs text-[#b42318]">Blocked: {item.blocked_marketplaces.join(', ')}</p>
+                  ) : null}
+                  {item.warning_marketplaces?.length ? (
+                    <p className="mt-1 text-xs text-[#8a4b10]">Warnings: {item.warning_marketplaces.join(', ')}</p>
+                  ) : null}
+                </>
+              )}
+            />
+          ) : null}
+
+          <SectionPanel
+            title="Launch QA checklist"
+            description="Operator-safe production drill steps for a tiny controlled eBay launch set."
+          >
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              {[
+                'Confirm eBay account is connected.',
+                'Confirm policy IDs are present.',
+                'Confirm merchant location key.',
+                'Confirm selected draft titles and prices.',
+                'Confirm condition and notes.',
+                'Confirm photos are actual item photos.',
+                'Confirm shipping weight and dimensions.',
+                'Confirm category and required aspects.',
+                'Confirm no source/reference-only image warning.',
+                'Run dry-run publish-ready or launch drill.',
+                'Queue only ready eBay listings with explicit confirmation.',
+                'Inspect translated errors and retry only retryable failures.',
+              ].map((item) => (
+                <div key={item} className="rounded-[12px] border border-[#e5e7eb] bg-white p-3 text-sm text-[#475467]">{item}</div>
+              ))}
+            </div>
+            {bulkPublishReport?.launch_drill ? (
+              <div className="mt-4 rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-4">
+                <p className="text-sm font-semibold text-[#101828]">Latest launch drill result</p>
+                <div className="mt-3 grid gap-3 md:grid-cols-3">
+                  <MetricCard label="Checked" value={bulkPublishReport.launch_drill.summary?.checked || 0} detail="Listings inspected in the drill." />
+                  <MetricCard label="Ready" value={bulkPublishReport.launch_drill.summary?.ready || 0} detail="Listings that passed the dry-run drill." />
+                  <MetricCard label="Blocked" value={bulkPublishReport.launch_drill.summary?.blocked || 0} detail="Listings that still need operator fixes." />
+                </div>
+              </div>
+            ) : null}
+          </SectionPanel>
+        </div>
+      </ListingsCollapsibleSection>
+      ) : null}
+
+      {(workspaceMode === 'queue' || workspaceMode === 'all') ? (
+      <ListingsCollapsibleSection
+        id="listing-publish-queue"
+        title="Queue monitoring"
+        description="Live worker progress and a direct handoff into the jobs console."
+        badge={`${publishJobStats.queued} queued`}
+        defaultOpen
+      >
+        <SectionPanel
+          noPadding
+          action={<Link href="/jobs" className="text-sm font-medium text-[#2563eb]">Open jobs console</Link>}
+        >
+          <div className="grid gap-3 p-5 md:grid-cols-2 xl:grid-cols-4">
+            <MetricCard label="Queued / running" value={publishJobStats.queued} detail="Jobs still moving through the worker." />
+            <MetricCard label="Completed" value={publishJobStats.completed} detail="Publish jobs that finished successfully." />
+            <MetricCard label="Failed" value={publishJobStats.failed} detail="Jobs that need attention or retry." />
+            <MetricCard label="Progress" value={`${publishJobStats.progress}%`} detail={`${publishJobStats.completed} of ${publishJobStats.total} publish jobs completed`} />
+          </div>
+        </SectionPanel>
+      </ListingsCollapsibleSection>
+      ) : null}
+      </PageFrame>
+      </ListingsWorkspaceErrorBoundary>
+    </AppShell>
+  );
+}
+
+ListingsPage.requireAuth = true;
+
+// Listing actions are safety-critical and must never be served from a stale
+// page document after a deployment. Next's hashed JS handles normal cache
+// invalidation; this header also prevents a browser/proxy retaining an older
+// HTML shell with obsolete bulk-action handlers.
+export async function getServerSideProps({ res }) {
+  res.setHeader('Cache-Control', 'no-store, max-age=0, must-revalidate');
+  return { props: {} };
+}

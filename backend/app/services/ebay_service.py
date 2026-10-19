@@ -1,0 +1,4725 @@
+from __future__ import annotations
+
+import asyncio
+import base64
+import hmac
+import hashlib
+import html
+import json
+import re
+import secrets
+from xml.etree import ElementTree
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import Any
+from urllib.parse import urlencode
+
+import httpx
+from PIL import Image
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.core import config as config_module
+from app.core.config import reload_settings, settings
+from app.models.enums import EbayPublishStatus, ListingStatus, MarketplaceListingStatus, MarketplaceName
+from app.models.models import Listing, MarketplaceAccount, MarketplaceListing, MarketplaceMetadataCache, MarketplacePublishAttempt, User
+from app.services.marketplace_error_translation import translate_marketplace_error
+from app.services.rate_limiter import rate_limiter
+
+
+
+class EbayIntegrationError(RuntimeError):
+    """Raised for eBay API integration errors."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider_call_attempted: bool = False,
+        http_status: int | None = None,
+        method: str | None = None,
+        endpoint: str | None = None,
+        provider_response: dict[str, Any] | None = None,
+        request_summary: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.provider_call_attempted = bool(provider_call_attempted)
+        self.http_status = http_status
+        self.method = str(method or "").strip().upper() or None
+        self.endpoint = endpoint
+        self.provider_response = provider_response if isinstance(provider_response, dict) else None
+        self.request_summary = request_summary if isinstance(request_summary, dict) else None
+
+
+class EbaySellerRestrictedError(EbayIntegrationError):
+    """The eBay account is barred from listing until the seller resolves an issue."""
+
+
+def _ebay_effective_price(listing: Listing) -> Any:
+    """Resolve eBay's destination price without mutating canonical price."""
+    marketplace_data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}
+    overrides = marketplace_data.get("marketplace_overrides") if isinstance(marketplace_data.get("marketplace_overrides"), dict) else {}
+    ebay_override = overrides.get("ebay") if isinstance(overrides.get("ebay"), dict) else {}
+    override = ebay_override.get("price")
+    # listing_price is the operator-approved current selling price.  A stale
+    # suggested_price must never win over it when building an eBay payload;
+    # doing so made later manual repricing appear to save locally while eBay
+    # continued receiving the old suggestion.
+    if override not in (None, ""):
+        return override
+    pricing = marketplace_data.get("pricing_analysis") if isinstance(marketplace_data.get("pricing_analysis"), dict) else {}
+    manual_price = marketplace_data.get("manual_price_override")
+    manual_reason = str(marketplace_data.get("manual_price_override_reason") or "").strip()
+    if manual_price not in (None, "") and manual_reason:
+        return manual_price
+    provenance = str(pricing.get("provenance") or "").strip().lower()
+    source_type = str(getattr(listing, "source_type", "") or "").strip().lower()
+    research_gated_source = source_type in {
+        "intake_head_slate", "google_photos_album", "media_inventory_recovery", "amazon_vine",
+    }
+    trusted_research = pricing.get("recommendation_eligible") is True or provenance in {
+        "sold_comps", "active_comps", "source_msrp", "source_retail", "market_comps",
+        "operator", "operator_set", "manual",
+    }
+    if research_gated_source and not trusted_research:
+        return None
+    if pricing.get("recommendation_eligible") is False and not (
+        (manual_price not in (None, "") and manual_reason)
+        or provenance.startswith(("operator", "manual"))
+    ):
+        return None
+    # Estimated acquisition/tax values and historical $19.99 defaults are not
+    # seller-authorized asking prices. Missing price must fail closed.
+    return listing.listing_price or listing.suggested_price or listing.buy_it_now_price
+
+
+_EBAY_TRADING_NAMESPACE = "urn:ebay:apis:eBLBaseComponents"
+
+
+def _ebay_trading_value(element: ElementTree.Element | None, path: str) -> str:
+    """Read a Trading API XML field without leaking namespace details to callers."""
+    if element is None:
+        return ""
+    value = element.findtext(path, namespaces={"e": _EBAY_TRADING_NAMESPACE})
+    return str(value or "").strip()
+
+
+def _is_inventory_sku_catalog_error(error: EbayIntegrationError) -> bool:
+    message = str(error).lower()
+    return "25707" in message or "invalid value for a sku" in message
+
+
+async def _get_active_ebay_listings_via_trading_api(
+    account: MarketplaceAccount,
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Read active listings through eBay's seller API when Inventory rejects a legacy SKU.
+
+    Inventory API refuses to enumerate *any* offers for an account that contains a
+    historical SKU which violates its current character rules.  GetMyeBaySelling
+    remains able to enumerate those listings, so this is a read-only compatibility
+    path for imports and reconciliation.
+    """
+    runtime_settings = reload_settings()
+    endpoint = "https://api.ebay.com/ws/api.dll" if runtime_settings.environment == "production" else "https://api.sandbox.ebay.com/ws/api.dll"
+    requested_limit = max(1, int(limit or 1))
+    page_size = min(requested_limit, 200)
+    page_number = 1
+    imported: list[dict[str, Any]] = []
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30)) as client:
+        while len(imported) < requested_limit:
+            request_xml = f'''<?xml version="1.0" encoding="utf-8"?>
+<GetMyeBaySellingRequest xmlns="{_EBAY_TRADING_NAMESPACE}">
+  <DetailLevel>ReturnAll</DetailLevel>
+  <ActiveList>
+    <Include>true</Include>
+    <Pagination>
+      <EntriesPerPage>{min(page_size, requested_limit - len(imported))}</EntriesPerPage>
+      <PageNumber>{page_number}</PageNumber>
+    </Pagination>
+  </ActiveList>
+</GetMyeBaySellingRequest>'''
+            await rate_limiter.acquire_async("ebay")
+            response = await client.post(
+                endpoint,
+                content=request_xml.encode("utf-8"),
+                headers={
+                    "X-EBAY-API-CALL-NAME": "GetMyeBaySelling",
+                    "X-EBAY-API-SITEID": "0",
+                    "X-EBAY-API-COMPATIBILITY-LEVEL": "1231",
+                    "X-EBAY-API-IAF-TOKEN": account.access_token,
+                    "Content-Type": "text/xml",
+                },
+            )
+            if response.status_code >= 400:
+                raise EbayIntegrationError(f"eBay Trading API request failed ({response.status_code}) while listing active items")
+            try:
+                root = ElementTree.fromstring(response.content)
+            except ElementTree.ParseError as exc:
+                raise EbayIntegrationError("eBay Trading API returned an unreadable active-listing response") from exc
+
+            ack = _ebay_trading_value(root, "e:Ack")
+            if ack.lower() not in {"success", "warning"}:
+                errors = root.findall("e:Errors", {"e": _EBAY_TRADING_NAMESPACE})
+                detail = "; ".join(
+                    filter(None, (_ebay_trading_value(error, "e:LongMessage") or _ebay_trading_value(error, "e:ShortMessage") for error in errors))
+                )
+                raise EbayIntegrationError(f"eBay Trading API could not list active items: {detail or ack or 'unknown error'}")
+
+            items = root.findall("e:ActiveList/e:ItemArray/e:Item", {"e": _EBAY_TRADING_NAMESPACE})
+            for item in items:
+                listing_id = _ebay_trading_value(item, "e:ItemID")
+                if not listing_id:
+                    continue
+                specifics: dict[str, Any] = {}
+                for pair in item.findall("e:ItemSpecifics/e:NameValueList", {"e": _EBAY_TRADING_NAMESPACE}):
+                    name = _ebay_trading_value(pair, "e:Name")
+                    values = [str(value.text or "").strip() for value in pair.findall("e:Value", {"e": _EBAY_TRADING_NAMESPACE}) if str(value.text or "").strip()]
+                    if name and values:
+                        specifics[name] = values[0]
+                image_urls = [
+                    str(value.text or "").strip()
+                    for value in item.findall("e:PictureDetails/e:PictureURL", {"e": _EBAY_TRADING_NAMESPACE})
+                    if str(value.text or "").strip()
+                ]
+                price = _ebay_trading_value(item, "e:SellingStatus/e:CurrentPrice")
+                quantity = _ebay_trading_value(item, "e:QuantityAvailable") or _ebay_trading_value(item, "e:Quantity") or "1"
+                sku = _ebay_trading_value(item, "e:SKU")
+                shipping_type = _ebay_trading_value(item, "e:ShippingDetails/e:ShippingType")
+                service = _ebay_trading_value(item, "e:ShippingDetails/e:ShippingServiceOptions/e:ShippingService")
+                service_cost = _ebay_trading_value(item, "e:ShippingDetails/e:ShippingServiceOptions/e:ShippingServiceCost")
+                free_shipping = _ebay_trading_value(item, "e:ShippingDetails/e:ShippingServiceOptions/e:FreeShipping").lower() == "true"
+                shipping_profile_id = _ebay_trading_value(item, "e:SellerProfiles/e:SellerShippingProfile/e:ShippingProfileID") or None
+                shipping_profile_name = _ebay_trading_value(item, "e:SellerProfiles/e:SellerShippingProfile/e:ShippingProfileName") or None
+                weight_major = _ebay_trading_value(item, "e:ShippingDetails/e:ShippingPackageDetails/e:WeightMajor")
+                weight_minor = _ebay_trading_value(item, "e:ShippingDetails/e:ShippingPackageDetails/e:WeightMinor")
+                try:
+                    package_weight = float(weight_major or 0) + (float(weight_minor or 0) / 16.0)
+                except ValueError:
+                    package_weight = None
+                package_dimensions = {
+                    "length": _ebay_trading_value(item, "e:ShippingDetails/e:ShippingPackageDetails/e:PackageLength") or None,
+                    "width": _ebay_trading_value(item, "e:ShippingDetails/e:ShippingPackageDetails/e:PackageWidth") or None,
+                    "height": _ebay_trading_value(item, "e:ShippingDetails/e:ShippingPackageDetails/e:PackageDepth") or None,
+                }
+                imported.append(
+                    {
+                        "source_listing_reference": f"https://www.ebay.com/itm/{listing_id}",
+                        "source_url": f"https://www.ebay.com/itm/{listing_id}",
+                        "title": _ebay_trading_value(item, "e:Title"),
+                        "description": _ebay_trading_value(item, "e:Description"),
+                        "price": price,
+                        "listing_price": price,
+                        "quantity": quantity,
+                        "image_urls": image_urls,
+                        "item_specifics": specifics,
+                        "attributes": specifics,
+                        "category_id": _ebay_trading_value(item, "e:PrimaryCategory/e:CategoryID"),
+                        "condition": _ebay_trading_value(item, "e:ConditionDisplayName") or _ebay_trading_value(item, "e:ConditionID"),
+                        "handling_time_days": _ebay_trading_value(item, "e:DispatchTimeMax") or None,
+                        "shipping": {
+                            "shipping_type": shipping_type or None,
+                            "service": service or None,
+                            "shipping_cost": service_cost or None,
+                            "free_shipping": free_shipping,
+                            "buyer_pays_shipping": bool(not free_shipping and str(shipping_type).lower() != "calculated" and service_cost not in {"", "0", "0.0", "0.00"}),
+                            "calculated": str(shipping_type).lower() == "calculated",
+                            "package_weight": package_weight if package_weight and package_weight > 0 else None,
+                            "package_dimensions": package_dimensions,
+                            "provenance": "ebay_trading_active_listing_read",
+                        },
+                        "tags": ["ebay", "imported"],
+                        "source_identifiers": {"ebay_listing_id": listing_id, "offer_id": None, "sku": sku or None},
+                        "listing_start_time": _ebay_trading_value(item, "e:ListingDetails/e:StartTime"),
+                        "view_count": _ebay_trading_value(item, "e:HitCount"),
+                        "raw_offer": {
+                            "source": "ebay_trading_api",
+                            "item": {"listingId": listing_id, "sku": sku or None},
+                            "listingPolicies": {"fulfillmentPolicyId": shipping_profile_id} if shipping_profile_id else {},
+                        },
+                        "operation_inspection": {
+                            "status": "confirmed",
+                            "method": "ebay_trading_get_my_ebay_selling",
+                            "handling_source": "ebay_trading_get_my_ebay_selling",
+                            "inspected_at": datetime.now(UTC).isoformat(),
+                            "fulfillment_policy_id": shipping_profile_id,
+                            "fulfillment_policy_name": shipping_profile_name,
+                        },
+                        "raw_inventory_item": {"source": "ebay_trading_api", "item": {"listingId": listing_id}},
+                    }
+                )
+                if len(imported) >= requested_limit:
+                    break
+
+            total_pages = _ebay_trading_value(root, "e:ActiveList/e:PaginationResult/e:TotalNumberOfPages")
+            if not items or page_number >= int(total_pages or 1) or len(imported) >= requested_limit:
+                break
+            page_number += 1
+    return imported
+
+
+async def get_ebay_trading_active_operations(account: MarketplaceAccount, *, limit: int = 1000) -> list[dict[str, Any]]:
+    """Read the active operations snapshot in bounded Trading API pages."""
+    return await _get_active_ebay_listings_via_trading_api(account, limit=max(1, min(int(limit), 1000)))
+
+
+async def get_ebay_offers_for_sku(account: MarketplaceAccount, sku: str) -> list[dict[str, Any]]:
+    """Read Inventory API offers for one exact SKU, including unpublished offers."""
+    normalized_sku = str(sku or "").strip()
+    if not normalized_sku or len(normalized_sku) > 50:
+        raise EbayIntegrationError("A valid exact eBay SKU is required for offer reconciliation")
+    client = EbayAPIClient(account.access_token)
+    response = await client.request(
+        "GET", "/sell/inventory/v1/offer", params={"sku": normalized_sku, "limit": 100, "offset": 0}
+    )
+    return [offer for offer in (response.get("offers") or []) if isinstance(offer, dict)]
+
+
+async def get_ebay_inventory_item_for_sku(account: MarketplaceAccount, sku: str) -> dict[str, Any]:
+    """Read one exact Inventory API item; intended for diagnostics/reconciliation."""
+    normalized_sku = str(sku or "").strip()
+    if not normalized_sku or len(normalized_sku) > 50 or not re.fullmatch(r"[A-Za-z0-9]+", normalized_sku):
+        raise EbayIntegrationError("A valid exact alphanumeric eBay SKU is required for inventory-item reconciliation")
+    client = EbayAPIClient(account.access_token)
+    return await client.request("GET", f"/sell/inventory/v1/inventory_item/{normalized_sku}")
+
+
+async def get_ebay_trading_item(account: MarketplaceAccount, item_id: str) -> dict[str, Any]:
+    """Read one exact legacy Trading API item, including PictureDetails."""
+    item_id = str(item_id or "").strip()
+    if not item_id:
+        raise EbayIntegrationError("An exact eBay item ID is required")
+    runtime_settings = reload_settings()
+    endpoint = "https://api.ebay.com/ws/api.dll" if runtime_settings.environment == "production" else "https://api.sandbox.ebay.com/ws/api.dll"
+    request_xml = f'''<?xml version="1.0" encoding="utf-8"?>
+<GetItemRequest xmlns="{_EBAY_TRADING_NAMESPACE}">
+  <ItemID>{html.escape(item_id)}</ItemID>
+  <DetailLevel>ReturnAll</DetailLevel>
+  <IncludeItemSpecifics>true</IncludeItemSpecifics>
+</GetItemRequest>'''
+    await rate_limiter.acquire_async("ebay")
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30)) as client:
+        response = await client.post(endpoint, content=request_xml.encode(), headers={
+            "X-EBAY-API-CALL-NAME": "GetItem",
+            "X-EBAY-API-SITEID": "0",
+            "X-EBAY-API-COMPATIBILITY-LEVEL": "1231",
+            "X-EBAY-API-IAF-TOKEN": account.access_token,
+            "Content-Type": "text/xml",
+        })
+    if response.status_code >= 400:
+        raise EbayIntegrationError(f"eBay Trading GetItem failed ({response.status_code})")
+    try:
+        root = ElementTree.fromstring(response.content)
+    except ElementTree.ParseError as exc:
+        raise EbayIntegrationError("eBay Trading GetItem returned invalid XML") from exc
+    ns = {"e": _EBAY_TRADING_NAMESPACE}
+    ack = _ebay_trading_value(root, "e:Ack")
+    item = root.find("e:Item", ns)
+    if not item or ack.lower() not in {"success", "warning"}:
+        return {"ack": ack, "item_id": item_id, "pictures": [], "errors": response.text[:2000]}
+    pictures = [str(node.text or "").strip() for node in item.findall("e:PictureDetails/e:PictureURL", ns) if str(node.text or "").strip()]
+    external = [str(node.text or "").strip() for node in item.findall("e:PictureDetails/e:ExternalPictureURL", ns) if str(node.text or "").strip()]
+    gallery = [str(node.text or "").strip() for node in item.findall("e:PictureDetails/e:GalleryURL", ns) if str(node.text or "").strip()]
+    listing_type = _ebay_trading_value(item, "e:ListingType")
+    listing_status = _ebay_trading_value(item, "e:SellingStatus/e:ListingStatus")
+    quantity_sold = _ebay_trading_value(item, "e:SellingStatus/e:QuantitySold")
+    end_time = _ebay_trading_value(item, "e:ListingDetails/e:EndTime")
+    variation_node = item.find("e:Variations", ns)
+    inventory_tracking = _ebay_trading_value(item, "e:InventoryTrackingMethod")
+    shipping_type = _ebay_trading_value(item, "e:ShippingDetails/e:ShippingType")
+    service = _ebay_trading_value(item, "e:ShippingDetails/e:ShippingServiceOptions/e:ShippingService")
+    service_cost = _ebay_trading_value(item, "e:ShippingDetails/e:ShippingServiceOptions/e:ShippingServiceCost")
+    free_shipping = _ebay_trading_value(item, "e:ShippingDetails/e:ShippingServiceOptions/e:FreeShipping").lower() == "true"
+    shipping_profile_id = _ebay_trading_value(item, "e:SellerProfiles/e:SellerShippingProfile/e:ShippingProfileID") or None
+    shipping_profile_name = _ebay_trading_value(item, "e:SellerProfiles/e:SellerShippingProfile/e:ShippingProfileName") or None
+    dimensions = {
+        "length": _ebay_trading_value(item, "e:ShippingDetails/e:ShippingPackageDetails/e:PackageLength") or None,
+        "width": _ebay_trading_value(item, "e:ShippingDetails/e:ShippingPackageDetails/e:PackageWidth") or None,
+        "height": _ebay_trading_value(item, "e:ShippingDetails/e:ShippingPackageDetails/e:PackageDepth") or None,
+    }
+    try:
+        package_weight = float(_ebay_trading_value(item, "e:ShippingDetails/e:ShippingPackageDetails/e:WeightMajor") or 0) + float(_ebay_trading_value(item, "e:ShippingDetails/e:ShippingPackageDetails/e:WeightMinor") or 0) / 16.0
+    except ValueError:
+        package_weight = None
+    return {"ack": ack, "item_id": item_id, "title": _ebay_trading_value(item, "e:Title"), "sku": _ebay_trading_value(item, "e:SKU") or None, "listing_type": listing_type, "listing_status": listing_status, "quantity": _ebay_trading_value(item, "e:Quantity"), "quantity_sold": quantity_sold, "end_time": end_time, "handling_time_days": _ebay_trading_value(item, "e:DispatchTimeMax") or None, "shipping_policy_id": shipping_profile_id, "shipping_policy_name": shipping_profile_name, "shipping": {"shipping_type": shipping_type or None, "service": service or None, "shipping_cost": service_cost or None, "free_shipping": free_shipping, "calculated": str(shipping_type).lower() == "calculated", "buyer_pays_shipping": bool(not free_shipping and str(shipping_type).lower() != "calculated" and service_cost not in {"", "0", "0.0", "0.00"}), "package_weight": package_weight if package_weight and package_weight > 0 else None, "package_dimensions": dimensions, "provenance": "ebay_trading_get_item"}, "has_variations": variation_node is not None, "inventory_tracking_method": inventory_tracking or None, "pictures": pictures, "external_picture_urls": external, "gallery_urls": gallery, "picture_count": len(pictures), "raw_item_source": "EBAY_TRADING_GETITEM"}
+
+
+async def get_ebay_supported_handling_times(account: MarketplaceAccount) -> dict[str, Any]:
+    """Read current eBay-site handling values without changing account state."""
+    runtime_settings = reload_settings()
+    endpoint = "https://api.ebay.com/ws/api.dll" if runtime_settings.environment == "production" else "https://api.sandbox.ebay.com/ws/api.dll"
+    request_xml = f'''<?xml version="1.0" encoding="utf-8"?>
+<GeteBayDetailsRequest xmlns="{_EBAY_TRADING_NAMESPACE}">
+  <DetailName>DispatchTimeMaxDetails</DetailName>
+</GeteBayDetailsRequest>'''
+    await rate_limiter.acquire_async("ebay")
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30)) as client:
+        response = await client.post(endpoint, content=request_xml.encode(), headers={
+            "X-EBAY-API-CALL-NAME": "GeteBayDetails",
+            "X-EBAY-API-SITEID": "0",
+            "X-EBAY-API-COMPATIBILITY-LEVEL": "1231",
+            "X-EBAY-API-IAF-TOKEN": account.access_token,
+            "Content-Type": "text/xml",
+        })
+    if response.status_code >= 400:
+        raise EbayIntegrationError(f"eBay Trading GeteBayDetails failed ({response.status_code})")
+    try:
+        root = ElementTree.fromstring(response.content)
+    except ElementTree.ParseError as exc:
+        raise EbayIntegrationError("eBay Trading GeteBayDetails returned invalid XML") from exc
+    ns = {"e": _EBAY_TRADING_NAMESPACE}
+    ack = _ebay_trading_value(root, "e:Ack")
+    if ack.lower() not in {"success", "warning"}:
+        errors = root.findall(".//e:Errors", ns)
+        detail = "; ".join(
+            _ebay_trading_value(error, "e:LongMessage") or _ebay_trading_value(error, "e:ShortMessage")
+            for error in errors
+        )
+        raise EbayIntegrationError(f"eBay Trading GeteBayDetails was not successful{': ' + detail if detail else ''}")
+    values: set[int] = set()
+    for node in root.findall(".//e:DispatchTimeMaxDetails/e:DispatchTimeMax", ns):
+        try:
+            value = int(str(node.text or "").strip())
+        except (TypeError, ValueError):
+            continue
+        if value >= 0:
+            values.add(value)
+    if not values:
+        raise EbayIntegrationError("eBay GeteBayDetails did not return supported handling-time values")
+    detail = root.find(".//e:DispatchTimeMaxDetails", ns)
+    return {
+        "values_days": sorted(values),
+        "extended_handling": _ebay_trading_value(detail, "e:ExtendedHandling").lower() == "true" if detail is not None else False,
+        "updated_at": _ebay_trading_value(detail, "e:UpdateTime") if detail is not None else None,
+        "source": "ebay_trading_get_ebay_details",
+    }
+
+
+def _trading_add_fixed_price_item_xml(listing: Listing, plan: dict[str, Any]) -> str:
+    """Build a Trading AddFixedPriceItem request from the canonical eBay plan.
+
+    The legacy API is used only for verified tree-100 Motors categories. Seller
+    profile IDs, category, price, quantity, condition, description, images and
+    item specifics are carried forward from the shared Inventory-plan builder.
+    """
+    category = plan.get("category") or {}
+    if (
+        str(category.get("taxonomy_marketplace") or "").upper() != "EBAY_MOTORS_US"
+        or str(category.get("taxonomy_tree_id") or "") != "100"
+        or not category.get("ownership_verified")
+        or category.get("semantic_motors_classification") != "TRUE_MOTORS"
+    ):
+        raise EbayIntegrationError("CATEGORY_REVALIDATION_REQUIRED: Trading create requires verified Motors taxonomy and product evidence")
+    aspect_summary = plan.get("aspect_summary") or {}
+    if aspect_summary.get("missing_required"):
+        raise EbayIntegrationError("EBAY_REQUIRED_ASPECT_MISSING: Trading create requires all live category aspects")
+    policies = plan.get("policy_ids") or {}
+    required_policy_ids = ("paymentPolicyId", "fulfillmentPolicyId", "returnPolicyId")
+    if not all(str(policies.get(key) or "").strip() for key in required_policy_ids):
+        raise EbayIntegrationError("EBAY_BUSINESS_POLICIES_REQUIRED: Trading create requires the connected account's payment, fulfillment, and return profiles")
+    policy_settings = plan.get("policy_settings") or {}
+    if not policy_settings.get("merchant_location_verified"):
+        raise EbayIntegrationError("EBAY_MERCHANT_LOCATION_REQUIRED: Trading create requires the connected account's verified ship-from location")
+    offer = plan.get("offer_payload") or {}
+    product = (plan.get("inventory_item_payload") or {}).get("product") or {}
+    start_price = offer.get("pricingSummary", {}).get("price", {}).get("value") or _ebay_effective_price(listing)
+    if start_price in (None, ""):
+        raise EbayIntegrationError("EBAY_PRICE_MISSING: an operator-authorized asking price is required; no default price was substituted")
+    item = ElementTree.Element(f"{{{_EBAY_TRADING_NAMESPACE}}}Item")
+    def add(parent, name: str, value: Any, attrs: dict[str, str] | None = None):
+        node = ElementTree.SubElement(parent, f"{{{_EBAY_TRADING_NAMESPACE}}}{name}", attrs or {})
+        node.text = str(value)
+        return node
+    add(item, "SKU", plan.get("sku") or _build_ebay_sku(listing.user_id, listing.id))
+    add(item, "Title", product.get("title") or listing.title or f"PosterPro Listing #{listing.id}")
+    add(item, "Description", product.get("description") or _sanitize_ebay_description(listing.description))
+    primary = ElementTree.SubElement(item, f"{{{_EBAY_TRADING_NAMESPACE}}}PrimaryCategory")
+    add(primary, "CategoryID", category.get("category_id"))
+    add(item, "StartPrice", start_price, {"currencyID": "USD"})
+    add(item, "Quantity", offer.get("availableQuantity") or max(1, int(listing.quantity or 1)))
+    condition = str((plan.get("inventory_item_payload") or {}).get("condition") or "USED_GOOD").upper()
+    condition_id = {"NEW": 1000, "USED_LIKE_NEW": 3000, "USED_VERY_GOOD": 3000, "USED_GOOD": 3000, "FOR_PARTS_OR_NOT_WORKING": 7000}.get(condition)
+    if condition_id is None:
+        raise EbayIntegrationError(f"EBAY_CONDITION_UNSUPPORTED: Trading API does not have a verified condition mapping for {condition}")
+    add(item, "ConditionID", condition_id)
+    add(item, "ListingType", "FixedPriceItem")
+    add(item, "ListingDuration", "GTC")
+    add(item, "Location", ", ".join(str(policy_settings.get(key) or "").strip() for key in ("merchant_location_city", "merchant_location_state_or_province") if str(policy_settings.get(key) or "").strip()))
+    add(item, "PostalCode", policy_settings.get("merchant_location_postal_code") or "")
+    add(item, "Country", policy_settings.get("merchant_location_country") or "US")
+    add(item, "Currency", "USD")
+    add(item, "DispatchTimeMax", max(1, int(policy_settings.get("handling_time_days") or 1)))
+    specifics = (plan.get("payload_preview") or {}).get("item_specifics") or product.get("aspects") or {}
+    if specifics:
+        details = ElementTree.SubElement(item, f"{{{_EBAY_TRADING_NAMESPACE}}}ItemSpecifics")
+        for name, raw_values in specifics.items():
+            values = _flatten_aspect_values(raw_values)
+            if not values:
+                continue
+            pair = ElementTree.SubElement(details, f"{{{_EBAY_TRADING_NAMESPACE}}}NameValueList")
+            add(pair, "Name", name)
+            for value in values:
+                add(pair, "Value", value)
+    images = [str(url).strip() for url in product.get("imageUrls") or [] if str(url).strip()]
+    if not images:
+        raise EbayIntegrationError("EBAY_IMAGE_MISSING: Trading create requires at least one verified listing image")
+    pictures = ElementTree.SubElement(item, f"{{{_EBAY_TRADING_NAMESPACE}}}PictureDetails")
+    for url in images[:12]:
+        add(pictures, "PictureURL", url)
+    profiles = ElementTree.SubElement(item, f"{{{_EBAY_TRADING_NAMESPACE}}}SellerProfiles")
+    for element, key in (("SellerPaymentProfile", "paymentPolicyId"), ("SellerReturnProfile", "returnPolicyId"), ("SellerShippingProfile", "fulfillmentPolicyId")):
+        node = ElementTree.SubElement(profiles, f"{{{_EBAY_TRADING_NAMESPACE}}}{element}")
+        add(node, {"SellerPaymentProfile": "PaymentProfileID", "SellerReturnProfile": "ReturnProfileID", "SellerShippingProfile": "ShippingProfileID"}[element], policies[key])
+    # Compatibility is emitted only from explicitly structured fitment facts;
+    # free-form make/model title fragments are not converted into fitment.
+    source = listing.source_metadata if isinstance(listing.source_metadata, dict) else {}
+    fitments = source.get("vehicle_fitment") or source.get("fitments") or []
+    if isinstance(fitments, dict):
+        fitments = [fitments]
+    structured = [row for row in fitments if isinstance(row, dict) and any(str(row.get(k) or "").strip() for k in ("Make", "Model", "Year"))] if isinstance(fitments, list) else []
+    if structured:
+        compat_list = ElementTree.SubElement(item, f"{{{_EBAY_TRADING_NAMESPACE}}}ItemCompatibilityList")
+        for fitment in structured:
+            compat = ElementTree.SubElement(compat_list, f"{{{_EBAY_TRADING_NAMESPACE}}}Compatibility")
+            for key in ("Make", "Model", "Year", "Trim", "Engine"):
+                value = str(fitment.get(key) or "").strip()
+                if value:
+                    pair = ElementTree.SubElement(compat, f"{{{_EBAY_TRADING_NAMESPACE}}}NameValueList")
+                    add(pair, "Name", key)
+                    add(pair, "Value", value)
+    request = ElementTree.Element(f"{{{_EBAY_TRADING_NAMESPACE}}}AddFixedPriceItemRequest")
+    request.append(item)
+    return ElementTree.tostring(request, encoding="unicode", xml_declaration=True)
+
+
+async def _add_fixed_price_item_via_trading_api(account: MarketplaceAccount, listing: Listing, plan: dict[str, Any]) -> dict[str, Any]:
+    """Create a verified Motors listing once; callers reconcile before replay."""
+    request_xml = _trading_add_fixed_price_item_xml(listing, plan)
+    runtime_settings = reload_settings()
+    endpoint = "https://api.ebay.com/ws/api.dll" if runtime_settings.environment == "production" else "https://api.sandbox.ebay.com/ws/api.dll"
+    await rate_limiter.acquire_async("ebay")
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(45)) as client:
+            response = await client.post(endpoint, content=request_xml.encode("utf-8"), headers={
+                "X-EBAY-API-CALL-NAME": "AddFixedPriceItem",
+                "X-EBAY-API-SITEID": "0",
+                "X-EBAY-API-COMPATIBILITY-LEVEL": "1231",
+                "X-EBAY-API-IAF-TOKEN": account.access_token,
+                "Content-Type": "text/xml",
+            })
+    except Exception as exc:
+        raise EbayIntegrationError("Trading AddFixedPriceItem transport failed after request submission; remote state is unknown", provider_call_attempted=True, method="POST", endpoint="AddFixedPriceItem", provider_response={"remote_state_unknown": True}) from exc
+    if response.status_code >= 500:
+        raise EbayIntegrationError(f"Trading AddFixedPriceItem returned HTTP {response.status_code}; remote state is unknown", provider_call_attempted=True, http_status=response.status_code, method="POST", endpoint="AddFixedPriceItem", provider_response={"remote_state_unknown": True})
+    if response.status_code >= 400:
+        raise EbayIntegrationError(f"Trading AddFixedPriceItem rejected the request (HTTP {response.status_code})", provider_call_attempted=True, http_status=response.status_code, method="POST", endpoint="AddFixedPriceItem", provider_response={"provider_rejected": True, "http_status": response.status_code})
+    try:
+        root = ElementTree.fromstring(response.content)
+    except ElementTree.ParseError as exc:
+        raise EbayIntegrationError("Trading AddFixedPriceItem returned unreadable XML; remote state is unknown", provider_call_attempted=True, method="POST", endpoint="AddFixedPriceItem", provider_response={"remote_state_unknown": True}) from exc
+    ns = {"e": _EBAY_TRADING_NAMESPACE}
+    ack = _ebay_trading_value(root, "e:Ack")
+    errors = root.findall("e:Errors", ns)
+    detail = "; ".join(filter(None, (_ebay_trading_value(row, "e:LongMessage") or _ebay_trading_value(row, "e:ShortMessage") for row in errors)))
+    if ack.lower() not in {"success", "warning"}:
+        raise EbayIntegrationError(f"Trading AddFixedPriceItem rejected the listing: {detail or ack or 'unknown provider error'}", provider_call_attempted=True, method="POST", endpoint="AddFixedPriceItem", provider_response={"ack": ack, "provider_rejected": True, "errors": detail})
+    item_id = _ebay_trading_value(root, "e:ItemID")
+    if not item_id:
+        raise EbayIntegrationError("Trading AddFixedPriceItem was acknowledged without an ItemID; remote state is unknown", provider_call_attempted=True, method="POST", endpoint="AddFixedPriceItem", provider_response={"ack": ack, "remote_state_unknown": True})
+    return {"listingId": item_id, "status": "PUBLISHED", "ack": ack, "response": {"item_id": item_id, "ack": ack, "warnings": detail}, "publisher_path": "TRADING_API_MOTORS"}
+
+
+async def end_ebay_trading_listing(listing: Listing, db: Session, *, expected_item_id: str, listing_type: str) -> dict[str, Any]:
+    """End an exact legacy Trading listing, then verify with GetItem."""
+    expected = str(expected_item_id or "").strip()
+    if not expected or str(listing.ebay_listing_id or "").strip() != expected:
+        raise EbayIntegrationError("Exact Trading ItemID is missing or does not match the listing")
+    normalized_type = str(listing_type or "").strip().lower()
+    action = "EndFixedPriceItem" if normalized_type == "fixedpriceitem" else "EndItem" if normalized_type else None
+    if not action:
+        raise EbayIntegrationError("Trading ListingType is unknown; manual verification is required")
+    account = await get_or_refresh_account(listing.user_id, db)
+    runtime_settings = reload_settings()
+    endpoint = "https://api.ebay.com/ws/api.dll" if runtime_settings.environment == "production" else "https://api.sandbox.ebay.com/ws/api.dll"
+    reason = "NotAvailable"
+    request_xml = f'''<?xml version="1.0" encoding="utf-8"?><{action}Request xmlns="{_EBAY_TRADING_NAMESPACE}"><ItemID>{html.escape(expected)}</ItemID><EndingReason>{reason}</EndingReason></{action}Request>'''
+    await rate_limiter.acquire_async("ebay")
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30)) as client:
+        response = await client.post(endpoint, content=request_xml.encode(), headers={"X-EBAY-API-CALL-NAME": action, "X-EBAY-API-SITEID": "0", "X-EBAY-API-COMPATIBILITY-LEVEL": "1231", "X-EBAY-API-IAF-TOKEN": account.access_token, "Content-Type": "text/xml"})
+    root = ElementTree.fromstring(response.content)
+    ns = {"e": _EBAY_TRADING_NAMESPACE}
+    ack = _ebay_trading_value(root, "e:Ack")
+    verification = await get_ebay_trading_item(account, expected)
+    final_status = str(verification.get("listing_status") or "").upper()
+    status = "ENDED" if ack.lower() in {"success", "warning"} and final_status not in {"ACTIVE", "PUBLISHED", "LISTED"} else "REMOTE_STATE_UNKNOWN"
+    return {"status": status, "item_id": expected, "action": action, "ending_reason": reason, "ack": ack, "verification": verification}
+
+
+@dataclass(slots=True)
+class EbayTokenBundle:
+    access_token: str
+    refresh_token: str | None
+    expires_in: int
+
+
+class EbayAPIClient:
+    """Thin async wrapper around eBay APIs with retries and standardized errors."""
+
+    def __init__(self, access_token: str, *, sandbox: bool | None = None, timeout_seconds: int = 30):
+        self.access_token = access_token
+        # Read the live settings object so tests and runtime configuration
+        # changes are honored; reloading a new object here can ignore a
+        # deliberate environment override on the process' settings singleton.
+        runtime_settings = config_module.settings
+        use_sandbox = runtime_settings.environment != "production" if sandbox is None else sandbox
+        self.base_url = "https://api.sandbox.ebay.com" if use_sandbox else "https://api.ebay.com"
+        self.timeout = httpx.Timeout(timeout_seconds)
+
+    async def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        payload: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        retries: int = 3,
+    ) -> dict[str, Any]:
+        request_headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json",
+            "Content-Language": "en-US",
+            "Accept": "application/json",
+            **(headers or {}),
+        }
+
+        backoff_seconds = 0.5
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            for attempt in range(1, retries + 1):
+                await rate_limiter.acquire_async("ebay")
+                response = await client.request(
+                    method,
+                    f"{self.base_url}{path}",
+                    params=params,
+                    json=payload,
+                    headers=request_headers,
+                )
+                if response.status_code in (429, 500, 502, 503, 504) and attempt < retries:
+                    await asyncio.sleep(backoff_seconds)
+                    backoff_seconds *= 2
+                    continue
+
+                if response.status_code >= 400:
+                    detail = _safe_json(response)
+                    message = f"eBay API request failed ({response.status_code}) for {path}: {json.dumps(detail)}"
+                    errors = detail.get("errors") if isinstance(detail, dict) else None
+                    error_context = {
+                        "provider_call_attempted": True,
+                        "http_status": response.status_code,
+                        "method": str(method or "").strip().upper() or None,
+                        "endpoint": path,
+                        "provider_response": detail if isinstance(detail, dict) else None,
+                        "request_summary": _ebay_request_shape(payload),
+                    }
+                    if isinstance(errors, list) and any(str(row.get("errorId")) == "25019" for row in errors if isinstance(row, dict)):
+                        raise EbaySellerRestrictedError(message, **error_context)
+                    raise EbayIntegrationError(message, **error_context)
+                return _safe_json(response)
+
+        raise EbayIntegrationError(f"eBay API retry exhaustion for {path}")
+
+
+def _ebay_request_shape(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Capture submitted field names without retaining product copy or values."""
+    if not isinstance(payload, dict):
+        return None
+    product = payload.get("product") if isinstance(payload.get("product"), dict) else {}
+    aspects = product.get("aspects") if isinstance(product.get("aspects"), dict) else {}
+    package = payload.get("packageWeightAndSize") if isinstance(payload.get("packageWeightAndSize"), dict) else {}
+    return {
+        "top_level_fields": sorted(str(key) for key in payload),
+        "product_fields": sorted(str(key) for key in product),
+        "product_aspect_names": sorted(str(key) for key in aspects),
+        "package_fields": sorted(str(key) for key in package),
+    }
+
+
+def _safe_json(response: httpx.Response) -> dict[str, Any]:
+    try:
+        parsed = response.json()
+        if isinstance(parsed, dict):
+            return parsed
+        return {"data": parsed}
+    except Exception:
+        return {"raw": response.text}
+
+
+def _coerce_positive_float(value: Any) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if numeric <= 0:
+        return None
+    return round(numeric, 3)
+
+
+def _coerce_price_number(value: Any) -> float | None:
+    """Normalize a persisted or remote price without accepting zero/negative values."""
+    return _coerce_positive_float(value)
+
+
+def _coerce_positive_int(value: Any) -> int | None:
+    try:
+        numeric = int(round(float(value)))
+    except (TypeError, ValueError):
+        return None
+    return numeric if numeric > 0 else None
+
+
+def _parse_ebay_weight_value(value: Any) -> float | None:
+    numeric = _coerce_positive_float(value)
+    if numeric is not None:
+        return numeric
+
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(lb|lbs|pound|pounds|oz|ounce|ounces|kg|kilogram|kilograms|g|gram|grams)\b", text)
+    if not match:
+        return None
+
+    amount = float(match.group(1))
+    unit = match.group(2)
+    if unit in {"lb", "lbs", "pound", "pounds"}:
+        return round(amount, 3)
+    if unit in {"oz", "ounce", "ounces"}:
+        return round(amount / 16.0, 3)
+    if unit in {"kg", "kilogram", "kilograms"}:
+        return round(amount * 2.20462, 3)
+    if unit in {"g", "gram", "grams"}:
+        return round(amount / 453.592, 3)
+    return None
+
+
+def _to_public_image_url(path: str) -> str:
+    raw = str(path or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith(("http://", "https://")):
+        return raw
+    base_url = (settings.app_base_url or "").strip().rstrip("/")
+
+    def _absolute_media_url(media_path: str) -> str:
+        normalized = media_path if media_path.startswith("/") else f"/{media_path}"
+        return f"{base_url}{normalized}" if base_url else normalized
+
+    if raw.startswith("/media/"):
+        return _absolute_media_url(raw)
+    marker = "/storage/"
+    storage_root = settings.storage_root.rstrip("/")
+    if raw.startswith("storage/"):
+        return _absolute_media_url(f"/media/{raw.removeprefix('storage/')}")
+    if raw.startswith("./storage/"):
+        return _absolute_media_url(f"/media/{raw.removeprefix('./storage/')}")
+    if marker in raw:
+        return _absolute_media_url(f"/media/{raw.split(marker, 1)[1]}")
+    if raw.startswith(storage_root):
+        relative = raw[len(storage_root):].lstrip("/\\")
+        if relative:
+            return _absolute_media_url(f"/media/{relative.replace('\\', '/')}")
+    return raw
+
+
+def _resolve_storage_path(path: str) -> str:
+    raw = str(path or "").strip()
+    if not raw:
+        return ""
+    storage_root = settings.storage_root.rstrip("/")
+    if raw.startswith(storage_root):
+        return raw
+    if raw.startswith("/media/"):
+        return f"{storage_root}/{raw.removeprefix('/media/')}"
+    if raw.startswith("storage/"):
+        return f"{storage_root}/{raw.removeprefix('storage/')}"
+    if raw.startswith("./storage/"):
+        return f"{storage_root}/{raw.removeprefix('./storage/')}"
+    marker = "/storage/"
+    if marker in raw:
+        return f"{storage_root}/{raw.split(marker, 1)[1]}"
+    return raw
+
+
+def _image_meets_ebay_policy(path: str) -> bool:
+    resolved = _resolve_storage_path(path)
+    try:
+        with Image.open(resolved) as image:
+            width, height = image.size
+            return max(width, height) >= 500
+    except Exception:
+        return False
+
+
+def _build_ebay_image_urls(listing: Listing) -> list[str]:
+    image_urls: list[str] = []
+    candidates: list[str] = [str(value) for value in (listing.image_urls or []) if str(value or '').strip()]
+    # Modern listing_images is the canonical source for imported/recovered
+    # media. Older rows may have an empty image_urls compatibility column even
+    # though their normalized image records contain usable storage paths.
+    for image in (getattr(listing, "listing_images", None) or []):
+        if not isinstance(image, dict) or str(image.get("operator_state") or "").lower() == "rejected":
+            continue
+        candidate = image.get("storage_path") or image.get("url") or image.get("local_path")
+        if candidate:
+            candidates.append(str(candidate))
+    for candidate in candidates:
+        if not _image_meets_ebay_policy(candidate):
+            continue
+        public_url = _to_public_image_url(candidate)
+        if public_url and public_url not in image_urls:
+            image_urls.append(public_url)
+    return image_urls
+
+
+def _sanitize_ebay_description(description: str | None) -> str:
+    raw = str(description or "").strip()
+    if not raw:
+        return "No description provided"
+    cleaned_lines: list[str] = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        lowered = stripped.lower()
+        if lowered.startswith("source url:"):
+            continue
+        stripped = re.sub(r"https?://\S+", "", stripped, flags=re.IGNORECASE).strip()
+        stripped = re.sub(r"www\.\S+", "", stripped, flags=re.IGNORECASE).strip()
+        if stripped:
+            cleaned_lines.append(stripped)
+    cleaned = "\n".join(cleaned_lines)
+    cleaned = html.escape(cleaned)
+    cleaned = cleaned.replace("\n", "<br>")
+    cleaned = re.sub(r"(<br>){3,}", "<br><br>", cleaned)
+    return cleaned or "No description provided"
+
+
+def _sync_ebay_marketplace_listing(
+    db: Session,
+    *,
+    listing_id: int,
+    status: MarketplaceListingStatus,
+    response: dict[str, Any] | None,
+) -> None:
+    row = db.execute(
+        select(MarketplaceListing).where(
+            MarketplaceListing.listing_id == listing_id,
+            MarketplaceListing.marketplace == MarketplaceName.ebay,
+        )
+        .order_by(MarketplaceListing.updated_at.desc(), MarketplaceListing.id.desc())
+    ).scalars().first()
+    if not row:
+        row = MarketplaceListing(
+            listing_id=listing_id,
+            marketplace=MarketplaceName.ebay,
+            status=status,
+        )
+    row.status = status
+    row.raw_response = response
+    row.marketplace_listing_id = (
+        (response or {}).get("listing_id")
+        or (response or {}).get("listingId")
+        or row.marketplace_listing_id
+    )
+    db.add(row)
+
+
+def _serialize_payload_snapshot(payload: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    return json.loads(json.dumps(payload, sort_keys=True, default=str))
+
+
+def _payload_hash(payload: dict[str, Any] | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    serialized = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def _build_ebay_sku(user_id: int, listing_id: int) -> str:
+    # eBay inventory SKUs must be alphanumeric and <= 50 chars.
+    # Keep the prefix recognizable while avoiding punctuation.
+    return f"posterprou{int(user_id)}l{int(listing_id)}"
+
+
+def _extract_listing_id_from_ebay_sku(sku: str, user_id: int | None = None) -> int | None:
+    raw = str(sku or "").strip()
+    if not raw:
+        return None
+    patterns = []
+    if user_id is not None:
+        patterns.append(rf"^posterprou{int(user_id)}l(\d+)$")
+        patterns.append(rf"^posterpro-{int(user_id)}-(\d+)$")
+    else:
+        patterns.append(r"^posterprou\d+l(\d+)$")
+        patterns.append(r"^posterpro-\d+-(\d+)$")
+    for pattern in patterns:
+        match = re.match(pattern, raw, re.IGNORECASE)
+        if match:
+            try:
+                return int(match.group(1))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _start_publish_attempt(
+    db: Session,
+    *,
+    listing: Listing,
+    marketplace: str,
+    dry_run: bool,
+    preflight_status: str | None,
+    payload_snapshot: dict[str, Any] | None,
+) -> MarketplacePublishAttempt:
+    attempt = MarketplacePublishAttempt(
+        listing_id=listing.id,
+        user_id=listing.user_id,
+        marketplace=MarketplaceName(marketplace),
+        started_at=datetime.now(UTC).replace(tzinfo=None),
+        dry_run=dry_run,
+        preflight_status=preflight_status,
+        payload_snapshot=_serialize_payload_snapshot(payload_snapshot),
+        payload_hash=_payload_hash(payload_snapshot),
+        inventory_item_sku=_build_ebay_sku(listing.user_id, listing.id),
+        retry_count=0,
+    )
+    db.add(attempt)
+    db.flush()
+    return attempt
+
+
+def _finish_publish_attempt(
+    db: Session,
+    *,
+    attempt: MarketplacePublishAttempt,
+    status: str,
+    response: dict[str, Any] | None,
+    error: Exception | str | None = None,
+    retryable: bool = False,
+) -> MarketplacePublishAttempt:
+    attempt.finished_at = datetime.now(UTC).replace(tzinfo=None)
+    attempt.marketplace_status = status
+    attempt.marketplace_listing_id = (
+        (response or {}).get("listing_id")
+        or (response or {}).get("listingId")
+        or attempt.marketplace_listing_id
+    )
+    attempt.offer_id = (
+        (response or {}).get("offerId")
+        or (response or {}).get("offer_id")
+        or attempt.offer_id
+    )
+    attempt.translated_error = translate_marketplace_error("ebay", error) if error else None
+    if isinstance(error, EbayIntegrationError):
+        attempt.translated_error = {
+            **(attempt.translated_error or {}),
+            "provider_method": error.method,
+            "provider_endpoint": error.endpoint,
+            "http_status": error.http_status,
+            "provider_call_attempted": error.provider_call_attempted,
+            "request_summary": error.request_summary,
+        }
+    attempt.raw_error = str(error) if error else None
+    attempt.retryable = bool(retryable or (attempt.translated_error or {}).get("retryable"))
+    db.add(attempt)
+    return attempt
+
+
+def _ebay_condition_override_candidates(listing: Listing) -> list[str]:
+    condition_data = listing.condition_data if isinstance(listing.condition_data, dict) else {}
+    bucket = str(condition_data.get("condition_bucket") or listing.condition or "").strip().lower()
+    source_type = str(listing.source_type or "").strip().lower()
+    if source_type == "amazon_vine" or bucket in {"new", "new_in_box", "brand_new"}:
+        return ["NEW"]
+    if bucket in {"open_box"}:
+        return ["USED_LIKE_NEW", "USED_VERY_GOOD", "USED_GOOD"]
+    if bucket in {"used_like_new"}:
+        return ["USED_LIKE_NEW", "USED_VERY_GOOD", "USED_GOOD"]
+    if bucket in {"used_very_good"}:
+        return ["USED_VERY_GOOD", "USED_GOOD"]
+    if bucket in {"used_good", "used"}:
+        return ["USED_GOOD", "USED_VERY_GOOD"]
+    if bucket in {"parts_only", "for_parts", "for_parts_or_not_working"}:
+        return ["FOR_PARTS_OR_NOT_WORKING"]
+    return ["USED_GOOD"]
+
+
+def _apply_publish_failure_repair(
+    db: Session,
+    listing: Listing,
+    *,
+    translated_error: dict[str, Any],
+    raw_error: str,
+) -> dict[str, Any]:
+    from app.services.marketplace_preflight import MarketplacePreflightService
+
+    applied_actions: list[str] = []
+    repair_notes: list[str] = []
+    code = str(translated_error.get("code") or "").strip()
+    operator_action = str(translated_error.get("operator_action") or "").strip()
+    preflight_service = MarketplacePreflightService()
+
+    if code in {"EBAY_SHIPPING_DATA_INVALID", "EBAY_WEIGHT_MISSING", "EBAY_SHIPPING_PACKAGE_INVALID"} or operator_action == "fix_shipping":
+        shipping = dict(listing.shipping_profile or {})
+        parsed_weight = _parse_ebay_weight_value(shipping.get("package_weight") or shipping.get("item_weight"))
+        if parsed_weight is not None:
+            shipping["package_weight"] = parsed_weight
+            shipping["manual_measurement_needed"] = False
+            shipping["estimated"] = True
+            source_confidence = shipping.get("source_confidence") if isinstance(shipping.get("source_confidence"), dict) else {}
+            shipping["source_confidence"] = {**source_confidence, "package_weight": "parsed_from_text"}
+            listing.shipping_profile = shipping
+            applied_actions.append("parsed_shipping_weight")
+        else:
+            repair_notes.append("shipping_weight_unparseable")
+
+    if code in {"EBAY_IMAGE_URL_INVALID", "EBAY_INVALID_IMAGE_URL"} or operator_action == "fix_photos":
+        repair_result = preflight_service.apply_repair_actions(db, listing, validate_images=True)
+        applied_actions.extend(repair_result.get("applied") or [])
+        repair_notes.extend(repair_result.get("skipped") or [])
+
+    if code in {
+        "EBAY_INVALID_CATEGORY",
+        "EBAY_CATEGORY_NOT_LEAF",
+        "EBAY_CATEGORY_MISSING",
+        "EBAY_ITEM_SPECIFIC_MISSING",
+        "EBAY_ASPECT_INVALID",
+        "EBAY_CONDITION_INCOMPATIBLE_WITH_CATEGORY",
+    } or operator_action in {"fix_category", "fix_aspects", "fix_condition"}:
+        repair_result = preflight_service.apply_repair_actions(db, listing, apply_category_suggestion=True, validate_images=False)
+        applied_actions.extend(repair_result.get("applied") or [])
+        repair_notes.extend(repair_result.get("skipped") or [])
+        if code == "EBAY_CONDITION_INCOMPATIBLE_WITH_CATEGORY":
+            candidates = _ebay_condition_override_candidates(listing)
+            condition_data = dict(listing.condition_data or {})
+            chosen = candidates[0] if candidates else None
+            if chosen and str(condition_data.get("ebay_condition_override") or "").strip().upper() != chosen:
+                condition_data["ebay_condition_override"] = chosen
+                condition_data["ebay_condition_override_candidates"] = candidates
+                condition_data["ebay_condition_override_reason"] = "publish_condition_repair"
+                listing.condition_data = condition_data
+                applied_actions.append("ebay_condition_override")
+
+    if applied_actions:
+        db.add(listing)
+        db.commit()
+        db.refresh(listing)
+
+    preflight_after = preflight_service.preflight_listing(db, listing, "ebay")
+    preflight_service.cache_preflight_summary(db, listing, preflight_after)
+
+    def _issue_code(issue: Any) -> str | None:
+        if isinstance(issue, dict):
+            code = issue.get("code")
+            return str(code).strip() if code is not None else None
+        text = str(issue or "").strip()
+        return text or None
+
+    preflight_state = {
+        "status": str(preflight_after.get("status") or "").strip().lower(),
+        "blockers": [code for code in (_issue_code(issue) for issue in (preflight_after.get("blockers") or [])) if code],
+        "warnings": [code for code in (_issue_code(issue) for issue in (preflight_after.get("warnings") or [])) if code],
+    }
+    marketplace_data = dict(listing.marketplace_data or {})
+    marketplace_data["publish_failure_repair"] = {
+        "marketplace": "ebay",
+        "translated_error": translated_error,
+        "raw_error": raw_error,
+        "applied_actions": applied_actions,
+        "notes": repair_notes,
+        "preflight_after": preflight_state,
+        "repaired_at": datetime.now(UTC).isoformat(),
+    }
+    listing.marketplace_data = marketplace_data
+
+    if preflight_state["status"] in {"ready", "ready_with_warnings", "published"}:
+        listing.status = ListingStatus.ready
+        listing.needs_review = False
+    elif applied_actions:
+        listing.status = ListingStatus.draft
+        listing.needs_review = True
+
+    db.add(listing)
+    db.commit()
+    db.refresh(listing)
+    return marketplace_data["publish_failure_repair"]
+
+
+def _is_invalid_access_token_error(error: Exception) -> bool:
+    message = str(error).lower()
+    return "invalid access token" in message or "(401)" in message
+
+
+def _extract_ebay_error_parameter(message: str, name: str) -> str | None:
+    if not message:
+        return None
+    pattern = rf'"name"\s*:\s*"{re.escape(name)}"\s*,\s*"value"\s*:\s*"([^"]+)"'
+    match = re.search(pattern, message)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _ebay_listing_query(listing: Listing) -> str:
+    metadata = listing.source_metadata or {}
+    raw_row = metadata.get("raw_row_json") or {}
+    for candidate in (metadata.get("product_name"), raw_row.get("Product Name"), listing.title):
+        text = str(candidate or "").strip()
+        if text:
+            if str(listing.source_type or "").strip().lower() == "amazon_vine" and str(listing.category_suggestion or "").strip():
+                semantic_leaf = str(listing.category_suggestion).split(">")[-1].strip()
+                # Keep the product identity while giving taxonomy search the
+                # already-normalized product classification as strong context.
+                return f"{semantic_leaf} {text}"[:160]
+            return text[:160]
+    return f"PosterPro listing {listing.id}"
+
+
+def _vine_category_match_score(expected_path: str, candidate_name: str) -> int:
+    expected = str(expected_path or "").lower()
+    candidate = str(candidate_name or "").lower()
+    aliases = (
+        (("blinds", "shades", "roller shade"), ("blind", "shade", "window")),
+        (("power over ethernet", "poe"), ("poe", "ethernet", "splitter")),
+        (("cargo racks", "rv bumper", "tote tank"), ("rack", "cargo", "trailer", "rv")),
+        (("stands & risers", "laptop"), ("stand", "riser", "holder", "laptop")),
+        (("irons & garment steamers", "ironing machine"), ("iron", "ironing", "steamer", "garment")),
+        (("water cooling", "cpu cooler"), ("cooling", "cooler", "water")),
+        (("bird houses", "bird house"), ("bird", "house")),
+        (("home décor > mirrors", "wall mirror", "mirrors"), ("mirror",)),
+        (("battery chargers", "battery charger"), ("battery", "charger")),
+        (("drip irrigation", "plant waterer"), ("drip", "irrigation", "watering")),
+        (("ottomans", "ottoman"), ("ottoman", "footstool", "pouf")),
+        (("kvm switches", "kvm switch"), ("kvm", "switch")),
+    )
+    expected_terms: set[str] = set()
+    for markers, terms in aliases:
+        if any(marker in expected for marker in markers):
+            expected_terms.update(terms)
+            break
+    if not expected_terms:
+        expected_terms = {word.rstrip("s") for word in re.findall(r"[a-z0-9]+", expected) if len(word) > 3}
+    candidate_terms = {word.rstrip("s") for word in re.findall(r"[a-z0-9]+", candidate) if len(word) > 2}
+    return len(expected_terms & candidate_terms)
+
+
+def _derive_brand(listing: Listing) -> str:
+    metadata = listing.source_metadata or {}
+    raw_row = metadata.get("raw_row_json") or {}
+    for candidate in (metadata.get("brand"), raw_row.get("Brand")):
+        text = str(candidate or "").strip()
+        if text:
+            return text
+    title = str(listing.title or "").strip()
+    prefix = re.split(r"\s+for\s+", title, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    if prefix and 1 < len(prefix.split()) <= 3 and len(prefix) <= 40:
+        return prefix
+    return "Unbranded"
+
+
+def _derive_phone_model(title: str) -> str | None:
+    patterns = (
+        r"(iPhone\s+\d+\s+Pro\s+Max)",
+        r"(iPhone\s+\d+\s+Pro)",
+        r"(iPhone\s+\d+\s+Plus)",
+        r"(iPhone\s+\d+)",
+        r"(iPhone\s+XR)",
+        r"(iPhone\s+XS\s+Max)",
+        r"(iPhone\s+XS)",
+        r"(iPhone\s+X)",
+        r"(iPad\s+[A-Za-z0-9\s]+)",
+        r"(Samsung\s+Galaxy\s+(?:S\d{1,2}|A\d{2}|Note\s*\d{1,2}|Z\s*Flip\s*\d?|Z\s*Fold\s*\d?)(?:\s+(?:Ultra|Plus|Pro|FE))?(?:\s+5G)?)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, title, flags=re.IGNORECASE)
+        if match:
+            return re.sub(r"\s+", " ", match.group(1)).strip()
+    code_match = re.search(r"\b([A-Z]{1,3}-?[A-Z0-9]{3,})\b", title)
+    if code_match:
+        return code_match.group(1)
+    return None
+
+
+def _derive_dimension_value(title: str) -> str | None:
+    patterns = (
+        r'(\d+(?:\.\d+)?\s*[xX]\s*\d+(?:\.\d+)?(?:\s*[xX]\s*\d+(?:\.\d+)?)?\s*(?:inch|inches|in|"))',
+        r'(\d+(?:\.\d+)?\s*(?:inch|inches|in|"))',
+    )
+    for pattern in patterns:
+        match = re.search(pattern, title, flags=re.IGNORECASE)
+        if match:
+            return re.sub(r"\s+", " ", match.group(1)).strip()
+    return None
+
+
+def _derive_capacity_value(title: str) -> str | None:
+    match = re.search(r"(\d+(?:\.\d+)?(?:-\d+(?:\.\d+)?)?\s*(?:cup|cups|oz|fl oz|gallon|gallons|gal|mah|ah|amp|amps|a|l|liter|liters))", title, flags=re.IGNORECASE)
+    if match:
+        return re.sub(r"\s+", " ", match.group(1)).strip()
+    return None
+
+
+def _derive_color(title: str) -> str | None:
+    if "multicolor" in str(title or "").lower() or "multi-color" in str(title or "").lower():
+        return "Multicolor"
+    colors = [
+        'Black', 'White', 'Gray', 'Grey', 'Silver', 'Gold', 'Blue', 'Red', 'Green', 'Pink', 'Purple', 'Brown', 'Beige', 'Clear', 'Chrome'
+    ]
+    lowered = title.lower()
+    for color in colors:
+        if color.lower() in lowered:
+            return color
+    return None
+
+
+def _clip_specific_value(value: str, limit: int = 65) -> str:
+    compact = re.sub(r"\s+", " ", str(value or '')).strip()
+    if len(compact) <= limit:
+        return compact
+    return compact[:limit].rstrip(' ,;-')
+
+
+def _fallback_aspect_value(listing: Listing, aspect_name: str, title: str) -> str | None:
+    normalized = aspect_name.lower()
+    model = _derive_phone_model(title)
+    dimension = _derive_dimension_value(title)
+    capacity = _derive_capacity_value(title)
+    color = _derive_color(title)
+    lower_title = str(title or "").lower()
+    # Vine product pages commonly provide dimensions as a structured
+    # "L x W x H" fact rather than in the title. Reuse that evidence for
+    # category-required dimensions instead of blocking a publish-ready draft.
+    source_specifics = listing.item_specifics if isinstance(listing.item_specifics, dict) else {}
+    dimension_text = " ".join(str(source_specifics.get(k) or "") for k in ("Item Dimensions", "Item dimensions L x W x H", "Item Dimensions L x W", "Product Dimensions", "Dimensions"))
+    dimension_parts = re.findall(r"\d+(?:\.\d+)?", dimension_text)
+    if normalized == 'model':
+        return model or 'Universal'
+    if normalized == 'compatible model':
+        if model:
+            return f'For {model}'
+        lowered = title.lower()
+        for pattern in (r'\b(s\d+\s*plus)\b', r'\b(moto\s+g\s+5g\s+\d{4})\b', r'\b(revvl\s+\d+\s+5g)\b'):
+            match = re.search(pattern, lowered, flags=re.IGNORECASE)
+            if match:
+                return match.group(1).title()
+        return 'Universal'
+    if normalized == 'compatible brand':
+        lowered = title.lower()
+        for token, brand in (("iphone", "Apple"), ("ipad", "Apple"), ("samsung", "Samsung"), ("tcl", "TCL"), ("motorola", "Motorola"), ("moto g", "Motorola"), ("revvl", "T-Mobile"), ("asus", "ASUS")):
+            if token in lowered:
+                return brand
+        return 'Universal'
+    if normalized in {'compatible mattress size', 'mattress size'}:
+        lowered = title.lower()
+        for size in ('cal king', 'king', 'queen', 'full', 'twin'):
+            if re.search(rf'\b{re.escape(size)}\b', lowered):
+                return size.title()
+        return 'Universal'
+    if normalized == 'frame material':
+        lowered = title.lower()
+        if 'metal' in lowered or 'steel' in lowered:
+            return 'Metal'
+        if 'wood' in lowered:
+            return 'Wood'
+        return 'Metal'
+    if normalized == 'size':
+        return dimension or 'One Size'
+    if normalized == 'item length':
+        return (dimension_parts[0] if dimension_parts else dimension) or 'Does Not Apply'
+    if normalized == 'item width':
+        if len(dimension_parts) > 1:
+            return dimension_parts[1]
+        title_parts = re.findall(r'\d+(?:\.\d+)?', title)
+        return title_parts[1] if len(title_parts) > 1 else 'Does Not Apply'
+    if normalized == 'item height':
+        if len(dimension_parts) > 2:
+            return dimension_parts[2]
+        title_parts = re.findall(r'\d+(?:\.\d+)?', title)
+        return title_parts[2] if len(title_parts) > 2 else (title_parts[0] if title_parts else 'Does Not Apply')
+    if normalized == 'capacity':
+        return capacity or 'Does Not Apply'
+    if normalized == 'storage capacity':
+        return capacity or 'Does Not Apply'
+    if normalized == 'type':
+        facts = listing.source_metadata if isinstance(listing.source_metadata, dict) else {}
+        amazon = facts.get("amazon_product_facts") if isinstance(facts.get("amazon_product_facts"), dict) else {}
+        sourced = amazon.get("specifications") if isinstance(amazon.get("specifications"), dict) else {}
+        for key in ("Type", "Product Type"):
+            value = str(sourced.get(key) or "").strip()
+            if value and value.lower() not in {"blanket", "backpack", "switch", "product"}:
+                return value
+        lowered = title.lower()
+        if "windshield curtain" in lowered or "rv cab curtain" in lowered:
+            return "Set" if re.search(r"\b(?:2|two)\s*(?:pcs?|pieces?)\b", lowered) else "Panels"
+        if "door curtain" in lowered or "door cover" in lowered:
+            return "Door Curtains"
+        if "rv dome light" in lowered or "rvhouse" in lowered:
+            return "Oyster Light"
+        if "closet organizer" in lowered:
+            return "Closet Organizer"
+        return _derive_item_type(title) or 'Does Not Apply'
+    if normalized == "product" and any(term in title.lower() for term in ("rs485 transceiver", "max485", "max3485")):
+        return "RS485 Transceiver Module"
+    if normalized in {'line type', 'fishing line type'}:
+        lowered = title.lower()
+        if 'monofilament' in lowered:
+            return 'Monofilament'
+        if 'fluorocarbon' in lowered:
+            return 'Fluorocarbon'
+        if 'braided' in lowered or 'braid' in lowered:
+            return 'Braided'
+        return 'Monofilament' if 'fishing line' in lowered else 'Does Not Apply'
+    if normalized in {'power source', 'power type'}:
+        lowered = title.lower()
+        if any(token in lowered for token in ('cordless', 'battery', 'bare tool', 'wireless')):
+            return 'Battery'
+        if re.search(r'\b(?:110|120|220|240)\s*v\b', lowered):
+            return 'Corded Electric'
+        return 'Corded Electric' if any(token in lowered for token in ('electric', 'corded')) else 'Does Not Apply'
+    if normalized == 'material':
+        lowered = title.lower()
+        for token, value in (
+            ("stainless steel", "Stainless Steel"),
+            ("aluminum", "Aluminum"),
+            ("aluminium", "Aluminum"),
+            ("bamboo", "Bamboo"),
+            ("wood", "Wood"),
+            ("plastic", "Plastic"),
+            ("carbon", "Carbon Fiber"),
+            ("nylon", "Nylon"),
+            ("polyester", "Polyester"),
+            ("metal", "Metal"),
+        ):
+            if token in lowered:
+                return value
+        return 'Does Not Apply'
+    if normalized in {"exterior material", "outer material"}:
+        for token, value in (("faux leather", "Faux Leather"), ("leather", "Leather"), ("synthetic", "Synthetic"), ("nylon", "Nylon"), ("canvas", "Canvas"), ("polyester", "Polyester")):
+            if token in lower_title:
+                return value
+        return None
+    if normalized in {"exterior color", "color"}:
+        return color
+    if normalized == "style":
+        for token, value in (("crossbody", "Crossbody"), ("tote", "Tote"), ("evening bag", "Evening"), ("clutch", "Clutch")):
+            if token in lower_title:
+                return value
+        return None
+    if normalized == "department" and any(token in lower_title for token in ("handbag", "wallet", "clutch", "tote bag", "crossbody bag", "evening bag", "coach", "kate spade", "dooney", "vera bradley")):
+        return "Women"
+    if normalized in {'voltage', 'volts'}:
+        match = re.search(r"(\d+(?:\.\d+)?)\s*v\b", title, flags=re.IGNORECASE)
+        if match:
+            return f"{match.group(1)}V"
+        return '12V' if 'car charger' in title.lower() else 'Does Not Apply'
+    if normalized in {'wattage', 'watts'}:
+        match = re.search(r"(\d+(?:\.\d+)?)\s*w\b", title, flags=re.IGNORECASE)
+        return f"{match.group(1)}W" if match else 'Does Not Apply'
+    if normalized in {'amperage', 'amps', 'amp'}:
+        match = re.search(r"(\d+(?:\.\d+)?)\s*a\b", title, flags=re.IGNORECASE)
+        return f"{match.group(1)}A" if match else 'Does Not Apply'
+    if normalized == 'color':
+        return color or 'Multicolor'
+    if normalized == 'artist':
+        return _derive_brand(listing) or 'Unknown'
+    if normalized == 'insect repellent treated':
+        return 'No'
+    return 'Does Not Apply'
+
+
+def _derive_item_type(title: str) -> str | None:
+    lowered = title.lower()
+    # Broad, buyer-facing product families used by eBay taxonomy required
+    # aspects.  Vine rows often arrive with only an ASIN/title and a
+    # placeholder Type; derive a safe category-level value instead of
+    # blocking the entire publish attempt.
+    for phrase, value in (
+        ("goose statue", "Statue"), ("artificial grass", "Grass Tool"),
+        ("window intercom", "Intercom"), ("speaker system", "Speaker"),
+        ("ethernet cable", "Ethernet Cable"), ("cat6", "Ethernet Cable"),
+        ("fire pit", "Fire Pit"), ("golf stand bag", "Golf Bag"),
+        ("golf mat", "Golf Mat"), ("computer monitor", "Monitor"),
+        ("hdmi splitter", "HDMI Splitter"), ("tank wand", "Tank Wand"),
+        ("grille", "Grille"), ("shift cable", "Shift Cable"),
+        ("runner rug", "Area Rug"), ("area rug", "Area Rug"),
+        ("access point", "Wireless Access Point"), ("bathroom mirror", "Mirror"),
+        ("mattress bag", "Mattress Bag"), ("webcam stand", "Camera Stand"),
+        ("selfie grip", "Phone Grip"), ("chafing dish", "Chafing Dish"),
+        ("hedge trimmer", "Hedge Trimmer"), ("leaf blower", "Leaf Blower"),
+        ("platform bed frame", "Bed Frame"), ("audio player", "Audio Player"),
+        ("wireless guitar system", "Wireless Audio System"),
+        ("audio adapter", "Audio Adapter"), ("bluetooth receiver", "Bluetooth Receiver"),
+        ("wifi doorbell chime", "Doorbell Chime"), ("doorbell chime", "Doorbell Chime"),
+        ("wifi chime", "Doorbell Chime"), ("chime for nest", "Doorbell Chime"),
+        ("spin scrubber", "Spin Scrubber"), ("cpu air cooler", "CPU Cooler"),
+        ("rebounder net", "Training Net"), ("golf clubs", "Golf Club Set"),
+        ("mini iron", "Iron"), ("iron for crafts", "Iron"),
+        ("grillz", "Grillz"), ("teeth grills", "Grillz"),
+        ("garden hose", "Garden Hose"), ("water hose", "Water Hose"),
+        ("wall sconce", "Wall Sconce"),
+    ):
+        if phrase in lowered:
+            return value
+    if "home safe" in lowered or "security safe" in lowered or "wall safe" in lowered or "safe box" in lowered:
+        return "Safe"
+    if "security camera" in lowered or "surveillance camera" in lowered or "indoor/outdoor camera" in lowered:
+        return "Security Camera"
+    if "animal tracker" in lowered or "pet tracker" in lowered or "gps tracker" in lowered:
+        return "GPS Tracker"
+    if "battery adapter" in lowered or "power adapter" in lowered:
+        return "Adapter"
+    if "smoke detector" in lowered or "smoke alarm" in lowered:
+        return "Smoke Detector"
+    if "bird house" in lowered or "birdhouse" in lowered:
+        return "Bird House"
+    if "grab bar" in lowered:
+        return "Grab Bar"
+    if "dog bed" in lowered or "pet bed" in lowered:
+        return "Pet Bed"
+    if "kvm switch" in lowered:
+        return "KVM Switch"
+    if "makeup brush cleaner" in lowered or "brush cleaner" in lowered:
+        return "Brush Cleaner Machine"
+    if "meat chopper" in lowered or "masher" in lowered:
+        return "Meat Chopper"
+    if "bidet" in lowered:
+        return "Bidet Sprayer"
+    if "flag pole mount" in lowered or "flagpole holder" in lowered:
+        return "Flag Pole Mount"
+    if "lpg hose" in lowered or "propane hose" in lowered:
+        return "Propane Hose"
+    if "sump pump battery backup" in lowered or "battery backup system" in lowered:
+        return "Battery Backup System"
+    if "backpack" in lowered:
+        return "Backpack"
+    if "golf bag" in lowered:
+        return "Golf Bag"
+    if "starter replacement" in lowered:
+        return "Starter"
+    if "towel rack" in lowered:
+        return "Towel Rack"
+    if "alternator" in lowered:
+        return "Alternator"
+    if "charger" in lowered:
+        return "Charger"
+    if "pressure switch" in lowered:
+        return "Pressure Switch"
+    if "hub" in lowered or "gateway" in lowered:
+        return "Wireless Hub"
+    if "flagstick" in lowered:
+        return "Flagstick"
+    if "exhaust fan" in lowered:
+        return "Exhaust Fan"
+    if "vent filter" in lowered:
+        return "Vent Filter"
+    if "water transfer pump" in lowered:
+        return "Water Transfer Pump"
+    if "fume extractor" in lowered:
+        return "Fume Extractor"
+    if "spot welder" in lowered:
+        return "Spot Welder"
+    if "battery pack" in lowered:
+        return "Battery Pack"
+    if "baitcaster reel" in lowered or "reel" in lowered:
+        return "Fishing Reel"
+    if "ceiling fan" in lowered:
+        return "Ceiling Fan"
+    if "heater" in lowered:
+        return "Heater"
+    if "drop sticks" in lowered or "reaction training toy" in lowered:
+        return "Game"
+    if "wifi extender" in lowered or "wifi repeater" in lowered:
+        return "WiFi Extender"
+    if "tpms" in lowered or "tire pressure monitoring" in lowered:
+        return "Tire Pressure Monitoring System"
+    if "screen replacement" in lowered or "digitizer" in lowered or "lcd display" in lowered:
+        return "Screen"
+    if "through wall microphone" in lowered or "contact microphone" in lowered:
+        return "Piezo/Crystal Microphone"
+    if "headset microphone" in lowered or "headset mic" in lowered:
+        return "Headset"
+    if "hair thinning shear" in lowered or "hair cutting shear" in lowered or "texturizing scissor" in lowered:
+        return "Hair Cutting Shears"
+    if "flex cable" in lowered or "power button cable" in lowered:
+        return "Replacement Part"
+    if "argb controller" in lowered or "rgb controller" in lowered:
+        return "Controller"
+    if "thong" in lowered or "lingerie" in lowered:
+        return "Panties"
+    if "back glass" in lowered:
+        return "Back Glass"
+    if "battery" in lowered:
+        return "Battery"
+    # Product-family fallbacks for Vine rows whose source facts do not expose
+    # a separate type field. These are category-safe labels, not fabricated
+    # model claims, and prevent required eBay Type from remaining blank.
+    for token, value in (
+        ("first aid", "First Aid Kit"),
+        ("blind", "Blind"),
+        ("trimmer", "Trimmer"),
+        ("slipper", "Slipper"),
+        ("toothpaste", "Toothpaste"),
+        ("ottoman", "Ottoman"),
+        ("pillow", "Pillow"),
+        ("blanket", "Blanket"),
+        ("basket", "Basket"),
+        ("microphone", "Microphone"),
+        ("printer", "Printer"),
+        ("selfie stick", "Selfie Stick"),
+        ("pump", "Pump"),
+        ("fan", "Fan"),
+        ("switch", "Switch"),
+        ("mount", "Mount"),
+        ("replacement", "Replacement Part"),
+        ("kit", "Kit"),
+        ("router", "Router"),
+        ("lamp", "Lamp"),
+        ("drill", "Nail Drill"),
+        ("razor", "Razor"),
+        ("trash bag", "Trash Bag"),
+        ("accessories bag", "Accessories Bag"),
+        ("pdu", "Power Distribution Unit"),
+        ("trainer", "Trainer"),
+        ("stool", "Stool"),
+        ("alarm", "Alarm"),
+        ("extender", "Extender"),
+        ("call button", "Call Button"),
+        ("well light", "Light"),
+        ("gel", "Gel"),
+    ):
+        if token in lowered:
+            return value
+    if "torch" in lowered:
+        return "Torch"
+    return None
+
+
+def _oauth_base() -> str:
+    runtime_settings = reload_settings()
+    return "https://auth.sandbox.ebay.com/oauth2/authorize" if runtime_settings.environment != "production" else "https://auth.ebay.com/oauth2/authorize"
+
+
+def _token_endpoint() -> str:
+    runtime_settings = reload_settings()
+    return "https://api.sandbox.ebay.com/identity/v1/oauth2/token" if runtime_settings.environment != "production" else "https://api.ebay.com/identity/v1/oauth2/token"
+
+
+def _scopes() -> str:
+    return " ".join(
+        [
+            "https://api.ebay.com/oauth/api_scope",
+            "https://api.ebay.com/oauth/api_scope/sell.marketing.readonly",
+            "https://api.ebay.com/oauth/api_scope/sell.marketing",
+            "https://api.ebay.com/oauth/api_scope/sell.inventory.readonly",
+            "https://api.ebay.com/oauth/api_scope/sell.inventory",
+            "https://api.ebay.com/oauth/api_scope/sell.account.readonly",
+            "https://api.ebay.com/oauth/api_scope/sell.account",
+            "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly",
+            "https://api.ebay.com/oauth/api_scope/sell.fulfillment",
+            "https://api.ebay.com/oauth/api_scope/sell.analytics.readonly",
+            "https://api.ebay.com/oauth/api_scope/sell.finances",
+            "https://api.ebay.com/oauth/api_scope/sell.payment.dispute",
+            "https://api.ebay.com/oauth/api_scope/commerce.identity.readonly",
+            "https://api.ebay.com/oauth/api_scope/sell.reputation",
+            "https://api.ebay.com/oauth/api_scope/sell.reputation.readonly",
+            "https://api.ebay.com/oauth/api_scope/commerce.notification.subscription",
+            "https://api.ebay.com/oauth/api_scope/commerce.notification.subscription.readonly",
+            "https://api.ebay.com/oauth/api_scope/sell.stores",
+            "https://api.ebay.com/oauth/api_scope/sell.stores.readonly",
+            "https://api.ebay.com/oauth/scope/sell.edelivery",
+            "https://api.ebay.com/oauth/api_scope/commerce.vero",
+            "https://api.ebay.com/oauth/api_scope/sell.inventory.mapping",
+            "https://api.ebay.com/oauth/api_scope/commerce.message",
+            "https://api.ebay.com/oauth/api_scope/commerce.feedback",
+            "https://api.ebay.com/oauth/api_scope/commerce.shipping",
+        ]
+    )
+
+
+def build_ebay_auth_url(user_id: int, redirect_uri: str) -> str:
+    runtime_settings = reload_settings()
+    if not runtime_settings.ebay_client_id:
+        raise EbayIntegrationError("Missing eBay OAuth settings (ebay_client_id / ebay_client_secret)")
+    state = _make_oauth_state(user_id)
+    query = urlencode(
+        {
+            "client_id": runtime_settings.ebay_client_id,
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "scope": _scopes(),
+            "state": state,
+        }
+    )
+    return f"{_oauth_base()}?{query}"
+
+
+def _make_oauth_state(user_id: int) -> str:
+    random_nonce = secrets.token_urlsafe(16)
+    payload = f"{user_id}:{random_nonce}"
+    signature = hmac.new((settings.session_secret or "posterpro-oauth").encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return base64.urlsafe_b64encode(f"{payload}:{signature}".encode("utf-8")).decode("utf-8")
+
+
+def parse_oauth_state(state: str) -> int:
+    try:
+        decoded = base64.urlsafe_b64decode(state + ("=" * (-len(state) % 4))).decode("utf-8")
+        user_id_text, nonce, signature = decoded.split(":", maxsplit=2)
+    except Exception as exc:
+        raise EbayIntegrationError("Invalid OAuth state") from exc
+    payload = f"{user_id_text}:{nonce}"
+    expected = hmac.new((settings.session_secret or "posterpro-oauth").encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        raise EbayIntegrationError("Invalid OAuth state")
+    return int(user_id_text)
+
+
+async def authenticate_user_ebay(user_id: int, redirect_uri: str) -> str:
+    """Return user-specific OAuth URL; callback handling stores token in DB."""
+    runtime_settings = reload_settings()
+    if not runtime_settings.ebay_client_id or not runtime_settings.ebay_client_secret:
+        raise EbayIntegrationError("Missing eBay OAuth settings (ebay_client_id / ebay_client_secret)")
+    if not redirect_uri:
+        raise EbayIntegrationError("redirect_uri is required")
+    return build_ebay_auth_url(user_id, redirect_uri)
+
+
+async def exchange_code_for_tokens(code: str, redirect_uri: str) -> EbayTokenBundle:
+    runtime_settings = reload_settings()
+    if not runtime_settings.ebay_client_id or not runtime_settings.ebay_client_secret:
+        raise EbayIntegrationError("Missing eBay OAuth settings (ebay_client_id / ebay_client_secret)")
+    credentials = f"{runtime_settings.ebay_client_id}:{runtime_settings.ebay_client_secret}".encode("utf-8")
+    basic_auth = base64.b64encode(credentials).decode("utf-8")
+    data = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+    }
+    headers = {
+        "Authorization": f"Basic {basic_auth}",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30)) as client:
+        response = await client.post(_token_endpoint(), data=data, headers=headers)
+
+    if response.status_code >= 400:
+        raise EbayIntegrationError(f"OAuth token exchange failed: {response.text}")
+
+    token_data = response.json()
+    return EbayTokenBundle(
+        access_token=token_data["access_token"],
+        refresh_token=token_data.get("refresh_token"),
+        expires_in=int(token_data.get("expires_in", 7200)),
+    )
+
+
+async def refresh_ebay_token(user_id: int, db: Session) -> MarketplaceAccount:
+    runtime_settings = reload_settings()
+    account = db.execute(
+        select(MarketplaceAccount).where(
+            MarketplaceAccount.user_id == user_id,
+            MarketplaceAccount.marketplace == MarketplaceName.ebay,
+        )
+    ).scalar_one_or_none()
+    if not account or not account.refresh_token:
+        raise EbayIntegrationError("No eBay account with refresh token found")
+
+    if not runtime_settings.ebay_client_id or not runtime_settings.ebay_client_secret:
+        raise EbayIntegrationError("Missing eBay OAuth settings (ebay_client_id / ebay_client_secret)")
+    credentials = f"{runtime_settings.ebay_client_id}:{runtime_settings.ebay_client_secret}".encode("utf-8")
+    basic_auth = base64.b64encode(credentials).decode("utf-8")
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": account.refresh_token,
+        "scope": _scopes(),
+    }
+    headers = {
+        "Authorization": f"Basic {basic_auth}",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30)) as client:
+        response = await client.post(_token_endpoint(), data=data, headers=headers)
+
+    if response.status_code >= 400:
+        raise EbayIntegrationError(f"Token refresh failed: {response.text}")
+
+    payload = response.json()
+    account.access_token = payload["access_token"]
+    account.token_expires_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(seconds=int(payload.get("expires_in", 7200)))
+    if payload.get("refresh_token"):
+        account.refresh_token = payload["refresh_token"]
+    account.connection_status = "connected"
+    account.last_error = None
+    account.last_refresh_at = datetime.now(UTC).replace(tzinfo=None)
+    db.add(account)
+    db.commit()
+    db.refresh(account)
+    return account
+
+
+def summarize_ebay_account_health(account: MarketplaceAccount | None) -> dict[str, Any]:
+    now = datetime.utcnow()
+    reauthorization_required = bool(account and getattr(account, "connection_status", "connected") == "reauthorization_required")
+    connected = bool(account and account.access_token) and not reauthorization_required
+    has_refresh_token = bool(account and account.refresh_token)
+    token_expires_at = account.token_expires_at if account else None
+
+    token_status = "disconnected"
+    import_ready = False
+    reconnect_required = False
+    status_note = "Connect eBay for this operator before importing or publishing."
+
+    if reauthorization_required:
+        token_status = "reauthorization_required"
+        reconnect_required = True
+        status_note = "eBay rejected the saved credentials. Reconnect eBay to authorize this operator again."
+    elif connected:
+        if token_expires_at is None:
+            token_status = "connected"
+            import_ready = True
+            status_note = "eBay is connected for this operator."
+        else:
+            expires_in_seconds = int((token_expires_at - now).total_seconds())
+            if expires_in_seconds <= 0:
+                if has_refresh_token:
+                    token_status = "expired_refreshable"
+                    import_ready = True
+                    status_note = "The saved eBay token has expired, but PosterPro can refresh it on the next import or publish."
+                else:
+                    token_status = "expired"
+                    reconnect_required = True
+                    status_note = "The saved eBay token has expired and does not include a refresh token. Reconnect eBay or import fresh user tokens."
+            elif expires_in_seconds <= 300:
+                if has_refresh_token:
+                    token_status = "expiring_soon"
+                    import_ready = True
+                    status_note = "The saved eBay token expires soon, but PosterPro can refresh it automatically."
+                else:
+                    token_status = "expiring_soon_manual"
+                    import_ready = True
+                    status_note = "The saved eBay token expires soon and does not include a refresh token. Reconnect eBay to avoid the next import failing."
+            elif has_refresh_token:
+                token_status = "healthy"
+                import_ready = True
+                status_note = "eBay is connected for this operator."
+            else:
+                token_status = "manual_token_only"
+                import_ready = True
+                status_note = "eBay is connected with a manual access token only. Imports work until the token expires; reconnect eBay for automatic refresh."
+
+    return {
+        "connected": connected,
+        "has_refresh_token": has_refresh_token,
+        "token_status": token_status,
+        "import_ready": import_ready,
+        "reconnect_required": reconnect_required,
+        "status_note": status_note,
+        "last_error": getattr(account, "last_error", None) if account else None,
+        "last_refresh_at": getattr(account, "last_refresh_at", None) if account else None,
+        "last_successful_check_at": getattr(account, "last_successful_check_at", None) if account else None,
+    }
+
+
+def _mark_ebay_reauthorization_required(account: MarketplaceAccount, db: Session, error: Exception) -> None:
+    """Persist a safe, actionable credential failure without retaining token material."""
+    message = str(error).replace(account.access_token or "", "[redacted]")[:500]
+    account.connection_status = "reauthorization_required"
+    account.last_error = message
+    db.add(account)
+    db.commit()
+
+
+async def get_or_refresh_account(user_id: int, db: Session) -> MarketplaceAccount:
+    account = db.execute(
+        select(MarketplaceAccount).where(
+            MarketplaceAccount.user_id == user_id,
+            MarketplaceAccount.marketplace == MarketplaceName.ebay,
+        )
+    ).scalar_one_or_none()
+    if not account:
+        raise EbayIntegrationError("No connected eBay account for user")
+    if account.token_expires_at and account.token_expires_at <= datetime.utcnow() + timedelta(minutes=5):
+        if not account.refresh_token and account.access_token:
+            # Older/manual eBay connections in this deployment can have an access token without a refresh token.
+            # Fall back to the stored token so read-only/import paths can still attempt the API call.
+            return account
+        try:
+            return await refresh_ebay_token(user_id, db)
+        except EbayIntegrationError as exc:
+            # A refresh failure is not a healthy connection. Persist the
+            # actionable state so Settings and the publish queue stop showing
+            # a stale "connected" badge after the access token has expired.
+            _mark_ebay_reauthorization_required(account, db, exc)
+            raise
+    return account
+
+
+async def _request_with_single_refresh(
+    user_id: int,
+    db: Session,
+    account: MarketplaceAccount,
+    *,
+    method: str,
+    path: str,
+    params: dict[str, Any] | None = None,
+    payload: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+) -> tuple[MarketplaceAccount, dict[str, Any]]:
+    client = EbayAPIClient(account.access_token)
+    try:
+        response = await client.request(method, path, params=params, payload=payload, headers=headers)
+        return account, response
+    except EbayIntegrationError as exc:
+        if "(401)" not in str(exc) or not account.refresh_token:
+            raise
+        try:
+            account = await refresh_ebay_token(user_id, db)
+        except EbayIntegrationError as refresh_exc:
+            _mark_ebay_reauthorization_required(account, db, refresh_exc)
+            raise
+        client = EbayAPIClient(account.access_token)
+        try:
+            response = await client.request(method, path, params=params, payload=payload, headers=headers)
+            return account, response
+        except EbayIntegrationError as retry_exc:
+            if "(401)" in str(retry_exc):
+                _mark_ebay_reauthorization_required(account, db, retry_exc)
+            raise
+
+
+async def create_inventory_location(
+    user_id: int,
+    db: Session,
+    *,
+    location_key: str | None = None,
+    origin: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    account = await get_or_refresh_account(user_id, db)
+    client = EbayAPIClient(account.access_token)
+    policy_settings = _load_listing_ebay_policy_settings(db, user_id)
+    location_key = str(location_key or "").strip() or policy_settings.get("merchant_location_key") or f"posterpro-{user_id}"
+    origin_settings = origin or _normalize_merchant_location_origin(policy_settings)
+    missing_origin_fields = [
+        field
+        for field, value in {
+            "merchant_location_postal_code": origin_settings.get("postal_code"),
+            "merchant_location_country": origin_settings.get("country"),
+        }.items()
+        if not str(value or "").strip()
+    ]
+    if missing_origin_fields:
+        raise EbayIntegrationError(f"Cannot create merchant location without: {', '.join(missing_origin_fields)}")
+    payload = _merchant_location_payload(origin_settings)
+    try:
+        _, response = await _request_with_single_refresh(
+            user_id,
+            db,
+            account,
+            method="POST",
+            path=f"/sell/inventory/v1/location/{location_key}",
+            payload=payload,
+        )
+        _ = response
+    except EbayIntegrationError as exc:
+        message = str(exc).lower()
+        if "merchantlocationkey already exists" not in message:
+            raise
+    return {"merchantLocationKey": location_key}
+
+
+async def suggest_ebay_category(listing: Listing, account: MarketplaceAccount, marketplace_id: str = "EBAY_US") -> dict[str, Any]:
+    if str(listing.category_suggestion or "").strip().isdigit():
+        category_id = str(listing.category_suggestion).strip()
+        result: dict[str, Any] = {"categoryId": category_id, "categoryName": category_id}
+        if str(listing.source_type or "").strip().lower() == "amazon_vine":
+            client = EbayAPIClient(account.access_token)
+            tree = await client.request("GET", "/commerce/taxonomy/v1/get_default_category_tree_id", params={"marketplace_id": marketplace_id})
+            tree_id = str(tree.get("categoryTreeId") or "")
+            verification = await verify_ebay_category(account, category_id, tree_id, marketplace_id=marketplace_id) if tree_id else {"verified": False, "leaf": None, "source": "tree_unavailable"}
+            result.update({
+                "leafVerified": bool(verification.get("verified") and verification.get("leaf")),
+                "taxonomyTreeId": tree_id,
+                "verificationSource": str(verification.get("source") or "unknown"),
+            })
+        return result
+    client = EbayAPIClient(account.access_token)
+    tree = await client.request("GET", "/commerce/taxonomy/v1/get_default_category_tree_id", params={"marketplace_id": marketplace_id})
+    tree_id = tree.get("categoryTreeId")
+    if not tree_id:
+        raise EbayIntegrationError("Unable to resolve eBay category tree id")
+    query = _ebay_listing_query(listing)
+    suggestions = await client.request(
+        "GET",
+        f"/commerce/taxonomy/v1/category_tree/{tree_id}/get_category_suggestions",
+        params={"q": query},
+    )
+    candidates = [row.get("category") or {} for row in suggestions.get("categorySuggestions") or []]
+    verification = None
+    if str(listing.source_type or "").strip().lower() == "amazon_vine":
+        semantic = str(listing.category_suggestion or "").strip()
+        ranked = sorted(
+            (( _vine_category_match_score(semantic, str(row.get("categoryName") or "")), row) for row in candidates),
+            key=lambda pair: pair[0],
+            reverse=True,
+        )
+        async def first_verified_leaf(rows):
+            for score, candidate in rows:
+                if score <= 0:
+                    continue
+                candidate_id = str(candidate.get("categoryId") or "").strip()
+                if not candidate_id:
+                    continue
+                verified = await verify_ebay_category(account, candidate_id, str(tree_id), marketplace_id=marketplace_id)
+                if verified.get("verified") and verified.get("leaf"):
+                    return candidate, verified
+            return None, None
+
+        category, verification = await first_verified_leaf(ranked)
+        if category is None:
+            # Retry against the semantic leaf alone. A top title-only match
+            # such as apparel for a window shade must never become a durable
+            # Vine category merely because eBay returned it first.
+            semantic_leaf = semantic.split(">")[-1].strip() or semantic
+            fallback = await client.request(
+                "GET",
+                f"/commerce/taxonomy/v1/category_tree/{tree_id}/get_category_suggestions",
+                params={"q": semantic_leaf},
+            )
+            candidates = [row.get("category") or {} for row in fallback.get("categorySuggestions") or []]
+            ranked = sorted(
+                ((_vine_category_match_score(semantic, str(row.get("categoryName") or "")), row) for row in candidates),
+                key=lambda pair: pair[0],
+                reverse=True,
+            )
+            category, verification = await first_verified_leaf(ranked)
+        if category is None or verification is None:
+            raise EbayIntegrationError(f"eBay taxonomy suggestions do not semantically match the Vine category: {semantic}")
+    else:
+        category = candidates[0] if candidates else {}
+        # The provider may return a syntactically valid but product-family
+        # contradictory first suggestion. Do not turn that into a durable
+        # listing category. If the top candidate is semantically flagged,
+        # inspect the remaining suggestions and accept only a current leaf
+        # that passes our conservative product/category guards.
+        if category:
+            from app.services.ebay_taxonomy import semantic_guard_flags
+
+            title = str(listing.title or "")
+            top_flags = semantic_guard_flags(title, str(category.get("categoryName") or ""))
+            if top_flags:
+                category = {}
+                for candidate in candidates[1:]:
+                    candidate_id = str(candidate.get("categoryId") or "").strip()
+                    candidate_flags = semantic_guard_flags(title, str(candidate.get("categoryName") or ""))
+                    if not candidate_id or candidate_flags:
+                        continue
+                    candidate_verification = await verify_ebay_category(
+                        account, candidate_id, str(tree_id), marketplace_id=marketplace_id,
+                    )
+                    if candidate_verification.get("verified") and candidate_verification.get("leaf"):
+                        category = candidate
+                        verification = candidate_verification
+                        break
+                if not category:
+                    raise EbayIntegrationError(
+                        "eBay taxonomy suggestions returned a semantically contradictory top category and no verified compatible leaf; operator category review is required"
+                    )
+    category_id = str(category.get("categoryId") or "").strip()
+    if not category_id:
+        fallback_category_id = str(listing.category_id or "").strip() if str(listing.category_id or "").strip().isdigit() else ""
+        if not fallback_category_id:
+            fallback_category_id = str(listing.category_suggestion or "").strip() if str(listing.category_suggestion or "").strip().isdigit() else ""
+        fallback_category_id = fallback_category_id or "171485"
+        return {"categoryId": fallback_category_id, "categoryName": fallback_category_id}
+    result = {
+        "categoryId": category_id,
+        "categoryName": str(category.get("categoryName") or "").strip(),
+    }
+    if str(listing.source_type or "").strip().lower() == "amazon_vine":
+        verification = verification or await verify_ebay_category(account, category_id, str(tree_id), marketplace_id=marketplace_id)
+        result.update({
+            "leafVerified": bool(verification.get("verified") and verification.get("leaf")),
+            "taxonomyTreeId": str(tree_id),
+            "verificationSource": str(verification.get("source") or "unknown"),
+        })
+    elif verification is not None:
+        result.update({
+            "leafVerified": bool(verification.get("verified") and verification.get("leaf")),
+            "taxonomyTreeId": str(tree_id),
+            "verificationSource": str(verification.get("source") or "unknown"),
+        })
+    return result
+
+async def search_ebay_categories(
+    query: str,
+    account: MarketplaceAccount,
+    marketplace_id: str = "EBAY_US",
+    taxonomy_tree_id: str | None = None,
+    *,
+    verification_limit: int | None = None,
+) -> list[dict[str, object]]:
+    """Return the actual eBay taxonomy suggestions for operator selection."""
+    client = EbayAPIClient(account.access_token)
+    tree_id = taxonomy_tree_id
+    if not tree_id:
+        tree = await client.request("GET", "/commerce/taxonomy/v1/get_default_category_tree_id", params={"marketplace_id": marketplace_id})
+        tree_id = tree.get("categoryTreeId")
+    if not tree_id:
+        raise EbayIntegrationError("Unable to resolve eBay category tree id")
+    response = await client.request("GET", f"/commerce/taxonomy/v1/category_tree/{tree_id}/get_category_suggestions", params={"q": query})
+    results = []
+    suggestions = response.get("categorySuggestions") or []
+    if verification_limit is not None:
+        suggestions = suggestions[:max(1, min(int(verification_limit), 20))]
+    for row in suggestions:
+        category = row.get("category") or {}
+        cid = str(category.get("categoryId") or "").strip()
+        if cid:
+            verified = await verify_ebay_category(account, cid, str(tree_id), marketplace_id=marketplace_id)
+            results.append({"category_id": cid, "category_name": str(category.get("categoryName") or cid), "breadcrumb": str(category.get("categoryTreeNodeLevel") or category.get("categoryName") or ""), "leaf": verified.get("leaf"), "publishable": verified.get("publishable"), "leaf_verified": verified.get("verified"), "verification_source": verified.get("source"), "taxonomy_tree_id": str(tree_id)})
+    return results
+
+
+async def verify_ebay_category(account: MarketplaceAccount, category_id: str, tree_id: str, marketplace_id: str = "EBAY_US") -> dict[str, object]:
+    """Verify category node metadata instead of assuming suggestions are publishable leaves."""
+    try:
+        client = EbayAPIClient(account.access_token)
+        payload = await client.request("GET", f"/commerce/taxonomy/v1/category_tree/{tree_id}/get_category_subtree", params={"category_id": category_id})
+        node = payload.get("categorySubtreeNode") or payload.get("rootCategoryNode") or {}
+        children = node.get("childCategoryTreeNodes") or []
+        return {"verified": True, "leaf": not bool(children), "publishable": not bool(children), "source": "ebay_taxonomy_category_subtree"}
+    except Exception:
+        return {"verified": False, "leaf": None, "publishable": None, "source": "verification_failed"}
+
+async def browse_ebay_categories(account: MarketplaceAccount, parent_category_id: str | None = None, marketplace_id: str = "EBAY_US", taxonomy_tree_id: str | None = None) -> dict[str, object]:
+    client = EbayAPIClient(account.access_token)
+    tree_id = str(taxonomy_tree_id or "")
+    if not tree_id:
+        tree = await client.request("GET", "/commerce/taxonomy/v1/get_default_category_tree_id", params={"marketplace_id": marketplace_id})
+        tree_id = str(tree.get("categoryTreeId") or "")
+    if not tree_id: raise EbayIntegrationError("Unable to resolve eBay category tree id")
+    path = f"/commerce/taxonomy/v1/category_tree/{tree_id}" if not parent_category_id else f"/commerce/taxonomy/v1/category_tree/{tree_id}/get_category_subtree"
+    params = {} if not parent_category_id else {"category_id": parent_category_id}
+    payload = await client.request("GET", path, params=params)
+    node = payload.get("categorySubtreeNode") or payload.get("rootCategoryNode") or {}
+    children = []
+    for child in node.get("childCategoryTreeNodes") or []:
+        c = child.get("category") or child
+        cid = str(c.get("categoryId") or "").strip()
+        if cid: children.append({"category_id": cid, "category_name": c.get("categoryName") or cid, "has_children": bool(child.get("childCategoryTreeNodes")), "leaf": not bool(child.get("childCategoryTreeNodes")), "publishable": not bool(child.get("childCategoryTreeNodes")), "taxonomy_tree_id": tree_id})
+    return {"tree_id": tree_id, "parent_category_id": parent_category_id, "categories": children, "_tree_payload": payload if not parent_category_id else None}
+
+
+async def build_ebay_item_specifics(
+    listing: Listing,
+    account: MarketplaceAccount,
+    category_id: str,
+    marketplace_id: str = "EBAY_US",
+) -> dict[str, list[str]]:
+    required = await get_required_item_specifics(account.access_token, category_id, marketplace_id=marketplace_id)
+    title = str(listing.title or "").strip()
+    model = _derive_phone_model(title)
+    compatible_brand = "For Apple" if re.search(r"\biphone\b|\bipad\b|\bapple\b", title, flags=re.IGNORECASE) else None
+    item_type = _derive_item_type(title)
+    specifics: dict[str, list[str]] = {}
+    for aspect in required.get("aspects", []):
+        constraint = aspect.get("aspectConstraint") or {}
+        if not constraint.get("aspectRequired"):
+            continue
+        name = str(aspect.get("localizedAspectName") or "").strip()
+        if not name:
+            continue
+        normalized = name.lower()
+        value: str | None = None
+        if normalized == "brand":
+            value = _derive_brand(listing)
+        elif normalized == "compatible brand":
+            value = compatible_brand or "Universal"
+        elif normalized == "compatible model":
+            value = f"For {model}" if model and not model.lower().startswith("for ") else model or "Universal"
+        elif normalized == "type":
+            value = item_type or "Replacement Part"
+        else:
+            value = _fallback_aspect_value(listing, name, title)
+        if value:
+            specifics[name] = [_clip_specific_value(value)]
+    if "Brand" not in specifics:
+        specifics["Brand"] = [_derive_brand(listing)]
+    return specifics
+
+
+async def create_or_replace_item(
+    listing: Listing,
+    account: MarketplaceAccount,
+    *,
+    item_specifics: dict[str, list[str]] | None = None,
+    inventory_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    client = EbayAPIClient(account.access_token)
+    sku = _build_ebay_sku(listing.user_id, listing.id)
+    payload = inventory_payload or {
+        "availability": {"shipToLocationAvailability": {"quantity": 1}},
+        "condition": "NEW",
+        "product": {
+            "title": listing.title or f"PosterPro Listing #{listing.id}",
+            "description": _sanitize_ebay_description(listing.description),
+            "aspects": item_specifics or {"Brand": [_derive_brand(listing)]},
+            "imageUrls": _build_ebay_image_urls(listing),
+        },
+    }
+    if not (payload.get("product") or {}).get("imageUrls"):
+        raise EbayIntegrationError(f"Listing {listing.id} has no images to send to eBay")
+    response = await client.request("PUT", f"/sell/inventory/v1/inventory_item/{sku}", payload=payload)
+    return {"sku": sku, "response": response}
+
+
+async def create_offer_for_item(
+    listing: Listing,
+    account: MarketplaceAccount,
+    sku: str,
+    *,
+    category_id: str,
+    offer_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    effective_price = _ebay_effective_price(listing)
+    if offer_payload is None and effective_price in (None, ""):
+        raise EbayIntegrationError("EBAY_PRICE_MISSING: an operator-authorized asking price is required; no default price was substituted")
+    client = EbayAPIClient(account.access_token)
+    payload = offer_payload or {
+        "sku": sku,
+        "marketplaceId": "EBAY_US",
+        "format": "FIXED_PRICE",
+        "availableQuantity": 1,
+        "categoryId": category_id,
+        "merchantLocationKey": f"posterpro-{listing.user_id}",
+        "pricingSummary": {"price": {"value": str(effective_price), "currency": "USD"}},
+    }
+    try:
+        response = await client.request("POST", "/sell/inventory/v1/offer", payload=payload)
+    except EbayIntegrationError as exc:
+        message = str(exc).lower()
+        if "not eligible for business policy" not in message:
+            existing_offer_id = _extract_ebay_error_parameter(str(exc), "offerId")
+            if "offer entity already exists" in message and existing_offer_id:
+                existing = await client.request("GET", f"/sell/inventory/v1/offer/{existing_offer_id}")
+                if str(existing.get("offerId") or existing_offer_id) != existing_offer_id:
+                    raise EbayIntegrationError("eBay returned a different offer identity; refusing to reuse it.") from exc
+                if str(existing.get("sku") or "") != str(sku):
+                    raise EbayIntegrationError("An existing eBay offer has a different SKU; refusing to modify or replace it.") from exc
+                if str(existing.get("marketplaceId") or "") != str(payload.get("marketplaceId") or "EBAY_US"):
+                    raise EbayIntegrationError("An existing eBay offer belongs to a different marketplace; refusing to reuse it.") from exc
+                remote_listing = existing.get("listing") if isinstance(existing.get("listing"), dict) else {}
+                listing_id = str(remote_listing.get("listingId") or existing.get("listingId") or "").strip() or None
+                known_listing_id = str(getattr(listing, "ebay_listing_id", None) or "").strip()
+                if listing_id and known_listing_id and listing_id != known_listing_id:
+                    raise EbayIntegrationError("The existing eBay offer points to a different known listing; reconcile identity before continuing.") from exc
+                return {"offerId": existing_offer_id, "response": existing, "existingListingId": listing_id, "reusedExisting": True}
+            raise
+        try:
+            policy_ids = await get_business_policy_ids(account.access_token, create_if_missing=True)
+            if any(policy_ids.values()):
+                payload["listingPolicies"] = {
+                    "paymentPolicyId": policy_ids.get("paymentPolicyId"),
+                    "returnPolicyId": policy_ids.get("returnPolicyId"),
+                    "fulfillmentPolicyId": policy_ids.get("fulfillmentPolicyId"),
+                }
+            response = await client.request("POST", "/sell/inventory/v1/offer", payload=payload)
+        except EbayIntegrationError as retry_exc:
+            retry_message = str(retry_exc).lower()
+            existing_offer_id = _extract_ebay_error_parameter(str(retry_exc), "offerId")
+            if "offer entity already exists" in retry_message and existing_offer_id:
+                existing = await client.request("GET", f"/sell/inventory/v1/offer/{existing_offer_id}")
+                if str(existing.get("offerId") or existing_offer_id) != existing_offer_id:
+                    raise EbayIntegrationError("eBay returned a different offer identity; refusing to reuse it.") from retry_exc
+                if str(existing.get("sku") or "") != str(sku):
+                    raise EbayIntegrationError("An existing eBay offer has a different SKU; refusing to modify or replace it.") from retry_exc
+                if str(existing.get("marketplaceId") or "") != str(payload.get("marketplaceId") or "EBAY_US"):
+                    raise EbayIntegrationError("An existing eBay offer belongs to a different marketplace; refusing to reuse it.") from retry_exc
+                remote_listing = existing.get("listing") if isinstance(existing.get("listing"), dict) else {}
+                listing_id = str(remote_listing.get("listingId") or existing.get("listingId") or "").strip() or None
+                known_listing_id = str(getattr(listing, "ebay_listing_id", None) or "").strip()
+                if listing_id and known_listing_id and listing_id != known_listing_id:
+                    raise EbayIntegrationError("The existing eBay offer points to a different known listing; reconcile identity before continuing.") from retry_exc
+                return {"offerId": existing_offer_id, "response": existing, "existingListingId": listing_id, "reusedExisting": True}
+            raise
+    return {"offerId": response.get("offerId"), "response": response}
+
+
+async def publish_offer(listing: Listing, account: MarketplaceAccount, offer_id: str) -> dict[str, Any]:
+    client = EbayAPIClient(account.access_token)
+    # Example payload for publishOffer (official field names)
+    response = await client.request("POST", f"/sell/inventory/v1/offer/{offer_id}/publish")
+    listing_id = response.get("listingId")
+    if not listing_id:
+        raise EbayIntegrationError("publishOffer did not return listingId")
+    return {"listingId": listing_id, "response": response}
+
+
+async def get_category_tree(access_token: str, marketplace_id: str = "EBAY_US") -> dict[str, Any]:
+    client = EbayAPIClient(access_token)
+    trees = await client.request("GET", "/commerce/taxonomy/v1/get_default_category_tree_id", params={"marketplace_id": marketplace_id})
+    tree_id = trees.get("categoryTreeId")
+    if not tree_id:
+        return trees
+    return await client.request("GET", f"/commerce/taxonomy/v1/category_tree/{tree_id}")
+
+
+async def get_known_ebay_us_category_tree(access_token: str) -> dict[str, Any]:
+    """Single controlled full-tree retrieval using the known EBAY_US tree 0.
+
+    Unlike the legacy helper this never calls get_default_category_tree_id and
+    is intended for an occasional shared synchronization job only.
+    """
+    client = EbayAPIClient(access_token)
+    return await client.request(
+        "GET",
+        "/commerce/taxonomy/v1/category_tree/0",
+        headers={"Accept-Encoding": "gzip"},
+    )
+
+
+async def get_known_ebay_category_tree(access_token: str, tree_id: str, *, marketplace_id: str = "EBAY_MOTORS_US") -> dict[str, Any]:
+    """Retrieve one explicitly selected taxonomy tree (shared sync only)."""
+    client = EbayAPIClient(access_token)
+    return await client.request(
+        "GET",
+        f"/commerce/taxonomy/v1/category_tree/{str(tree_id)}",
+        headers={"Accept-Encoding": "gzip", "X-Marketplace-Id": marketplace_id},
+    )
+
+
+async def get_business_policy_ids(
+    access_token: str,
+    marketplace_id: str = "EBAY_US",
+    *,
+    create_if_missing: bool = True,
+) -> dict[str, Any]:
+    client = EbayAPIClient(access_token)
+    headers = {"Content-Language": "en-US"}
+    base = f"/sell/account/v1"
+    payment = await client.request("GET", f"{base}/payment_policy", params={"marketplace_id": marketplace_id}, headers=headers)
+    shipping = await client.request("GET", f"{base}/fulfillment_policy", params={"marketplace_id": marketplace_id}, headers=headers)
+    returns = await client.request("GET", f"{base}/return_policy", params={"marketplace_id": marketplace_id}, headers=headers)
+    if create_if_missing and not (payment.get("paymentPolicies") or []):
+        await client.request(
+            "POST",
+            f"{base}/payment_policy",
+            headers=headers,
+            payload={
+                "name": "PosterPro Default Payment",
+                "marketplaceId": marketplace_id,
+                "categoryTypes": [{"name": "ALL_EXCLUDING_MOTORS_VEHICLES"}],
+                "paymentMethods": [{"paymentMethodType": "PERSONAL_CHECK"}],
+                "immediatePay": False,
+            },
+        )
+        payment = await client.request("GET", f"{base}/payment_policy", params={"marketplace_id": marketplace_id}, headers=headers)
+    if create_if_missing and not (shipping.get("fulfillmentPolicies") or []):
+        await client.request(
+            "POST",
+            f"{base}/fulfillment_policy",
+            headers=headers,
+            payload={
+                "name": "PosterPro Default Fulfillment",
+                "marketplaceId": marketplace_id,
+                "categoryTypes": [{"name": "ALL_EXCLUDING_MOTORS_VEHICLES"}],
+                "handlingTime": {"unit": "DAY", "value": 1},
+                "shippingOptions": [
+                    {
+                        "optionType": "DOMESTIC",
+                        "costType": "FLAT_RATE",
+                        "shippingServices": [
+                            {
+                                "shippingCarrierCode": "USPS",
+                                "shippingServiceCode": "USPSGroundAdvantage",
+                                "freeShipping": True,
+                                "buyerResponsibleForShipping": False,
+                            }
+                        ],
+                    }
+                ],
+                "globalShipping": False,
+            },
+        )
+        shipping = await client.request("GET", f"{base}/fulfillment_policy", params={"marketplace_id": marketplace_id}, headers=headers)
+    if create_if_missing and not (returns.get("returnPolicies") or []):
+        await client.request(
+            "POST",
+            f"{base}/return_policy",
+            headers=headers,
+            payload={
+                "name": "PosterPro Default Returns",
+                "marketplaceId": marketplace_id,
+                "categoryTypes": [{"name": "ALL_EXCLUDING_MOTORS_VEHICLES"}],
+                "returnsAccepted": False,
+            },
+        )
+        returns = await client.request("GET", f"{base}/return_policy", params={"marketplace_id": marketplace_id}, headers=headers)
+    return {
+        "paymentPolicyId": (payment.get("paymentPolicies") or [{}])[0].get("paymentPolicyId"),
+        "fulfillmentPolicyId": (shipping.get("fulfillmentPolicies") or [{}])[0].get("fulfillmentPolicyId"),
+        "returnPolicyId": (returns.get("returnPolicies") or [{}])[0].get("returnPolicyId"),
+    }
+
+
+async def _list_business_policies_for_account(
+    user_id: int,
+    db: Session,
+    account: MarketplaceAccount,
+    *,
+    marketplace_id: str = "EBAY_US",
+) -> dict[str, Any]:
+    async def _fetch(current_account: MarketplaceAccount) -> dict[str, Any]:
+        return await list_business_policies(current_account.access_token, marketplace_id=marketplace_id)
+
+    try:
+        return await _fetch(account)
+    except EbayIntegrationError as exc:
+        if "(401)" not in str(exc) or not account.refresh_token:
+            raise
+        try:
+            refreshed = await refresh_ebay_token(user_id, db)
+        except EbayIntegrationError as refresh_exc:
+            _mark_ebay_reauthorization_required(account, db, refresh_exc)
+            raise
+        return await _fetch(refreshed)
+
+
+async def _get_business_policy_ids_for_account(
+    user_id: int,
+    db: Session,
+    account: MarketplaceAccount,
+    *,
+    marketplace_id: str = "EBAY_US",
+    create_if_missing: bool = True,
+) -> dict[str, Any]:
+    async def _fetch(current_account: MarketplaceAccount) -> dict[str, Any]:
+        return await get_business_policy_ids(
+            current_account.access_token,
+            marketplace_id=marketplace_id,
+            create_if_missing=create_if_missing,
+        )
+
+    try:
+        return await _fetch(account)
+    except EbayIntegrationError as exc:
+        if "(401)" not in str(exc) or not account.refresh_token:
+            raise
+        try:
+            refreshed = await refresh_ebay_token(user_id, db)
+        except EbayIntegrationError as refresh_exc:
+            _mark_ebay_reauthorization_required(account, db, refresh_exc)
+            raise
+        return await _fetch(refreshed)
+
+
+def _policy_summary_entry(policy: dict[str, Any], *, id_field: str, marketplace_id: str) -> dict[str, Any]:
+    category_types = []
+    for category_type in policy.get("categoryTypes") or []:
+        if not isinstance(category_type, dict):
+            continue
+        name = str(category_type.get("name") or "").strip()
+        if name:
+            category_types.append(name)
+    return {
+        "id": str(policy.get(id_field) or "").strip(),
+        "name": str(policy.get("name") or "").strip(),
+        "marketplace_id": str(policy.get("marketplaceId") or marketplace_id).strip() or marketplace_id,
+        "is_default": bool(policy.get("default")),
+        "category_types": category_types,
+        "raw_category_types": policy.get("categoryTypes") or [],
+        # Keep only the operational fulfillment-policy facts needed by the
+        # read-only shipping/handling preview. Never expose credentials or
+        # copy arbitrary provider payloads into the dashboard response.
+        "handling_time": policy.get("handlingTime") if isinstance(policy.get("handlingTime"), dict) else None,
+        "shipping_options": [
+            {
+                "option_type": option.get("optionType"),
+                "cost_type": option.get("costType"),
+                "shipping_services": [
+                    {
+                        "carrier": service.get("shippingCarrierCode"),
+                        "service": service.get("shippingServiceCode"),
+                        "free_shipping": service.get("freeShipping"),
+                        "buyer_responsible": service.get("buyerResponsibleForShipping"),
+                    }
+                    for service in (option.get("shippingServices") or []) if isinstance(service, dict)
+                ],
+            }
+            for option in (policy.get("shippingOptions") or []) if isinstance(option, dict)
+        ],
+    }
+
+
+def _pick_preferred_policy(policies: list[dict[str, Any]], *, id_field: str) -> tuple[dict[str, Any] | None, str]:
+    if not policies:
+        return None, "missing"
+    defaults = [policy for policy in policies if policy.get("is_default")]
+    if defaults:
+        return defaults[0], "default"
+    category_match = [
+        policy
+        for policy in policies
+        if "ALL_EXCLUDING_MOTORS_VEHICLES" in {str(item).upper() for item in policy.get("category_types") or []}
+    ]
+    if category_match:
+        return category_match[0], "all_excluding_motors_vehicles"
+    return policies[0], "first_available"
+
+
+async def list_business_policies(access_token: str, marketplace_id: str = "EBAY_US") -> dict[str, Any]:
+    client = EbayAPIClient(access_token)
+    headers = {"Content-Language": "en-US"}
+    base = "/sell/account/v1"
+    payment = await client.request("GET", f"{base}/payment_policy", params={"marketplace_id": marketplace_id}, headers=headers)
+    shipping = await client.request("GET", f"{base}/fulfillment_policy", params={"marketplace_id": marketplace_id}, headers=headers)
+    returns = await client.request("GET", f"{base}/return_policy", params={"marketplace_id": marketplace_id}, headers=headers)
+
+    payment_policies = [_policy_summary_entry(policy, id_field="paymentPolicyId", marketplace_id=marketplace_id) for policy in payment.get("paymentPolicies") or [] if isinstance(policy, dict)]
+    fulfillment_policies = [_policy_summary_entry(policy, id_field="fulfillmentPolicyId", marketplace_id=marketplace_id) for policy in shipping.get("fulfillmentPolicies") or [] if isinstance(policy, dict)]
+    return_policies = [_policy_summary_entry(policy, id_field="returnPolicyId", marketplace_id=marketplace_id) for policy in returns.get("returnPolicies") or [] if isinstance(policy, dict)]
+
+    selected_payment, payment_reason = _pick_preferred_policy(payment_policies, id_field="paymentPolicyId")
+    selected_fulfillment, fulfillment_reason = _pick_preferred_policy(fulfillment_policies, id_field="fulfillmentPolicyId")
+    selected_return, return_reason = _pick_preferred_policy(return_policies, id_field="returnPolicyId")
+
+    return {
+        "marketplace_id": marketplace_id,
+        "payment_policies": payment_policies,
+        "fulfillment_policies": fulfillment_policies,
+        "return_policies": return_policies,
+        "selected": {
+            "payment_policy_id": selected_payment["id"] if selected_payment else "",
+            "payment_policy_name": selected_payment["name"] if selected_payment else "",
+            "payment_selection_reason": payment_reason,
+            "fulfillment_policy_id": selected_fulfillment["id"] if selected_fulfillment else "",
+            "fulfillment_policy_name": selected_fulfillment["name"] if selected_fulfillment else "",
+            "fulfillment_selection_reason": fulfillment_reason,
+            "return_policy_id": selected_return["id"] if selected_return else "",
+            "return_policy_name": selected_return["name"] if selected_return else "",
+            "return_selection_reason": return_reason,
+        },
+    }
+
+
+def _normalize_merchant_location_origin(raw: dict | None) -> dict[str, str]:
+    source = raw if isinstance(raw, dict) else {}
+    return {
+        "location_name": str(source.get("merchant_location_location_name") or "PosterPro Default Location").strip(),
+        "postal_code": str(source.get("merchant_location_postal_code") or "").strip(),
+        "country": str(source.get("merchant_location_country") or "").strip(),
+        "city": str(source.get("merchant_location_city") or "").strip(),
+        "state_or_province": str(source.get("merchant_location_state_or_province") or "").strip(),
+        "phone": str(source.get("merchant_location_phone") or "").strip(),
+    }
+
+
+def _merchant_location_payload(origin: dict[str, str]) -> dict[str, Any]:
+    return {
+        "name": origin.get("location_name") or "PosterPro Default Location",
+        "location": {
+            "address": {
+                "addressLine1": "123 Marketplace St",
+                "city": origin.get("city") or "San Jose",
+                "stateOrProvince": origin.get("state_or_province") or "CA",
+                "postalCode": origin.get("postal_code") or "",
+                "country": origin.get("country") or "",
+            }
+        },
+        "merchantLocationStatus": "ENABLED",
+        "locationTypes": ["WAREHOUSE"],
+    }
+
+
+async def sync_business_policies(
+    user_id: int,
+    db: Session,
+    *,
+    marketplace_id: str = "EBAY_US",
+    create_missing_defaults: bool = False,
+) -> dict[str, Any]:
+    account = await get_or_refresh_account(user_id, db)
+    # Policy selection is user-owned configuration.  Load it before building
+    # the sync response so a harmless catalog read cannot fail with an
+    # unbound local variable and leave the publishing UI in a false "blocked"
+    # state.
+    policy_settings = _load_listing_ebay_policy_settings(db, user_id)
+    policy_catalog = await _list_business_policies_for_account(
+        user_id,
+        db,
+        account,
+        marketplace_id=marketplace_id,
+    )
+    selected = policy_catalog["selected"]
+    payment_policies = policy_catalog["payment_policies"]
+    fulfillment_policies = policy_catalog["fulfillment_policies"]
+    return_policies = policy_catalog["return_policies"]
+
+    missing_types = []
+    if not payment_policies:
+        missing_types.append("payment")
+    if not fulfillment_policies:
+        missing_types.append("fulfillment")
+    if not return_policies:
+        missing_types.append("return")
+
+    settings_updates: dict[str, Any] = {
+        "marketplace_id": marketplace_id,
+        "policy_candidates": {
+            "payment": payment_policies,
+            "fulfillment": fulfillment_policies,
+            "return": return_policies,
+        },
+        "last_policy_sync_at": datetime.now(UTC).replace(tzinfo=None).isoformat(),
+        "policy_sync_error": "",
+        "shipping_service_code": policy_settings.get("shipping_service_code") or "USPSGroundAdvantage",
+    }
+
+    if missing_types:
+        if not create_missing_defaults:
+            settings_updates["policy_sync_status"] = "blocked"
+            settings_updates["policy_sync_error"] = f"Missing eBay policies: {', '.join(missing_types)}"
+            return {
+                "status": "blocked",
+                "marketplace_id": marketplace_id,
+                "missing_policy_types": missing_types,
+                "policy_catalog": policy_catalog,
+                "settings_updates": settings_updates,
+            }
+        policy_ids = await _get_business_policy_ids_for_account(
+            user_id,
+            db,
+            account,
+            marketplace_id=marketplace_id,
+            create_if_missing=True,
+        )
+        policy_catalog = await _list_business_policies_for_account(
+            user_id,
+            db,
+            account,
+            marketplace_id=marketplace_id,
+        )
+        payment_policies = policy_catalog["payment_policies"]
+        fulfillment_policies = policy_catalog["fulfillment_policies"]
+        return_policies = policy_catalog["return_policies"]
+        selected = policy_catalog["selected"]
+        settings_updates["policy_candidates"] = {
+            "payment": payment_policies,
+            "fulfillment": fulfillment_policies,
+            "return": return_policies,
+        }
+        settings_updates["policy_sync_status"] = "created_defaults"
+    else:
+        policy_ids = await _get_business_policy_ids_for_account(
+            user_id,
+            db,
+            account,
+            marketplace_id=marketplace_id,
+            create_if_missing=False,
+        )
+        settings_updates["policy_sync_status"] = "synced"
+
+    settings_updates.update(
+        {
+            "payment_policy_id": selected.get("payment_policy_id") or policy_ids.get("paymentPolicyId") or "",
+            "payment_policy_name": selected.get("payment_policy_name") or "",
+            "fulfillment_policy_id": selected.get("fulfillment_policy_id") or policy_ids.get("fulfillmentPolicyId") or "",
+            "fulfillment_policy_name": selected.get("fulfillment_policy_name") or "",
+            "return_policy_id": selected.get("return_policy_id") or policy_ids.get("returnPolicyId") or "",
+            "return_policy_name": selected.get("return_policy_name") or "",
+            "marketplace_id": marketplace_id,
+            "shipping_service_code": policy_settings.get("shipping_service_code") or "USPSGroundAdvantage",
+        }
+    )
+
+    return {
+        "status": "updated",
+        "marketplace_id": marketplace_id,
+        "policy_catalog": policy_catalog,
+        "selected": selected,
+        "missing_policy_types": missing_types,
+        "settings_updates": settings_updates,
+    }
+
+
+async def verify_merchant_location(
+    user_id: int,
+    db: Session,
+    *,
+    location_key: str | None = None,
+    create_if_missing: bool = False,
+    origin: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    account = await get_or_refresh_account(user_id, db)
+    policy_settings = _load_listing_ebay_policy_settings(db, user_id)
+    resolved_key = str(location_key or policy_settings.get("merchant_location_key") or f"posterpro-{user_id}").strip()
+    origin_settings = _normalize_merchant_location_origin(policy_settings)
+    if isinstance(origin, dict):
+        for field, key in (
+            ("merchant_location_location_name", "location_name"),
+            ("merchant_location_postal_code", "postal_code"),
+            ("merchant_location_country", "country"),
+            ("merchant_location_city", "city"),
+            ("merchant_location_state_or_province", "state_or_province"),
+            ("merchant_location_phone", "phone"),
+        ):
+            value = str(origin.get(field) or "").strip()
+            if value:
+                origin_settings[key] = value
+    client = EbayAPIClient(account.access_token)
+    settings_updates: dict[str, Any] = {
+        "merchant_location_key": resolved_key,
+        "merchant_location_error": "",
+        "merchant_location_last_checked_at": datetime.now(UTC).replace(tzinfo=None).isoformat(),
+    }
+
+    try:
+        _, location = await _request_with_single_refresh(
+            user_id,
+            db,
+            account,
+            method="GET",
+            path=f"/sell/inventory/v1/location/{resolved_key}",
+        )
+        address = (location.get("location") or {}).get("address") if isinstance(location.get("location"), dict) else {}
+        address = address if isinstance(address, dict) else {}
+        settings_updates.update(
+            {
+                "merchant_location_verified": True,
+                "merchant_location_status": "verified",
+                "merchant_location_location_name": str(location.get("name") or origin_settings.get("location_name") or "").strip() or "PosterPro Default Location",
+                "merchant_location_postal_code": str(address.get("postalCode") or origin_settings.get("postal_code") or "").strip(),
+                "merchant_location_country": str(address.get("country") or origin_settings.get("country") or "").strip(),
+                "merchant_location_city": str(address.get("city") or origin_settings.get("city") or "").strip(),
+                "merchant_location_state_or_province": str(address.get("stateOrProvince") or origin_settings.get("state_or_province") or "").strip(),
+            }
+        )
+        return {
+            "status": "verified",
+            "marketplace_id": "EBAY_US",
+            "merchant_location_key": resolved_key,
+            "merchant_location": location,
+            "settings_updates": settings_updates,
+        }
+    except EbayIntegrationError as exc:
+        message = str(exc)
+        lower = message.lower()
+        if "404" not in lower and "not found" not in lower and "does not exist" not in lower:
+            settings_updates.update(
+                {
+                    "merchant_location_verified": False,
+                    "merchant_location_status": "error",
+                    "merchant_location_error": message,
+                }
+            )
+            return {
+                "status": "error",
+                "marketplace_id": "EBAY_US",
+                "merchant_location_key": resolved_key,
+                "error": message,
+                "settings_updates": settings_updates,
+            }
+        if not create_if_missing:
+            settings_updates.update(
+                {
+                    "merchant_location_verified": False,
+                    "merchant_location_status": "missing",
+                    "merchant_location_error": message,
+                }
+            )
+            return {
+                "status": "blocked",
+                "marketplace_id": "EBAY_US",
+                "merchant_location_key": resolved_key,
+                "missing_fields": [
+                    field
+                    for field, value in {
+                        "merchant_location_postal_code": origin.get("postal_code"),
+                        "merchant_location_country": origin.get("country"),
+                    }.items()
+                    if not str(value or "").strip()
+                ],
+                "error": message,
+                "settings_updates": settings_updates,
+            }
+
+        missing_origin_fields = [
+            field
+            for field, value in {
+                "merchant_location_postal_code": origin_settings.get("postal_code"),
+                "merchant_location_country": origin_settings.get("country"),
+            }.items()
+            if not str(value or "").strip()
+        ]
+        if missing_origin_fields:
+            settings_updates.update(
+                {
+                    "merchant_location_verified": False,
+                    "merchant_location_status": "blocked",
+                    "merchant_location_error": f"Missing origin fields: {', '.join(missing_origin_fields)}",
+                }
+            )
+            return {
+                "status": "blocked",
+                "marketplace_id": "EBAY_US",
+                "merchant_location_key": resolved_key,
+                "missing_fields": missing_origin_fields,
+                "error": f"Missing origin fields: {', '.join(missing_origin_fields)}",
+                "settings_updates": settings_updates,
+            }
+
+        created = await create_inventory_location(user_id, db, location_key=resolved_key, origin=origin_settings)
+        settings_updates.update(
+            {
+                "merchant_location_verified": True,
+                "merchant_location_status": "created",
+            }
+        )
+        return {
+            "status": "created",
+            "marketplace_id": "EBAY_US",
+            "merchant_location_key": created.get("merchantLocationKey") or resolved_key,
+            "settings_updates": settings_updates,
+        }
+
+
+async def get_required_item_specifics(
+    access_token: str,
+    category_id: str,
+    marketplace_id: str = "EBAY_US",
+    *,
+    tree_id: str | None = None,
+) -> dict[str, Any]:
+    """Fetch aspects from the selected local taxonomy domain without a tree-ID lookup.
+
+    eBay's default-tree endpoint is shared/rate-limited and used to be called once
+    per uncached category. The supported US trees are stable and synchronized
+    locally (EBAY_US=0, EBAY_MOTORS_US=100), so resolve them explicitly. A caller
+    with another marketplace must provide its tree ID rather than silently
+    guessing.
+    """
+    client = EbayAPIClient(access_token)
+    resolved_tree_id = str(tree_id or "").strip()
+    if not resolved_tree_id:
+        resolved_tree_id = {"EBAY_US": "0", "EBAY_MOTORS_US": "100"}.get(str(marketplace_id).upper(), "")
+    if not resolved_tree_id:
+        raise EbayIntegrationError(f"No synchronized taxonomy tree is configured for {marketplace_id}")
+    return await client.request(
+        "GET",
+        f"/commerce/taxonomy/v1/category_tree/{resolved_tree_id}/get_item_aspects_for_category",
+        params={"category_id": category_id},
+    )
+
+
+async def get_ebay_item_condition_policies(
+    access_token: str, category_id: str, marketplace_id: str = "EBAY_US"
+) -> dict[str, Any]:
+    """Read eBay's current condition requirement and values for one category."""
+    category_id = str(category_id or "").strip()
+    if not category_id.isdigit():
+        raise EbayIntegrationError("A numeric eBay leaf category is required for condition-policy lookup")
+    client = EbayAPIClient(access_token)
+    response = await client.request(
+        "GET",
+        f"/sell/metadata/v1/marketplace/{marketplace_id}/get_item_condition_policies",
+        params={"filter": f"categoryIds:{{{category_id}}}"},
+        headers={"Accept-Encoding": "gzip"},
+    )
+    policies = response.get("itemConditionPolicies") or []
+    matching = [
+        row for row in policies
+        if isinstance(row, dict) and str(row.get("categoryId") or "").strip() == category_id
+    ]
+    if not matching:
+        raise EbayIntegrationError(
+            f"eBay Metadata API returned no item-condition policy for category {category_id}"
+        )
+    return matching[0]
+
+
+def summarize_ebay_condition_policy(policy: dict[str, Any], listing: Listing) -> dict[str, Any]:
+    """Expose current provider condition choices without guessing enum equivalence."""
+    raw_conditions = policy.get("itemConditions") or []
+    conditions = []
+    for condition in raw_conditions:
+        if not isinstance(condition, dict):
+            continue
+        conditions.append({
+            "condition_id": condition.get("conditionId"),
+            "description": condition.get("conditionDescription") or condition.get("conditionName"),
+            "help_text": condition.get("conditionHelpText"),
+        })
+    condition_data = listing.condition_data if isinstance(listing.condition_data, dict) else {}
+    return {
+        "status": "provider_metadata_confirmed",
+        "category_id": str(policy.get("categoryId") or ""),
+        "condition_required": policy.get("itemConditionRequired"),
+        "supported_conditions": conditions,
+        "current_listing_condition": str(listing.condition or "").strip() or None,
+        "current_condition_bucket": str(condition_data.get("condition_bucket") or "").strip() or None,
+        "current_ebay_condition_override": str(condition_data.get("ebay_condition_override") or "").strip() or None,
+        "compatibility_assessment": "operator_review_required; provider numeric IDs/descriptions are not inferred into PosterPro condition enums",
+    }
+
+
+def _normalize_ebay_policy_settings(raw: dict | None) -> dict[str, Any]:
+    source = raw if isinstance(raw, dict) else {}
+    policy_candidates = source.get("policy_candidates") if isinstance(source.get("policy_candidates"), dict) else {}
+    return {
+        "fulfillment_policy_id": str(source.get("fulfillment_policy_id") or "").strip(),
+        "fulfillment_policy_name": str(source.get("fulfillment_policy_name") or "").strip(),
+        "payment_policy_id": str(source.get("payment_policy_id") or "").strip(),
+        "payment_policy_name": str(source.get("payment_policy_name") or "").strip(),
+        "return_policy_id": str(source.get("return_policy_id") or "").strip(),
+        "return_policy_name": str(source.get("return_policy_name") or "").strip(),
+        "merchant_location_key": str(source.get("merchant_location_key") or "").strip(),
+        "merchant_location_verified": bool(source.get("merchant_location_verified")),
+        "merchant_location_status": str(source.get("merchant_location_status") or "").strip(),
+        "merchant_location_last_checked_at": str(source.get("merchant_location_last_checked_at") or "").strip(),
+        "merchant_location_error": str(source.get("merchant_location_error") or "").strip(),
+        "merchant_location_location_name": str(source.get("merchant_location_location_name") or "PosterPro Default Location").strip(),
+        "merchant_location_postal_code": str(source.get("merchant_location_postal_code") or "95125").strip(),
+        "merchant_location_country": str(source.get("merchant_location_country") or "US").strip(),
+        "merchant_location_city": str(source.get("merchant_location_city") or "San Jose").strip(),
+        "merchant_location_state_or_province": str(source.get("merchant_location_state_or_province") or "CA").strip(),
+        "merchant_location_phone": str(source.get("merchant_location_phone") or "").strip(),
+        "shipping_service_code": str(source.get("shipping_service_code") or "USPSGroundAdvantage").strip(),
+        "handling_time_days": max(1, int(source.get("handling_time_days") or 1)),
+        "local_pickup_allowed": bool(source.get("local_pickup_allowed")),
+        "calculated_shipping": bool(source.get("calculated_shipping")),
+        "package_weight_required": bool(source.get("package_weight_required", True)),
+        "package_dimensions_required": bool(source.get("package_dimensions_required", True)),
+        "marketplace_id": str(source.get("marketplace_id") or "EBAY_US").strip() or "EBAY_US",
+        "last_policy_sync_at": str(source.get("last_policy_sync_at") or "").strip(),
+        "policy_sync_status": str(source.get("policy_sync_status") or "uninitialized").strip(),
+        "policy_sync_error": str(source.get("policy_sync_error") or "").strip(),
+        "policy_candidates": policy_candidates,
+    }
+
+
+def _load_listing_ebay_policy_settings(db: Session, user_id: int) -> dict[str, Any]:
+    user = db.get(User, user_id)
+    settings_json = user.settings_json if user else {}
+    raw = settings_json.get("ebay_marketplace_policy_settings") if isinstance(settings_json, dict) else {}
+    return _normalize_ebay_policy_settings(raw if isinstance(raw, dict) else {})
+
+
+async def _cached_category_aspects(
+    db: Session,
+    account: MarketplaceAccount,
+    category_id: str,
+    *,
+    marketplace_id: str = "EBAY_US",
+    taxonomy_tree_id: str | None = None,
+    force_refresh: bool = False,
+    allow_live_refresh: bool = True,
+) -> tuple[dict[str, Any] | None, str, bool]:
+    resolved_tree_id = str(taxonomy_tree_id or "").strip()
+    if not resolved_tree_id:
+        resolved_tree_id = {"EBAY_US": "0", "EBAY_MOTORS_US": "100"}.get(str(marketplace_id).upper(), "")
+    tree_version = "unknown"
+    if resolved_tree_id:
+        try:
+            from app.services.ebay_taxonomy import taxonomy_metadata
+            local_tree = taxonomy_metadata(db, resolved_tree_id, marketplace_id)
+            if local_tree:
+                tree_version = str(local_tree.get("category_tree_version") or "unknown")
+        except Exception:
+            # Cache lookup remains usable in lightweight/test databases that do
+            # not have the taxonomy table installed.
+            pass
+    cache_key = f"ebay:{marketplace_id}:{resolved_tree_id or 'unknown'}:{tree_version}:{category_id}:aspects"
+    cache_keys = [cache_key]
+    # Preserve already-synchronized legacy cache rows during the key migration.
+    cache_keys.append(f"ebay:{marketplace_id}:{category_id}:aspects")
+    cached_rows = db.execute(
+        select(MarketplaceMetadataCache).where(
+            MarketplaceMetadataCache.marketplace == "ebay",
+            MarketplaceMetadataCache.cache_key.in_(cache_keys),
+        )
+        .order_by(MarketplaceMetadataCache.updated_at.desc(), MarketplaceMetadataCache.id.desc())
+    ).scalars().all()
+    cached = cached_rows[0] if cached_rows else None
+    if cached and cached.payload and not force_refresh:
+        # Normal listing preparation must remain usable while eBay metadata is
+        # offline/rate-limited.  A stale but previously valid aspect payload is
+        # still safer than issuing the same shared request once per listing.
+        source = "cache" if cached.expires_at and cached.expires_at > datetime.utcnow() else "cache_stale"
+        if not allow_live_refresh:
+            return cached.payload, source, True
+        if source == "cache":
+            return cached.payload, source, True
+    if not allow_live_refresh and not force_refresh:
+        return None, "unavailable", False
+    try:
+        payload = await get_required_item_specifics(
+            account.access_token,
+            category_id,
+            marketplace_id=marketplace_id,
+            tree_id=resolved_tree_id or None,
+        )
+    except Exception:
+        if cached and cached.payload:
+            return cached.payload, "cache_stale", True
+        return None, "unavailable", False
+
+    expires_at = datetime.utcnow() + timedelta(days=7)
+    row = cached or MarketplaceMetadataCache(
+        marketplace="ebay",
+        cache_key=cache_key,
+    )
+    row.payload = payload
+    row.source_version = "ebay_taxonomy_v1"
+    row.expires_at = expires_at
+    db.add(row)
+    db.commit()
+    return payload, "live", True
+
+
+def _flatten_aspect_values(values: Any) -> list[str]:
+    if isinstance(values, list):
+        return [str(value).strip() for value in values if str(value).strip()]
+    if values is None:
+        return []
+    text = str(values).strip()
+    return [text] if text else []
+
+
+def _ebay_candidate_aspect_values(listing: Listing) -> dict[str, str]:
+    specifics = listing.item_specifics if isinstance(listing.item_specifics, dict) else {}
+    source = listing.source_metadata if isinstance(listing.source_metadata, dict) else {}
+    condition = listing.condition_data if isinstance(listing.condition_data, dict) else {}
+    title = str(listing.title or "").strip()
+    facts = source.get("amazon_product_facts") if isinstance(source.get("amazon_product_facts"), dict) else {}
+    fact_specs = facts.get("specifications") if isinstance(facts.get("specifications"), dict) else {}
+    def usable(value: Any) -> str:
+        if isinstance(value, list):
+            value = next((item for item in value if str(item or "").strip()), "")
+        text = str(value or "").strip()
+        return "" if text.lower() in {"does not apply", "unknown", "n/a", "not applicable"} else text
+    def lookup(*keys: str) -> str:
+        """Read normalized/source facts using case-insensitive label aliases."""
+        pools = (specifics, fact_specs, facts, source)
+        wanted = {str(key).strip().lower() for key in keys}
+        for pool in pools:
+            for key, value in pool.items():
+                if str(key).strip().lower() in wanted:
+                    found = usable(value)
+                    if found:
+                        return found
+        return ""
+    type_from_facts = next((usable(fact_specs.get(key)) for key in ("Type", "Product Type", "Item Type", "Product type")), "")
+    candidates = {
+        "brand": _derive_brand(listing),
+        "model": str(specifics.get("Model") or specifics.get("MPN") or source.get("model") or "").strip(),
+        "mpn": str(specifics.get("MPN") or source.get("mpn") or "").strip(),
+        "upc": str(specifics.get("UPC") or source.get("upc") or "").strip(),
+        "ean": str(specifics.get("EAN") or source.get("ean") or "").strip(),
+        "isbn": str(specifics.get("ISBN") or source.get("isbn") or "").strip(),
+        "color": lookup("Color", "Colour", "Color Name"),
+        "size": lookup("Size", "Size Name"),
+        "material": lookup("Material", "Primary Material", "Material Type", "Outer Material"),
+        "type": lookup("Type", "Product Type", "Item Type", "Item Type Name") or type_from_facts or _derive_item_type(title) or "",
+        "style": lookup("Style", "Style Name", "Product Style", "Bottom Style"),
+        "department": lookup("Department", "Department Name") or ("Women" if re.search(r"\bwomens?\b|\bwoman\b|\bthong\b|\bpant(?:y|ies)\b|\blingerie\b|\bcrop top\b", title, re.I) else "Men" if re.search(r"\bmens?\b|\bman\b", title, re.I) else ""),
+        "upper material": lookup("Upper Material", "Outer Material", "Material Type"),
+        "us shoe size": lookup("US Shoe Size", "Shoe Size", "Size"),
+        "size type": lookup("Size Type") or ("Regular" if re.search(r"\b(thong|pant(?:y|ies)|lingerie|bra|top|dress|shirt)\b", title, re.I) else ""),
+        "form factor": lookup("Form Factor", "Microphone Form Factor") or ("Headset" if re.search(r"\bheadset\b", title, re.I) else "Piezo/Crystal Microphone" if re.search(r"through wall microphone|contact microphone", title, re.I) else ""),
+        "storage capacity": lookup("Storage Capacity"),
+        "screen size": lookup("Screen Size"),
+        "internet connectivity": lookup("Internet Connectivity", "Connectivity Technology"),
+        "compatible brand": lookup("Compatible Brand", "Brand Compatibility") or (
+            "Apple" if re.search(r"\biphone\b|\bipad\b|\bmacbook\b", title, re.I)
+            else "Samsung" if re.search(r"\bsamsung\b|\bgalaxy\b", title, re.I)
+            else "TCL" if re.search(r"\btcl\b", title, re.I)
+            else "Motorola" if re.search(r"\bmoto(?:rola)?\b", title, re.I)
+            else "LG" if re.search(r"\blg\b", title, re.I)
+            else ""
+        ),
+        "compatible model": lookup("Compatible Model", "Model Compatibility", "Compatible Devices"),
+        "compatible mattress size": lookup("Compatible Mattress Size", "Compatible With Mattress Size", "Mattress Size", "Size"),
+        "frame material": lookup("Frame Material", "Material Type", "Material"),
+        "condition": str(condition.get("condition_bucket") or listing.condition or "").strip(),
+        "condition description": str(condition.get("item_condition_notes") or listing.description or "").strip(),
+    }
+    return {key: value for key, value in candidates.items() if value}
+
+
+def _ebay_condition_value(listing: Listing) -> str:
+    condition_data = listing.condition_data if isinstance(listing.condition_data, dict) else {}
+    override = str(condition_data.get("ebay_condition_override") or "").strip().upper()
+    if override:
+        return override
+    bucket = str(condition_data.get("condition_bucket") or listing.condition or "").strip().lower()
+    if str(listing.source_type or "").strip().lower() == "amazon_vine":
+        return "NEW"
+    if bucket in {"new", "new_in_box", "brand_new"}:
+        return "NEW"
+    if bucket in {"open_box"}:
+        return "USED_LIKE_NEW"
+    if bucket in {"used_like_new"}:
+        return "USED_LIKE_NEW"
+    if bucket in {"used_very_good"}:
+        return "USED_VERY_GOOD"
+    if bucket in {"parts_only", "for_parts", "for_parts_or_not_working"}:
+        return "FOR_PARTS_OR_NOT_WORKING"
+    if bucket in {"open_box_or_used_unknown", "used", "used_good"}:
+        return "USED_GOOD"
+    return "USED_GOOD"
+
+
+def _is_placeholder_specific_value(name: str, values: list[str]) -> bool:
+    normalized_name = str(name or "").strip().lower()
+    normalized_values = [str(value or "").strip().lower() for value in values if str(value or "").strip()]
+    if not normalized_values:
+        return True
+    placeholders = {"does not apply", "n/a", "na", "unknown", "not applicable"}
+    if all(value in placeholders for value in normalized_values):
+        return True
+    if normalized_name == "compatible model" and all(value in {"for asin", "universal"} for value in normalized_values):
+        return True
+    return False
+
+
+def _sanitize_ebay_specific_values(name: str, values: list[str]) -> list[str]:
+    normalized_name = str(name or "").strip().lower()
+    cleaned: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        if normalized_name == "eprel registration number" and not re.fullmatch(r"\d{1,19}", text):
+            continue
+        cleaned.append(_clip_specific_value(text))
+    return cleaned
+
+
+def _cap_ebay_item_specifics(
+    mapped: dict[str, list[str]],
+    required_aspects: list[dict[str, Any]],
+    recommended_aspects: list[dict[str, Any]],
+) -> dict[str, list[str]]:
+    max_specifics = 45
+    if len(mapped) <= max_specifics:
+        return mapped
+
+    required_names = [str(item.get("localizedAspectName") or "").strip() for item in required_aspects if str(item.get("localizedAspectName") or "").strip()]
+    recommended_names = [str(item.get("localizedAspectName") or "").strip() for item in recommended_aspects if str(item.get("localizedAspectName") or "").strip()]
+    priority_names = []
+    seen: set[str] = set()
+    for name in [*required_names, *recommended_names, "Brand", "Type", "Model", "MPN", "Color", "Size", "Material"]:
+        if name and name in mapped and name not in seen:
+            seen.add(name)
+            priority_names.append(name)
+
+    capped: dict[str, list[str]] = {}
+    for name in priority_names:
+        capped[name] = mapped[name]
+        if len(capped) >= max_specifics:
+            return capped
+
+    for name, values in mapped.items():
+        if name in capped:
+            continue
+        capped[name] = values
+        if len(capped) >= max_specifics:
+            break
+    return capped
+
+
+def _build_ebay_package_weight_and_size(listing: Listing) -> dict[str, Any] | None:
+    shipping = listing.shipping_profile if isinstance(listing.shipping_profile, dict) else {}
+    from app.services.shipping_profitability_policy import estimated_parcel_fields, unverified_parcel_fields
+
+    estimated = set(estimated_parcel_fields(shipping))
+    unverified = set(unverified_parcel_fields(shipping))
+    weight_value = None if "package_weight" in estimated or "package_weight" in unverified else _parse_ebay_weight_value(shipping.get("package_weight") or shipping.get("item_weight"))
+    dimensions = shipping.get("package_dimensions") if isinstance(shipping.get("package_dimensions"), dict) else {}
+    if "package_dimensions" in estimated or "package_dimensions" in unverified:
+        length = width = height = None
+    else:
+        length = _coerce_positive_int(dimensions.get("length"))
+        width = _coerce_positive_int(dimensions.get("width"))
+        height = _coerce_positive_int(dimensions.get("height"))
+
+    payload: dict[str, Any] = {}
+    if weight_value is not None:
+        payload["weight"] = {"value": weight_value, "unit": "POUND"}
+    if length and width and height:
+        payload["dimensions"] = {
+            "length": length,
+            "width": width,
+            "height": height,
+            "unit": "INCH",
+        }
+    return payload or None
+
+
+def _flatten_ebay_specifics_for_storage(mapped_specifics: dict[str, list[str]] | None) -> dict[str, Any]:
+    flattened: dict[str, Any] = {}
+    if not isinstance(mapped_specifics, dict):
+        return flattened
+    for key, values in mapped_specifics.items():
+        name = str(key or "").strip()
+        if not name:
+            continue
+        if isinstance(values, list):
+            cleaned = [str(value).strip() for value in values if str(value or "").strip()]
+        else:
+            cleaned = [str(values).strip()] if str(values or "").strip() else []
+        if not cleaned:
+            continue
+        flattened[name] = cleaned[0] if len(cleaned) == 1 else cleaned
+    return flattened
+
+
+def _apply_ebay_plan_repairs_to_listing(listing: Listing, plan: dict[str, Any]) -> None:
+    payload_preview = plan.get("payload_preview") if isinstance(plan.get("payload_preview"), dict) else {}
+    category = plan.get("category") if isinstance(plan.get("category"), dict) else {}
+    category_id = str(category.get("category_id") or "").strip()
+    if category_id.isdigit():
+        listing.category_suggestion = category_id
+
+    flattened_specifics = _flatten_ebay_specifics_for_storage(payload_preview.get("item_specifics"))
+    if flattened_specifics:
+        listing.item_specifics = flattened_specifics
+
+    marketplace_data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}
+    listing.marketplace_data = {
+        **marketplace_data,
+        "ebay_last_resolved_category": {
+            "category_id": category_id,
+            "category_name": str(category.get("category_name") or "").strip(),
+            "source": str(category.get("source") or "").strip(),
+        },
+        "ebay_item_specifics_provenance": payload_preview.get("item_specifics_provenance") or {},
+        "ebay_item_specifics_approximate": payload_preview.get("item_specifics_approximate") or [],
+        "ebay_last_auto_repair_at": datetime.now(UTC).isoformat(),
+    }
+
+
+def _map_ebay_item_specifics(
+    listing: Listing,
+    aspects: dict[str, Any] | None,
+) -> tuple[dict[str, list[str]], list[dict[str, Any]], list[dict[str, Any]], list[str], list[str], dict[str, str]]:
+    raw_aspects = (aspects or {}).get("aspects") or []
+    allowed: dict[str, dict[str, Any]] = {}
+    required: list[dict[str, Any]] = []
+    recommended: list[dict[str, Any]] = []
+    optional: list[dict[str, Any]] = []
+    for aspect in raw_aspects:
+        if not isinstance(aspect, dict):
+            continue
+        name = str(aspect.get("localizedAspectName") or "").strip()
+        if not name:
+            continue
+        allowed[name.lower()] = aspect
+        constraint = aspect.get("aspectConstraint") or {}
+        if constraint.get("aspectRequired"):
+            required.append(aspect)
+        elif constraint.get("aspectEnabledForVariations"):
+            recommended.append(aspect)
+        else:
+            optional.append(aspect)
+
+    existing_specifics = listing.item_specifics if isinstance(listing.item_specifics, dict) else {}
+    draft_provenance = {}
+    if isinstance(listing.marketplace_data, dict):
+        raw_provenance = listing.marketplace_data.get("ebay_item_specifics_provenance")
+        if isinstance(raw_provenance, dict):
+            draft_provenance = {str(key): str(value) for key, value in raw_provenance.items() if str(key).strip()}
+    candidate_values = _ebay_candidate_aspect_values(listing)
+    mapped: dict[str, list[str]] = {}
+    missing_required: list[str] = []
+    unsupported: list[str] = []
+    provenance: dict[str, str] = {}
+
+    for key, value in existing_specifics.items():
+        normalized = str(key).strip().lower()
+        if normalized and normalized not in allowed:
+            unsupported.append(str(key))
+        if normalized in allowed and value not in (None, "", []):
+            flattened = _sanitize_ebay_specific_values(str(key), _flatten_aspect_values(value))
+            if not flattened or _is_placeholder_specific_value(str(key), flattened):
+                continue
+            mapped[str(key)] = flattened
+            provenance[str(key)] = draft_provenance.get(str(key), "existing")
+
+    for aspect in [*required, *recommended, *optional]:
+        name = str(aspect.get("localizedAspectName") or "").strip()
+        normalized = name.lower()
+        constraint = aspect.get("aspectConstraint") or {}
+        required_value = bool(constraint.get("aspectRequired"))
+        if name in mapped and mapped[name]:
+            continue
+        candidate = candidate_values.get(normalized)
+        if candidate:
+            cleaned_candidate = _sanitize_ebay_specific_values(name, [candidate[:80]])
+            if not cleaned_candidate or _is_placeholder_specific_value(name, cleaned_candidate):
+                if required_value and normalized in {"mpn", "manufacturer part number"}:
+                    mapped[name] = ["Does Not Apply"]
+                    provenance[name] = "default"
+                    continue
+                # A placeholder Type should fall through to the title-based
+                # derivation below (e.g. "Security Camera", "Safe").
+                if normalized == "type":
+                    candidate = None
+                    cleaned_candidate = []
+                else:
+                    # A placeholder source value (for example ``Universal``
+                    # for a phone-compatible model) is not a final answer,
+                    # but it should fall through to the title/fact-specific
+                    # fallback below before we declare the aspect missing.
+                    candidate = None
+                    cleaned_candidate = []
+            if candidate is not None and cleaned_candidate:
+                mapped[name] = cleaned_candidate
+                provenance[name] = "derived"
+                continue
+        fallback = _fallback_aspect_value(listing, name, str(listing.title or ""))
+        if normalized == "type" and (not fallback or str(fallback).strip().lower() in {"does not apply", "n/a", "unknown", "not applicable"}):
+            fallback = _derive_item_type(str(listing.title or ""))
+        if fallback:
+            cleaned_fallback = _sanitize_ebay_specific_values(name, [_clip_specific_value(fallback)])
+            if not cleaned_fallback or _is_placeholder_specific_value(name, cleaned_fallback):
+                if required_value and normalized in {"mpn", "manufacturer part number"}:
+                    mapped[name] = ["Does Not Apply"]
+                    provenance[name] = "default"
+                    continue
+                if required_value:
+                    missing_required.append(name)
+                continue
+            mapped[name] = cleaned_fallback
+            provenance[name] = "approximate"
+            continue
+        # eBay explicitly permits "Does not apply" for MPN when a product has
+        # no manufacturer part number (common for Amazon Vine ASIN-only rows).
+        # Treat it as a valid required value only for MPN; other required
+        # aspects still need a meaningful product-specific value.
+        if required_value and normalized in {"mpn", "manufacturer part number"}:
+            mapped[name] = ["Does Not Apply"]
+            provenance[name] = "default"
+            continue
+        if required_value:
+            missing_required.append(name)
+
+    if "Brand" not in mapped and candidate_values.get("brand"):
+        cleaned_brand = _sanitize_ebay_specific_values("Brand", [candidate_values["brand"][:80]])
+        if cleaned_brand and not _is_placeholder_specific_value("Brand", cleaned_brand):
+            mapped["Brand"] = cleaned_brand
+            provenance["Brand"] = "derived"
+    if "Brand" not in mapped:
+        mapped["Brand"] = [_derive_brand(listing)]
+        provenance["Brand"] = draft_provenance.get("Brand", "default")
+
+    mapped = _cap_ebay_item_specifics(mapped, required, recommended)
+    return mapped, required, recommended, missing_required, unsupported, provenance
+
+
+async def build_ebay_publish_plan(
+    listing: Listing,
+    db: Session,
+    *,
+    marketplace_id: str = "EBAY_US",
+    allow_create_policies: bool = False,
+    allow_live_metadata_refresh: bool = True,
+) -> dict[str, Any]:
+    price = _ebay_effective_price(listing)
+    if price in (None, ""):
+        raise EbayIntegrationError("EBAY_PRICE_MISSING: an operator-authorized asking price is required; no default price was substituted")
+    account = await get_or_refresh_account(listing.user_id, db)
+    policy_settings = _load_listing_ebay_policy_settings(db, listing.user_id)
+    candidate_values = _ebay_candidate_aspect_values(listing)
+    # A saved numeric category is already the operator/taxonomy selection. Do
+    # not re-query eBay's shared category tree for every preflight; taxonomy
+    # verification is synchronized separately and the local ID remains usable
+    # for preparation while eBay is unavailable.
+    saved_category_id = str(listing.category_id or listing.category_suggestion or "").strip()
+    if saved_category_id.isdigit():
+        source_metadata = listing.source_metadata if isinstance(listing.source_metadata, dict) else {}
+        validation = source_metadata.get("category_validation") if isinstance(source_metadata.get("category_validation"), dict) else {}
+        validation_matches = str(validation.get("category_id") or "") == saved_category_id
+        stored_tree_id = str(source_metadata.get("taxonomy_tree_id") or (validation.get("tree_id") if validation_matches else "") or "").strip()
+        stored_taxonomy_marketplace = str(source_metadata.get("taxonomy_marketplace") or (validation.get("marketplace") if validation_matches else "") or "").strip().upper()
+        local_category = None
+        try:
+            from app.services.ebay_taxonomy import category_by_id, listing_has_motors_semantics, semantic_guard_flags
+            if stored_tree_id and stored_taxonomy_marketplace:
+                local_category = category_by_id(db, saved_category_id, stored_tree_id, stored_taxonomy_marketplace)
+            elif not stored_tree_id and not stored_taxonomy_marketplace:
+                # Missing ownership is never a reason to probe Motors. Legacy
+                # unqualified IDs may be interpreted only in the default US
+                # tree, and only after that exact lookup succeeds.
+                local_category = category_by_id(db, saved_category_id, "0", "EBAY_US")
+        except Exception:
+            local_category = None
+        resolved_tree_id = str((local_category or {}).get("category_tree_id") or stored_tree_id)
+        resolved_taxonomy_marketplace = str((local_category or {}).get("marketplace") or stored_taxonomy_marketplace)
+        ownership_verified = bool(local_category and resolved_tree_id and resolved_taxonomy_marketplace)
+        motors_semantic = bool(ownership_verified and resolved_tree_id == "100" and listing_has_motors_semantics(listing))
+        category_flags = semantic_guard_flags(str(listing.title or ""), str((local_category or {}).get("full_path") or "")) if local_category else ["category_ownership_unverified"]
+        category_data = {
+            "categoryId": saved_category_id,
+            "categoryName": str((local_category or {}).get("category_name") or listing.category_suggestion or saved_category_id).strip(),
+            "categoryPath": str((local_category or {}).get("full_path") or source_metadata.get("category_path") or ""),
+            "leafVerified": bool((local_category or {}).get("leaf")) if local_category else bool(source_metadata.get("leaf_verified", True)),
+            "taxonomyMarketplace": resolved_taxonomy_marketplace,
+            "taxonomyTreeId": resolved_tree_id,
+            "taxonomyTreeVersion": str((local_category or {}).get("category_tree_version") or ""),
+            "verificationSource": "local_synchronized_taxonomy" if local_category else str(source_metadata.get("category_provenance") or "local_listing"),
+            "ownershipVerified": ownership_verified,
+            "semanticMotorsClassification": "TRUE_MOTORS" if motors_semantic else ("NOT_MOTORS" if resolved_tree_id != "100" else "INSUFFICIENT_EVIDENCE"),
+            "semanticFlags": category_flags,
+            "revalidationRequired": not ownership_verified or bool(category_flags) or (resolved_tree_id == "100" and not motors_semantic),
+            "publisherPath": "TRADING_API_MOTORS" if motors_semantic else "INVENTORY_API",
+        }
+    elif not allow_live_metadata_refresh:
+        # Offline/cache-first preflight must not call the shared taxonomy
+        # endpoint for a listing that has no saved leaf.  Report the missing
+        # category as a destination blocker; the explicit taxonomy sync/search
+        # path can resolve it later.
+        category_data = {
+            "categoryId": "",
+            "categoryName": str(listing.category_suggestion or "").strip(),
+            "leafVerified": False,
+            "taxonomyTreeId": "",
+            "verificationSource": "local_cache_unavailable",
+        }
+    else:
+        category_data = await suggest_ebay_category(listing, account, marketplace_id=marketplace_id)
+    category_id = str(category_data.get("categoryId") or "").strip()
+    if category_id:
+        try:
+            aspect_payload, category_aspect_source, category_aspect_available = await _cached_category_aspects(
+                db, account, category_id, marketplace_id=str(category_data.get("taxonomyMarketplace") or marketplace_id),
+                taxonomy_tree_id=category_data.get("taxonomyTreeId"),
+                allow_live_refresh=allow_live_metadata_refresh,
+            )
+        except TypeError as exc:
+            # Preserve compatibility with lightweight test/adapter shims that
+            # implement the older cache signature; the production helper above
+            # remains the bounded, cache-first path.
+            if not any(name in str(exc) for name in ("allow_live_refresh", "taxonomy_tree_id")):
+                raise
+            aspect_payload, category_aspect_source, category_aspect_available = await _cached_category_aspects(
+                db, account, category_id, marketplace_id=str(category_data.get("taxonomyMarketplace") or marketplace_id),
+            )
+    else:
+        aspect_payload, category_aspect_source, category_aspect_available = None, "unavailable", False
+    mapped_specifics, required_aspects, recommended_aspects, missing_required, unsupported, provenance = _map_ebay_item_specifics(
+        listing,
+        aspect_payload,
+    )
+    image_urls = _build_ebay_image_urls(listing)
+    if not image_urls:
+        raise EbayIntegrationError(f"Listing {listing.id} has no images to send to eBay")
+
+    live_policy_ids = {}
+    if all(policy_settings.get(key) for key in ("payment_policy_id", "fulfillment_policy_id", "return_policy_id")):
+        live_policy_ids = {
+            "paymentPolicyId": policy_settings.get("payment_policy_id") or "",
+            "fulfillmentPolicyId": policy_settings.get("fulfillment_policy_id") or "",
+            "returnPolicyId": policy_settings.get("return_policy_id") or "",
+        }
+    elif allow_create_policies:
+        live_policy_ids = await get_business_policy_ids(account.access_token, marketplace_id=marketplace_id, create_if_missing=True)
+        policy_settings = {
+            **policy_settings,
+            "payment_policy_id": live_policy_ids.get("paymentPolicyId") or policy_settings.get("payment_policy_id") or "",
+            "fulfillment_policy_id": live_policy_ids.get("fulfillmentPolicyId") or policy_settings.get("fulfillment_policy_id") or "",
+            "return_policy_id": live_policy_ids.get("returnPolicyId") or policy_settings.get("return_policy_id") or "",
+        }
+    else:
+        # Policy candidates synchronized into the tenant settings are the
+        # account-level cache. A listing preflight must not re-fetch the same
+        # payment/fulfillment/return objects. An explicit Settings sync can
+        # refresh this cache when it is stale or invalid.
+        candidates = policy_settings.get("policy_candidates") if isinstance(policy_settings.get("policy_candidates"), dict) else {}
+        def cached_candidate(kind: str, id_key: str) -> str:
+            rows = candidates.get(kind) if isinstance(candidates.get(kind), list) else []
+            for row in rows:
+                if isinstance(row, dict) and str(row.get("id") or row.get(id_key) or "").strip():
+                    return str(row.get("id") or row.get(id_key)).strip()
+            return ""
+        live_policy_ids = {
+            "paymentPolicyId": cached_candidate("payment", "paymentPolicyId"),
+            "fulfillmentPolicyId": cached_candidate("fulfillment", "fulfillmentPolicyId"),
+            "returnPolicyId": cached_candidate("return", "returnPolicyId"),
+        }
+
+    sku = _build_ebay_sku(listing.user_id, listing.id)
+    sku = _build_ebay_sku(listing.user_id, listing.id)
+    # Destination overrides are deliberate operator state.  They take
+    # precedence over the canonical/reference price for eBay updates while
+    # leaving other marketplaces untouched.
+    package_weight_and_size = _build_ebay_package_weight_and_size(listing)
+    inventory_payload = {
+        "sku": sku,
+        "availability": {"shipToLocationAvailability": {"quantity": max(1, int(listing.quantity or 1))}},
+        "condition": _ebay_condition_value(listing),
+        "product": {
+            "title": listing.title or f"PosterPro Listing #{listing.id}",
+            "description": _sanitize_ebay_description(listing.description),
+            "aspects": mapped_specifics,
+            "imageUrls": image_urls,
+        },
+    }
+    if package_weight_and_size:
+        inventory_payload["packageWeightAndSize"] = package_weight_and_size
+    offer_payload = {
+        "sku": sku,
+        "marketplaceId": marketplace_id,
+        "format": "FIXED_PRICE",
+        "availableQuantity": max(1, int(listing.quantity or 1)),
+        "categoryId": category_id,
+        "merchantLocationKey": policy_settings.get("merchant_location_key") or f"posterpro-{listing.user_id}",
+        "pricingSummary": {"price": {"value": str(price), "currency": "USD"}},
+    }
+    shipping_policy = {
+        "merchantLocationKey": offer_payload["merchantLocationKey"],
+        "fulfillmentPolicyId": live_policy_ids.get("fulfillmentPolicyId") or None,
+        "paymentPolicyId": live_policy_ids.get("paymentPolicyId") or None,
+        "returnPolicyId": live_policy_ids.get("returnPolicyId") or None,
+        "handlingTime": policy_settings.get("handling_time_days"),
+        "shippingServiceCode": policy_settings.get("shipping_service_code") or "USPSGroundAdvantage",
+        "calculatedShipping": bool(policy_settings.get("calculated_shipping")),
+        "localPickupAllowed": bool(policy_settings.get("local_pickup_allowed")),
+    }
+    if live_policy_ids.get("paymentPolicyId") and live_policy_ids.get("fulfillmentPolicyId") and live_policy_ids.get("returnPolicyId"):
+        offer_payload["listingPolicies"] = {
+            "paymentPolicyId": live_policy_ids.get("paymentPolicyId"),
+            "returnPolicyId": live_policy_ids.get("returnPolicyId"),
+            "fulfillmentPolicyId": live_policy_ids.get("fulfillmentPolicyId"),
+        }
+    return {
+        "marketplace": "ebay",
+        "listing_id": listing.id,
+        "sku": sku,
+        "category": {
+            "category_id": category_id,
+            "category_name": str(category_data.get("categoryName") or "").strip() or category_id,
+            "source": "listing.category_suggestion" if str(listing.category_suggestion or "").strip().isdigit() else "ebay_taxonomy",
+            "metadata_source": category_aspect_source,
+            "metadata_available": category_aspect_available,
+            "leaf_verified": category_data.get("leafVerified") if str(listing.source_type or "").strip().lower() == "amazon_vine" else None,
+            "taxonomy_tree_id": category_data.get("taxonomyTreeId"),
+            "taxonomy_marketplace": category_data.get("taxonomyMarketplace"),
+            "category_path": category_data.get("categoryPath"),
+            "ownership_verified": category_data.get("ownershipVerified", False),
+            "semantic_motors_classification": category_data.get("semanticMotorsClassification"),
+            "revalidation_required": category_data.get("revalidationRequired", False),
+            "publisher_path": category_data.get("publisherPath") or "INVENTORY_API",
+            "verification_source": category_data.get("verificationSource"),
+        },
+        "aspect_summary": {
+            "required": [str(item.get("localizedAspectName") or "").strip() for item in required_aspects],
+            "recommended": [str(item.get("localizedAspectName") or "").strip() for item in recommended_aspects],
+            "missing_required": missing_required,
+            "unsupported": unsupported,
+        },
+        "policy_settings": policy_settings,
+        "policy_ids": live_policy_ids,
+        "inventory_item_payload": inventory_payload,
+        "offer_payload": offer_payload,
+        "payload_preview": {
+            "sku": sku,
+            "title": inventory_payload["product"]["title"],
+            "description": inventory_payload["product"]["description"],
+            "condition": inventory_payload["condition"],
+            "conditionDescription": (listing.condition_data or {}).get("item_condition_notes") or listing.description or "",
+            "category_id": category_id,
+            "quantity": offer_payload["availableQuantity"],
+            "price": price,
+            "currency": "USD",
+            "product_identifiers": {
+                key.upper(): value
+                for key, value in {
+                    "upc": candidate_values.get("upc"),
+                    "ean": candidate_values.get("ean"),
+                    "isbn": candidate_values.get("isbn"),
+                    "mpn": candidate_values.get("mpn"),
+                }.items()
+                if value
+            },
+            "item_specifics": mapped_specifics,
+            "item_specifics_provenance": provenance,
+            "item_specifics_approximate": [field for field, source in provenance.items() if source in {"derived", "approximate", "default"}],
+            "image_urls": image_urls,
+            "packageWeightAndSize": package_weight_and_size or {},
+            "shipping_policy": shipping_policy,
+            "marketplaceId": marketplace_id,
+            "listing_format": "FIXED_PRICE",
+            "duration": "GTC",
+            "site": marketplace_id,
+        },
+        "image_summary": {
+            "image_count": len(image_urls),
+            "actual_image_count": len([image for image in (listing.listing_images or []) if isinstance(image, dict) and not image.get("is_reference") and image.get("operator_state") != "rejected"]),
+            "reference_only": bool(listing.listing_images) and not any(
+                isinstance(image, dict) and not image.get("is_reference") and image.get("operator_state") != "rejected"
+                for image in (listing.listing_images or [])
+            ),
+        },
+        "account_id": account.id,
+        "account_summary": {
+            "marketplace": account.marketplace.value if hasattr(account.marketplace, "value") else str(account.marketplace),
+            "external_account_id": account.external_account_id,
+            "has_refresh_token": bool(account.refresh_token),
+            "token_expires_at": account.token_expires_at.isoformat() if account.token_expires_at else None,
+        },
+        "shipping_summary": {
+            "shipping_profile": listing.shipping_profile or {},
+            "shipping_policy": shipping_policy,
+        },
+    }
+
+
+async def get_incoming_best_offers(
+    account: MarketplaceAccount,
+    *,
+    limit: int = 100,
+    marketplace_id: str = "EBAY_US",
+) -> list[dict[str, Any]]:
+    """
+    Pull incoming buyer offers from eBay's negotiation API.
+    """
+    client = EbayAPIClient(account.access_token)
+    response = await client.request(
+        "GET",
+        "/sell/negotiation/v1/find_offers",
+        params={
+            "limit": limit,
+            "marketplace_id": marketplace_id,
+            "offer_type": "COUNTER_OFFER",
+        },
+    )
+    offers = response.get("offers") or response.get("bestOffers") or []
+    return [offer for offer in offers if isinstance(offer, dict)]
+
+
+async def get_fulfillment_orders(
+    account: MarketplaceAccount,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+    filter_expression: str | None = None,
+) -> list[dict[str, Any]]:
+    """Pull paid/completed orders from eBay Fulfillment API."""
+    client = EbayAPIClient(account.access_token)
+    params: dict[str, Any] = {"limit": limit, "offset": offset}
+    if filter_expression:
+        params["filter"] = filter_expression
+    response = await client.request("GET", "/sell/fulfillment/v1/order", params=params)
+    orders = response.get("orders") or []
+    return [order for order in orders if isinstance(order, dict)]
+
+
+async def get_active_ebay_listings(
+    user_id: int,
+    db: Session,
+    *,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    account = await get_or_refresh_account(user_id, db)
+    client = EbayAPIClient(account.access_token)
+
+    async def _offer_page(*, page_limit: int, offset: int) -> dict[str, Any]:
+        nonlocal account, client
+        try:
+            return await client.request("GET", "/sell/inventory/v1/offer", params={"limit": page_limit, "offset": offset})
+        except EbayIntegrationError as exc:
+            # eBay can revoke an access token before the locally supplied
+            # expiry. Refresh once, then retry the same *read-only* page.
+            if "(401)" not in str(exc) or not account.refresh_token:
+                raise
+            try:
+                account = await refresh_ebay_token(user_id, db)
+            except EbayIntegrationError as refresh_exc:
+                _mark_ebay_reauthorization_required(account, db, refresh_exc)
+                raise
+            client = EbayAPIClient(account.access_token)
+            try:
+                return await client.request("GET", "/sell/inventory/v1/offer", params={"limit": page_limit, "offset": offset})
+            except EbayIntegrationError as retry_exc:
+                if "(401)" in str(retry_exc):
+                    _mark_ebay_reauthorization_required(account, db, retry_exc)
+                raise
+
+    requested_limit = max(1, int(limit or 1))
+    page_limit = min(requested_limit, 100)
+    offers: list[dict[str, Any]] = []
+    offset = 0
+    try:
+        while len(offers) < requested_limit:
+            offers_response = await _offer_page(page_limit=min(page_limit, requested_limit - len(offers)), offset=offset)
+            page = [offer for offer in (offers_response.get("offers") or []) if isinstance(offer, dict)]
+            offers.extend(page)
+            if len(page) < page_limit:
+                break
+            offset += len(page)
+    except EbayIntegrationError as exc:
+        if not _is_inventory_sku_catalog_error(exc):
+            raise
+        imported = await _get_active_ebay_listings_via_trading_api(account, limit=requested_limit)
+        account.last_successful_check_at = datetime.now(UTC).replace(tzinfo=None)
+        account.connection_status = "connected"
+        account.last_error = None
+        db.add(account)
+        db.commit()
+        return imported
+    account.last_successful_check_at = datetime.now(UTC).replace(tzinfo=None)
+    account.connection_status = "connected"
+    account.last_error = None
+    db.add(account)
+    db.commit()
+    imported: list[dict[str, Any]] = []
+    for offer in offers:
+        sku = str(offer.get("sku") or "").strip()
+        if not sku:
+            continue
+        offer_status = str(offer.get("listingStatus") or offer.get("status") or "").strip().upper()
+        if offer_status and offer_status not in {"ACTIVE", "PUBLISHED", "LISTED"}:
+            continue
+
+        inventory_item = await client.request("GET", f"/sell/inventory/v1/inventory_item/{sku}")
+        product = inventory_item.get("product") or {}
+        availability = (inventory_item.get("availability") or {}).get("shipToLocationAvailability") or {}
+        pricing_summary = offer.get("pricingSummary") or {}
+        price_payload = pricing_summary.get("price") or {}
+        listing_id = str(offer.get("listingId") or "").strip()
+        source_url = f"https://www.ebay.com/itm/{listing_id}" if listing_id else ""
+        aspects = product.get("aspects") or {}
+        normalized_aspects = {
+            str(key): values[0] if isinstance(values, list) and values else values
+            for key, values in aspects.items()
+            if str(key).strip()
+        }
+        image_urls = [
+            str(url).strip()
+            for url in (product.get("imageUrls") or [])
+            if str(url).strip()
+        ]
+        imported.append(
+            {
+                "source_listing_reference": source_url or listing_id or sku,
+                "source_url": source_url or None,
+                "title": str(product.get("title") or "").strip(),
+                "description": str(product.get("description") or "").strip(),
+                "price": price_payload.get("value"),
+                "listing_price": price_payload.get("value"),
+                "quantity": availability.get("quantity") or offer.get("availableQuantity") or 1,
+                "image_urls": image_urls,
+                "item_specifics": normalized_aspects,
+                "attributes": normalized_aspects,
+                "category_id": offer.get("categoryId"),
+                "condition": inventory_item.get("condition") or "",
+                "tags": ["ebay", "imported"],
+                "source_identifiers": {
+                    "ebay_listing_id": listing_id or None,
+                    "offer_id": str(offer.get("offerId") or "").strip() or None,
+                    "sku": sku,
+                },
+                "raw_offer": offer,
+                "raw_inventory_item": inventory_item,
+            }
+        )
+    return imported
+
+
+def _resolve_existing_ebay_offer_id(listing: Listing) -> str | None:
+    marketplace_data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}
+    offer = marketplace_data.get("offer") if isinstance(marketplace_data.get("offer"), dict) else {}
+    for candidate in (
+        offer.get("offerId"),
+        offer.get("offer_id"),
+        marketplace_data.get("offer_id"),
+        marketplace_data.get("current_offer_id"),
+        (marketplace_data.get("ebay_revision") or {}).get("offer_id") if isinstance(marketplace_data.get("ebay_revision"), dict) else None,
+    ):
+        value = str(candidate or "").strip()
+        if value:
+            return value
+
+    # Historical eBay sync rows stored the authoritative offer identity in
+    # MarketplaceListing.raw_response rather than copying it into
+    # listing.marketplace_data. Recover that exact ID for updates/ends; never
+    # derive or guess an offer from the listing ID or SKU.
+    for row in getattr(listing, "marketplace_listings", None) or []:
+        market = str(getattr(getattr(row, "marketplace", None), "value", getattr(row, "marketplace", "")) or "").lower()
+        if market not in {"ebay", "marketplacename.ebay"}:
+            continue
+        raw = getattr(row, "raw_response", None)
+        if not isinstance(raw, dict):
+            continue
+        candidates = [
+            raw.get("offer_id"), raw.get("offerId"),
+            (raw.get("source_identifiers") or {}).get("offer_id") if isinstance(raw.get("source_identifiers"), dict) else None,
+            ((raw.get("remote") or {}).get("raw_offer") or {}).get("offerId") if isinstance((raw.get("remote") or {}).get("raw_offer"), dict) else None,
+        ]
+        for candidate in candidates:
+            value = str(candidate or "").strip()
+            if value:
+                return value
+
+    attempts = [attempt for attempt in (listing.publish_attempts or []) if isinstance(attempt, MarketplacePublishAttempt)]
+    attempts = sorted(
+        attempts,
+        key=lambda attempt: (
+            attempt.updated_at.isoformat() if attempt.updated_at else "",
+            attempt.id or 0,
+        ),
+        reverse=True,
+    )
+    for attempt in attempts:
+        if str(attempt.offer_id or "").strip():
+            return str(attempt.offer_id).strip()
+    return None
+
+
+async def end_ebay_listing(
+    listing: Listing,
+    db: Session,
+    *,
+    expected_external_listing_id: str,
+) -> dict[str, Any]:
+    """Withdraw an exact known Inventory API offer without deleting its history.
+
+    We require the caller's external listing ID to match the canonical eBay
+    identity before making a remote request. An offer is then fetched and its
+    current listing ID is checked again before withdrawal. This makes a stale
+    or mismatched job fail closed rather than ending a different listing.
+    """
+    expected = str(expected_external_listing_id or "").strip()
+    canonical_id = str(listing.ebay_listing_id or "").strip()
+    if not expected or not canonical_id or expected != canonical_id:
+        raise EbayIntegrationError("Exact eBay listing identity is missing or no longer matches; no remote action was taken.")
+
+    sync = (listing.marketplace_data or {}).get("ebay_sync") if isinstance(listing.marketplace_data, dict) else {}
+    capability = sync.get("management_capability") if isinstance(sync, dict) and isinstance(sync.get("management_capability"), dict) else {}
+    if str(capability.get("management_origin") or "").upper() == "TRADING_API_LEGACY":
+        listing_type = str(capability.get("listing_type") or sync.get("listing_type") or "")
+        return await end_ebay_trading_listing(listing, db, expected_item_id=expected, listing_type=listing_type)
+
+    offer_id = _resolve_existing_ebay_offer_id(listing)
+    if not offer_id:
+        raise EbayIntegrationError("The exact eBay offer ID is not stored; no remote action was taken.")
+
+    account = await get_or_refresh_account(listing.user_id, db)
+    client = EbayAPIClient(account.access_token)
+    offer = await client.request("GET", f"/sell/inventory/v1/offer/{offer_id}")
+    remote_listing = offer.get("listing") if isinstance(offer.get("listing"), dict) else {}
+    remote_listing_id = str(remote_listing.get("listingId") or offer.get("listingId") or "").strip()
+    if remote_listing_id and remote_listing_id != expected:
+        raise EbayIntegrationError("The stored eBay offer points to a different listing; no remote action was taken.")
+
+    offer_status = str(offer.get("status") or offer.get("offerStatus") or "").strip().upper()
+    if offer_status in {"UNPUBLISHED", "WITHDRAWN", "ENDED", "DELETED"}:
+        status = "ALREADY_ENDED"
+        response: dict[str, Any] = {"offerId": offer_id, "listingId": expected, "previous_status": offer_status}
+    else:
+        if not remote_listing_id:
+            raise EbayIntegrationError("eBay did not confirm which external listing belongs to this offer; no remote action was taken.")
+        withdrawal_response = await client.request("POST", f"/sell/inventory/v1/offer/{offer_id}/withdraw")
+        # eBay accepting the withdrawal request is not proof that the offer is
+        # no longer live.  Re-read the exact offer before reporting ENDED.
+        verification = await client.request("GET", f"/sell/inventory/v1/offer/{offer_id}")
+        verified_status = str((verification or {}).get("status") or (verification or {}).get("offerStatus") or "").strip().upper()
+        response = {"offerId": offer_id, "listingId": expected, "withdrawal": withdrawal_response, "verification": verification}
+        if verified_status in {"UNPUBLISHED", "WITHDRAWN", "ENDED", "DELETED", "CLOSED", "DEACTIVATED"}:
+            status = "ENDED"
+        else:
+            status = "REMOTE_STATE_UNKNOWN"
+
+    now = datetime.now(UTC).replace(tzinfo=None).isoformat()
+    previous_data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}
+    listing.marketplace_data = {
+        **previous_data,
+        "ebay_end": {
+            "status": status,
+            "offer_id": offer_id,
+            "listing_id": expected,
+            "completed_at": now,
+            "response": response,
+        },
+        "ebay_status": "ENDED" if status in {"ENDED", "ALREADY_ENDED"} else "REMOTE_STATE_UNKNOWN",
+    }
+    if status in {"ENDED", "ALREADY_ENDED"}:
+        _sync_ebay_marketplace_listing(
+            db,
+            listing_id=listing.id,
+            status=MarketplaceListingStatus.CLOSED,
+            response={"status": status, "listing_id": expected, "offer_id": offer_id, "response": response},
+        )
+    db.add(listing)
+    db.commit()
+    return {"status": status, "listing_id": expected, "offer_id": offer_id, "response": response}
+
+
+def _ebay_listing_revision_changes(local: Listing, remote: dict[str, Any]) -> list[str]:
+    changed: list[str] = []
+    remote_title = str(remote.get("title") or "").strip()
+    remote_description = str(remote.get("description") or "").strip()
+    remote_price = remote.get("listing_price")
+    remote_quantity = remote.get("quantity")
+    remote_category = str(remote.get("category_id") or "").strip()
+    remote_condition = str(remote.get("condition") or "").strip()
+    remote_specifics = remote.get("item_specifics") if isinstance(remote.get("item_specifics"), dict) else {}
+    if remote_title and remote_title != str(local.title or "").strip():
+        changed.append("title")
+    if remote_description and remote_description != str(local.description or "").strip():
+        changed.append("description")
+    if remote_price is not None and _coerce_price_number(remote_price) != _coerce_price_number(local.listing_price or local.suggested_price):
+        changed.append("listing_price")
+    if remote_quantity is not None and int(remote_quantity or 0) != int(local.quantity or 0):
+        changed.append("quantity")
+    if remote_category and remote_category != str(local.category_id or "").strip():
+        changed.append("category_id")
+    if remote_condition and remote_condition != str(local.condition or "").strip():
+        changed.append("condition")
+    if remote_specifics and remote_specifics != (local.item_specifics or {}):
+        changed.append("item_specifics")
+    return changed
+
+
+async def sync_ebay_active_listings(
+    user_id: int,
+    db: Session,
+    *,
+    # Reconcile the complete active inventory by default.  The previous
+    # 100-row default silently left later live listings (including listings
+    # beyond the first page) with stale local prices and metadata.
+    limit: int = 1000,
+) -> dict[str, Any]:
+    account = await get_or_refresh_account(user_id, db)
+    active_listings = await get_active_ebay_listings(user_id, db, limit=limit)
+    # Keep the dashboard's verified identity snapshot in step with the same
+    # successful read used for reconciliation.  Otherwise the catalog could
+    # continue showing the pre-sync local count until a separate snapshot job
+    # happened to run.
+    snapshot_ids = sorted({
+        str((row.get("source_identifiers") or {}).get("ebay_listing_id") or "").strip()
+        for row in active_listings
+        if isinstance(row, dict) and isinstance(row.get("source_identifiers"), dict)
+        and str((row.get("source_identifiers") or {}).get("ebay_listing_id") or "").strip()
+    })
+    snapshot_key = f"dashboard-active-listing-identities-v1:{int(user_id)}"
+    snapshot = db.execute(select(MarketplaceMetadataCache).where(
+        MarketplaceMetadataCache.marketplace == MarketplaceName.ebay.value,
+        MarketplaceMetadataCache.cache_key == snapshot_key,
+    ).order_by(MarketplaceMetadataCache.created_at.desc(), MarketplaceMetadataCache.id.desc()).limit(1)).scalar_one_or_none()
+    snapshot_payload = {
+        "listing_ids": snapshot_ids,
+        "verified_at": datetime.now(UTC).isoformat(),
+        "result_count": len(active_listings),
+        "source": "ebay_active_listings_read",
+    }
+    if snapshot is None:
+        snapshot = MarketplaceMetadataCache(
+            marketplace=MarketplaceName.ebay.value,
+            cache_key=snapshot_key,
+            payload=snapshot_payload,
+            source_version="dashboard-live-v1",
+        )
+    else:
+        snapshot.payload = snapshot_payload
+        snapshot.source_version = "dashboard-live-v1"
+    snapshot.expires_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=10)
+    db.add(snapshot)
+    db.flush()
+    matched = 0
+    created = 0
+    updated = 0
+    unmatched = 0
+    changed_fields: dict[str, int] = {}
+    results: list[dict[str, Any]] = []
+
+    for remote in active_listings:
+        source_identifiers = remote.get("source_identifiers") if isinstance(remote.get("source_identifiers"), dict) else {}
+        ebay_listing_id = str(source_identifiers.get("ebay_listing_id") or "").strip()
+        sku = str(source_identifiers.get("sku") or "").strip()
+        offer_id = str(source_identifiers.get("offer_id") or "").strip()
+        local = None
+        if ebay_listing_id:
+            local = db.execute(
+                select(Listing).where(
+                    Listing.user_id == user_id,
+                    Listing.ebay_listing_id == ebay_listing_id,
+                )
+            ).scalars().first()
+        if not local and ebay_listing_id:
+            # Older imports can retain the remote ID only on the marketplace
+            # projection.  Match that first before creating a history row.
+            local = db.execute(
+                select(Listing)
+                .join(MarketplaceListing, MarketplaceListing.listing_id == Listing.id)
+                .where(
+                    Listing.user_id == user_id,
+                    MarketplaceListing.marketplace == MarketplaceName.ebay,
+                    MarketplaceListing.marketplace_listing_id == ebay_listing_id,
+                )
+                .order_by(MarketplaceListing.updated_at.desc(), Listing.id.desc())
+            ).scalars().first()
+        if not local:
+            listing_id = _extract_listing_id_from_ebay_sku(sku, user_id=user_id)
+            if listing_id:
+                local = db.get(Listing, listing_id)
+                if local and local.user_id != user_id:
+                    local = None
+        if not local:
+            # Read-only eBay reconciliation is allowed to create a local
+            # historical mirror of a remote active offer.  It never calls a
+            # remote create/revise/end endpoint, and stable remote IDs/SKUs
+            # make reruns idempotent.
+            remote_images = [str(url).strip() for url in (remote.get("image_urls") or []) if str(url).strip()]
+            # Inventory responses for legacy/history rows may omit media even
+            # though the authoritative Trading listing still has PictureDetails.
+            # Hydrate by exact ItemID before creating the local mirror.
+            if not remote_images and ebay_listing_id:
+                try:
+                    trading_item = await get_ebay_trading_item(account, ebay_listing_id)
+                    remote_images = [
+                        str(url).strip()
+                        for url in [*(trading_item.get("pictures") or []), *(trading_item.get("external_picture_urls") or []), *(trading_item.get("gallery_urls") or [])]
+                        if str(url).strip()
+                    ]
+                    if remote_images:
+                        remote["image_urls"] = list(dict.fromkeys(remote_images))
+                except Exception:
+                    # Reconciliation remains useful when a particular historical
+                    # item is unavailable; its media capability stays explicit.
+                    pass
+            local = Listing(
+                user_id=user_id,
+                status=ListingStatus.posted,
+                source_type="ebay_history_reconciliation",
+                title=str(remote.get("title") or "eBay listing").strip()[:255] or "eBay listing",
+                description=str(remote.get("description") or "").strip() or None,
+                category_id=str(remote.get("category_id") or "").strip() or None,
+                item_specifics=remote.get("item_specifics") if isinstance(remote.get("item_specifics"), dict) else {},
+                condition=str(remote.get("condition") or "").strip() or None,
+                listing_price=_coerce_price_number(remote.get("listing_price")),
+                suggested_price=_coerce_price_number(remote.get("listing_price")),
+                quantity=max(0, int(remote.get("quantity") or 0)),
+                image_urls=remote_images or None,
+                listing_images=[
+                    {
+                        "storage_path": url,
+                        "source_url": url,
+                        "source_platform": "ebay",
+                        "operator_state": "approved",
+                        "is_reference": False,
+                        "metadata": {"source": "ebay_history_reconciliation", "remote_listing_id": ebay_listing_id},
+                    }
+                    for url in remote_images
+                ] or None,
+                ebay_listing_id=ebay_listing_id or None,
+                ebay_publish_status=EbayPublishStatus.POSTED,
+                source_metadata={
+                    "source": "ebay_history_reconciliation",
+                    "source_identifiers": {"ebay_listing_id": ebay_listing_id or None, "offer_id": offer_id or None, "sku": sku or None},
+                    "source_url": remote.get("source_url"),
+                    "imported_at": datetime.now(UTC).replace(tzinfo=None).isoformat(),
+                },
+                marketplace_data={"ebay_sync": {"source": "ebay_active_listings", "sku": sku or None, "offer_id": offer_id or None}},
+            )
+            db.add(local)
+            db.flush()
+            created += 1
+
+        matched += 1
+        revision_changes = _ebay_listing_revision_changes(local, remote)
+        changed_fields_summary: dict[str, Any] = {}
+        remote_images = [str(url).strip() for url in (remote.get("image_urls") or []) if str(url).strip()]
+        if not remote_images and ebay_listing_id and not (local.image_urls or local.listing_images):
+            try:
+                trading_item = await get_ebay_trading_item(account, ebay_listing_id)
+                remote_images = [
+                    str(url).strip()
+                    for url in [*(trading_item.get("pictures") or []), *(trading_item.get("external_picture_urls") or []), *(trading_item.get("gallery_urls") or [])]
+                    if str(url).strip()
+                ]
+                if remote_images:
+                    remote["image_urls"] = list(dict.fromkeys(remote_images))
+            except Exception:
+                pass
+        # Reconciliation is allowed to enrich local history rows from an
+        # authoritative read-only response, but must never replace operator
+        # media with an empty remote response or overwrite existing media.
+        if remote_images and not (local.image_urls or local.listing_images):
+            local.image_urls = remote_images
+            local.listing_images = [
+                {
+                    "storage_path": url,
+                    "source_url": url,
+                    "source_platform": "ebay_reconciliation",
+                    "operator_state": "approved",
+                    "is_reference": True,
+                    "metadata": {"remote_listing_id": ebay_listing_id, "provenance": "EBAY_READ_ONLY_RECONCILIATION"},
+                }
+                for url in remote_images
+            ]
+            changed_fields_summary["media_hydrated"] = True
+        if revision_changes:
+            changed_fields_summary["changed_fields"] = revision_changes
+            if remote.get("title"):
+                local.title = str(remote.get("title") or "").strip() or local.title
+            if remote.get("description"):
+                local.description = str(remote.get("description") or "").strip() or local.description
+            if remote.get("listing_price") is not None:
+                remote_price = _coerce_price_number(remote.get("listing_price"))
+                if remote_price is not None:
+                    local.listing_price = remote_price
+                    if local.suggested_price is None:
+                        local.suggested_price = remote_price
+            if remote.get("quantity") is not None:
+                try:
+                    local.quantity = max(0, int(remote.get("quantity") or 0))
+                except (TypeError, ValueError):
+                    pass
+            if remote.get("category_id"):
+                local.category_id = str(remote.get("category_id") or "").strip() or local.category_id
+            if remote.get("condition"):
+                local.condition = str(remote.get("condition") or "").strip() or local.condition
+            if isinstance(remote.get("item_specifics"), dict) and remote.get("item_specifics"):
+                local.item_specifics = remote.get("item_specifics")
+            updated += 1
+            for field in revision_changes:
+                changed_fields[field] = changed_fields.get(field, 0) + 1
+
+        local.marketplace_data = {
+            **(local.marketplace_data or {}),
+            "ebay_sync": {
+                "last_synced_at": datetime.now(UTC).replace(tzinfo=None).isoformat(),
+                "source": "ebay_active_listings",
+                "ebay_listing_id": ebay_listing_id or local.ebay_listing_id,
+                "offer_id": offer_id or _resolve_existing_ebay_offer_id(local),
+                "sku": sku or f"posterpro-{local.user_id}-{local.id}",
+                "remote_title": remote.get("title"),
+                "remote_price": remote.get("listing_price"),
+                "remote_quantity": remote.get("quantity"),
+                "remote_category_id": remote.get("category_id"),
+                "remote_condition": remote.get("condition"),
+                "remote_item_specifics": remote.get("item_specifics"),
+                "remote_image_urls": remote.get("image_urls") or [],
+                "management_capability": {
+                    "remote_discovered": bool(ebay_listing_id),
+                    "identity_complete": bool(ebay_listing_id and offer_id),
+                    "media_complete": bool(remote_images),
+                    "update_capable": bool(offer_id),
+                    "end_capable": bool(offer_id),
+                    "management_origin": "INVENTORY_API_MANAGED" if offer_id else "TRADING_API_LEGACY" if ebay_listing_id else "UNKNOWN_ORIGIN",
+                    "state": "IDENTITY_COMPLETE" if offer_id else "IDENTITY_INCOMPLETE",
+                    "reason": None if offer_id else "Exact eBay offer identity was not returned by reconciliation.",
+                },
+                "remote_listing_start_time": remote.get("listing_start_time"),
+                "remote_view_count": remote.get("view_count"),
+                **changed_fields_summary,
+            },
+        }
+        _sync_ebay_marketplace_listing(
+            db,
+            listing_id=local.id,
+            status=MarketplaceListingStatus.PUBLISHED,
+            response={
+                "status": "SYNCED",
+                "source": "ebay_active_listings",
+                "ebay_listing_id": ebay_listing_id or local.ebay_listing_id,
+                "offer_id": offer_id or _resolve_existing_ebay_offer_id(local),
+                "sku": sku or f"posterpro-{local.user_id}-{local.id}",
+                "remote": remote,
+            },
+        )
+        db.add(local)
+        results.append(
+            {
+                "listing_id": local.id,
+                "ebay_listing_id": ebay_listing_id or local.ebay_listing_id,
+                "changed_fields": revision_changes,
+                "status": "updated" if revision_changes else "unchanged",
+            }
+        )
+
+    # The active-listing response is a complete, successful remote snapshot.
+    # Reconcile local eBay projections that disappeared from that snapshot.  A
+    # missing row is not enough on its own to archive a listing: listings with
+    # no durable remote identity remain unknown, and listings still live on a
+    # different marketplace remain posted.  All listing fields/media are left
+    # untouched; only the eBay projection and explicit archive history change.
+    active_ids = {
+        str((row.get("source_identifiers") or {}).get("ebay_listing_id") or "").strip()
+        for row in active_listings
+        if isinstance(row, dict) and isinstance(row.get("source_identifiers"), dict)
+    }
+    active_ids.discard("")
+    local_ebay_rows = list(db.execute(
+        select(MarketplaceListing)
+        .join(Listing, Listing.id == MarketplaceListing.listing_id)
+        .where(
+            Listing.user_id == user_id,
+            MarketplaceListing.marketplace == MarketplaceName.ebay,
+            MarketplaceListing.status.in_((MarketplaceListingStatus.PUBLISHED, MarketplaceListingStatus.UPDATED)),
+            MarketplaceListing.marketplace_listing_id.is_not(None),
+        )
+    ).scalars())
+    archived = 0
+    closed = 0
+    unknown = 0
+    for remote_row in local_ebay_rows:
+        remote_id = str(remote_row.marketplace_listing_id or "").strip()
+        if not remote_id or remote_id in active_ids:
+            continue
+        listing = db.get(Listing, remote_row.listing_id)
+        if listing is None:
+            continue
+        # A complete active snapshot proves this exact eBay identity is no
+        # longer active. Keep the historical row and response for relisting.
+        raw = remote_row.raw_response if isinstance(remote_row.raw_response, dict) else {}
+        remote_row.status = MarketplaceListingStatus.CLOSED
+        remote_row.raw_response = {
+            **raw,
+            "status": "CLOSED",
+            "remote_state": "NOT_LIVE",
+            "reconciled_at": datetime.now(UTC).replace(tzinfo=None).isoformat(),
+            "source": "ebay_active_snapshot_reconciliation",
+        }
+        db.add(remote_row)
+        prior_data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}
+        ebay_sync = prior_data.get("ebay_sync") if isinstance(prior_data.get("ebay_sync"), dict) else {}
+        listing.marketplace_data = {
+            **prior_data,
+            "ebay_sync": {
+                **ebay_sync,
+                "remote_state": "NOT_LIVE",
+                "remote_state_verified_at": datetime.now(UTC).replace(tzinfo=None).isoformat(),
+                "remote_listing_id": remote_id,
+                "sync_source": "ebay_active_snapshot_reconciliation",
+            },
+        }
+        other_live = db.execute(select(MarketplaceListing.id).where(
+            MarketplaceListing.listing_id == listing.id,
+            MarketplaceListing.marketplace != MarketplaceName.ebay,
+            MarketplaceListing.status.in_((MarketplaceListingStatus.PUBLISHED, MarketplaceListingStatus.UPDATED)),
+            MarketplaceListing.marketplace_listing_id.is_not(None),
+        ).limit(1)).scalar_one_or_none()
+        if other_live or listing.sold_at is not None:
+            closed += 1
+            db.add(listing)
+            continue
+        labels = list(listing.custom_labels or [])
+        if "archived_ebay" not in {str(value).strip().lower() for value in labels}:
+            labels.append("archived_ebay")
+        listing.custom_labels = labels
+        listing.status = ListingStatus.archived
+        listing.ebay_publish_status = EbayPublishStatus.POSTED
+        listing.marketplace_data = {
+            **listing.marketplace_data,
+            "archive_state": {
+                "status": "ARCHIVED",
+                "reason": "eBay active snapshot no longer contains this listing",
+                "marketplace": "ebay",
+                "remote_listing_id": remote_id,
+                "verified_at": datetime.now(UTC).replace(tzinfo=None).isoformat(),
+                "preserved_for_relist": True,
+            },
+        }
+        db.add(listing)
+        archived += 1
+
+    db.commit()
+    return {
+        "user_id": user_id,
+        "marketplace": "ebay",
+        "checked": len(active_listings),
+        "matched": matched,
+        "created": created,
+        "updated": updated,
+        "unmatched": unmatched,
+        "remote_closed": closed,
+        "archived": archived,
+        "remote_state_unknown": unknown,
+        "changed_fields": changed_fields,
+        "results": results,
+        "account_id": account.id,
+    }
+
+
+async def hydrate_ebay_history_media(
+    user_id: int,
+    db: Session,
+    *,
+    limit: int = 1000,
+    only_missing: bool = True,
+) -> dict[str, Any]:
+    """Recover canonical media for eBay history rows from exact Trading GetItem data.
+
+    History reconciliation used to persist the empty ``image_urls`` field returned by
+    the lightweight active-listing inventory response.  This read-only repair uses the
+    authoritative item ID and Trading ``GetItem.PictureDetails`` instead.  It never
+    replaces non-empty/operator media and never calls a marketplace mutation endpoint.
+    """
+    account = await get_or_refresh_account(user_id, db)
+    stmt = (
+        select(Listing)
+        .where(Listing.user_id == user_id, Listing.source_type == "ebay_history_reconciliation")
+        .order_by(Listing.id.asc())
+        .limit(max(1, int(limit or 1)))
+    )
+    rows = list(db.execute(stmt).scalars())
+    if only_missing:
+        rows = [row for row in rows if not (row.image_urls or row.listing_images)]
+
+    recovered = 0
+    no_images = 0
+    errors = 0
+    checked = 0
+    results: list[dict[str, Any]] = []
+    for listing in rows:
+        item_id = str(listing.ebay_listing_id or "").strip()
+        if not item_id:
+            no_images += 1
+            results.append({"listing_id": listing.id, "status": "missing_remote_id"})
+            continue
+        checked += 1
+        try:
+            remote = await get_ebay_trading_item(account, item_id)
+        except Exception as exc:
+            errors += 1
+            results.append({"listing_id": listing.id, "item_id": item_id, "status": "lookup_error", "error": str(exc)[:500]})
+            continue
+        urls: list[str] = []
+        for value in [*(remote.get("pictures") or []), *(remote.get("external_picture_urls") or []), *(remote.get("gallery_urls") or [])]:
+            url = str(value or "").strip()
+            if url and url not in urls:
+                urls.append(url)
+        if not urls:
+            no_images += 1
+            results.append({"listing_id": listing.id, "item_id": item_id, "status": "remote_no_images"})
+            continue
+
+        # Only fill an actually empty canonical media set.  Existing local/operator
+        # media is more authoritative for PosterPro and must never be overwritten.
+        if not (listing.image_urls or listing.listing_images):
+            listing.image_urls = urls
+            listing.listing_images = [
+                {
+                    "storage_path": url,
+                    "source_url": url,
+                    "source_platform": "ebay_reconciliation",
+                    "provider_source": "EBAY_TRADING_GETITEM",
+                    "operator_state": "approved",
+                    "is_reference": True,
+                    "metadata": {
+                        "remote_listing_id": item_id,
+                        "retrieved_at": datetime.now(UTC).replace(tzinfo=None).isoformat(),
+                    },
+                }
+                for url in urls
+            ]
+            marketplace_data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}
+            ebay_sync = marketplace_data.get("ebay_sync") if isinstance(marketplace_data.get("ebay_sync"), dict) else {}
+            capability = ebay_sync.get("management_capability") if isinstance(ebay_sync.get("management_capability"), dict) else {}
+            listing.marketplace_data = {
+                **marketplace_data,
+                "ebay_sync": {
+                    **ebay_sync,
+                    "remote_image_urls": urls,
+                    "media_hydrated_at": datetime.now(UTC).replace(tzinfo=None).isoformat(),
+                    "media_source": "EBAY_TRADING_GETITEM",
+                    "management_capability": {**capability, "media_complete": True},
+                },
+            }
+            for marketplace_row in getattr(listing, "marketplace_listings", None) or []:
+                if getattr(marketplace_row, "marketplace", None) != MarketplaceName.ebay:
+                    continue
+                raw = marketplace_row.raw_response if isinstance(marketplace_row.raw_response, dict) else {}
+                remote_payload = raw.get("remote") if isinstance(raw.get("remote"), dict) else {}
+                marketplace_row.raw_response = {
+                    **raw,
+                    "remote": {**remote_payload, "image_urls": urls, "media_source": "EBAY_TRADING_GETITEM"},
+                }
+                db.add(marketplace_row)
+            db.add(listing)
+            recovered += 1
+            results.append({"listing_id": listing.id, "item_id": item_id, "status": "recovered", "image_count": len(urls)})
+        else:
+            results.append({"listing_id": listing.id, "item_id": item_id, "status": "preserved_existing", "remote_image_count": len(urls)})
+
+    db.commit()
+    return {
+        "user_id": user_id,
+        "checked": checked,
+        "recovered": recovered,
+        "remote_no_images": no_images,
+        "lookup_errors": errors,
+        "results": results,
+    }
+
+
+async def sync_ebay_fulfillment_history(
+    user_id: int,
+    db: Session,
+    *,
+    limit: int = 100,
+) -> dict[str, Any]:
+    from app.services.sale_detection_service import SaleDetectionService
+
+    account = await get_or_refresh_account(user_id, db)
+    requested_limit = max(1, int(limit or 1))
+    page_limit = min(requested_limit, 50)
+    orders: list[dict[str, Any]] = []
+    offset = 0
+    while len(orders) < requested_limit:
+        page = await get_fulfillment_orders(account, limit=min(page_limit, requested_limit - len(orders)), offset=offset)
+        orders.extend(page)
+        if len(page) < min(page_limit, requested_limit - len(orders) + len(page)):
+            break
+        offset += len(page)
+        if len(page) == 0:
+            break
+    sale_detection = SaleDetectionService()
+    matched = 0
+    created = 0
+    updated = 0
+    unmatched = 0
+    results: list[dict[str, Any]] = []
+
+    for order in orders:
+        if not isinstance(order, dict):
+            continue
+        line_items = order.get("lineItems") if isinstance(order.get("lineItems"), list) else []
+        first_line = line_items[0] if line_items and isinstance(line_items[0], dict) else {}
+        marketplace_order_id = str(order.get("orderId") or order.get("order_id") or "").strip() or None
+        marketplace_listing_id = (
+            str(first_line.get("legacyItemId") or first_line.get("itemId") or first_line.get("listingId") or order.get("legacyItemId") or "").strip()
+            or None
+        )
+        title = str(first_line.get("title") or order.get("title") or "").strip() or None
+        try:
+            quantity = max(1, int(first_line.get("quantity") or order.get("quantity") or 1))
+        except (TypeError, ValueError):
+            quantity = 1
+        amount = None
+        pricing_summary = order.get("pricingSummary") if isinstance(order.get("pricingSummary"), dict) else {}
+        total = pricing_summary.get("total") if isinstance(pricing_summary.get("total"), dict) else {}
+        try:
+            if total.get("value") is not None:
+                amount = float(total.get("value"))
+        except (TypeError, ValueError):
+            amount = None
+        sold_at = str(order.get("creationDate") or order.get("lastModifiedDate") or "").strip() or None
+        event = {
+            "marketplace": "ebay",
+            "marketplace_order_id": marketplace_order_id,
+            "marketplace_listing_id": marketplace_listing_id,
+            "quantity": quantity,
+            "amount": amount,
+            "currency": str(total.get("currency") or order.get("currency") or "USD"),
+            "sold_at": sold_at,
+            "raw": {"order": order, "source": "ebay_fulfillment_history"},
+            "title": title,
+        }
+        if sale_detection._already_processed(db, "ebay", marketplace_order_id, marketplace_listing_id):
+            continue
+        listing = sale_detection._find_listing(db, user_id, event)
+        sale = sale_detection._record_sale(db, user_id, listing, event)
+        created += 1
+        if listing:
+            matched += 1
+            remaining = max(0, int(listing.quantity or 0) - quantity)
+            listing.quantity = remaining
+            listing.sold_at = sale.sold_at
+            if remaining <= 0 and listing.status in {ListingStatus.ready, ListingStatus.draft, ListingStatus.posted}:
+                listing.status = ListingStatus.posted
+            listing.marketplace_data = {
+                **(listing.marketplace_data or {}),
+                "ebay_history_sync": {
+                    "synced_at": datetime.now(UTC).replace(tzinfo=None).isoformat(),
+                    "source": "ebay_fulfillment_history",
+                    "marketplace_order_id": marketplace_order_id,
+                    "marketplace_listing_id": marketplace_listing_id,
+                    "quantity": quantity,
+                    "amount": amount,
+                },
+            }
+            db.add(listing)
+            updated += 1
+        else:
+            unmatched += 1
+        db.add(sale)
+        results.append(
+            {
+                "sale_id": sale.id,
+                "listing_id": listing.id if listing else None,
+                "marketplace_order_id": marketplace_order_id,
+                "marketplace_listing_id": marketplace_listing_id,
+            }
+        )
+
+    db.commit()
+    return {
+        "user_id": user_id,
+        "marketplace": "ebay",
+        "checked": len(orders),
+        "matched": matched,
+        "created": created,
+        "updated": updated,
+        "unmatched": unmatched,
+        "results": results,
+        "account_id": account.id,
+    }
+
+
+async def revise_ebay_listing(
+    listing: Listing,
+    db: Session,
+    *,
+    expected_external_listing_id: str | None = None,
+) -> dict[str, Any]:
+    expected_id = str(expected_external_listing_id or listing.ebay_listing_id or "").strip()
+    canonical_id = str(listing.ebay_listing_id or "").strip()
+    if not expected_id or expected_id != canonical_id:
+        raise EbayIntegrationError("Exact eBay listing identity is missing or no longer matches; update was not attempted.")
+    account = await get_or_refresh_account(listing.user_id, db)
+    plan = await build_ebay_publish_plan(listing, db, allow_create_policies=False)
+    offer_id = _resolve_existing_ebay_offer_id(listing)
+    if not offer_id and listing.ebay_listing_id:
+        offer_id = str((listing.marketplace_data or {}).get("offer", {}).get("offerId") or "").strip() or None
+    if not offer_id:
+        raise EbayIntegrationError("The exact eBay offer ID is not stored; update was not attempted and no replacement offer was created.")
+
+    client = EbayAPIClient(account.access_token)
+    current_offer = await client.request("GET", f"/sell/inventory/v1/offer/{offer_id}")
+    current_listing = current_offer.get("listing") if isinstance(current_offer.get("listing"), dict) else {}
+    remote_listing_id = str(current_listing.get("listingId") or current_offer.get("listingId") or "").strip()
+    if remote_listing_id != expected_id:
+        raise EbayIntegrationError("The stored eBay offer does not confirm the exact external listing identity; update was not attempted.")
+
+    item_data = await create_or_replace_item(
+        listing,
+        account,
+        item_specifics=plan["payload_preview"]["item_specifics"],
+        inventory_payload=plan["inventory_item_payload"],
+    )
+
+    offer_payload = dict(plan["offer_payload"])
+    offer_payload["offerId"] = offer_id
+    response = await client.request("PUT", f"/sell/inventory/v1/offer/{offer_id}", payload=offer_payload)
+    publish_data = {"offerId": offer_id, "response": response, "status": "UPDATED"}
+
+    previous_data = listing.marketplace_data or {}
+    ebay_url = str(previous_data.get("ebay_url") or "").strip() or f"https://www.ebay.com/itm/{listing.ebay_listing_id or item_data['sku']}"
+    listing.marketplace_data = {
+        **previous_data,
+        "ebay_revision": {
+            "synced_at": datetime.now(UTC).replace(tzinfo=None).isoformat(),
+            "source": "posterpro",
+            "item": item_data,
+            "offer": publish_data,
+            "plan": {key: value for key, value in plan.items() if key != "account"},
+        },
+        "ebay_url": ebay_url,
+    }
+    listing.ebay_publish_status = EbayPublishStatus.POSTED
+    _sync_ebay_marketplace_listing(
+        db,
+        listing_id=listing.id,
+        status=MarketplaceListingStatus.UPDATED if listing.ebay_listing_id else MarketplaceListingStatus.PUBLISHED,
+        response={
+            "status": "UPDATED",
+            "sku": item_data.get("sku"),
+            "offer_id": publish_data.get("offerId"),
+            "item": item_data,
+            "offer": publish_data,
+            "plan": {key: value for key, value in plan.items() if key != "account"},
+        },
+    )
+    db.add(listing)
+    db.commit()
+    db.refresh(listing)
+    return {
+        "status": "UPDATED" if listing.ebay_listing_id else "PUBLISHED",
+        "sku": item_data.get("sku"),
+        "offer_id": publish_data.get("offerId"),
+        "listing_id": listing.ebay_listing_id,
+        "revision": listing.marketplace_data.get("ebay_revision"),
+    }
+
+
+async def accept_best_offer(account: MarketplaceAccount, offer_id: str) -> dict[str, Any]:
+    client = EbayAPIClient(account.access_token)
+    return await client.request("POST", f"/sell/negotiation/v1/offer/{offer_id}/accept")
+
+
+async def reject_best_offer(account: MarketplaceAccount, offer_id: str, reason: str | None = None) -> dict[str, Any]:
+    client = EbayAPIClient(account.access_token)
+    payload = {"declineReason": reason} if reason else None
+    return await client.request("POST", f"/sell/negotiation/v1/offer/{offer_id}/decline", payload=payload)
+
+
+async def publish_listing_to_ebay(listing: Listing, db: Session, *, relist: bool = False) -> dict[str, Any]:
+    listing.ebay_publish_status = EbayPublishStatus.POSTING
+    db.add(listing)
+    db.commit()
+
+    attempt = _start_publish_attempt(
+        db,
+        listing=listing,
+        marketplace="ebay",
+        dry_run=False,
+        preflight_status=str(listing.ebay_publish_status),
+        payload_snapshot={"listing_id": listing.id, "title": listing.title, "description": listing.description},
+    )
+    db.commit()
+
+    try:
+        plan = await build_ebay_publish_plan(listing, db, allow_create_policies=True)
+        _apply_ebay_plan_repairs_to_listing(listing, plan)
+        db.add(listing)
+        db.commit()
+        plan_category = plan.get("category") or {}
+        if str(plan_category.get("taxonomy_tree_id") or "").strip() == "100":
+            from app.services.ebay_taxonomy import listing_has_motors_semantics
+            verified_motors = (
+                plan_category.get("ownership_verified") is True
+                and str(plan_category.get("taxonomy_marketplace") or "").upper() == "EBAY_MOTORS_US"
+                and listing_has_motors_semantics(listing)
+            )
+            if not verified_motors:
+                raise EbayIntegrationError("CATEGORY_REVALIDATION_REQUIRED: category ownership and product semantics must both be verified before publisher routing.")
+            account = await get_or_refresh_account(listing.user_id, db)
+            sku = _build_ebay_sku(listing.user_id, listing.id)
+            attempt.payload_snapshot = _serialize_payload_snapshot({
+                "listing_id": listing.id,
+                "title": listing.title,
+                "publisher_path": "TRADING_API_MOTORS",
+                "category": {key: plan_category.get(key) for key in ("taxonomy_marketplace", "taxonomy_tree_id", "category_id", "category_path")},
+            })
+            db.add(attempt)
+            db.commit()
+            # A read-only active snapshot is the duplicate gate and the first
+            # reconciliation step for any prior ambiguous request.
+            active = await _get_active_ebay_listings_via_trading_api(account, limit=5000)
+            matches = [row for row in active if str(row.get("source_identifiers", {}).get("sku") or "").strip().lower() == sku.lower()]
+            if len(matches) > 1:
+                raise EbayIntegrationError("REMOTE_STATE_UNKNOWN / RECONCILIATION_REQUIRED: multiple active Trading listings share this PosterPro SKU", provider_response={"remote_state_unknown": True})
+            prior_attempts = db.execute(select(MarketplacePublishAttempt).where(
+                MarketplacePublishAttempt.listing_id == listing.id,
+                MarketplacePublishAttempt.marketplace == MarketplaceName.ebay,
+                MarketplacePublishAttempt.id != attempt.id,
+                MarketplacePublishAttempt.dry_run.is_(False),
+            )).scalars().all()
+            prior_unknown = any(str(row.marketplace_status or "").strip().upper() in {"REMOTE_STATE_UNKNOWN", "RECONCILIATION_REQUIRED", "SUBMITTED_REMOTE_ID_PENDING"} for row in prior_attempts)
+            if matches:
+                remote_row = matches[0]
+                publish_data = {"listingId": str(remote_row.get("source_identifiers", {}).get("ebay_listing_id") or ""), "status": "EXISTING_LISTING_RECONCILED", "publisher_path": "TRADING_API_MOTORS", "response": {"source": "GetMyeBaySelling", "sku": sku}}
+                if not publish_data["listingId"]:
+                    raise EbayIntegrationError("REMOTE_STATE_UNKNOWN / RECONCILIATION_REQUIRED: active SKU match has no remote ItemID", provider_response={"remote_state_unknown": True})
+            elif prior_unknown:
+                raise EbayIntegrationError("REMOTE_STATE_UNKNOWN / RECONCILIATION_REQUIRED: prior Trading submission is ambiguous; active snapshot has no match, so automatic replay is prohibited", provider_response={"remote_state_unknown": True})
+            else:
+                publish_data = await _add_fixed_price_item_via_trading_api(account, listing, plan)
+                verification = await get_ebay_trading_item(account, publish_data["listingId"])
+                if str(verification.get("ack") or "").lower() not in {"success", "warning"} or str(verification.get("listing_status") or "").upper() not in {"ACTIVE", "PUBLISHED", "LISTED"}:
+                    raise EbayIntegrationError("Trading create response could not be verified as active; remote state is unknown", provider_call_attempted=True, endpoint="GetItem", provider_response={"remote_state_unknown": True, "item_id": publish_data.get("listingId")})
+                publish_data["verification"] = verification
+            previous_data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}
+            remote_id = str(publish_data["listingId"])
+            remote_url = f"https://www.ebay.com/itm/{remote_id}"
+            listing.ebay_listing_id = remote_id
+            listing.ebay_publish_status = EbayPublishStatus.POSTED
+            listing.marketplace_data = {
+                **previous_data,
+                "publisher_path": "TRADING_API_MOTORS",
+                "preflight_plan": {key: value for key, value in plan.items() if key != "account"},
+                "category": plan_category,
+                "item_specifics": (plan.get("payload_preview") or {}).get("item_specifics") or {},
+                "publish": publish_data,
+                "ebay_url": remote_url,
+                "last_publish_action": "publish",
+            }
+            _sync_ebay_marketplace_listing(db, listing_id=listing.id, status=MarketplaceListingStatus.PUBLISHED, response={
+                "listing_id": remote_id, "status": str(listing.ebay_publish_status), "ebay_url": remote_url,
+                "publisher_path": "TRADING_API_MOTORS", "publish": publish_data,
+            })
+            _finish_publish_attempt(db, attempt=attempt, status="published", response={
+                "listing_id": remote_id, "ebay_url": remote_url, "publisher_path": "TRADING_API_MOTORS", "sku": sku,
+            })
+            db.add(listing)
+            db.commit()
+            db.refresh(listing)
+            return {"listing_id": remote_id, "status": listing.ebay_publish_status, "ebay_url": remote_url, "publisher_path": "TRADING_API_MOTORS"}
+        account = await get_or_refresh_account(listing.user_id, db)
+        location_data = await create_inventory_location(
+            listing.user_id,
+            db,
+            location_key=plan.get("policy_settings", {}).get("merchant_location_key") or None,
+        )
+        item_data = await create_or_replace_item(
+            listing,
+            account,
+            item_specifics=plan["payload_preview"]["item_specifics"],
+            inventory_payload=plan["inventory_item_payload"],
+        )
+        offer_data = await create_offer_for_item(
+            listing,
+            account,
+            item_data["sku"],
+            category_id=plan["category"]["category_id"],
+            offer_payload=plan["offer_payload"],
+        )
+        if offer_data.get("existingListingId"):
+            # The offer already points to a specific live remote listing. Adopt
+            # that identity instead of invoking publishOffer again (which can
+            # create a duplicate or return an ambiguous provider error).
+            publish_data = {
+                "listingId": str(offer_data["existingListingId"]),
+                "offerId": offer_data["offerId"],
+                "status": "EXISTING_LISTING_RECONCILED",
+                "response": offer_data.get("response") or {},
+            }
+        else:
+            publish_data = await publish_offer(listing, account, offer_data["offerId"])
+
+        previous_listing_id = listing.ebay_listing_id
+        listing.ebay_listing_id = publish_data["listingId"]
+        listing.ebay_publish_status = EbayPublishStatus.POSTED
+        previous_data = listing.marketplace_data or {}
+        history = list(previous_data.get("auto_relist_history") or [])
+        if relist:
+            history.append(
+                {
+                    "action": "AUTO_RELISTED",
+                    "previous_listing_id": previous_listing_id,
+                    "new_listing_id": publish_data["listingId"],
+                    "timestamp": datetime.now(UTC).isoformat(),
+                }
+            )
+        listing.marketplace_data = {
+            **previous_data,
+            "preflight_plan": {key: value for key, value in plan.items() if key != "account"},
+            "location": location_data,
+            "category": plan["category"],
+            "item_specifics": plan["payload_preview"]["item_specifics"],
+            "item": item_data,
+            "offer": offer_data,
+            "publish": publish_data,
+            "ebay_url": f"https://www.ebay.com/itm/{publish_data['listingId']}",
+            "last_publish_action": "relist" if relist else "publish",
+            "auto_relist_history": history,
+        }
+        _sync_ebay_marketplace_listing(
+            db,
+            listing_id=listing.id,
+            status=MarketplaceListingStatus.PUBLISHED,
+            response={
+                "listing_id": publish_data["listingId"],
+                "status": str(listing.ebay_publish_status),
+                "ebay_url": listing.marketplace_data["ebay_url"],
+                "publish": publish_data,
+            },
+        )
+        _finish_publish_attempt(
+            db,
+            attempt=attempt,
+            status="published",
+            response={
+                "listing_id": publish_data["listingId"],
+                "status": str(listing.ebay_publish_status),
+                "ebay_url": listing.marketplace_data["ebay_url"],
+                "publish": publish_data,
+                "offer_id": offer_data.get("offerId"),
+                "sku": item_data.get("sku"),
+            },
+        )
+        db.add(listing)
+        db.commit()
+        db.refresh(listing)
+        return {
+            "listing_id": publish_data["listingId"],
+            "status": listing.ebay_publish_status,
+            "ebay_url": listing.marketplace_data["ebay_url"],
+        }
+    except Exception as exc:
+        provider_response = exc.provider_response if isinstance(exc, EbayIntegrationError) and isinstance(exc.provider_response, dict) else {}
+        remote_unknown = bool(provider_response.get("remote_state_unknown"))
+        if remote_unknown:
+            message = "REMOTE_STATE_UNKNOWN / RECONCILIATION_REQUIRED: Trading API submission may have been accepted; reconcile the exact seller inventory before any replay."
+            listing.ebay_publish_status = EbayPublishStatus.FAILED
+            listing.processing_state = "remote_state_unknown"
+            listing.processing_stage = "ebay_remote_reconciliation"
+            listing.processing_blocking_reason = message
+            listing.processing_error_stage = "remote_reconciliation"
+            listing.processing_last_error = str(exc)
+            listing.needs_review = False
+            listing.marketplace_data = {
+                **(listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}),
+                "publisher_path": "TRADING_API_MOTORS",
+                "remote_reconciliation_required": True,
+                "remote_submission_error": str(exc),
+            }
+            _sync_ebay_marketplace_listing(db, listing_id=listing.id, status=MarketplaceListingStatus.FAILED, response={
+                "code": "REMOTE_STATE_UNKNOWN", "message": message, "publisher_path": "TRADING_API_MOTORS",
+            })
+            _finish_publish_attempt(db, attempt=attempt, status="REMOTE_STATE_UNKNOWN", response={
+                "publisher_path": "TRADING_API_MOTORS", "remote_state_unknown": True,
+            }, error=exc, retryable=False)
+            db.add(listing)
+            db.commit()
+            raise
+        listing.ebay_publish_status = EbayPublishStatus.FAILED
+        translated = translate_marketplace_error("ebay", exc)
+        repair_result = _apply_publish_failure_repair(
+            db,
+            listing,
+            translated_error=translated,
+            raw_error=str(exc),
+        )
+        listing.marketplace_data = {
+            **(listing.marketplace_data or {}),
+            "error": translated.get("user_message") or str(exc),
+            "error_detail": translated,
+            "raw_error": str(exc),
+            "publish_failure_repair": repair_result,
+        }
+        _sync_ebay_marketplace_listing(
+            db,
+            listing_id=listing.id,
+            status=MarketplaceListingStatus.FAILED,
+            response={
+                "error": translated.get("user_message") or str(exc),
+                "error_detail": translated,
+                "publish_failure_repair": repair_result,
+                "status": str(listing.ebay_publish_status),
+            },
+        )
+        _finish_publish_attempt(
+            db,
+            attempt=attempt,
+            status="failed",
+            response={
+                "error": translated.get("user_message") or str(exc),
+                "error_detail": translated,
+                "publish_failure_repair": repair_result,
+                "status": str(listing.ebay_publish_status),
+            },
+            error=exc,
+            retryable=bool(translated.get("retryable")),
+        )
+        db.add(listing)
+        db.commit()
+        raise

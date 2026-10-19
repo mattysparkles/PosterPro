@@ -1,0 +1,307 @@
+from app.api.routes import _serialize_listing_response, _safe_marketplace_response
+from app.models.enums import ListingStatus
+from app.models.models import Listing, MarketplaceImportJob, User
+from app.services.listing_review import (
+    derive_condition_data,
+    derive_shipping_profile,
+    normalize_listing_images,
+    sync_listing_review_state,
+    summarize_listing_readiness,
+)
+from app.workers import tasks
+
+
+def test_normalize_listing_images_deduplicates_stable_intake_photo_ids():
+    images = normalize_listing_images(
+        listing_images=[
+            {
+                "storage_path": "/media/intake/a-v1.jpg",
+                "source_url": "https://photos.example/a-v1",
+                "metadata": {"intake_photo_id": 77},
+            },
+            {
+                "storage_path": "/media/intake/a-v2.jpg",
+                "source_url": "https://photos.example/a-v2",
+                "metadata": {"intake_photo_id": 77},
+            },
+            {
+                "storage_path": "/media/intake/b.jpg",
+                "source_url": "https://photos.example/b",
+                "metadata": {"intake_photo_id": 78},
+            },
+        ],
+        approved=True,
+    )
+
+    assert len(images) == 2
+    assert [image["metadata"]["intake_photo_id"] for image in images] == [77, 78]
+
+
+def test_listing_review_metadata_persists_on_listing_model(db_session):
+    user = User(email="review-persist@example.com")
+    db_session.add(user)
+    db_session.flush()
+
+    listing = Listing(
+        user_id=user.id,
+        status=ListingStatus.draft,
+        title="Open Box Router",
+        image_urls=["/media/uploads/router-front.jpg"],
+        listing_images=normalize_listing_images(
+            image_urls=["/media/uploads/router-front.jpg"],
+            source_platform="upload",
+            approved=True,
+        ),
+        condition="Needs review",
+        condition_data=derive_condition_data(
+            listing={"condition": None, "source_type": "amazon_vine"},
+            source_type="amazon_vine",
+            existing={"condition_source": "import"},
+        ),
+        shipping_profile=derive_shipping_profile(
+            listing={"title": "Open Box Router"},
+            existing={"estimated": True, "manual_measurement_needed": True},
+        ),
+        needs_review=True,
+    )
+    db_session.add(listing)
+    db_session.commit()
+    db_session.refresh(listing)
+
+    assert listing.listing_images[0]["source_platform"] == "upload"
+    assert listing.condition_data["condition_bucket"] == "open_box_or_used_unknown"
+    assert listing.shipping_profile["manual_measurement_needed"] is True
+
+
+def test_missing_shipping_data_requires_measurement_instead_of_a_fictional_estimate():
+    shipping = derive_shipping_profile(
+        listing={"title": "Ryobi Battery Adapter", "description": "New open box"},
+        existing={},
+    )
+    assert shipping["package_weight"] is None
+    assert shipping["package_dimensions"] == {}
+    assert shipping["estimated"] is False
+    assert shipping["shipping_profile_source"] == "measurement_required"
+    assert shipping["package_weight_unit"] == "lb"
+    assert shipping["package_dimension_unit"] == "in"
+    assert shipping["manual_measurement_needed"] is True
+    assert shipping["calculated_shipping_readiness"]["ready"] is False
+
+
+def test_existing_estimated_or_partial_package_data_requires_measurement():
+    shipping = derive_shipping_profile(
+        listing={"title": "Small boxed tabletop reflex game"},
+        existing={
+            "package_weight": "32 oz",
+            "package_dimensions": {"length": 14, "width": None, "height": 5},
+            "estimated": False,
+            "estimated_fields": ["width"],
+            "manual_measurement_needed": True,
+        },
+    )
+    assert shipping["package_weight"] == 2.0
+    assert shipping["package_dimensions"] == {"length": 14, "width": None, "height": 5}
+    assert shipping["estimated"] is True
+    assert shipping["manual_measurement_needed"] is True
+    assert shipping["estimated_fields"] == ["width"]
+
+
+def test_imported_reference_images_are_labeled_and_failed_imports_are_preserved(db_session, monkeypatch):
+    user = User(email="import-images@example.com")
+    db_session.add(user)
+    db_session.flush()
+
+    job = MarketplaceImportJob(
+        user_id=user.id,
+        source_marketplace="ebay",
+        import_mode="direct_api",
+        status="queued",
+        payload={},
+    )
+    db_session.add(job)
+    db_session.flush()
+
+    monkeypatch.setattr(tasks, "_best_effort_localize_bridge_assets", lambda assets: ([], []))
+    monkeypatch.setattr(
+        tasks,
+        "_best_effort_localize_import_images",
+        lambda urls: (["/media/imports/camera-front.jpg"], [{"source_url": "https://bad.example/img.jpg", "reason": "download_failed"}]),
+    )
+
+    listing, created = tasks._create_imported_listing(
+        db=db_session,
+        user_id=user.id,
+        source_marketplace="ebay",
+        import_job_id=job.id,
+        import_mode="direct_api",
+        source_listing_reference="ref-1",
+        raw_payload={"source_url": "https://www.ebay.com/itm/123"},
+        normalized={
+          "title": "Imported Camera",
+          "description": "Imported description",
+          "image_urls": ["https://example.com/camera-front.jpg"],
+          "item_specifics": {"Brand": "Canon"},
+          "condition": "Used",
+          "quantity": 1,
+        },
+    )
+
+    assert created is True
+    assert listing.listing_images[0]["source_platform"] == "ebay"
+    assert listing.listing_images[0]["is_reference"] is True
+    assert listing.source_metadata["image_import_failures"][0]["reason"] == "download_failed"
+
+
+def test_shipping_estimate_structure_and_readiness_blockers():
+    shipping = derive_shipping_profile(
+        listing={"title": "Glass lamp with lithium battery", "description": "Fragile collectible lamp"},
+        existing={"estimated": True, "manual_measurement_needed": True},
+    )
+    condition = derive_condition_data(
+        listing={"condition": None, "source_type": "amazon_vine"},
+        source_type="amazon_vine",
+        existing={},
+    )
+    readiness = summarize_listing_readiness(
+        listing_images=normalize_listing_images(
+            image_urls=["/media/reference/lamp.jpg"],
+            source_platform="amazon",
+            default_is_reference=True,
+            approved=False,
+        ),
+        condition_data=condition,
+        shipping_profile=shipping,
+        listing={"listing_price": 25, "category_suggestion": "Home"},
+    )
+
+    assert shipping["fragile"] is True
+    assert shipping["battery"] is True
+    assert readiness["blocked_for_publish"] is True
+    assert "Only source/reference images attached" in readiness["blockers"]
+    assert readiness["shipping_checklist"]["manual_measurement_needed"] is True
+    assert "Package shipping profile is incomplete" in readiness["blockers"]
+
+
+def test_manual_override_behavior_survives_serialization(db_session):
+    user = User(email="override@example.com")
+    db_session.add(user)
+    db_session.flush()
+
+    listing = Listing(
+        user_id=user.id,
+        status=ListingStatus.ready,
+        title="Keurig Coffee Maker",
+        description="Used machine with accessories included.",
+        listing_price=49.99,
+        condition="Used",
+        condition_data={
+            "condition_bucket": "used",
+            "condition_source": "operator",
+            "condition_confidence": 0.95,
+            "operator_review_required": False,
+            "included_accessories": ["drip tray", "water tank"],
+        },
+        shipping_profile={
+            "package_weight": 8.5,
+            "package_dimensions": {"length": 18, "width": 12, "height": 14},
+            "shipping_class_suggestion": "ups_ground",
+            "manual_measurement_needed": False,
+        },
+        listing_images=[
+            {
+                "storage_path": "/media/uploads/keurig-front.jpg",
+                "source_platform": "upload",
+                "role": "primary",
+                "operator_state": "approved",
+                "display_order": 0,
+                "is_reference": False,
+                "confidence": 1.0,
+            }
+        ],
+        image_urls=["/media/uploads/keurig-front.jpg"],
+    )
+    db_session.add(listing)
+    db_session.flush()
+    payload = _serialize_listing_response(listing)
+
+    assert payload["condition_data"]["condition_source"] == "operator"
+    assert payload["shipping_profile"]["shipping_class_suggestion"] == "ups_ground"
+    assert payload["readiness_summary"]["ready_for_publish"] is True
+
+
+def test_sync_listing_review_state_promotes_vine_source_images_for_review(db_session):
+    user = User(email="vine-reference@example.com")
+    db_session.add(user)
+    db_session.flush()
+
+    listing = Listing(
+        user_id=user.id,
+        status=ListingStatus.draft,
+        title="Amazon Vine Test Item",
+        image_urls=["storage/vine-search/test-image.jpg"],
+        source_type="amazon_vine",
+        source_metadata={"amazon_source_page_url": "https://www.amazon.com/dp/B000TEST"},
+    )
+
+    sync_listing_review_state(listing=listing)
+
+    assert listing.listing_images[0]["is_reference"] is False
+    assert listing.listing_images[0]["operator_state"] == "approved"
+
+
+def test_sync_listing_review_state_treats_google_slate_photos_as_item_media(db_session):
+    user = User(email="google-photo-media@example.com")
+    db_session.add(user)
+    db_session.flush()
+
+    listing = Listing(
+        user_id=user.id,
+        status=ListingStatus.draft,
+        title="Slate captured item",
+        image_urls=["/media/google-photos/item-front.jpg"],
+        source_type="google_photos_album",
+        source_metadata={"intake": {"photo_ids": [123]}},
+    )
+
+    sync_listing_review_state(listing=listing)
+
+    image = listing.listing_images[0]
+    assert image["is_reference"] is False
+    assert image["operator_state"] == "approved"
+    readiness = summarize_listing_readiness(
+        listing_images=listing.listing_images,
+        condition_data=listing.condition_data,
+        shipping_profile=listing.shipping_profile,
+        listing={"title": listing.title, "category_suggestion": listing.category_suggestion},
+        source_type=listing.source_type,
+    )
+    assert readiness["actual_image_count"] == 1
+    assert readiness["manual_photo_needed"] is False
+
+
+def test_listing_response_redacts_marketplace_credentials():
+    safe = _safe_marketplace_response({
+        "status": "PUBLISHED",
+        "access_token": "secret-token",
+        "nested": {"device_secret": "secret-device", "external_url": "https://example.test/item"},
+    })
+    assert safe["status"] == "PUBLISHED"
+    assert safe["access_token"] == "[redacted]"
+    assert safe["nested"]["device_secret"] == "[redacted]"
+    assert safe["nested"]["external_url"].startswith("https://")
+
+
+def test_listing_response_does_not_present_source_policy_as_category(db_session):
+    user = User(email="category-display@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(
+        user_id=user.id,
+        title="RV windshield curtain",
+        description="Blackout curtain for an RV windshield.",
+        category_suggestion="Amazon > FREE 30-day refund/replacement",
+        category_id=None,
+    )
+    db_session.add(listing); db_session.flush()
+    payload = _serialize_listing_response(listing)
+    assert payload["category_suggestion"] == "Marketplace category needs resolution"
+    assert payload["category_resolution_status"] == "NEEDS_RESOLUTION"

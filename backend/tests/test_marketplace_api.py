@@ -1,0 +1,2320 @@
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
+from types import SimpleNamespace
+
+import pytest
+
+from app.core import database as database_module
+from app.models.enums import EbayPublishStatus, ListingStatus, MarketplaceName
+from app.models.models import (
+    Cluster,
+    IntakeNotification,
+    IntakePhoto,
+    IntakeSlate,
+    Listing,
+    ListingTemplate,
+    MarketplaceAccount,
+    StorefrontProfile,
+    User,
+    MarketplaceCrosspostJob,
+    MarketplacePublishBatch,
+    MarketplaceImportJob,
+    MarketplaceListing,
+    Sale,
+)
+from app.models.enums import MarketplaceListingStatus
+from app.api import routes as listings_routes
+from app.api import marketplaces as marketplaces_api
+from app.api import sales as sales_api
+from app.api.sales import _ebay_fulfillment_counts
+from app.services.listing_specificity import classify_listing_reviewability, is_bare_identifier_title, is_caption_like_title
+from app.workers import tasks
+from app.models.models import ListingCorrectionJob
+from app.services.marketplace_field_mapper import build_marketplace_payload
+from app.services.marketplace_preflight import compute_payload_hash
+from app.services import marketplace_orchestrator
+from app.services.multi_platform_publisher import PublishResult
+
+
+def test_route_workflow_shipping_defaults_do_not_infer_free_shipping_above_threshold():
+    prefs = listings_routes._workflow_preferences(None)
+    assert prefs["shipping_price_threshold"] == 25.0
+    assert prefs["shipping_under_threshold_mode"] == "buyer_pays_shipping"
+    assert prefs["shipping_at_or_above_threshold_mode"] == "preserve_existing"
+
+
+def test_route_workflow_shipping_preferences_preserve_explicit_operator_choice(db_session):
+    user = User(email="workflow-shipping-preference@example.com", settings_json={
+        "workflow_preferences": {
+            "shipping_price_threshold": 32,
+            "shipping_under_threshold_mode": "buyer_pays_shipping",
+            "shipping_at_or_above_threshold_mode": "free_shipping",
+        }
+    })
+    db_session.add(user)
+    db_session.flush()
+
+    prefs = listings_routes._workflow_preferences(user)
+    assert prefs["shipping_price_threshold"] == 32
+    assert prefs["shipping_at_or_above_threshold_mode"] == "free_shipping"
+
+
+def seed_listing(user_id: int) -> int:
+    db = database_module.SessionLocal()
+    cluster = Cluster(user_id=user_id, title_hint="Shoes")
+    db.add(cluster)
+    db.commit()
+    db.refresh(cluster)
+    listing = Listing(user_id=user_id, cluster_id=cluster.id, title="Shoes", description="Clean")
+    db.add(listing)
+    db.commit()
+    db.refresh(listing)
+    db.close()
+    return listing.id
+
+
+def seed_bucket_listing(user_id: int, **kwargs) -> int:
+    db = database_module.SessionLocal()
+    marketplace_data = kwargs.get("marketplace_data")
+    if isinstance(marketplace_data, dict) and isinstance(marketplace_data.get("marketplace_preflight"), dict):
+        marketplace_data = dict(marketplace_data)
+        preflight = dict(marketplace_data.get("marketplace_preflight") or {})
+        by_marketplace = {}
+        for market, row in (preflight.get("by_marketplace") or {}).items():
+            by_marketplace[market] = {
+                **row,
+                "last_checked_at": datetime.now(timezone.utc).isoformat(),
+                "preparation_status": row.get("preparation_status") or row.get("status") or "ready",
+            }
+        preflight["by_marketplace"] = by_marketplace
+        marketplace_data["marketplace_preflight"] = preflight
+        kwargs["marketplace_data"] = marketplace_data
+    if kwargs.get("source_type") == "amazon_vine" and kwargs.get("category_id") and not kwargs.get("category_suggestion"):
+        kwargs["category_suggestion"] = "Home & Garden > Test Products"
+        source_metadata = dict(kwargs.get("source_metadata") or {})
+        source_metadata["category_validation"] = {"status": "valid_local", "leaf": True, "tree_id": "0", "tree_version": "134", "category_id": str(kwargs["category_id"]), "full_path": kwargs["category_suggestion"]}
+        kwargs["source_metadata"] = source_metadata
+    # Queue-contract fixtures represent completed machine work unless a test
+    # explicitly supplies an in-flight state.  This keeps the strict
+    # Needs-Review/preflight contract testable without relying on ORM defaults.
+    kwargs.setdefault("processing_state", "complete")
+    kwargs.setdefault("image_urls", ["https://cdn.example.test/item.jpg"])
+    kwargs.setdefault("listing_images", [{"storage_path": "https://cdn.example.test/item.jpg", "operator_state": "approved", "role": "primary", "is_reference": False}])
+    kwargs.setdefault("shipping_profile", {"package_weight": 1.0, "package_dimensions": {"length": 10, "width": 8, "height": 4}})
+    kwargs.setdefault("condition_data", {"condition_bucket": "new", "operator_review_required": False})
+    listing = Listing(user_id=user_id, **kwargs)
+    db.add(listing)
+    db.commit()
+    db.refresh(listing)
+    db.close()
+    return listing.id
+
+
+def test_ebay_fulfillment_counts_use_only_paid_unfulfilled_orders():
+    now = datetime(2026, 9, 14, 12, tzinfo=timezone.utc)
+    orders = [
+        {"orderPaymentStatus": "PAID", "orderFulfillmentStatus": "NOT_STARTED", "fulfillmentStartInstructions": [{"shippingStep": {"shipByDate": "2026-09-13T23:00:00Z"}}]},
+        {"orderPaymentStatus": "PAID", "orderFulfillmentStatus": "IN_PROGRESS", "fulfillmentStartInstructions": [{"shippingStep": {"shipByDate": "2026-09-14T23:00:00Z"}}]},
+        {"orderPaymentStatus": "PAID", "orderFulfillmentStatus": "NOT_STARTED", "fulfillmentStartInstructions": [{"shippingStep": {"shipByDate": "2026-09-16T23:00:00Z"}}]},
+        {"orderPaymentStatus": "PENDING", "orderFulfillmentStatus": "NOT_STARTED"},
+        {"orderPaymentStatus": "PAID", "orderFulfillmentStatus": "FULFILLED"},
+    ]
+    assert _ebay_fulfillment_counts(orders, now=now) == {"need_to_ship": 3, "due_today": 1, "overdue": 1}
+
+
+@pytest.mark.anyio
+async def test_sales_operations_summary_reports_unconfigured_without_faking_zero(async_client):
+    register = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Operations Owner", "email": f"operations-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert register.status_code == 201
+    response = await async_client.get("/sales/operations-summary")
+    assert response.status_code == 200
+    assert response.json() == {
+        "shipping": {"status": "NOT_CONFIGURED", "marketplace": "ebay", "counts": None},
+        "messages": {"status": "NOT_CONFIGURED", "marketplace": "ebay", "unread": None},
+    }
+
+
+@pytest.mark.anyio
+async def test_sales_operations_summary_uses_live_ebay_orders_and_unread_count(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Fulfillment Owner", "email": f"fulfillment-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    db = database_module.SessionLocal()
+    account = MarketplaceAccount(
+        user_id=user_id, marketplace=MarketplaceName.ebay,
+        external_account_id="seller-test", access_token="fake-access", refresh_token="fake-refresh",
+    )
+    db.add(account)
+    db.commit()
+    db.close()
+
+    async def fake_refresh(requested_user_id, session):
+        assert requested_user_id == user_id
+        return session.query(MarketplaceAccount).filter(MarketplaceAccount.user_id == user_id).one()
+
+    class FakeEbayClient:
+        def __init__(self, _token):
+            pass
+
+        async def request(self, _method, path, *, params):
+            if path == "/sell/fulfillment/v1/order":
+                assert params == {"limit": 100, "offset": 0}
+                yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+                return {"total": 1, "orders": [{
+                    "orderPaymentStatus": "PAID", "orderFulfillmentStatus": "NOT_STARTED",
+                    "fulfillmentStartInstructions": [{"shippingStep": {"shipByDate": yesterday}}],
+                }]}
+            assert path == "/commerce/message/v1/conversation"
+            assert params["conversationStatus"] == "UNREAD"
+            return {"conversationsMetadata": {"total": 3}, "conversations": []}
+
+    monkeypatch.setattr(sales_api, "get_or_refresh_account", fake_refresh)
+    monkeypatch.setattr(sales_api, "EbayAPIClient", FakeEbayClient)
+    response = await async_client.get("/sales/operations-summary")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["shipping"]["status"] == "REMOTE_VERIFIED"
+    assert payload["shipping"]["counts"] == {"need_to_ship": 1, "due_today": 0, "overdue": 1}
+    assert payload["messages"]["status"] == "REMOTE_VERIFIED"
+    assert payload["messages"]["unread"] == 3
+
+
+@pytest.mark.anyio
+async def test_need_a_correction_api_creates_authenticated_durable_job(async_client, monkeypatch):
+    register = await async_client.post("/auth/register", json={"full_name": "Correction Owner", "email": f"correction-{uuid4()}@example.com", "password": "supersecret123"})
+    assert register.status_code == 201
+    listing_id = seed_bucket_listing(register.json()["user"]["id"], status=ListingStatus.draft, title="Generic Product", description="Condition: New.", source_type="amazon_vine", source_metadata={"amazon_evidence": {"asin": "B000TEST", "title": "160-in-1 Electronic Learning Kit", "brand": "Example"}})
+    monkeypatch.setattr(tasks.process_listing_correction_jobs_task, "delay", lambda **_kwargs: None)
+    response = await async_client.post(f"/listings/{listing_id}/request-revision", json={"fields": ["title", "description", "category"], "note": "Use the actual source evidence. The title and description are too generic and the eBay category is incorrect.", "priority": 0})
+    assert response.status_code == 200
+    db = database_module.SessionLocal()
+    job = db.query(ListingCorrectionJob).filter(ListingCorrectionJob.listing_id == listing_id).one()
+    assert job.priority == 0
+    assert job.fields == ["title", "description", "category"]
+    assert "actual source evidence" in job.operator_note
+    assert response.json()["source_metadata"]["correction_job_id"] == job.id
+    assert response.json()["source_metadata"]["correction_status"] in {"QUEUED", "QUEUED - DRAFTING PAUSED"}
+    db.close()
+
+
+@pytest.mark.anyio
+async def test_need_a_correction_survives_transient_broker_failure(async_client, monkeypatch):
+    register = await async_client.post("/auth/register", json={"full_name": "Broker Failure Owner", "email": f"broker-{uuid4()}@example.com", "password": "supersecret123"})
+    listing_id = seed_bucket_listing(register.json()["user"]["id"], status=ListingStatus.draft, title="Generic", description="Draft", source_type="amazon_vine")
+    def fail_delay(**_kwargs):
+        raise RuntimeError("broker unavailable")
+    monkeypatch.setattr(tasks.process_listing_correction_jobs_task, "delay", fail_delay)
+    response = await async_client.post(f"/listings/{listing_id}/request-revision", json={"fields": ["description"], "note": "Use source evidence", "priority": 0})
+    assert response.status_code == 200
+    metadata = response.json()["source_metadata"]
+    assert metadata["correction_status"] == "QUEUED"
+    assert "broker unavailable" in metadata["correction_enqueue_error"]
+    db = database_module.SessionLocal(); job = db.query(ListingCorrectionJob).filter(ListingCorrectionJob.listing_id == listing_id).one(); assert job.status == "queued"; db.close()
+
+
+@pytest.mark.anyio
+async def test_listing_condition_patch_persists_value(async_client):
+    register = await async_client.post("/auth/register", json={"full_name": "Condition Owner", "email": f"condition-{uuid4()}@example.com", "password": "supersecret123"})
+    assert register.status_code == 201
+    listing_id = seed_bucket_listing(register.json()["user"]["id"], status=ListingStatus.draft, title="Condition Test", condition="Used")
+    response = await async_client.patch(f"/listings/{listing_id}", json={"condition": "New"})
+    assert response.status_code == 200
+    assert response.json()["condition"] == "New"
+    db = database_module.SessionLocal(); row = db.get(Listing, listing_id); assert row.condition == "New"; db.close()
+
+
+@pytest.mark.anyio
+async def test_listing_publish_fields_invalidate_cached_preflight(async_client):
+    register = await async_client.post("/auth/register", json={"full_name": "Preflight Cache Owner", "email": f"preflight-cache-{uuid4()}@example.com", "password": "supersecret123"})
+    assert register.status_code == 201
+    listing_id = seed_bucket_listing(register.json()["user"]["id"], status=ListingStatus.draft, title="Cached", marketplace_data={"marketplace_preflight": {"by_marketplace": {"ebay": {"status": "blocked"}}}})
+    response = await async_client.patch(f"/listings/{listing_id}", json={"title": "Corrected product title"})
+    assert response.status_code == 200
+    db = database_module.SessionLocal(); row = db.get(Listing, listing_id); assert "marketplace_preflight" not in (row.marketplace_data or {}); db.close()
+
+
+@pytest.mark.anyio
+async def test_timeline_manual_classification_round_trip(async_client):
+    register = await async_client.post("/auth/register", json={"full_name": "Timeline Owner", "email": f"timeline-{uuid4()}@example.com", "password": "supersecret123"})
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    db = database_module.SessionLocal()
+    photo = IntakePhoto(user_id=user_id, source_provider="test", source_photo_id=f"photo-{uuid4()}", local_path="/tmp/photo.jpg", image_type="photo", is_slate=False, metadata_json={})
+    db.add(photo); db.commit(); db.refresh(photo); photo_id = photo.id; db.close()
+    marked = await async_client.post("/intake/timeline/classify", json={"photo_ids": [photo_id], "classification": "SLATE"})
+    assert marked.status_code == 200 and marked.json()["updated"] == 1
+    db = database_module.SessionLocal(); row = db.get(IntakePhoto, photo_id)
+    assert row.is_slate is True and row.image_type == "slate" and row.metadata_json["classification_source"] == "MANUAL_OPERATOR"; db.close()
+    reset = await async_client.post("/intake/timeline/classify", json={"photo_ids": [photo_id], "classification": "PHOTO"})
+    assert reset.status_code == 200
+    db = database_module.SessionLocal(); row = db.get(IntakePhoto, photo_id)
+    assert row.is_slate is False and row.image_type == "photo" and row.metadata_json["classification"] == "PHOTO"; db.close()
+
+
+@pytest.mark.anyio
+async def test_retroactive_slate_is_visible_as_modern_timeline_marker(async_client):
+    register = await async_client.post("/auth/register", json={"full_name": "Slate Owner", "email": f"slate-{uuid4()}@example.com", "password": "supersecret123"})
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    db = database_module.SessionLocal()
+    from datetime import datetime, timedelta, timezone
+    start = datetime.now(timezone.utc)
+    photos = [
+        IntakePhoto(user_id=user_id, source_provider="test", source_photo_id=f"before-{uuid4()}", local_path="/tmp/before.jpg", captured_at=start, imported_at=start, image_type="photo", metadata_json={}),
+        IntakePhoto(user_id=user_id, source_provider="test", source_photo_id=f"after-{uuid4()}", local_path="/tmp/after.jpg", captured_at=start + timedelta(minutes=1), imported_at=start + timedelta(minutes=1), image_type="photo", metadata_json={}),
+    ]
+    db.add_all(photos); db.commit(); [db.refresh(photo) for photo in photos]; before_id, after_id = photos[0].id, photos[1].id; db.close()
+    created = await async_client.post("/intake/slates/retroactive", json={"retroactive": True, "after_photo_id": before_id, "before_photo_id": after_id, "item_id": "ITEM-TEST", "box_id": "BOX-TEST", "location": "Warehouse A / Shelf 4", "title": "Cordless transfer pump", "brand": "Example", "model": "TP-12", "condition": "New", "notes": "12V transfer pump for fuel cans", "flaws": "None observed", "weight": "4 lb", "length": "10 in", "width": "6 in", "height": "5 in", "voice_notes": "Verify hose fittings before listing"})
+    assert created.status_code == 200, created.text
+    slate_id = created.json()["slate"]["id"]
+    timeline = await async_client.get("/intake/timeline")
+    assert timeline.status_code == 200
+    markers = [row for row in timeline.json()["items"] if row.get("is_slate_marker")]
+    marker = next(row for row in markers if row["photo"]["slate_id"] == slate_id)
+    assert marker["photo"]["classification"] == "SLATE"
+    assert marker["photo"]["classification_source"] == "MODERN_SLATE"
+    assert marker["photo"]["timeline_role"] == "HEAD"
+    assert marker["photo"]["slate"]["item_id"] == "ITEM-TEST"
+    assert marker["photo"]["slate"]["box_id"] == "BOX-TEST"
+    assert marker["photo"]["slate"]["location"] == "Warehouse A / Shelf 4"
+    assert marker["photo"]["slate"]["title"] == "Cordless transfer pump"
+    assert marker["photo"]["slate"]["notes"] == "12V transfer pump for fuel cans"
+    assert marker["photo"]["slate"]["voice_notes"] == "Verify hose fittings before listing"
+    assert marker["photo"]["metadata_json"]["modern_artwork_missing"] is False
+    assert marker["photo"]["metadata_json"]["official_slate_id"] == slate_id
+
+    # Legacy/source observations remain useful when canonical Slate columns are
+    # sparse; the Timeline should still render the durable decoded item facts.
+    db = database_module.SessionLocal()
+    slate = db.get(IntakeSlate, slate_id)
+    slate.title = None
+    slate.brand = None
+    slate.metadata_json = {**(slate.metadata_json or {}), "legacy_metadata": {"title": "Legacy transfer-pump title", "brand": "Legacy brand"}}
+    db.add(slate); db.commit(); db.close()
+    timeline = await async_client.get("/intake/timeline")
+    marker = next(row for row in timeline.json()["items"] if row.get("is_slate_marker") and row["photo"]["slate_id"] == slate_id)
+    assert marker["photo"]["slate"]["title"] == "Legacy transfer-pump title"
+    assert marker["photo"]["slate"]["brand"] == "Legacy brand"
+
+
+@pytest.mark.anyio
+async def test_add_slate_boundary_and_adjacent_marker_are_stable(async_client):
+    register = await async_client.post("/auth/register", json={"full_name": "Boundary Owner", "email": f"boundary-{uuid4()}@example.com", "password": "supersecret123"})
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    db = database_module.SessionLocal(); start = datetime.now(timezone.utc)
+    photos = [IntakePhoto(user_id=user_id, source_provider="test", source_photo_id=f"boundary-{i}-{uuid4()}", local_path=f"/tmp/boundary-{i}.jpg", captured_at=start + timedelta(minutes=i), imported_at=start, image_type="photo", metadata_json={}) for i in range(2)]
+    db.add_all(photos); db.commit(); [db.refresh(p) for p in photos]; ids = [p.id for p in photos]; db.close()
+    first = await async_client.post("/intake/slates/retroactive", json={"retroactive": True, "after_photo_id": ids[0], "before_photo_id": ids[1], "item_id": "BOUNDARY-1", "box_id": "BOX-1", "location": "Shelf 1"})
+    assert first.status_code == 200, first.text
+    first_id = first.json()["slate"]["id"]
+    adjacent = await async_client.post("/intake/slates/retroactive", json={"retroactive": True, "after_photo_id": f"slate-{first_id}", "before_photo_id": ids[1], "item_id": "BOUNDARY-2"})
+    assert adjacent.status_code == 200, adjacent.text
+    rows = (await async_client.get("/intake/timeline?limit=20")).json()["items"]
+    markers = [row for row in rows if row.get("is_slate_marker")]
+    assert len(markers) == 2
+    assert all(marker["photo"]["slate"]["id"] for marker in markers)
+    assert [row["photo"]["id"] for row in rows if not row.get("is_slate_marker")] == ids
+
+
+@pytest.mark.anyio
+async def test_legacy_image_slates_are_replaced_in_original_positions_idempotently(async_client):
+    register = await async_client.post("/auth/register", json={"full_name": "Legacy Slate Owner", "email": f"legacy-slate-{uuid4()}@example.com", "password": "supersecret123"})
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    db = database_module.SessionLocal()
+    start = datetime.now(timezone.utc)
+    photos = []
+    for index in range(5):
+        photos.append(IntakePhoto(user_id=user_id, source_provider="test", source_photo_id=f"legacy-source-{index}", original_filename=f"legacy-{index}.jpg", local_path=f"/tmp/legacy-{index}.jpg", captured_at=start + timedelta(minutes=index), imported_at=start, image_type="slate" if index in (1, 3) else "photo", is_slate=index in (1, 3), metadata_json=({"item_id": f"ITEM-{index}", "box_id": f"BOX-{index}", "location": f"Shelf {index}", "notes": f"Voice note {index}", "voice_notes": f"Audio {index}"} if index in (1, 3) else {})))
+    db.add_all(photos); db.commit(); [db.refresh(photo) for photo in photos]; db.close()
+    first = await async_client.get("/intake/timeline?limit=20")
+    assert first.status_code == 200
+    rows = first.json()["items"]
+    markers = [row for row in rows if row.get("is_slate_marker")]
+    assert [row["photo"]["item_id"] for row in markers] == ["ITEM-1", "ITEM-3"]
+    assert [
+        ("SLATE", row["photo"]["slate"]["item_id"], row["photo"]["metadata_json"].get("legacy_photo_id"))
+        if row.get("is_slate_marker") else ("PHOTO", row["photo"]["id"])
+        for row in rows
+    ] == [("PHOTO", photos[0].id), ("SLATE", "ITEM-1", photos[1].id), ("PHOTO", photos[2].id), ("SLATE", "ITEM-3", photos[3].id), ("PHOTO", photos[4].id)]
+    for index, marker in zip((1, 3), markers):
+        assert marker["photo"]["slate"]["id"]
+        assert marker["photo"]["slate"]["item_id"] == f"ITEM-{index}"
+        assert marker["photo"]["slate"]["box_id"] == f"BOX-{index}"
+        assert marker["photo"]["slate"]["location"] == f"Shelf {index}"
+        assert marker["photo"]["slate"]["notes"] == f"Voice note {index}"
+        assert marker["photo"]["slate"]["voice_notes"] == f"Audio {index}"
+        assert marker["photo"]["metadata_json"]["legacy_metadata"]["voice_notes"] == f"Audio {index}"
+        assert marker["photo"]["metadata_json"]["legacy_metadata"]["item_id"] == f"ITEM-{index}"
+        assert marker["photo"]["metadata_json"]["legacy_photo_id"] == photos[index].id
+        assert marker["photo"]["metadata_json"]["legacy_source_photo_id"] == f"legacy-source-{index}"
+        assert marker["timeline_key"][1]
+    db = database_module.SessionLocal(); count = db.query(IntakeSlate).filter(IntakeSlate.user_id == user_id).count(); db.close(); assert count == 2
+    second = await async_client.get("/intake/timeline?limit=20")
+    assert second.status_code == 200
+    assert [(row.get("is_slate_marker"), row["photo"].get("id"), row["photo"].get("metadata_json", {}).get("legacy_photo_id")) for row in second.json()["items"]] == [(row.get("is_slate_marker"), row["photo"].get("id"), row["photo"].get("metadata_json", {}).get("legacy_photo_id")) for row in rows]
+    db = database_module.SessionLocal(); assert db.query(IntakeSlate).filter(IntakeSlate.user_id == user_id).count() == 2; db.close()
+
+
+@pytest.mark.anyio
+async def test_timeline_newest_order_and_bulk_delete_are_scoped(async_client):
+    register = await async_client.post("/auth/register", json={"full_name": "Timeline Bulk Owner", "email": f"timeline-bulk-{uuid4()}@example.com", "password": "supersecret123"})
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    db = database_module.SessionLocal()
+    start = datetime.now(timezone.utc)
+    photos = [
+        IntakePhoto(user_id=user_id, source_provider="test", source_photo_id=f"bulk-{i}-{uuid4()}", local_path=f"/tmp/bulk-{i}.jpg", captured_at=start + timedelta(minutes=i), imported_at=start, image_type="photo", metadata_json={})
+        for i in range(3)
+    ]
+    db.add_all(photos); db.commit(); [db.refresh(photo) for photo in photos]; ids = [photo.id for photo in photos]; db.close()
+    oldest = await async_client.get("/intake/timeline?limit=20&order=oldest")
+    newest = await async_client.get("/intake/timeline?limit=20&order=newest")
+    assert oldest.status_code == newest.status_code == 200
+    assert [row["photo"]["id"] for row in oldest.json()["items"] if not row.get("is_slate_marker")] == ids
+    assert [row["photo"]["id"] for row in newest.json()["items"] if not row.get("is_slate_marker")] == list(reversed(ids))
+    deleted = await async_client.post("/intake/timeline/assets/bulk-delete", json={"photo_ids": [ids[0], ids[2], 999999999]})
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["deleted"] == 2
+    assert deleted.json()["skipped"] == [999999999]
+    db = database_module.SessionLocal()
+    rows = db.query(IntakePhoto).filter(IntakePhoto.id.in_(ids)).all()
+    assert all((row.metadata_json or {}).get("timeline_deleted") for row in rows if row.id in {ids[0], ids[2]})
+    assert not (next(row for row in rows if row.id == ids[1]).metadata_json or {}).get("timeline_deleted")
+    db.close()
+
+
+@pytest.mark.anyio
+async def test_timeline_jump_returns_bounded_window_around_group_and_photo(async_client):
+    register = await async_client.post("/auth/register", json={"full_name": "Timeline Jump", "email": f"timeline-jump-{uuid4()}@example.com", "password": "supersecret123"})
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    db = database_module.SessionLocal()
+    start = datetime.now(timezone.utc)
+    photos = [
+        IntakePhoto(user_id=user_id, source_provider="test", source_photo_id=f"jump-{i}-{uuid4()}", original_filename=f"jump-{i}.jpg", local_path=f"/tmp/jump-{i}.jpg", item_id=f"GROUP-{i}", captured_at=start + timedelta(minutes=i), imported_at=start, image_type="photo", metadata_json={})
+        for i in range(3)
+    ]
+    db.add_all(photos); db.commit(); [db.refresh(photo) for photo in photos]; ids = [photo.id for photo in photos]; db.close()
+
+    group_result = await async_client.get("/intake/timeline?limit=3&order=newest&jump_group=2")
+    assert group_result.status_code == 200, group_result.text
+    group_target = next(row for row in group_result.json()["items"] if row["image_group_index"] == 2)
+    assert group_target["photo"]["id"] == ids[1]
+    assert group_result.json()["jump_index"] == 1
+
+    photo_result = await async_client.get("/intake/timeline?limit=3&order=newest&jump_photo=2B")
+    assert photo_result.status_code == 200, photo_result.text
+    photo_target = next(row for row in photo_result.json()["items"] if row["photo"].get("group_photo_label") == "2-B")
+    assert photo_target["photo"]["id"] == ids[1]
+
+
+@pytest.mark.anyio
+async def test_retroactive_slate_one_sided_boundaries_follow_newest_first_view(async_client):
+    register = await async_client.post("/auth/register", json={"full_name": "Timeline Edge Owner", "email": f"timeline-edge-{uuid4()}@example.com", "password": "supersecret123"})
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    db = database_module.SessionLocal()
+    start = datetime.now(timezone.utc)
+    photos = [
+        IntakePhoto(user_id=user_id, source_provider="test", source_photo_id=f"edge-{i}-{uuid4()}", local_path=f"/tmp/edge-{i}.jpg", captured_at=start + timedelta(minutes=i), imported_at=start, image_type="photo", metadata_json={})
+        for i in range(3)
+    ]
+    db.add_all(photos); db.commit(); [db.refresh(photo) for photo in photos]; ids = [photo.id for photo in photos]; db.close()
+
+    # The UI is descending/newest-first: its visual start is chronologically
+    # after the newest photo, while its visual end is before the oldest.
+    head = await async_client.post("/intake/slates/retroactive", json={"retroactive": True, "after_photo_id": ids[-1], "item_id": "EDGE-HEAD"})
+    tail = await async_client.post("/intake/slates/retroactive", json={"retroactive": True, "before_photo_id": ids[0], "item_id": "EDGE-TAIL"})
+    after_only = await async_client.post("/intake/slates/retroactive", json={"retroactive": True, "after_photo_id": ids[1], "item_id": "EDGE-AFTER-ONLY"})
+    assert head.status_code == tail.status_code == after_only.status_code == 200
+
+    newest = await async_client.get("/intake/timeline?limit=20&order=newest")
+    assert newest.status_code == 200
+    rows = newest.json()["items"]
+    ids_in_view = [row["photo"].get("item_id") if row.get("is_slate_marker") else row["photo"]["id"] for row in rows]
+    assert ids_in_view[0] == "EDGE-HEAD"
+    assert ids_in_view[1] == ids[-1]
+    assert ids_in_view[-2:] == [ids[0], "EDGE-TAIL"]
+    assert ids_in_view.index(ids[2]) < ids_in_view.index("EDGE-AFTER-ONLY") < ids_in_view.index(ids[1])
+
+
+@pytest.mark.anyio
+async def test_retroactive_slate_between_newest_first_neighbors_keeps_chronological_boundary(async_client):
+    register = await async_client.post("/auth/register", json={"full_name": "Timeline Mid Owner", "email": f"timeline-mid-{uuid4()}@example.com", "password": "supersecret123"})
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    db = database_module.SessionLocal()
+    start = datetime.now(timezone.utc)
+    photos = [
+        IntakePhoto(user_id=user_id, source_provider="test", source_photo_id=f"mid-{i}-{uuid4()}", local_path=f"/tmp/mid-{i}.jpg", captured_at=start + timedelta(minutes=i), imported_at=start, image_type="photo", metadata_json={})
+        for i in range(3)
+    ]
+    db.add_all(photos); db.commit(); [db.refresh(photo) for photo in photos]; ids = [photo.id for photo in photos]; db.close()
+    # The UI swaps the newest-first visual neighbors into chronological API order.
+    created = await async_client.post("/intake/slates/retroactive", json={"retroactive": True, "after_photo_id": ids[1], "before_photo_id": ids[2], "item_id": "EDGE-MIDDLE"})
+    assert created.status_code == 200, created.text
+    newest = await async_client.get("/intake/timeline?limit=20&order=newest")
+    assert newest.status_code == 200
+    rows = newest.json()["items"]
+    sequence = [row["photo"].get("item_id") if row.get("is_slate_marker") else row["photo"]["id"] for row in rows]
+    assert sequence.index(ids[2]) < sequence.index("EDGE-MIDDLE") < sequence.index(ids[1])
+
+
+@pytest.mark.anyio
+async def test_marketplace_discovery_and_publish_queue(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "Marketplace Owner",
+            "email": f"market-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+
+    listing_id = seed_listing(user_id)
+
+    class DummyTask:
+        id = "task-123"
+
+    monkeypatch.setattr(tasks.publish_listing_to_marketplace_task, "delay", lambda *_args, **_kwargs: DummyTask())
+    monkeypatch.setattr(marketplaces_api, "queue_publish", lambda *_args, **_kwargs: [
+        {"marketplace": "ebay", "status": "QUEUED", "task_id": "task-123"},
+        {"marketplace": "mercari", "status": "MANUAL_HANDOFF_READY", "task_id": None},
+    ])
+
+    m = await async_client.get("/marketplaces")
+    assert m.status_code == 200
+    assert any(row["name"] == "ebay" for row in m.json()["marketplaces"])
+
+    response = await async_client.post(
+        f"/listings/{listing_id}/publish",
+        json={
+            "marketplaces": ["ebay", "mercari"],
+            "confirm_live_publish": True,
+            "confirmation_phrase": "QUEUE LIVE EBAY READY LISTINGS",
+        },
+    )
+    assert response.status_code == 200
+    results = response.json()["results"]
+    assert len(results) == 2
+    assert results[0]["status"] == "QUEUED"
+    assert results[1]["status"] == "MANUAL_HANDOFF_READY"
+
+
+@pytest.mark.anyio
+async def test_listing_queue_filters_match_operator_ready_contract(async_client):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "Queue Contract Owner",
+            "email": f"queue-contract-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+
+    review_ready_id = seed_bucket_listing(
+        user_id,
+        status=ListingStatus.ready,
+        title="Review Ready Item",
+        description="Complete draft awaiting manual approval.",
+        listing_price=19.99,
+        condition="New",
+        category_id="123",
+        needs_review=True,
+        source_type="amazon_vine",
+        marketplace_data={
+            "quality_summary": {"ready_for_publish_queue": True},
+            "targets": ["ebay"],
+            "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "ready"}}},
+        },
+        source_metadata={},
+    )
+    recovery_attention_id = seed_bucket_listing(
+        user_id,
+        status=ListingStatus.draft,
+        title="Recovered Inventory Needs Attention",
+        description="Still being worked on automatically.",
+        listing_price=29.99,
+        condition="Needs review",
+        category_id="456",
+        needs_review=False,
+        source_type="media_inventory_recovery",
+        processing_state="needs_attention",
+        processing_stage="quality_gate",
+        processing_blocking_reason="needs_grouping_review",
+        marketplace_data={
+            "quality_summary": {"ready_for_publish_queue": False},
+            "targets": ["ebay"],
+            "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "blocked"}}},
+        },
+        source_metadata={},
+    )
+    ready_id = seed_bucket_listing(
+        user_id,
+        status=ListingStatus.ready,
+        title="Approved Ready Item",
+        description="Manually approved and waiting for publish.",
+        listing_price=39.99,
+        condition="New",
+        category_id="789",
+        needs_review=False,
+        source_type="amazon_vine",
+        marketplace_data={
+            "quality_summary": {"ready_for_publish_queue": True},
+            "targets": ["ebay"],
+            "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "ready"}}},
+        },
+        source_metadata={"operator_approved_at": "2026-08-12T12:00:00Z"},
+    )
+    blocked_id = seed_bucket_listing(
+        user_id,
+        status=ListingStatus.draft,
+        title="Blocked Draft Item",
+        description="Missing key facts and still in progress.",
+        listing_price=15.99,
+        condition="Needs review",
+        category_id="555",
+        needs_review=False,
+        source_type="amazon_vine",
+        marketplace_data={
+            "quality_summary": {"ready_for_publish_queue": False},
+            "targets": ["ebay"],
+            "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "blocked"}}},
+        },
+        source_metadata={},
+    )
+    sold_id = seed_bucket_listing(
+        user_id,
+        status=ListingStatus.ready,
+        title="Sold Item",
+        description="This item has been sold and should only appear in Sold.",
+        listing_price=49.99,
+        condition="Used",
+        category_id="999",
+        needs_review=False,
+        source_type="amazon_vine",
+        sold_at=datetime(2026, 8, 12, 12, 30, tzinfo=timezone.utc),
+        quantity=0,
+        custom_labels=["sold"],
+        marketplace_data={
+            "quality_summary": {"ready_for_publish_queue": False},
+            "targets": ["ebay"],
+            "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "published"}}},
+        },
+        source_metadata={"operator_approved_at": "2026-08-12T12:00:00Z"},
+    )
+    archived_id = seed_bucket_listing(
+        user_id,
+        status=ListingStatus.ready,
+        title="Archived Item",
+        description="This item is archived and should only appear in Archived.",
+        listing_price=59.99,
+        condition="Used",
+        category_id="998",
+        needs_review=False,
+        source_type="amazon_vine",
+        custom_labels=["archived_vine"],
+        marketplace_data={
+            "quality_summary": {"ready_for_publish_queue": False},
+            "targets": ["ebay"],
+            "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "ready"}}},
+        },
+        source_metadata={"operator_approved_at": "2026-08-12T12:00:00Z"},
+    )
+
+    review_resp = await async_client.get("/listings?queue=review&page_size=50")
+    assert review_resp.status_code == 200
+    review_payload = review_resp.json()
+    review_ids = {row["id"] for row in review_payload["items"]}
+    # A durable review flag alone cannot bypass the shared destination
+    # publishability evaluator; this fixture lacks a fully valid shipping
+    # payload and therefore remains out of Needs Review.
+    assert review_ids == set()
+    assert review_payload["total"] == 0
+
+    attention_resp = await async_client.get("/listings?queue=attention&page_size=50")
+    assert attention_resp.status_code == 200
+    attention_payload = attention_resp.json()
+    attention_ids = {row["id"] for row in attention_payload["items"]}
+    assert recovery_attention_id in attention_ids
+    assert attention_payload["total"] >= 1
+
+    ready_resp = await async_client.get("/listings?queue=ready&page_size=50")
+    assert ready_resp.status_code == 200
+    ready_payload = ready_resp.json()
+    ready_ids = {row["id"] for row in ready_payload["items"]}
+    assert ready_ids == set()
+    assert ready_payload["total"] == 0
+
+    drafts_resp = await async_client.get("/listings?queue=drafts&page_size=50")
+    assert drafts_resp.status_code == 200
+    drafts_payload = drafts_resp.json()
+    draft_ids = {row["id"] for row in drafts_payload["items"]}
+    assert blocked_id not in draft_ids
+    assert recovery_attention_id not in draft_ids
+
+    all_resp = await async_client.get("/listings?page_size=50")
+    assert all_resp.status_code == 200
+    all_payload = all_resp.json()
+    all_ids = {row["id"] for row in all_payload["items"]}
+    assert sold_id not in all_ids
+    assert archived_id not in all_ids
+
+    vine_resp = await async_client.get("/listings?queue=vine&page_size=50")
+    assert vine_resp.status_code == 200
+    vine_payload = vine_resp.json()
+    vine_ids = {row["id"] for row in vine_payload["items"]}
+    assert sold_id not in vine_ids
+    assert archived_id not in vine_ids
+
+    published_resp = await async_client.get("/listings?queue=published&page_size=50")
+    assert published_resp.status_code == 200
+    published_payload = published_resp.json()
+    published_ids = {row["id"] for row in published_payload["items"]}
+    assert sold_id not in published_ids
+    assert archived_id not in published_ids
+
+    sold_resp = await async_client.get("/listings?queue=sold&page_size=50")
+    assert sold_resp.status_code == 200
+    sold_payload = sold_resp.json()
+    sold_ids = {row["id"] for row in sold_payload["items"]}
+    assert sold_ids == {sold_id}
+    assert sold_payload["total"] == 1
+
+    archived_resp = await async_client.get("/listings?queue=archived&page_size=50")
+    assert archived_resp.status_code == 200
+    archived_payload = archived_resp.json()
+    archived_ids = {row["id"] for row in archived_payload["items"]}
+    assert archived_ids == {archived_id}
+    assert archived_payload["total"] == 1
+
+
+@pytest.mark.anyio
+async def test_attention_queue_separates_capability_policy_reconciliation_and_retry(async_client):
+    register = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Separated Queue Owner", "email": f"queue-separation-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    rows = {
+        "publisher_unsupported": seed_bucket_listing(
+            user_id, status=ListingStatus.FAILED, title="Verified Motors Alternator", description="Vehicle-specific alternator.",
+            processing_state="publisher_path_unsupported", processing_blocking_reason="PUBLISHER_PATH_UNSUPPORTED_EBAY_MOTORS",
+        ),
+        "policy_blocked": seed_bucket_listing(
+            user_id, status=ListingStatus.draft, title="Lithium Battery Product", description="Battery compliance review.",
+            processing_state="policy_blocked", processing_blocking_reason="Marketplace policy review required: hazmat.",
+        ),
+        "provider_retry": seed_bucket_listing(
+            user_id, status=ListingStatus.draft, title="Retryable Provider Product", description="Provider retry is scheduled.",
+            processing_state="retry", processing_blocking_reason="Provider timeout, retry scheduled.",
+        ),
+        "reconciliation": seed_bucket_listing(
+            user_id, status=ListingStatus.draft, title="Unknown Remote Product", description="Remote state needs reconciliation.",
+            processing_state="remote_state_unknown", processing_blocking_reason="REMOTE_STATE_UNKNOWN / RECONCILIATION_REQUIRED",
+        ),
+    }
+
+    attention = (await async_client.get("/listings?queue=attention&page_size=50")).json()
+    attention_ids = {row["id"] for row in attention["items"]}
+    assert attention["total"] == 0
+    assert not (set(rows.values()) & attention_ids)
+    for queue, listing_id in rows.items():
+        response = await async_client.get(f"/listings?queue={queue}&page_size=50")
+        assert response.status_code == 200
+        assert response.json()["total"] == 1
+        assert response.json()["items"][0]["id"] == listing_id
+    catalog = (await async_client.get("/listings?page=1&page_size=1")).json()
+    assert catalog["bucket_counts"].get("attention", 0) == 0
+    assert catalog["bucket_counts"].get("publisher_unsupported") == 1
+    assert catalog["bucket_counts"].get("policy_blocked") == 1
+    assert catalog["bucket_counts"].get("provider_retry") == 1
+    assert catalog["bucket_counts"].get("reconciliation") == 1
+
+
+@pytest.mark.anyio
+async def test_listing_queue_hides_generic_caption_rows_and_merged_child_projections(async_client):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "Generic Queue Owner",
+            "email": f"generic-queue-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+
+    generic_review_id = seed_bucket_listing(
+        user_id,
+        status=ListingStatus.ready,
+        title="Circuit Board",
+        description="Bare caption only.",
+        listing_price=19.99,
+        condition="Needs review",
+        category_id="",
+        needs_review=True,
+        source_type="media_inventory_recovery",
+        processing_state="complete",
+        processing_stage="quality_gate",
+        source_metadata={"recovery": {"item_id": "REC-1"}},
+    )
+    merged_child_id = seed_bucket_listing(
+        user_id,
+        status=ListingStatus.ready,
+        title="Merged child listing",
+        description="Should not appear as a standalone item.",
+        listing_price=29.99,
+        condition="Needs review",
+        category_id="",
+        needs_review=False,
+        source_type="media_inventory_recovery",
+        processing_state="complete",
+        processing_stage="quality_gate",
+        source_metadata={
+            "recovery": {
+                "item_id": "REC-2",
+                "merged_into_recovery_item_id": "REC-1",
+                "merged_into_recovery_group_id": 99,
+            }
+        },
+    )
+
+    review_resp = await async_client.get("/listings?queue=review&page_size=50")
+    assert review_resp.status_code == 200
+    review_payload = review_resp.json()
+    review_ids = {row["id"] for row in review_payload["items"]}
+    assert generic_review_id not in review_ids
+
+    all_resp = await async_client.get("/listings?page_size=50")
+    assert all_resp.status_code == 200
+    all_payload = all_resp.json()
+    all_ids = {row["id"] for row in all_payload["items"]}
+    assert merged_child_id not in all_ids
+
+
+def test_reviewability_classifier_is_consistent_across_example_titles():
+    examples = [
+        (
+            "Circuit Board",
+            "weak",
+            {},
+            {},
+        ),
+        (
+            "Whirlpool W11478526 Washer Main Control Board OEM Replacement Part",
+            "pass",
+            {"Brand": "Whirlpool", "MPN": "W11478526", "Type": "Washer Main Control Board"},
+            {},
+        ),
+        (
+            "35541-10020",
+            "weak",
+            {},
+            {},
+        ),
+        (
+            "Volvo 106 213 G Pipe",
+            "pass",
+            {"Brand": "Volvo", "MPN": "106 213 G", "Type": "Pipe"},
+            {"recovery": {"identity": {"title": "Volvo Pipe", "brand": "Volvo", "mpn": "106 213 G"}}},
+        ),
+        (
+            "Product Packaging",
+            "weak",
+            {},
+            {},
+        ),
+    ]
+    for title, expected, item_specifics, source_metadata in examples:
+        result = classify_listing_reviewability(title=title, description=None, category=None, item_specifics=item_specifics, source_metadata=source_metadata, has_images=True)
+        assert result["reviewability_class"] == expected
+        assert is_caption_like_title(title) == (expected == "weak" and title.lower() in {"circuit board", "product packaging"})
+        assert is_bare_identifier_title(title) == (title == "35541-10020")
+        if expected == "pass":
+            assert result["is_specific_sellable_identity"] is True
+        dummy = Listing(
+            title=title,
+            description="",
+            source_type="media_inventory_recovery",
+            category_suggestion="",
+            item_specifics=item_specifics,
+            source_metadata=source_metadata,
+            image_urls=["/media/example.jpg"],
+            status=ListingStatus.ready,
+            needs_review=True,
+            processing_state="complete",
+            marketplace_data={"marketplace_preflight": {"by_marketplace": {"ebay": {"status": "ready", "blockers": []}}}},
+        )
+        bucket = listings_routes._listing_bucket(dummy)
+        assert bucket == ("needs_attention" if expected == "weak" else "review")
+
+
+@pytest.mark.anyio
+async def test_listing_source_and_queue_filters_compose(async_client):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "Composed Filter Owner",
+            "email": f"composed-filter-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+
+    vine_review_id = seed_bucket_listing(
+        user_id,
+        status=ListingStatus.draft,
+        title="Vine Review Item",
+        description="Amazon Vine item awaiting review.",
+        listing_price=19.99,
+        condition="New",
+        category_id="123",
+        needs_review=True,
+        source_type="amazon_vine",
+        marketplace_data={
+            "quality_summary": {"ready_for_publish_queue": True},
+            "targets": ["ebay"],
+            "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "ready"}}},
+        },
+    )
+    vine_published_id = seed_bucket_listing(
+        user_id,
+        status=ListingStatus.ready,
+        title="Vine Published Item",
+        description="Amazon Vine item already published.",
+        listing_price=29.99,
+        condition="New",
+        category_id="124",
+        needs_review=False,
+        source_type="amazon_vine",
+        ebay_publish_status=EbayPublishStatus.POSTED,
+        ebay_listing_id="EBAY12345",
+        marketplace_data={
+            "quality_summary": {"ready_for_publish_queue": True},
+            "targets": ["ebay"],
+            "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "published"}}},
+        },
+    )
+    photo_review_id = seed_bucket_listing(
+        user_id,
+        status=ListingStatus.draft,
+        title="Photo Review Item",
+        description="Google Photos item awaiting review.",
+        listing_price=9.99,
+        condition="Used",
+        category_id="125",
+        needs_review=True,
+        source_type="google_photos_album",
+        marketplace_data={
+            "quality_summary": {"ready_for_publish_queue": True},
+            "targets": ["ebay"],
+            "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "ready"}}},
+        },
+    )
+
+    vine_review_resp = await async_client.get("/listings?queue=review&source_type=amazon_vine&page_size=50")
+    assert vine_review_resp.status_code == 200
+    vine_review_payload = vine_review_resp.json()
+    vine_review_ids = {row["id"] for row in vine_review_payload["items"]}
+    assert vine_review_ids == set()
+
+    vine_published_resp = await async_client.get("/listings?queue=published&source_type=amazon_vine&page_size=50")
+    assert vine_published_resp.status_code == 200
+    vine_published_payload = vine_published_resp.json()
+    vine_published_ids = {row["id"] for row in vine_published_payload["items"]}
+    assert vine_published_ids == {vine_published_id}
+
+    photo_review_resp = await async_client.get("/listings?queue=review&source_type=google_photos_album&page_size=50")
+    assert photo_review_resp.status_code == 200
+    photo_review_payload = photo_review_resp.json()
+    photo_review_ids = {row["id"] for row in photo_review_payload["items"]}
+    assert photo_review_ids == set()
+
+
+@pytest.mark.anyio
+async def test_all_queue_excludes_sold_archived_and_review_requires_publishable_preflight(async_client):
+    register = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Queue Semantics Owner", "email": f"queue-semantics-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    active_review = seed_bucket_listing(
+        user_id, status=ListingStatus.draft, title="Northwind LED Desk Lamp Model L100", description="A Northwind LED desk lamp with adjustable light and a clean tested presentation.", source_type="amazon_vine",
+        needs_review=True, processing_state="complete", category_id="123", category_suggestion="Home > Lighting", listing_price=25,
+        listing_images=[{"storage_path": "/media/ready-review.jpg", "operator_state": "approved", "role": "primary"}],
+        condition="New", condition_data={"operator_review_required": False},
+        shipping_profile={"manual_measurement_needed": False, "package_weight": 1, "package_dimensions": {"length": 8, "width": 6, "height": 4}},
+        marketplace_data={"targets": ["ebay"], "pricing_analysis": {"provenance": "sold_comps", "comp_count_used": 3, "price_confidence": 0.8, "current_price": 25}, "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "ready", "blockers": []}}}},
+    )
+    blocked_review = seed_bucket_listing(
+        user_id, status=ListingStatus.draft, title="Blocked review", description="Specific product", source_type="amazon_vine",
+        needs_review=True, marketplace_data={"targets": ["ebay"], "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "blocked", "blockers": [{"code": "ASPECT_REQUIRED"}]}}}},
+    )
+    approved_but_blocked = seed_bucket_listing(
+        user_id, status=ListingStatus.ready, title="Approved but blocked", description="Specific product", source_type="amazon_vine",
+        needs_review=False, source_metadata={"operator_approved_at": "2026-09-09T12:00:00Z"},
+        marketplace_data={"targets": ["ebay"], "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "blocked", "blockers": [{"code": "ASPECT_REQUIRED"}]}}}},
+    )
+    active_draft = seed_bucket_listing(user_id, status=ListingStatus.draft, title="Active draft", source_type="amazon_vine")
+    sold = seed_bucket_listing(user_id, status=ListingStatus.PUBLISHED, title="Sold item", source_type="amazon_vine", sold_at=datetime.utcnow(), quantity=0)
+    archived = seed_bucket_listing(user_id, status=ListingStatus.draft, title="Archived item", source_type="amazon_vine", custom_labels=["archived_vine"])
+
+    all_payload = (await async_client.get("/listings?queue=all&source_type=amazon_vine&page_size=50")).json()
+    all_ids = {row["id"] for row in all_payload["items"]}
+    assert {active_review, blocked_review, active_draft, approved_but_blocked}.issubset(all_ids)
+    assert sold not in all_ids and archived not in all_ids
+
+    review_payload = (await async_client.get("/listings?queue=review&source_type=amazon_vine&page_size=50")).json()
+    assert {row["id"] for row in review_payload["items"]} == {active_review}
+    assert review_payload["items"][0]["queue_bucket"] == "review"
+    attention_payload = (await async_client.get("/listings?queue=attention&source_type=amazon_vine&page_size=50")).json()
+    attention_ids = {row["id"] for row in attention_payload["items"]}
+    assert blocked_review in attention_ids and approved_but_blocked in attention_ids
+    assert all(row["queue_bucket"] == "needs_attention" for row in attention_payload["items"])
+    ready_ids = {row["id"] for row in (await async_client.get("/listings?queue=ready&source_type=amazon_vine&page_size=50")).json()["items"]}
+    assert approved_but_blocked not in ready_ids
+
+
+@pytest.mark.anyio
+async def test_published_ebay_listing_queues_facebook_only(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "Marketplace Owner",
+            "email": f"market-fb-crosspost-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    listing_id = seed_listing(user_id)
+
+    class DummyTask:
+        id = "task-facebook-only"
+
+    monkeypatch.setattr(tasks.publish_listing_to_marketplace_task, "delay", lambda *_args, **_kwargs: DummyTask())
+    monkeypatch.setattr(marketplaces_api, "queue_publish", lambda *_args, **_kwargs: [
+        {"marketplace": "ebay", "status": "SKIPPED_ALREADY_PUBLISHED", "task_id": None},
+        {"marketplace": "facebook", "status": "QUEUED", "task_id": "task-facebook-only"},
+    ])
+
+    response = await async_client.post(
+        f"/listings/{listing_id}/publish",
+        json={"marketplaces": ["ebay", "facebook"], "confirm_live_publish": True, "confirmation_phrase": "QUEUE LIVE EBAY READY LISTINGS"},
+    )
+    assert response.status_code == 200
+    results = response.json()["results"]
+    assert any(item["marketplace"] == "ebay" and item["status"] == "SKIPPED_ALREADY_PUBLISHED" for item in results)
+    assert any(item["marketplace"] == "facebook" and item["status"] == "QUEUED" for item in results)
+
+
+@pytest.mark.anyio
+async def test_marketplace_jobs_overview_includes_system_status_snapshot(async_client):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "Status Snapshot Owner",
+            "email": f"status-snapshot-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+
+    seed_bucket_listing(
+        user_id,
+        status=ListingStatus.draft,
+        title="Draft Item",
+        description="A draft item.",
+        listing_price=11.0,
+        category_id="100",
+        source_type="amazon_vine",
+    )
+    seed_bucket_listing(
+        user_id,
+        status=ListingStatus.ready,
+        title="Ready Item",
+        description="A ready item.",
+        listing_price=12.0,
+        category_id="101",
+        source_type="amazon_vine",
+        source_metadata={"operator_approved_at": "2026-08-12T12:00:00Z"},
+    )
+    seed_bucket_listing(
+        user_id,
+        status=ListingStatus.ready,
+        title="Sold Item",
+        description="A sold item.",
+        listing_price=13.0,
+        category_id="102",
+        source_type="amazon_vine",
+        sold_at=datetime(2026, 8, 12, 13, 0, tzinfo=timezone.utc),
+        quantity=0,
+        custom_labels=["sold"],
+    )
+    seed_bucket_listing(
+        user_id,
+        status=ListingStatus.ready,
+        title="Archived Item",
+        description="An archived item.",
+        listing_price=14.0,
+        category_id="103",
+        source_type="amazon_vine",
+        custom_labels=["archived_vine"],
+    )
+
+    response = await async_client.get("/marketplace-jobs/overview?compact=true&limit=5")
+    assert response.status_code == 200
+    payload = response.json()
+    status = payload["system_status"]
+    assert status["catalog_total"] == 4
+    assert status["catalog_sold"] == 1
+    assert status["catalog_archived"] == 1
+    assert status["catalog_visible"] == 2
+    assert "status_message" in status
+
+
+@pytest.mark.anyio
+async def test_dashboard_catalog_metrics_are_unpaginated_and_count_live_canonical_items_once(async_client):
+    register = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Metric Owner", "email": f"metric-owner-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+
+    db = database_module.SessionLocal()
+    live_rows = [
+        Listing(
+            user_id=user_id,
+            status=ListingStatus.PUBLISHED,
+            ebay_publish_status=EbayPublishStatus.POSTED,
+            ebay_listing_id=f"EBAY-{idx}",
+            title=f"Live {idx}",
+            description="live",
+            quantity=1,
+        )
+        for idx in range(161)
+    ]
+    db.add_all(live_rows)
+    db.flush()
+    # Two live marketplace projections for one canonical item must not inflate
+    # the dashboard's listing count.
+    db.add_all([
+        MarketplaceListing(listing_id=live_rows[0].id, marketplace=MarketplaceName.facebook, marketplace_listing_id="fb-1", status=MarketplaceListingStatus.PUBLISHED),
+        MarketplaceListing(listing_id=live_rows[0].id, marketplace=MarketplaceName.mercari, marketplace_listing_id="mc-1", status=MarketplaceListingStatus.PUBLISHED),
+    ])
+    unconfirmed_projection = Listing(user_id=user_id, status=ListingStatus.draft, title="Unconfirmed projection", description="still a draft", quantity=1)
+    db.add(unconfirmed_projection)
+    db.flush()
+    db.add(MarketplaceListing(listing_id=unconfirmed_projection.id, marketplace=MarketplaceName.facebook, marketplace_listing_id=None, status=MarketplaceListingStatus.PUBLISHED))
+    draft = Listing(user_id=user_id, status=ListingStatus.draft, title="Women's Brown Leather Crossbody Bag", description="draft", quantity=1)
+    review = Listing(user_id=user_id, status=ListingStatus.draft, processing_state="complete", title="Vintage Navy Cotton Sweater Size Large", description="A vintage navy cotton sweater in size large with a classic knit texture and clean presentation for review.", quantity=1, needs_review=True, category_id="124", category_suggestion="Clothing > Sweaters", listing_price=30, condition="Used - Very Good", listing_images=[{"storage_path": "https://example.test/review.jpg", "operator_state": "approved", "role": "primary"}], condition_data={"operator_review_required": False}, shipping_profile={"manual_measurement_needed": False, "package_weight": 1, "package_dimensions": {"length": 12, "width": 10, "height": 4}}, marketplace_data={"targets": ["ebay"], "pricing_analysis": {"provenance": "sold_comps", "comp_count_used": 3, "price_confidence": 0.8, "current_price": 30}, "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "needs_review", "blockers": []}}}})
+    ready = Listing(user_id=user_id, status=ListingStatus.ready, title="Ready Product", description="A ready product with verified basic details and a clear buyer-facing description for publication.", quantity=1, image_urls=["https://example.test/ready.jpg"], category_id="125", category_suggestion="Collectibles", listing_price=30, condition="New", condition_data={"operator_review_required": False}, shipping_profile={"manual_measurement_needed": False, "package_weight": 1, "package_dimensions": {"length": 8, "width": 6, "height": 4}}, source_metadata={"operator_approved_at": "2026-09-01T00:00:00Z"}, marketplace_data={"targets": ["ebay"], "pricing_analysis": {"provenance": "sold_comps", "comp_count_used": 3, "price_confidence": 0.8, "current_price": 30}, "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "ready", "blockers": []}}}})
+    attention = Listing(user_id=user_id, status=ListingStatus.draft, title="Vintage Brass Table Lamp with Shade", description="blocked", quantity=1, needs_review=True, marketplace_data={"targets": ["ebay"], "marketplace_preflight": {"by_marketplace": {"ebay": {"status": "blocked", "blockers": ["CONDITION_REQUIRED"]}}}})
+    sold = Listing(user_id=user_id, status=ListingStatus.PUBLISHED, title="Sold Vintage Lamp", description="sold", quantity=0, sold_at=datetime.utcnow())
+    archived = Listing(user_id=user_id, status=ListingStatus.draft, title="Archived Wool Coat", description="archived", quantity=1, custom_labels=["archived_vine"])
+    failed = Listing(user_id=user_id, status=ListingStatus.FAILED, title="Failed Sneaker Listing", description="failed", quantity=1)
+    db.add_all([draft, review, ready, attention, sold, archived, failed])
+    db.commit()
+    db.close()
+
+    # The page payload remains limited to five, while all dashboard metrics
+    # are computed independently over the tenant's complete canonical catalog.
+    response = await async_client.get("/marketplace-jobs/overview?compact=true&limit=5")
+    assert response.status_code == 200
+    status = response.json()["system_status"]
+    assert status["catalog_live"] == 161
+    assert status["catalog_published"] == 161
+    assert status["catalog_review"] == 1
+    assert status["catalog_ready"] == 1
+    assert status["catalog_drafts"] == 2
+    assert status["catalog_failed"] == 1
+
+    for queue, expected in (("review", 1), ("ready", 1), ("drafts", 2), ("needs_attention", 1)):
+        queued = await async_client.get(f"/listings?page=1&page_size=5&queue={queue}")
+        assert queued.status_code == 200
+        assert queued.json()["total"] == expected
+
+    published_page = await async_client.get("/listings?page=1&page_size=5&queue=published")
+    assert published_page.status_code == 200
+    assert published_page.json()["total"] == 161
+    assert len(published_page.json()["items"]) == 5
+
+
+@pytest.mark.anyio
+async def test_dashboard_live_breakdown_uses_remote_ebay_snapshot_and_deduplicates_other_markets(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Live Snapshot Owner", "email": f"live-snapshot-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    db = database_module.SessionLocal()
+    rows = [
+        Listing(user_id=user_id, status=ListingStatus.PUBLISHED, ebay_publish_status=EbayPublishStatus.POSTED, ebay_listing_id=f"EXT-{n}", title=f"Tracked listing {n}", description="live", quantity=1)
+        for n in range(1, 5)
+    ]
+    db.add_all(rows)
+    db.add(MarketplaceAccount(user_id=user_id, marketplace=MarketplaceName.ebay, external_account_id="test-seller", access_token="test-access", refresh_token="test-refresh"))
+    db.flush()
+    db.add_all([
+        MarketplaceListing(listing_id=rows[1].id, marketplace=MarketplaceName.facebook, marketplace_listing_id="FB-2", status=MarketplaceListingStatus.PUBLISHED),
+        MarketplaceListing(listing_id=rows[2].id, marketplace=MarketplaceName.facebook, marketplace_listing_id="FB-3", status=MarketplaceListingStatus.PUBLISHED),
+        MarketplaceListing(listing_id=rows[3].id, marketplace=MarketplaceName.facebook, marketplace_listing_id=None, status=MarketplaceListingStatus.PUBLISHED),
+    ])
+    db.commit()
+    db.close()
+
+    import app.services.active_listing_snapshot as snapshot_service
+    calls = []
+
+    async def fake_active_ebay_listings(requested_user_id, _db, *, limit):
+        calls.append((requested_user_id, limit))
+        return [
+            {"source_identifiers": {"ebay_listing_id": "EXT-1"}},
+            {"source_identifiers": {"ebay_listing_id": "EXT-2"}},
+        ]
+
+    monkeypatch.setattr(snapshot_service, "get_active_ebay_listings", fake_active_ebay_listings)
+    response = await async_client.get("/marketplace-jobs/overview?compact=true&limit=5")
+    assert response.status_code == 200
+    status = response.json()["system_status"]
+    assert status["catalog_live"] == 3
+    assert status["catalog_live_by_marketplace"]["ebay"] == 2
+    assert status["catalog_live_by_marketplace"]["facebook"] == 2
+    assert status["catalog_live_by_marketplace"]["mercari"] is None
+    assert status["catalog_live_verification"] == "REMOTE_VERIFIED"
+    assert status["catalog_ebay_reconciliation_needed"] == 2
+
+    published = await async_client.get("/listings?queue=published&page=1&page_size=10")
+    assert published.status_code == 200
+    assert published.json()["total"] == 2
+
+    # A second summary reads the fresh tenant-scoped snapshot without another
+    # external request, while stale local eBay rows do not re-enter the count.
+    second = await async_client.get("/marketplace-jobs/overview?compact=true&limit=5")
+    assert second.status_code == 200
+    assert second.json()["system_status"]["catalog_live"] == 3
+    assert len(calls) == 1
+
+
+@pytest.mark.anyio
+async def test_marketplace_publish_multi_requires_explicit_live_confirmation(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "Marketplace Owner",
+            "email": f"market-multi-confirm-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    listing_id = seed_listing(user_id)
+
+    called = []
+
+    def fake_queue_publish(*args, **kwargs):
+        called.append((args, kwargs))
+        return [{"marketplace": "ebay", "status": "QUEUED", "task_id": "task-1"}]
+
+    monkeypatch.setattr(marketplaces_api, "queue_publish", fake_queue_publish)
+
+    response = await async_client.post(
+        f"/listings/{listing_id}/publish",
+        json={"marketplaces": ["ebay"], "confirm_live_publish": False},
+    )
+    assert response.status_code == 400
+    assert "QUEUE LIVE EBAY READY LISTINGS" in response.json()["detail"]
+    assert called == []
+
+
+@pytest.mark.anyio
+async def test_bulk_publish_ready_requires_explicit_live_confirmation(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "Marketplace Owner",
+            "email": f"market-confirm-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    listing_id = seed_listing(user_id)
+
+    called = []
+
+    def fake_bulk_publish_ready(*args, **kwargs):
+        called.append((args, kwargs))
+        return {"items": [], "summary": {"queued": 0}, "markets": ["ebay"], "dry_run": False, "allow_warnings": False, "skip_already_queued": True}
+
+    monkeypatch.setattr(marketplaces_api, "bulk_publish_ready", fake_bulk_publish_ready)
+
+    response = await async_client.post(
+        "/marketplaces/publish-ready/bulk",
+        json={
+            "listing_ids": [listing_id],
+            "marketplaces": ["ebay"],
+            "dry_run": False,
+        },
+    )
+    assert response.status_code == 400
+    assert "QUEUE LIVE EBAY READY LISTINGS" in response.json()["detail"]
+    assert called == []
+
+
+@pytest.mark.anyio
+async def test_bulk_publish_ready_dry_run_does_not_require_confirmation(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "Marketplace Owner",
+            "email": f"market-dryrun-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    listing_id = seed_listing(user_id)
+
+    called = []
+
+    def fake_bulk_publish_ready(*args, **kwargs):
+        called.append((args, kwargs))
+        return {
+            "items": [],
+            "summary": {"queued": 0, "dry_run_ready": 1, "dry_run_blocked": 0},
+            "markets": ["ebay"],
+            "dry_run": True,
+            "allow_warnings": False,
+            "skip_already_queued": True,
+        }
+
+    monkeypatch.setattr(marketplaces_api, "bulk_publish_ready", fake_bulk_publish_ready)
+
+    response = await async_client.post(
+        "/marketplaces/publish-ready/bulk",
+        json={
+            "listing_ids": [listing_id],
+            "marketplaces": ["ebay"],
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["dry_run"] is True
+    assert called
+
+
+@pytest.mark.anyio
+async def test_launch_drill_dry_run_is_safe_and_itemized(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "Launch Drill Owner",
+            "email": f"market-drill-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    listing_id = seed_listing(user_id)
+
+    def fake_launch_drill(*args, **kwargs):
+        return {
+            "marketplace": "ebay",
+            "generated_at": None,
+            "summary": {"checked": 1, "ready": 1, "blocked": 0, "warnings": 0},
+            "items": [
+                {
+                    "listing_id": listing_id,
+                    "title": "Launch Drill Item",
+                    "status": "ready",
+                    "preflight": {"status": "ready"},
+                    "payload_preview": {"sku": "posterprou1l1"},
+                    "blockers": [],
+                    "warnings": [],
+                    "launch_checklist": [{"label": "Preflight ready", "ok": True}],
+                    "reason": None,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(marketplaces_api.MarketplacePreflightService, "launch_drill_dry_run", fake_launch_drill)
+
+    response = await async_client.post(
+        "/marketplaces/launch-drill/dry-run",
+        json={"listing_ids": [listing_id], "marketplace": "ebay", "max_items": 5, "require_ready": True, "include_payload_preview": True},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]["ready"] == 1
+    assert payload["items"][0]["status"] == "ready"
+
+
+@pytest.mark.anyio
+async def test_listing_approve_auto_queues_when_enabled(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "Approve Owner",
+            "email": f"approve-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+
+    settings_resp = await async_client.patch(
+        "/auth/me",
+        json={"auto_publish_after_approval": True},
+    )
+    assert settings_resp.status_code == 200
+
+    listing_id = seed_listing(user_id)
+    await async_client.patch(
+        f"/listings/{listing_id}",
+        json={"needs_review": True, "status": "draft", "marketplace_data": {"targets": ["ebay"]}},
+    )
+
+    def fake_preflight(self, _db, listing, marketplace):
+        return {
+            "listing_id": listing.id,
+            "marketplace": marketplace,
+            "status": "ready",
+            "blockers": [],
+            "warnings": [],
+        }
+
+    class DummyTask:
+        id = "approve-task-123"
+
+    monkeypatch.setattr(marketplaces_api.MarketplacePreflightService, "preflight_listing", fake_preflight)
+    monkeypatch.setattr(tasks.publish_listing_to_marketplace_task, "delay", lambda *_args, **_kwargs: DummyTask())
+
+    response = await async_client.post(f"/listings/{listing_id}/approve")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["auto_publish_after_approval"] is True
+    assert payload["approval_publishable"] is True
+    assert len(payload["results"]) == 1
+    targets = sorted([item["marketplace"] for item in payload["results"]])
+    assert targets == ["ebay"]
+    assert payload["listing"]["needs_review"] is False
+    assert payload["listing"]["status"] == "ready"
+
+
+@pytest.mark.anyio
+async def test_listing_bulk_approve_uses_same_contract(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "Bulk Approve Owner",
+            "email": f"approve-bulk-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+
+    listing_a = seed_listing(user_id)
+    listing_b = seed_listing(user_id)
+    for listing_id in (listing_a, listing_b):
+        update_resp = await async_client.patch(
+            f"/listings/{listing_id}",
+            json={"needs_review": True, "status": "draft", "marketplace_data": {"targets": ["ebay"]}},
+        )
+        assert update_resp.status_code == 200
+
+    def fake_preflight(self, _db, listing, marketplace):
+        return {
+            "listing_id": listing.id,
+            "marketplace": marketplace,
+            "status": "ready",
+            "blockers": [],
+            "warnings": [],
+        }
+
+    class DummyTask:
+        id = "approve-bulk-task-123"
+
+    monkeypatch.setattr(marketplaces_api.MarketplacePreflightService, "preflight_listing", fake_preflight)
+    monkeypatch.setattr(tasks.publish_listing_to_marketplace_task, "delay", lambda *_args, **_kwargs: DummyTask())
+
+    response = await async_client.post("/listings/approve-bulk", json={"listing_ids": [listing_a, listing_b]})
+    assert response.status_code == 200
+    payload = response.json()
+    approvals = payload["approvals"]
+    assert len(approvals) == 2
+    for approval in approvals:
+        assert approval["auto_publish_after_approval"] is False
+        assert approval["approval_publishable"] is True
+        assert approval["results"] == []
+        assert approval["listing"]["needs_review"] is False
+        assert approval["listing"]["status"] == "ready"
+
+
+@pytest.mark.anyio
+async def test_listing_approve_keeps_blocked_items_in_draft(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "Blocked Approve Owner",
+            "email": f"approve-blocked-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+
+    listing_id = seed_listing(user_id)
+    await async_client.patch(
+        f"/listings/{listing_id}",
+        json={"needs_review": True, "status": "draft", "marketplace_data": {"targets": ["ebay"]}},
+    )
+
+    def fake_preflight(self, _db, listing, marketplace):
+        return {
+            "listing_id": listing.id,
+            "marketplace": marketplace,
+            "status": "blocked",
+            "blockers": [{"code": "EBAY_REQUIRED_ASPECT_MISSING", "message": "Type is required"}],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(marketplaces_api.MarketplacePreflightService, "preflight_listing", fake_preflight)
+
+    response = await async_client.post(f"/listings/{listing_id}/approve")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["approval_publishable"] is False
+    assert payload["listing"]["status"] == "draft"
+    assert payload["listing"]["needs_review"] is False
+    assert payload["results"] == []
+
+
+@pytest.mark.anyio
+async def test_approve_and_queue_blocks_before_job_when_destination_preflight_fails(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "Queue Owner",
+            "email": f"approve-queue-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+
+    listing_id = seed_listing(user_id)
+    await async_client.patch(
+        f"/listings/{listing_id}",
+        json={"needs_review": True, "status": "draft", "marketplace_data": {"targets": ["ebay", "facebook"]}},
+    )
+
+    def fail_preflight(*_args, **_kwargs):
+        raise RuntimeError("diagnostic provider unavailable")
+
+    monkeypatch.setattr(listings_routes.MarketplacePreflightService, "preflight_listing", fail_preflight)
+    enqueued = []
+    monkeypatch.setattr(listings_routes, "enqueue_crosspost_job", lambda *_args, **_kwargs: enqueued.append(True))
+
+    response = await async_client.post(
+        "/listings/approve-and-queue",
+        json={
+            "listing_ids": [listing_id],
+            "marketplaces": ["ebay", "facebook"],
+            "confirm_live_publish": True,
+            "confirmation_phrase": "QUEUE LIVE EBAY READY LISTINGS",
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["results"][0]["status"] == "blocked"
+    assert payload["results"][0].get("job_id") is None
+    assert enqueued == []
+
+
+@pytest.mark.anyio
+async def test_approve_and_queue_publishes_ready_market_when_other_selected_market_is_disconnected(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Partial Queue Owner", "email": f"partial-queue-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    listing_id = seed_listing(user_id)
+
+    def mixed_preflight(self, _db, listing, marketplace):
+        if marketplace == "ebay":
+            return {"listing_id": listing.id, "marketplace": marketplace, "status": "ready", "preparation_status": "ready", "preparation_blockers": [], "blockers": [], "warnings": []}
+        connection = {"code": "FACEBOOK_LIVE_PUBLISH_UNVERIFIED", "message": "Facebook is not connected", "retryable": True}
+        return {"listing_id": listing.id, "marketplace": marketplace, "status": "blocked", "preparation_status": "ready", "preparation_blockers": [], "connection_blockers": [connection], "blockers": [connection], "warnings": []}
+
+    monkeypatch.setattr(listings_routes.MarketplacePreflightService, "preflight_listing", mixed_preflight)
+    monkeypatch.setattr(listings_routes, "enqueue_crosspost_job", lambda *_args, **kwargs: {"status": "queued", "job_id": 77, "task_id": "task-77", "target_marketplaces": kwargs["target_markets"]})
+    response = await async_client.post(
+        "/listings/approve-and-queue",
+        json={"listing_ids": [listing_id], "marketplaces": ["ebay", "facebook"], "confirm_live_publish": True, "confirmation_phrase": "QUEUE LIVE EBAY READY LISTINGS"},
+    )
+    assert response.status_code == 200
+    item = response.json()["results"][0]
+    assert item["status"] == "queued"
+    assert item["job_id"] == 77
+    assert {row["marketplace"]: row["status"] for row in item["results"]} == {"ebay": "queued", "facebook": "blocked"}
+    db = database_module.SessionLocal()
+    blocked_jobs = db.query(MarketplaceCrosspostJob).filter(
+        MarketplaceCrosspostJob.listing_id == listing_id,
+        MarketplaceCrosspostJob.target_marketplaces.contains(["facebook"]),
+    ).all()
+    assert len(blocked_jobs) == 1
+    assert blocked_jobs[0].status == "blocked"
+    assert blocked_jobs[0].batch_id
+    db.close()
+
+
+@pytest.mark.anyio
+async def test_approve_and_queue_preserves_each_selected_destination_operation(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Two Destination Owner", "email": f"two-dest-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    listing_ids = [seed_listing(user_id), seed_listing(user_id)]
+    calls = []
+
+    def ready_preflight(self, _db, listing, marketplace):
+        return {"listing_id": listing.id, "marketplace": marketplace, "status": "ready", "preparation_status": "ready", "preparation_blockers": [], "blockers": [], "warnings": [], "payload_preview": {"payload": {"title": listing.title, "marketplace": marketplace}}}
+
+    def capture_enqueue(*_args, **kwargs):
+        market = kwargs["target_markets"][0]
+        calls.append((kwargs["listing"].id, tuple(kwargs["target_markets"]), kwargs["execution_plan"].get("preflight_payload_hash_by_marketplace", {}).get(market)))
+        return {"status": "queued", "job_id": len(calls), "task_id": f"task-{len(calls)}", "target_marketplaces": kwargs["target_markets"]}
+
+    monkeypatch.setattr(listings_routes.MarketplacePreflightService, "evaluate_publishability", lambda self, db, listing, marketplace, refresh=False: {"publishable": True, "preflight": ready_preflight(self, db, listing, marketplace)})
+    monkeypatch.setattr(listings_routes, "enqueue_crosspost_job", capture_enqueue)
+    response = await async_client.post(
+        "/listings/approve-and-queue",
+        json={"listing_ids": listing_ids, "marketplaces": ["ebay", "facebook"], "confirm_live_publish": True, "confirmation_phrase": "QUEUE LIVE EBAY READY LISTINGS"},
+    )
+    assert response.status_code == 200
+    assert len(calls) == 4
+    assert {(listing_id, markets[0]) for listing_id, markets, _hash in calls} == {(listing_id, market) for listing_id in listing_ids for market in ("ebay", "facebook")}
+    assert all(payload_hash for _listing_id, _market, payload_hash in calls)
+
+
+@pytest.mark.anyio
+async def test_real_approve_queue_persists_payload_and_real_worker_reaches_provider_boundary(async_client, monkeypatch):
+    """Exercise the production route, durable job, and worker hash gate together.
+
+    Celery dispatch and only the final provider mutation are mocked.  The route,
+    enqueue_crosspost_job, JSON persistence, and task body remain real.
+    """
+    register = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Payload Contract Owner", "email": f"payload-contract-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    listing_id = seed_bucket_listing(
+        user_id,
+        status=ListingStatus.draft,
+        title="Eleacc 4000A Car Battery Jump Starter",
+        description="Portable 4000A jump starter with compressor.",
+        listing_price=79.99,
+        source_type="amazon_vine",
+        category_id="123456",
+        category_suggestion="Consumer Electronics > Portable Chargers & Power Banks",
+    )
+
+    def ready_evaluation(self, db, listing, marketplace, refresh=False):  # noqa: ARG001
+        return {"publishable": True, "preflight": {
+            "listing_id": listing.id,
+            "marketplace": marketplace,
+            "status": "ready",
+            "preparation_status": "ready",
+            "preparation_blockers": [],
+            "blockers": [],
+            "warnings": [],
+        }}
+
+    class DummyTask:
+        id = "payload-contract-task"
+
+    monkeypatch.setattr(listings_routes.MarketplacePreflightService, "evaluate_publishability", ready_evaluation)
+    monkeypatch.setattr(marketplace_orchestrator.process_marketplace_crosspost_job_task, "apply_async", lambda *args, **kwargs: DummyTask())
+    response = await async_client.post(
+        "/listings/approve-and-queue",
+        json={
+            "listing_ids": [listing_id],
+            "marketplaces": ["ebay"],
+            "confirm_live_publish": True,
+            "confirmation_phrase": "QUEUE LIVE EBAY READY LISTINGS",
+        },
+    )
+    assert response.status_code == 200, response.text
+
+    db = database_module.SessionLocal()
+    job = db.query(MarketplaceCrosspostJob).filter(MarketplaceCrosspostJob.listing_id == listing_id).order_by(MarketplaceCrosspostJob.id.desc()).first()
+    assert job is not None
+    listing = db.get(Listing, listing_id)
+    expected_payload = build_marketplace_payload(listing, "ebay")
+    expected_hash = compute_payload_hash(expected_payload)
+    assert job.execution_plan["preflight_payload_hash_by_marketplace"]["ebay"] == expected_hash
+    assert job.execution_plan["approved_execution_payload_by_marketplace"]["ebay"] == expected_payload
+
+    provider_calls = []
+    monkeypatch.setattr(
+        tasks.multi_platform_publisher,
+        "publish",
+        lambda db, listing, marketplace: provider_calls.append((listing.id, marketplace))
+        or PublishResult(marketplace=marketplace, status=MarketplaceListingStatus.PUBLISHED, response={"mock": True}),
+    )
+    result = tasks.process_marketplace_crosspost_job_task.run(job.id)
+    assert provider_calls == [(listing_id, "ebay")]
+    assert not any(row.get("code") == "PREFLIGHT_EXECUTION_PAYLOAD_MISMATCH" for row in result.get("results", []))
+    assert result["status"] in {"completed", "partial", "failed"}  # provider boundary was reached
+    db.close()
+
+
+def test_execution_plan_json_safe_for_timezone_aware_datetime():
+    """Datetime-bearing preflight metadata must be JSON-safe before persistence."""
+    from app.services.marketplace_orchestrator import _json_safe
+
+    value = _json_safe({"checked_at": datetime(2026, 9, 26, 12, 34, tzinfo=timezone.utc)})
+    assert value["checked_at"].startswith("2026-09-26T12:34:00")
+
+
+@pytest.mark.anyio
+async def test_unpublish_and_archive_persists_exact_selection_and_end_jobs(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Archive Owner", "email": f"archive-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    listing_id = seed_listing(user_id)
+    db = database_module.SessionLocal()
+    db.add(MarketplaceListing(listing_id=listing_id, marketplace=MarketplaceName.ebay, marketplace_listing_id="REMOTE-123", status=MarketplaceListingStatus.PUBLISHED, raw_response={"listing_url": "https://www.ebay.com/itm/REMOTE-123"}))
+    db.commit(); db.close()
+    monkeypatch.setattr("app.api.marketplace_jobs._enqueue_priority", lambda *_args, **_kwargs: SimpleNamespace(id="archive-task"))
+    response = await async_client.post("/listings/unpublish-and-archive", json={"listing_ids": [listing_id]})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["selected"] == 1
+    assert payload["summary"]["queued"] == 1
+    db = database_module.SessionLocal()
+    batch = db.query(MarketplacePublishBatch).filter_by(id=payload["batch_id"]).one()
+    job = db.query(MarketplaceCrosspostJob).filter_by(batch_id=batch.id, listing_id=listing_id).one()
+    assert batch.selected_count == 1
+    assert job.execution_plan["operation"] == "end"
+    assert job.execution_plan["external_listing_id"] == "REMOTE-123"
+    assert job.execution_plan["unpublish_and_archive"] is True
+    assert db.get(Listing, listing_id).status != ListingStatus.archived
+    db.close()
+
+
+@pytest.mark.anyio
+async def test_unpublish_and_archive_does_not_archive_without_remote_identity(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Unknown Archive Owner", "email": f"archive-unknown-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert register.status_code == 201
+    listing_id = seed_listing(register.json()["user"]["id"])
+    monkeypatch.setattr("app.api.marketplace_jobs._enqueue_priority", lambda *_args, **_kwargs: SimpleNamespace(id="should-not-run"))
+    response = await async_client.post("/listings/unpublish-and-archive", json={"listing_ids": [listing_id], "marketplaces": ["ebay"]})
+    assert response.status_code == 200
+    assert response.json()["results"][0]["status"] == "REMOTE_STATE_UNKNOWN"
+    assert response.json()["summary"].get("remote_state_unknown_count") == 1
+    db = database_module.SessionLocal(); row = db.get(Listing, listing_id)
+    assert row.status != ListingStatus.archived
+    assert row.marketplace_data["archive_state"]["status"] == "REMOTE_STATE_UNKNOWN"
+    db.close()
+
+
+@pytest.mark.anyio
+async def test_ebay_history_sync_endpoint_exists(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "History Sync Owner",
+            "email": f"ebay-history-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+
+    async def fake_history(*_args, **_kwargs):
+        return {"checked": 2, "matched": 1, "created": 1, "updated": 1, "unmatched": 0}
+
+    monkeypatch.setattr(marketplaces_api, "sync_ebay_fulfillment_history", fake_history)
+
+    response = await async_client.post("/marketplaces/ebay/sync/history", json={})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["checked"] == 2
+
+
+@pytest.mark.anyio
+async def test_sales_dashboard_reports_profit_and_cost_metrics(async_client):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "Sales Metrics Owner",
+            "email": f"sales-metrics-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    listing_id = seed_listing(user_id)
+
+    db = database_module.SessionLocal()
+    try:
+        sale = Sale(
+            user_id=user_id,
+            listing_id=listing_id,
+            platform=MarketplaceName.ebay,
+            marketplace_order_id="ORDER-1",
+            marketplace_listing_id="LISTING-1",
+            quantity=1,
+            amount=80.0,
+            currency="USD",
+            fees_actual=12.0,
+            shipping_cost=8.0,
+            promotional_fees=3.0,
+            marketplace_fees=7.0,
+            profit=50.0,
+            roi_percentage=100.0,
+            status="DETECTED",
+            sold_at=datetime.utcnow(),
+            details={"source": "unit-test"},
+        )
+        db.add(sale)
+        db.commit()
+    finally:
+        db.close()
+
+    response = await async_client.get("/sales/dashboard", params={"user_id": user_id, "limit": 50, "search": "Shoes", "sort_by": "profit", "sort_dir": "desc"})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]["total_profit"] == 50.0
+    assert payload["summary"]["gross"] == 80.0
+    assert payload["summary"]["periods"]["today"]["sales"] == 1
+    assert payload["summary"]["periods"]["last_30_days"]["gross"] == 80.0
+    assert payload["summary"]["fulfillment_status_available"] is False
+    assert payload["sales"][0]["fees_actual"] == 12.0
+
+
+@pytest.mark.anyio
+async def test_listings_and_sales_dashboard_default_to_authenticated_tenant(async_client):
+    register_one = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "All Rows Owner",
+            "email": f"all-rows-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register_one.status_code == 201
+    first_user_id = register_one.json()["user"]["id"]
+    first_listing_id = seed_listing(first_user_id)
+
+    register_two = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "All Rows Owner Two",
+            "email": f"all-rows-two-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register_two.status_code == 201
+    second_user_id = register_two.json()["user"]["id"]
+    second_listing_id = seed_listing(second_user_id)
+
+    db = database_module.SessionLocal()
+    try:
+        first_sale = Sale(
+            user_id=first_user_id,
+            listing_id=first_listing_id,
+            platform=MarketplaceName.ebay,
+            marketplace_order_id="ORDER-ALL-1",
+            marketplace_listing_id="LISTING-ALL-1",
+            quantity=1,
+            amount=45.0,
+            currency="USD",
+            fees_actual=4.0,
+            shipping_cost=3.0,
+            promotional_fees=1.0,
+            marketplace_fees=5.0,
+            profit=32.0,
+            roi_percentage=71.0,
+            status="DETECTED",
+            details={"source": "unit-test"},
+        )
+        second_sale = Sale(
+            user_id=second_user_id,
+            listing_id=second_listing_id,
+            platform=MarketplaceName.ebay,
+            marketplace_order_id="ORDER-ALL-2",
+            marketplace_listing_id="LISTING-ALL-2",
+            quantity=1,
+            amount=55.0,
+            currency="USD",
+            fees_actual=5.0,
+            shipping_cost=4.0,
+            promotional_fees=1.0,
+            marketplace_fees=6.0,
+            profit=39.0,
+            roi_percentage=70.0,
+            status="DETECTED",
+            details={"source": "unit-test"},
+        )
+        db.add_all([first_sale, second_sale])
+        db.commit()
+    finally:
+        db.close()
+
+    listings_resp = await async_client.get("/listings", params={"page": 1, "page_size": 50, "queue": "all"})
+    assert listings_resp.status_code == 200
+    listings_payload = listings_resp.json()
+    assert listings_payload["total"] == 1
+    titles = {item["title"] for item in listings_payload["items"]}
+    assert "Shoes" in titles
+    assert second_listing_id in {item["id"] for item in listings_payload["items"]}
+    assert first_listing_id not in {item["id"] for item in listings_payload["items"]}
+
+    sales_resp = await async_client.get("/sales/dashboard", params={"limit": 50})
+    assert sales_resp.status_code == 200
+    sales_payload = sales_resp.json()
+    assert sales_payload["summary"]["total_sales"] == 1
+    sale_listing_ids = {sale["listing_id"] for sale in sales_payload["sales"]}
+    assert sale_listing_ids == {second_listing_id}
+
+
+@pytest.mark.anyio
+async def test_ebay_revision_endpoint_requires_confirmation_and_calls_revision(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "eBay Revision Owner",
+            "email": f"ebay-revision-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    listing_id = seed_listing(user_id)
+
+    db = database_module.SessionLocal()
+    try:
+        listing = db.get(Listing, listing_id)
+        listing.ebay_listing_id = "12345"
+        listing.marketplace_data = {"offer": {"offerId": "offer-1"}}
+        db.add(listing)
+        db.commit()
+    finally:
+        db.close()
+
+    called = []
+
+    async def fake_revise(listing, db):
+        called.append(listing.id)
+        return {"status": "UPDATED", "offer_id": "offer-1"}
+
+    monkeypatch.setattr(marketplaces_api, "revise_ebay_listing", fake_revise)
+
+    response = await async_client.post(
+        f"/marketplaces/ebay/listings/{listing_id}/sync",
+        json={"confirm_live_publish": True, "confirmation_phrase": "QUEUE LIVE EBAY READY LISTINGS"},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "UPDATED"
+    assert called == [listing_id]
+
+
+@pytest.mark.anyio
+async def test_ebay_inventory_sync_alias_uses_active_listing_sync(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "eBay Sync Owner",
+            "email": f"ebay-sync-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+
+    called = []
+
+    async def fake_sync(user_id, db, *, limit=100):
+        called.append((user_id, limit))
+        return {"marketplace": "ebay", "checked": 1, "matched": 1, "updated": 0, "unmatched": 0}
+
+    monkeypatch.setattr(marketplaces_api, "sync_ebay_active_listings", fake_sync)
+
+    response = await async_client.post("/marketplaces/ebay/sync?limit=25")
+    assert response.status_code == 200
+    assert response.json()["checked"] == 1
+    assert called and called[0][1] == 25
+
+
+@pytest.mark.anyio
+async def test_public_storefront_lists_only_published_items(async_client):
+    register = await async_client.post(
+        "/auth/register",
+        json={
+            "full_name": "Storefront Owner",
+            "email": f"storefront-{uuid4()}@example.com",
+            "password": "supersecret123",
+        },
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+
+    published_id = seed_bucket_listing(
+        user_id,
+        status=ListingStatus.PUBLISHED,
+        title="Live Storefront Item",
+        description="This item is publicly published.",
+        listing_price=24.99,
+        image_urls=["/media/storefront/live-item.jpg"],
+        listing_images=[
+            {
+                "storage_path": "/media/storefront/live-item.jpg",
+                "role": "primary",
+                "operator_state": "approved",
+                "is_reference": False,
+                "display_order": 0,
+            }
+        ],
+        ebay_listing_id="1234567890",
+        ebay_publish_status=EbayPublishStatus.POSTED,
+        source_type="amazon_vine",
+    )
+    draft_id = seed_bucket_listing(
+        user_id,
+        status=ListingStatus.draft,
+        title="Hidden Draft Item",
+        description="This draft should not appear on the storefront.",
+        listing_price=19.99,
+        source_type="amazon_vine",
+    )
+
+    db = database_module.SessionLocal()
+    db.add(StorefrontProfile(user_id=user_id, slug=f"store-{user_id}", store_name="Storefront Owner Shop", enabled=True))
+    db.commit()
+    db.close()
+
+    response = await async_client.get(f"/public/stores/store-{user_id}/listings?page_size=12")
+    assert response.status_code == 200
+    payload = response.json()
+    item_ids = {row["id"] for row in payload["items"]}
+    assert published_id in item_ids
+    assert draft_id not in item_ids
+    storefront_item = next(row for row in payload["items"] if row["id"] == published_id)
+    assert storefront_item["title"] == "Live Storefront Item"
+    assert storefront_item["price"] == 24.99
+    assert storefront_item["thumbnail_url"]
+    assert "ebay" in {link["marketplace"] for link in storefront_item["marketplace_links"]}
+    assert storefront_item["thumbnail_url"].startswith("/media/")
+    detail = await async_client.get(f"/public/stores/store-{user_id}/products/{published_id}")
+    assert detail.status_code == 200
+    assert detail.json()["product"]["title"] == "Live Storefront Item"
+    assert (await async_client.get("/public/storefront/listings")).status_code == 410
+    assert "entitlements" not in (await async_client.get(f"/public/stores/store-{user_id}")).json()["store"]
+    outbound = await async_client.get(f"/public/stores/store-{user_id}/outbound/{published_id}/ebay", follow_redirects=False)
+    assert outbound.status_code == 302
+    assert outbound.headers["location"] == "https://www.ebay.com/itm/1234567890"
+    analytics = await async_client.get("/storefront/analytics/outbound")
+    assert analytics.status_code == 200
+    assert analytics.json()["clicks"][0]["count"] == 1
+    assert analytics.json()["conversions"] == "NOT_REPORTED_BY_MARKETPLACE"
+
+
+@pytest.mark.anyio
+async def test_storefront_settings_are_tenant_scoped_and_provider_secrets_redacted(async_client):
+    first = await async_client.post("/auth/register", json={"full_name": "Payments A", "email": f"pay-a-{uuid4()}@example.com", "password": "supersecret123"})
+    assert first.status_code == 201
+    payload = {
+        "slug": f"payments-{first.json()['user']['id']}", "store_name": "Payments A Store", "enabled": True,
+        "payment_settings": {"cashapp": {"enabled": True, "handle": "$SellerA", "verification_mode": "MANUAL_CONFIRMATION", "discount_percent": 2}},
+        "provider_secrets": {"stripe_secret_key": "sk_test_private-value", "paypal_client_secret": "paypal-private-value"},
+    }
+    saved = await async_client.put("/storefront/settings", json=payload)
+    assert saved.status_code == 200
+    body = saved.json()
+    assert body["profile"]["payment_settings"]["cashapp"]["handle"] == "$SellerA"
+    assert body["provider_credentials_configured"] is True
+    assert "sk_test_private-value" not in str(body) and "paypal-private-value" not in str(body)
+    public_profile = (await async_client.get(f"/public/stores/{payload['slug']}")).json()["store"]
+    assert public_profile["direct_checkout_available"] is False
+    assert public_profile["payment_methods"] == []
+    assert "$SellerA" not in str(public_profile)
+
+    second = await async_client.post("/auth/register", json={"full_name": "Payments B", "email": f"pay-b-{uuid4()}@example.com", "password": "supersecret123"})
+    assert second.status_code == 201
+    other_profile = (await async_client.get("/storefront/settings")).json()["profile"]
+    assert other_profile["enabled"] is False
+    assert other_profile["payment_settings"] == {}
+    assert other_profile["slug"] != payload["slug"]
+    assert (await async_client.get("/storefront/orders")).json()["items"] == []
+
+
+@pytest.mark.anyio
+async def test_direct_store_order_reserves_then_reconciles_exactly_once(async_client, monkeypatch):
+    from sqlalchemy import select
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "commerce_billing_enabled", True)
+    registered = await async_client.post("/auth/register", json={"full_name": "Direct Seller", "email": f"direct-{uuid4()}@example.com", "password": "supersecret123"})
+    assert registered.status_code == 201
+    user_id = registered.json()["user"]["id"]
+    listing_id = seed_bucket_listing(user_id, status=ListingStatus.PUBLISHED, title="Direct sale item", description="One item", listing_price=50, quantity=1, ebay_listing_id="DIRECT12345", ebay_publish_status=EbayPublishStatus.POSTED)
+    db = database_module.SessionLocal()
+    user = db.get(User, user_id)
+    user.settings_json = {"subscription": {"plan": "PREMIUM", "status": "active", "entitlements": {"storefront.public_catalog": True, "storefront.external_purchase_links": True, "storefront.direct_checkout": True, "payments.manual_methods": True}}}
+    db.add(user)
+    db.add(StorefrontProfile(user_id=user_id, slug=f"direct-{user_id}", store_name="Direct Seller", enabled=True, payment_settings_json={"cashapp": {"enabled": True, "handle": "$DirectSeller", "label": "Cash App", "instructions": "Send exact amount", "discount_percent": 10, "verification_mode": "MANUAL_CONFIRMATION"}}))
+    db.add(MarketplaceListing(listing_id=listing_id, marketplace=MarketplaceName.ebay, marketplace_listing_id="DIRECT12345", status=MarketplaceListingStatus.PUBLISHED))
+    db.commit()
+    db.close()
+
+    order_request = {"listing_id": listing_id, "customer_name": "Buyer", "customer_email": "buyer@example.com", "payment_method": "cashapp", "idempotency_key": f"checkout-{uuid4()}", "shipping_address": {"street": "1 Main St", "city": "Boston", "region": "MA", "postal_code": "02110", "country": "US"}}
+    checkout = await async_client.post(f"/public/stores/direct-{user_id}/checkout", json=order_request)
+    assert checkout.status_code == 200
+    body = checkout.json()
+    assert body["status"] == "AWAITING_PAYMENT" and body["payment_handle"] == "$DirectSeller"
+    assert body["subtotal"] == 50 and body["discount_amount"] == 5 and body["total"] == 45
+    duplicate = await async_client.post(f"/public/stores/direct-{user_id}/checkout", json=order_request)
+    assert duplicate.status_code == 200 and duplicate.json()["order_number"] == body["order_number"]
+    db = database_module.SessionLocal()
+    listing = db.get(Listing, listing_id)
+    assert listing.quantity == 1 and listing.sold_at is None
+    db.close()
+
+    marked = await async_client.post(f"/public/stores/direct-{user_id}/orders/{body['order_number']}/payment-sent?token={body['checkout_token']}")
+    assert marked.status_code == 200 and marked.json()["payment_status"] == "PAYMENT_PENDING_VERIFICATION"
+    pending = (await async_client.get("/storefront/orders?status=PAYMENT_PENDING_VERIFICATION")).json()["items"]
+    assert len(pending) == 1 and pending[0]["customer_email"] == "buyer@example.com"
+    order_id = pending[0]["id"]
+    confirmed = await async_client.post(f"/storefront/orders/{order_id}/confirm-payment")
+    assert confirmed.status_code == 200
+    assert confirmed.json()["order"]["payment_status"] == "PAID"
+    sale_id = confirmed.json()["sale_id"]
+    db = database_module.SessionLocal()
+    listing = db.get(Listing, listing_id)
+    sales = db.execute(select(Sale).where(Sale.user_id == user_id, Sale.platform == MarketplaceName.storefront_direct)).scalars().all()
+    jobs = db.execute(select(MarketplaceCrosspostJob).where(MarketplaceCrosspostJob.listing_id == listing_id, MarketplaceCrosspostJob.requested_mode == "sale_reconciliation_end")).scalars().all()
+    assert listing.quantity == 0 and listing.sold_at is not None
+    assert len(sales) == 1 and sales[0].id == sale_id
+    assert len(jobs) == 1 and jobs[0].execution_plan["external_listing_id"] == "DIRECT12345"
+    db.close()
+    repeated = await async_client.post(f"/storefront/orders/{order_id}/confirm-payment")
+    assert repeated.status_code == 200 and repeated.json()["idempotent"] is True and repeated.json()["sale_id"] == sale_id
+
+
+def test_commerce_entitlements_fail_closed_and_ebay_affiliate_requires_complete_epn_config(monkeypatch):
+    from app.api.storefront import _epn_url, _safe_marketplace_url
+    from app.core.config import settings
+    from app.services.commerce_entitlements import commerce_entitlement
+
+    user = User(id=808, settings_json={"subscription": {"plan": "PREMIUM", "status": "active", "entitlements": {"storefront.direct_checkout": True}}})
+    monkeypatch.setattr(settings, "commerce_billing_enabled", False)
+    assert commerce_entitlement(user, "storefront.direct_checkout")["entitled"] is False
+    monkeypatch.setattr(settings, "commerce_billing_enabled", True)
+    assert commerce_entitlement(user, "storefront.direct_checkout")["entitled"] is True
+
+    for key in ("ebay_epn_campaign_id", "ebay_epn_channel_id", "ebay_epn_rotation_id", "ebay_epn_tool_id", "ebay_epn_event_type"):
+        monkeypatch.setattr(settings, key, None)
+    assert _epn_url("https://www.ebay.com/itm/123?token=do-not-forward") is None
+    monkeypatch.setattr(settings, "ebay_epn_campaign_id", "1234567890")
+    monkeypatch.setattr(settings, "ebay_epn_channel_id", "4")
+    monkeypatch.setattr(settings, "ebay_epn_rotation_id", "1")
+    monkeypatch.setattr(settings, "ebay_epn_tool_id", "10001")
+    monkeypatch.setattr(settings, "ebay_epn_event_type", "1")
+    url = _epn_url("https://www.ebay.com/itm/123?token=do-not-forward", custom_id="posterpro_test")
+    assert "campid=1234567890" in url and "customid=posterpro_test" in url
+    assert "token" not in url
+    assert _safe_marketplace_url("ebay", "https://www.ebay.com/itm/other-item/9876543210", "1234567890") == "https://www.ebay.com/itm/1234567890"
+
+
+@pytest.mark.anyio
+async def test_storefront_catalog_is_tenant_scoped_and_database_paginated(async_client):
+    owner = await async_client.post("/auth/register", json={"full_name": "Catalog Owner", "email": f"store-a-{uuid4()}@example.com", "password": "supersecret123"})
+    assert owner.status_code == 201
+    owner_id = owner.json()["user"]["id"]
+    other = await async_client.post("/auth/register", json={"full_name": "Other Owner", "email": f"store-b-{uuid4()}@example.com", "password": "supersecret123"})
+    assert other.status_code == 201
+    other_id = other.json()["user"]["id"]
+    local_ids = []
+    for index in range(25):
+        local_ids.append(seed_bucket_listing(owner_id, status=ListingStatus.PUBLISHED, title=f"Catalog product {index:02d}", description="Tenant product", listing_price=index + 1, image_urls=[f"/media/catalog/{index}.jpg"], listing_images=[{"storage_path": f"/media/catalog/{index}.jpg", "role": "primary", "operator_state": "approved", "is_reference": False}], ebay_listing_id=f"CAT{index:04d}", ebay_publish_status=EbayPublishStatus.POSTED))
+    foreign_id = seed_bucket_listing(other_id, status=ListingStatus.PUBLISHED, title="Foreign catalog secret", listing_price=999, image_urls=["/media/private.jpg"], ebay_listing_id="FOREIGN123", ebay_publish_status=EbayPublishStatus.POSTED)
+    db = database_module.SessionLocal()
+    db.add_all([StorefrontProfile(user_id=owner_id, slug=f"owner-{owner_id}", store_name="Owner", enabled=True), StorefrontProfile(user_id=other_id, slug=f"other-{other_id}", store_name="Other", enabled=True)])
+    db.commit()
+    db.close()
+
+    first = await async_client.get(f"/public/stores/owner-{owner_id}/listings?page=1&page_size=12&sort_by=name&sort_dir=asc")
+    second = await async_client.get(f"/public/stores/owner-{owner_id}/listings?page=2&page_size=12&sort_by=name&sort_dir=asc")
+    last = await async_client.get(f"/public/stores/owner-{owner_id}/listings?page=3&page_size=12")
+    assert first.status_code == second.status_code == last.status_code == 200
+    assert first.json()["total"] == 25 and first.json()["page"] == 1 and len(first.json()["items"]) == 12
+    assert second.json()["page"] == 2 and len(second.json()["items"]) == 12
+    assert last.json()["page"] == 3 and len(last.json()["items"]) == 1
+    assert foreign_id not in {row["id"] for row in first.json()["items"] + second.json()["items"] + last.json()["items"]}
+    assert (await async_client.get(f"/public/stores/owner-{owner_id}/listings?search=Foreign")).json()["total"] == 0
+    assert (await async_client.get(f"/public/stores/owner-{owner_id}/listings?min_price=10&max_price=12")).json()["total"] == 3
+    assert (await async_client.get(f"/public/stores/owner-{owner_id}/listings?page_size=25")).status_code == 422
+
+
+@pytest.mark.anyio
+async def test_storefront_includes_published_store_only_inventory_without_fake_marketplace_links(async_client):
+    owner = await async_client.post("/auth/register", json={"full_name": "Direct Catalog", "email": f"direct-catalog-{uuid4()}@example.com", "password": "supersecret123"})
+    user_id = owner.json()["user"]["id"]
+    item_id = seed_bucket_listing(user_id, status=ListingStatus.PUBLISHED, title="Store-only published item", listing_price=18.50, quantity=1)
+    db = database_module.SessionLocal()
+    db.add(StorefrontProfile(user_id=user_id, slug=f"store-only-{user_id}", store_name="Direct Catalog", enabled=True))
+    db.commit()
+    db.close()
+
+    listing_response = await async_client.get(f"/public/stores/store-only-{user_id}/listings")
+    assert listing_response.status_code == 200
+    payload = listing_response.json()
+    assert payload["total"] == 1
+    assert payload["items"][0]["id"] == item_id
+    assert payload["items"][0]["marketplace_links"] == []
+    assert (await async_client.get(f"/public/stores/store-only-{user_id}/outbound/{item_id}/ebay")).status_code == 404
+
+
+@pytest.mark.anyio
+async def test_listing_template_apply_is_tenant_scoped(async_client):
+    owner = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Template Owner", "email": f"template-owner-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert owner.status_code == 201
+    owner_id = owner.json()["user"]["id"]
+    listing_id = seed_bucket_listing(owner_id, status=ListingStatus.draft, title="Owner listing", description="Owner copy")
+    template = await async_client.post("/listing-templates", json={"name": "Owner template", "fields": {"condition": "New"}})
+    assert template.status_code == 200
+    template_id = template.json()["id"]
+
+    other = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Other Tenant", "email": f"template-other-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert other.status_code == 201
+    denied = await async_client.post(f"/listings/{listing_id}/apply-template", json={"template_id": template_id})
+    assert denied.status_code in {403, 404}
+
+
+@pytest.mark.anyio
+async def test_jobs_and_notifications_are_tenant_scoped(async_client):
+    first = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Tenant A", "email": f"tenant-a-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert first.status_code == 201
+    user_a = first.json()["user"]["id"]
+    listing_a = seed_bucket_listing(user_a, status=ListingStatus.draft, title="Tenant A listing", description="A")
+    db = database_module.SessionLocal()
+    notification = IntakeNotification(user_id=user_a, title="A notice", message="private", notification_type="test")
+    crosspost = MarketplaceCrosspostJob(user_id=user_a, listing_id=listing_a, target_marketplaces=["ebay"], status="queued")
+    import_job = MarketplaceImportJob(user_id=user_a, source_marketplace="ebay", status="queued")
+    db.add_all([notification, crosspost, import_job]); db.commit(); db.refresh(notification); db.refresh(crosspost); db.refresh(import_job)
+    ids = (notification.id, crosspost.id, import_job.id)
+    db.close()
+
+    second = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Tenant B", "email": f"tenant-b-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert second.status_code == 201
+    assert (await async_client.post(f"/notifications/{ids[0]}/read")).status_code == 404
+    assert (await async_client.get(f"/marketplace-crosspost-jobs/{ids[1]}")).status_code == 404
+    assert (await async_client.get(f"/marketplace-import-jobs/{ids[2]}")).status_code == 404
+
+
+@pytest.mark.anyio
+async def test_sync_sold_rejects_foreign_listing_ids(async_client):
+    first = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Sale Tenant A", "email": f"sale-a-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert first.status_code == 201
+    listing_id = seed_bucket_listing(first.json()["user"]["id"], status=ListingStatus.draft, title="A sale", description="A")
+    second = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Sale Tenant B", "email": f"sale-b-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert second.status_code == 201
+    response = await async_client.post("/listings/sync_sold", json={"listing_ids": [listing_id]})
+    assert response.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_vine_correction_stays_draft_until_worker_and_uses_source_facts(async_client, monkeypatch):
+    register = await async_client.post(
+        "/auth/register",
+        json={"full_name": "Vine Correction", "email": f"vine-correction-{uuid4()}@example.com", "password": "supersecret123"},
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user"]["id"]
+    listing_id = seed_bucket_listing(
+        user_id,
+        status=ListingStatus.draft,
+        title="Generic Vine Product",
+        description="Needs work",
+        condition="Used",
+        needs_review=True,
+        restricted_review_required=True,
+        source_type="amazon_vine",
+        source_metadata={"amazon_product_facts": {"asin": "B123", "title": "160-in-1 Electronic Learning Kit", "brand": "ExampleCo", "features": ["Hands-on experiments"]}},
+    )
+    monkeypatch.setattr(tasks.process_listing_correction_jobs_task, "delay", lambda **_kwargs: None)
+    response = await async_client.post(
+        f"/listings/{listing_id}/request-revision",
+        json={"fields": ["title", "description", "category", "condition"], "note": "Use the actual Vine source evidence.", "priority": 0},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "draft"
+    assert response.json()["needs_review"] is False
+    db_check = database_module.SessionLocal(); queued = db_check.query(ListingCorrectionJob).filter(ListingCorrectionJob.listing_id == listing_id).one(); assert queued.status == "queued"; db_check.close()
+
+    class FakeAI:
+        def generate(self, payload, **_kwargs):
+            assert payload["source_evidence"]["asin"] == "B123"
+            assert payload["source_metadata"]["recovery"]["identity"]["asin"] == "B123"
+            assert payload["operator_instruction"] == "Use the actual Vine source evidence."
+            return {"title": "ExampleCo 160-in-1 Electronic Learning Kit", "description": "Hands-on electronic learning kit with 160 experiments and components."}
+
+    monkeypatch.setattr(tasks, "ListingAIService", lambda: FakeAI())
+    monkeypatch.setattr(tasks, "SessionLocal", database_module.SessionLocal)
+    result = tasks.process_listing_correction_jobs_task.run(limit=1)
+    assert result["processed"]
+    db = database_module.SessionLocal()
+    row = db.get(Listing, listing_id)
+    assert row.condition == "New"
+    assert "Hands-on electronic learning kit" in row.description
+    assert row.title != "Use the actual Vine source evidence."
+    assert row.needs_review is False
+    db.close()

@@ -1,0 +1,14 @@
+[Unit]
+Description=PosterPro Bridge Fluxbox Window Manager
+After=posterpro-bridge-xvfb.service
+Requires=posterpro-bridge-xvfb.service
+
+[Service]
+Type=simple
+Environment=DISPLAY=:99
+ExecStart=/usr/bin/fluxbox
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

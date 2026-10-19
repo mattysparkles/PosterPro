@@ -1,0 +1,391 @@
+from __future__ import annotations
+
+from collections.abc import Iterable
+import math
+import re
+
+from app.services.shipping_profitability_policy import measured_parcel_readiness, normalize_shipping_policy
+
+
+def _shipping_number(value) -> float | None:
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    match = re.search(r"[-+]?\d+(?:\.\d+)?", str(value).replace(",", ""))
+    if not match:
+        return None
+    number = float(match.group(0))
+    unit = str(value).lower()
+    if ("oz" in unit or "ounce" in unit) and "fl oz" not in unit and "fluid" not in unit:
+        number /= 16
+    elif re.search(r"\bkg\b|kilogram", unit):
+        number *= 2.2046226218
+    elif re.search(r"\bg\b|gram", unit):
+        number /= 453.59237
+    return number if math.isfinite(number) and number > 0 else None
+
+
+def _normalize_shipping_policy(policy: dict | None) -> dict:
+    return normalize_shipping_policy(policy)
+
+
+def shipping_policy_for_user(user) -> dict:
+    settings_json = getattr(user, "settings_json", None) or {}
+    workflow = settings_json.get("workflow_preferences")
+    return _normalize_shipping_policy(workflow if isinstance(workflow, dict) else None)
+
+
+def _safe_list(value) -> list:
+    return [item for item in (value or []) if item]
+
+
+def _slug_tokens(*values: str | None) -> list[str]:
+    tokens: list[str] = []
+    for value in values:
+        if not value:
+            continue
+        cleaned = "".join(char.lower() if char.isalnum() else " " for char in str(value))
+        tokens.extend(part for part in cleaned.split() if part)
+    return tokens
+
+
+def normalize_listing_images(
+    *,
+    listing_images: Iterable[dict] | None = None,
+    image_urls: Iterable[str] | None = None,
+    source_url: str | None = None,
+    source_page_url: str | None = None,
+    source_platform: str | None = None,
+    default_is_reference: bool = False,
+    approved: bool = False,
+) -> list[dict]:
+    normalized: list[dict] = []
+    seen_keys: set[str] = set()
+    # Intake-derived media carries a stable source-photo identifier.  Paths
+    # and provider URLs can change across retries, so they are not sufficient
+    # to prevent the same physical source asset being attached twice.
+    seen_source_photo_ids: set[str] = set()
+
+    def push(entry: dict, fallback_order: int) -> None:
+        path = str(entry.get("storage_path") or entry.get("url") or entry.get("local_path") or "").strip()
+        origin = str(entry.get("source_url") or "").strip()
+        key = f"{path}|{origin}"
+        if not path or key in seen_keys:
+            return
+        metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+        source_photo_id = metadata.get("intake_photo_id") or metadata.get("source_photo_id") or entry.get("source_photo_id")
+        source_photo_key = str(source_photo_id).strip() if source_photo_id is not None else ""
+        if source_photo_key and source_photo_key in seen_source_photo_ids:
+            return
+        seen_keys.add(key)
+        if source_photo_key:
+            seen_source_photo_ids.add(source_photo_key)
+        role = str(entry.get("role") or ("primary" if not normalized else "alternate_angle")).strip() or "alternate_angle"
+        confidence = entry.get("confidence")
+        try:
+            confidence_value = round(float(confidence), 3) if confidence is not None else (1.0 if approved else 0.72)
+        except (TypeError, ValueError):
+            confidence_value = 1.0 if approved else 0.72
+        operator_state = str(entry.get("operator_state") or ("approved" if approved else "suggested")).strip() or "suggested"
+        is_reference = bool(entry.get("is_reference"))
+        if "is_reference" not in entry:
+            is_reference = default_is_reference
+        normalized.append(
+            {
+                "storage_path": path,
+                "source_url": origin or source_url,
+                "source_page_url": str(entry.get("source_page_url") or source_page_url or "").strip() or None,
+                "source_platform": str(entry.get("source_platform") or source_platform or "upload").strip() or "upload",
+                "role": role,
+                "confidence": confidence_value,
+                "operator_state": operator_state,
+                "operator_approved": operator_state == "approved",
+                "operator_rejected": operator_state == "rejected",
+                "display_order": int(entry.get("display_order") or fallback_order),
+                "is_reference": is_reference,
+                "warning": str(entry.get("warning") or ("Reference image: verify actual item photos before publish." if is_reference else "")).strip() or None,
+                "label": str(entry.get("label") or "").strip() or None,
+                "metadata": metadata,
+            }
+        )
+
+    for index, entry in enumerate(_safe_list(listing_images)):
+        if isinstance(entry, dict):
+            push(entry, index)
+    for index, image_url in enumerate(_safe_list(image_urls), start=len(normalized)):
+        push({"storage_path": image_url}, index)
+    normalized.sort(key=lambda item: (int(item.get("display_order") or 0), item.get("storage_path") or ""))
+    if normalized:
+        normalized[0]["role"] = "primary"
+        normalized[0]["display_order"] = 0
+    return normalized
+
+
+def derive_condition_data(
+    *,
+    listing: dict | None = None,
+    source_type: str | None = None,
+    source_metadata: dict | None = None,
+    existing: dict | None = None,
+) -> dict:
+    listing = listing or {}
+    source_metadata = source_metadata if isinstance(source_metadata, dict) else {}
+    existing = existing if isinstance(existing, dict) else {}
+    raw_condition = str(listing.get("condition") or existing.get("condition") or "").strip()
+    source_type_value = str(source_type or listing.get("source_type") or "").strip().lower()
+    default_state = "needs_review"
+    confidence = existing.get("condition_confidence")
+    if confidence is None:
+        confidence = 0.25 if source_type_value in {"amazon_vine", "google_photos_album"} else 0.45
+    if raw_condition:
+        lowered = raw_condition.lower()
+        if "new" in lowered and "box" in lowered:
+            default_state = "new_in_box"
+        elif "open" in lowered or "box" in lowered:
+            default_state = "open_box"
+        elif "parts" in lowered:
+            default_state = "parts_only"
+        elif "used" in lowered:
+            default_state = "used"
+
+    if source_type_value == "amazon_vine" and default_state == "needs_review":
+        default_state = "open_box_or_used_unknown"
+    if source_type_value.endswith("_import") and default_state == "needs_review":
+        default_state = "import_condition_unverified"
+
+    notes = str(existing.get("item_condition_notes") or "").strip()
+    if not notes and source_type_value == "amazon_vine":
+        notes = "Condition not yet verified. Review actual item photos, completeness, packaging, and accessories before publish."
+
+    return {
+        "condition": raw_condition or listing.get("condition") or "Needs review",
+        "condition_bucket": str(existing.get("condition_bucket") or default_state),
+        "condition_source": str(existing.get("condition_source") or ("import" if raw_condition else "default_unknown")),
+        "condition_confidence": float(confidence),
+        "open_box": bool(existing.get("open_box", default_state in {"open_box", "open_box_or_used_unknown"})),
+        "new_in_box": bool(existing.get("new_in_box", default_state == "new_in_box")),
+        "used": bool(existing.get("used", default_state in {"used", "open_box_or_used_unknown"})),
+        "parts_only": bool(existing.get("parts_only", default_state == "parts_only")),
+        "tested_state": str(existing.get("tested_state") or "untested"),
+        "missing_accessories": bool(existing.get("missing_accessories", False)),
+        "missing_accessories_notes": str(existing.get("missing_accessories_notes") or "").strip() or None,
+        "included_accessories": _safe_list(existing.get("included_accessories")),
+        "damage_notes": str(existing.get("damage_notes") or "").strip() or None,
+        "packaging_condition": str(existing.get("packaging_condition") or "unknown"),
+        "item_condition_notes": notes or None,
+        "operator_review_required": bool(existing.get("operator_review_required", True)),
+    }
+
+
+def derive_shipping_profile(
+    *,
+    listing: dict | None = None,
+    item_specifics: dict | None = None,
+    existing: dict | None = None,
+    policy: dict | None = None,
+) -> dict:
+    listing = listing or {}
+    item_specifics = item_specifics if isinstance(item_specifics, dict) else {}
+    existing = existing if isinstance(existing, dict) else {}
+    policy = _normalize_shipping_policy(policy)
+    title = str(listing.get("title") or "").strip()
+    description = str(listing.get("description") or "").strip()
+    tokens = set(_slug_tokens(
+        title,
+        description,
+        listing.get("category_suggestion"),
+        listing.get("category"),
+        item_specifics.get("Type"),
+        item_specifics.get("Model"),
+    ))
+    fragile = any(token in tokens for token in {"glass", "ceramic", "monitor", "screen", "lamp", "mirror"})
+    battery = any(token in tokens for token in {"battery", "lithium", "rechargeable", "powerbank"})
+    liquid = any(token in tokens for token in {"liquid", "shampoo", "cleaner", "spray"})
+    aerosol = "aerosol" in tokens
+    oversize = any(token in tokens for token in {"furniture", "chair", "table", "ladder"})
+    local_pickup = oversize or fragile
+    package_weight = _shipping_number(existing.get("package_weight"))
+    package_dimensions = existing.get("package_dimensions") if isinstance(existing.get("package_dimensions"), dict) else {}
+    def positive(value) -> bool:
+        return _shipping_number(value) is not None
+
+    missing_weight = not positive(package_weight)
+    missing_dimensions = not all(positive(package_dimensions.get(key)) for key in ("length", "width", "height"))
+    # Calculated shipping needs measured parcel facts. Never manufacture them
+    # from title/category clues: estimates are not valid rate inputs.
+    estimated_fields = list(existing.get("estimated_fields") or [])
+    provenance = dict(existing.get("provenance") or {}) if isinstance(existing.get("provenance"), dict) else {}
+    estimated = bool(existing.get("estimated") or estimated_fields)
+    raw_price = listing.get("listing_price") or listing.get("suggested_price") or listing.get("buy_it_now_price") or listing.get("estimated_value")
+    try:
+        price = float(raw_price)
+    except (TypeError, ValueError):
+        price = None
+    threshold = float(policy["shipping_price_threshold"])
+    under_mode = policy["shipping_under_threshold_mode"]
+    over_mode = policy["shipping_at_or_above_threshold_mode"]
+    under_threshold = bool(price is not None and price > 0 and price < threshold)
+    selected_mode = under_mode if policy["shipping_policy_enabled"] and under_threshold else over_mode
+    existing_buyer_pays = bool(existing.get("buyer_pays_shipping"))
+    existing_free_shipping = bool(existing.get("free_shipping"))
+    buyer_pays_shipping = existing_buyer_pays if selected_mode == "preserve_existing" else selected_mode == "buyer_pays_shipping"
+    free_shipping = existing_free_shipping if selected_mode == "preserve_existing" else not buyer_pays_shipping
+    result = {
+        "item_weight": existing.get("item_weight"),
+        "package_weight": package_weight,
+        "item_dimensions": existing.get("item_dimensions") if isinstance(existing.get("item_dimensions"), dict) else {},
+        "package_dimensions": package_dimensions,
+        "package_weight_unit": str(existing.get("package_weight_unit") or "lb"),
+        "package_dimension_unit": str(existing.get("package_dimension_unit") or "in"),
+        "shipping_class_suggestion": str(existing.get("shipping_class_suggestion") or ("local_pickup_only" if local_pickup else "standard_ground")),
+        "dimensional_weight": existing.get("dimensional_weight"),
+        "fragile": bool(existing.get("fragile", fragile)),
+        "battery": bool(existing.get("battery", battery)),
+        "liquid": bool(existing.get("liquid", liquid)),
+        "aerosol": bool(existing.get("aerosol", aerosol)),
+        "hazmat": bool(existing.get("hazmat", battery or aerosol)),
+        "oversize": bool(existing.get("oversize", oversize)),
+        "local_pickup_recommended": bool(existing.get("local_pickup_recommended", local_pickup)),
+        "manual_measurement_needed": bool(existing.get("shipping_estimate_blocked") is True or missing_weight or missing_dimensions or estimated),
+        "shipping_notes": str(existing.get("shipping_notes") or "").strip() or None,
+        "buyer_pays_shipping": bool(existing.get("buyer_pays_shipping", buyer_pays_shipping)),
+        "shipping_charge_mode": str(existing.get("shipping_charge_mode") or ("calculated" if buyer_pays_shipping else ("included" if free_shipping else "unset"))),
+        "free_shipping": bool(existing.get("free_shipping", free_shipping)),
+        "source_confidence": existing.get("source_confidence") or {},
+        "estimated": estimated,
+        "estimated_fields": list(dict.fromkeys(estimated_fields)),
+        "provenance": provenance,
+        "shipping_profile_source": str(existing.get("shipping_profile_source") or ("measurement_required" if missing_weight or missing_dimensions else "existing_structured_data")),
+        "shipping_price_threshold": threshold,
+        "shipping_under_threshold_mode": under_mode,
+        "shipping_at_or_above_threshold_mode": over_mode,
+    }
+    result["calculated_shipping_readiness"] = measured_parcel_readiness(result)
+    return result
+
+
+def summarize_listing_readiness(
+    *,
+    listing_images: Iterable[dict] | None,
+    condition_data: dict | None,
+    shipping_profile: dict | None,
+    listing: dict | None = None,
+    source_type: str | None = None,
+) -> dict:
+    listing = listing or {}
+    source_type_value = str(source_type or listing.get("source_type") or "").strip().lower()
+    images = [item for item in _safe_list(listing_images) if isinstance(item, dict)]
+    condition_data = condition_data if isinstance(condition_data, dict) else {}
+    shipping_profile = shipping_profile if isinstance(shipping_profile, dict) else {}
+    approved_images = [item for item in images if item.get("operator_state") != "rejected"]
+    actual_item_images = [item for item in approved_images if not item.get("is_reference") and item.get("operator_state") == "approved"]
+    primary_image = next((item for item in approved_images if item.get("role") == "primary"), approved_images[0] if approved_images else None)
+    blockers: list[str] = []
+    warnings: list[str] = []
+
+    if not approved_images:
+        blockers.append("No images attached")
+    elif not actual_item_images:
+        if source_type_value == "amazon_vine":
+            warnings.append("Only source/reference images attached")
+        else:
+            blockers.append("Only source/reference images attached")
+    if not primary_image:
+        blockers.append("Primary image not set")
+    if condition_data.get("operator_review_required", True):
+        warnings.append("Condition needs operator review")
+    package_dimensions = shipping_profile.get("package_dimensions") if isinstance(shipping_profile.get("package_dimensions"), dict) else {}
+    usable_weight = _shipping_number(shipping_profile.get("package_weight")) is not None
+    try:
+        usable_dimensions = all(_shipping_number(package_dimensions.get(key)) is not None for key in ("length", "width", "height"))
+    except (TypeError, ValueError, OverflowError):
+        usable_dimensions = False
+    if not usable_weight or not usable_dimensions:
+        blockers.append("Package shipping profile is incomplete")
+    elif shipping_profile.get("shipping_estimate_blocked") is True:
+        blockers.append("Shipping profile requires a safe, non-estimated resolution")
+    if not listing.get("category_id") and not listing.get("category_suggestion"):
+        warnings.append("Category still needs review")
+    if not listing.get("listing_price") and not listing.get("suggested_price"):
+        blockers.append("Price missing")
+    if shipping_profile.get("battery"):
+        warnings.append("Battery shipping review required")
+    if shipping_profile.get("fragile"):
+        warnings.append("Fragile packaging review required")
+
+    image_roles = {str(item.get("role") or "") for item in images}
+    if not ({"box", "label", "barcode"} & image_roles):
+        warnings.append("No box, label, or barcode image attached")
+
+    return {
+        "images_missing": not approved_images,
+        "manual_photo_needed": not actual_item_images,
+        "primary_image_present": bool(primary_image),
+        "approved_image_count": len(approved_images),
+        "actual_image_count": len(actual_item_images),
+        "reference_image_count": len([item for item in approved_images if item.get("is_reference")]),
+        "blocked_for_publish": bool(blockers),
+        "blockers": blockers,
+        "warnings": warnings,
+        "ready_for_publish": not blockers,
+        "shipping_checklist": {
+            "weight_present": usable_weight,
+            "package_dimensions_present": usable_dimensions,
+            "shipping_profile_selected": bool(shipping_profile.get("shipping_class_suggestion")),
+            "oversized": bool(shipping_profile.get("oversize")),
+            "fragile": bool(shipping_profile.get("fragile")),
+            "hazmat_or_battery": bool(shipping_profile.get("hazmat") or shipping_profile.get("battery") or shipping_profile.get("liquid") or shipping_profile.get("aerosol")),
+            "local_pickup_recommended": bool(shipping_profile.get("local_pickup_recommended")),
+            "manual_measurement_needed": bool(shipping_profile.get("manual_measurement_needed")),
+            "box_or_label_photo_present": bool({"box", "label", "barcode"} & image_roles),
+        },
+        "marketplace_readiness": {
+            "ebay": {
+                "condition_ready": bool(condition_data.get("condition")),
+                "category_ready": bool(listing.get("category_id") or listing.get("category_suggestion")),
+                "photos_ready": bool(actual_item_images),
+                "shipping_ready": not shipping_profile.get("manual_measurement_needed", True),
+            },
+            "facebook": {
+                "condition_ready": bool(condition_data.get("condition")),
+                "photos_ready": bool(actual_item_images or approved_images),
+                "price_ready": bool(listing.get("listing_price") or listing.get("suggested_price")),
+            },
+        },
+    }
+
+
+def sync_listing_review_state(*, listing) -> None:
+    source_metadata = listing.source_metadata if isinstance(listing.source_metadata, dict) else {}
+    source_type_value = str(listing.source_type or "").strip().lower()
+    listing.listing_images = normalize_listing_images(
+        listing_images=listing.listing_images,
+        image_urls=listing.image_urls,
+        source_url=source_metadata.get("source_image_url"),
+        source_page_url=source_metadata.get("amazon_source_page_url"),
+        source_platform=listing.source_type or "upload",
+        default_is_reference=bool(str(source_metadata.get("source_marketplace") or "").strip()),
+        # Google Photos/Slate captures are the operator's actual item photos,
+        # not marketplace reference imagery.  They enter the same reviewable
+        # draft flow as uploaded/Vine media; explicit ``is_reference`` or a
+        # rejected operator state still wins per image.
+        approved=source_type_value in {"upload", "storage_batch", "amazon_vine", "google_photos_album", "photo_intake"},
+    )
+    listing.image_urls = [item["storage_path"] for item in (listing.listing_images or []) if item.get("operator_state") != "rejected"]
+    listing.condition_data = derive_condition_data(
+        listing={
+            "condition": listing.condition,
+            "source_type": listing.source_type,
+        },
+        source_type=listing.source_type,
+        source_metadata=listing.source_metadata,
+        existing=listing.condition_data,
+    )
+    listing.shipping_profile = derive_shipping_profile(
+        listing={
+            "title": listing.title,
+            "description": listing.description,
+            "category_suggestion": listing.category_suggestion,
+        },
+        item_specifics=listing.item_specifics,
+        existing=listing.shipping_profile,
+    )
