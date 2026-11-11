@@ -9,6 +9,9 @@
 - Every fixed regression gets a permanent test. Keep marketplace readiness destination-specific; preserve Vine drafts and valid media on recoverable image failures. Use “Ready for Approval” for prepared listings awaiting operator approval.
 - Report IMPLEMENTED, INTEGRATED, TESTED, RELEASE BUILT, DEPLOYED, and PRODUCTION VERIFIED separately. Only production verification completes a production feature. Never claim physical hardware or external marketplace behavior from mocks alone.
 - Stop at an explicit approval boundary for destructive migrations, irreversible data transformations, credential rotation, risky downtime, or unverified physical printing. Continue safe, read-only and reversible preparation while documenting the exact blocker.
+- The active clean source checkout is `/opt/apps/posterpro/canonical`, branch `main`, tracking the public GitHub `main`. The former `/opt/apps/posterpro/integration-20261110` tree is archival only; do not build or deploy from it.
+- For frontend/browser-extension-only changes, use `ops/release/build_frontend_release.sh`. It runs frontend tests/build and changed-extension bridge tests. Backend tests/runtime may be reused only when exact backend, bridge, migration, lockfile, runtime-version, and active-release checks pass; the manifest must say which evidence was reused and include its hashes. Any backend, worker, bridge, migration, or runtime dependency change requires the full runtime test/build path.
+- Test and build-generated files belong in immutable release artifacts or task-specific temporary directories, never the canonical checkout. Do not clean persistent or private state to make tests pass.
 
 ---
 

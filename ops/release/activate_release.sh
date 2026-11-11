@@ -7,7 +7,7 @@ active_link="${POSTERPRO_ACTIVE_RELEASE_LINK:-}"
 lock_path="${POSTERPRO_DEPLOY_LOCK:-/run/lock/posterpro-deploy.lock}"
 health_url="${POSTERPRO_BACKEND_HEALTH_URL:-https://posterpro.sparkleserver.site/api/health}"
 frontend_url="${POSTERPRO_FRONTEND_HEALTH_URL:-https://posterpro.sparkleserver.site/}"
-canonical_repo="${POSTERPRO_CANONICAL_REPO:-/opt/apps/posterpro/integration-20261110}"
+canonical_repo="${POSTERPRO_CANONICAL_REPO:-/opt/apps/posterpro/canonical}"
 units="${POSTERPRO_SYSTEMD_UNITS:-posterpro-backend.service posterpro-frontend.service}"
 health_retries="${POSTERPRO_HEALTH_RETRIES:-20}"
 health_retry_delay="${POSTERPRO_HEALTH_RETRY_DELAY:-2}"
@@ -53,15 +53,45 @@ if ! flock -n 9; then
   exit 3
 fi
 current="$(readlink -f "$active_link")"
-python3 - "$current/release.json" "$candidate/release.json" "$canonical_repo" <<'PY'
-import json,sys
+python3 - "$current/release.json" "$candidate/release.json" "$canonical_repo" "$current" "$candidate" <<'PY'
+import datetime,json,pathlib,sys
 with open(sys.argv[1]) as f: old=json.load(f)
 with open(sys.argv[2]) as f: new=json.load(f)
 if old.get('canonical_branch') != 'main' or new.get('canonical_branch') != 'main': raise SystemExit('non-canonical release')
 if old.get('git_commit') == new.get('git_commit'): raise SystemExit('release already active')
-if old.get('built_at_utc','') >= new.get('built_at_utc',''): raise SystemExit('stale release candidate')
+def build_time(value):
+    if not isinstance(value,str): raise SystemExit('release has no valid build timestamp')
+    for fmt in ('%Y-%m-%dT%H:%M:%SZ','%Y%m%dT%H%M%SZ'):
+        try: return datetime.datetime.strptime(value,fmt).replace(tzinfo=datetime.timezone.utc)
+        except ValueError: pass
+    raise SystemExit(f'invalid release build timestamp: {value!r}')
+if build_time(old.get('built_at_utc')) >= build_time(new.get('built_at_utc')):
+    print('stale release candidate',file=sys.stderr)
+    raise SystemExit(3)
 import subprocess
-if subprocess.run(['git','-C',sys.argv[3],'merge-base','--is-ancestor',old['git_commit'],new['git_commit']],check=False).returncode: raise SystemExit('candidate does not descend from active release')
+repo,current_release,candidate=map(pathlib.Path,sys.argv[3:6])
+descends=subprocess.run(['git','-C',str(repo),'merge-base','--is-ancestor',old['git_commit'],new['git_commit']],check=False).returncode == 0
+if not descends:
+    transition=new.get('source_lineage_transition')
+    if not isinstance(transition,dict): raise SystemExit('candidate does not descend from active release')
+    if transition.get('from_release_id') != old.get('release_id') or transition.get('from_commit') != old.get('git_commit'):
+        raise SystemExit('source-lineage transition does not identify the current production release')
+    baseline=repo/'ops/release/source-lineage-baseline.json'
+    packaged_baseline=candidate/'source/ops/release/source-lineage-baseline.json'
+    if not baseline.is_file() or not packaged_baseline.is_file() or baseline.read_bytes() != packaged_baseline.read_bytes():
+        raise SystemExit('source-lineage baseline is missing or differs from the candidate source')
+    import json as json_module
+    proof=json_module.loads(baseline.read_text())
+    base_commit=transition.get('base_commit')
+    if proof.get('legacy_release_id') != old.get('release_id') or proof.get('legacy_release_commit') != old.get('git_commit') or proof.get('github_lineage_base_commit') != base_commit:
+        raise SystemExit('source-lineage proof metadata does not match the active release and candidate')
+    if transition.get('source_equivalence_sha256') != proof.get('production_application_source_sha256'):
+        raise SystemExit('source-lineage fingerprint does not match the reviewed proof')
+    if subprocess.run(['git','-C',str(repo),'merge-base','--is-ancestor',base_commit,new['git_commit']],check=False).returncode:
+        raise SystemExit('candidate does not descend from the verified public lineage base')
+    verified=subprocess.run([str(repo/'ops/release/verify_lineage_transition.py'),str(current_release/'source'),str(repo),base_commit,transition['source_equivalence_sha256'],old['release_id'],old['git_commit']],check=False,capture_output=True,text=True)
+    if verified.returncode or verified.stdout.strip() != transition['source_equivalence_sha256']:
+        raise SystemExit('source-lineage transition equivalence verification failed')
 PY
 previous="$current"
 read -r -a unit_list <<< "$units"

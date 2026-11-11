@@ -3,6 +3,10 @@
   const VERSION = extensionRuntime?.getManifest?.().version || "unknown";
   const PAGE_SOURCE = "posterpro-settings";
   const EXTENSION_SOURCE = "posterpro-extension";
+  // Pairing-code creation is an authenticated network round trip. Keep the
+  // trusted-click authorization long enough for that request, while still
+  // requiring a recent, real operator gesture.
+  const AUTHORIZATION_CLICK_WINDOW_MS = 60000;
   let lastTrustedAuthorizationClick = 0;
   let pairingInProgress = false;
 
@@ -79,9 +83,22 @@
       return;
     }
     if (data.type !== "PAIR_EXTENSION") return;
-    if (pairingInProgress || !lastTrustedAuthorizationClick || Date.now() - lastTrustedAuthorizationClick > 10000) return;
+    if (pairingInProgress) return;
+    if (!lastTrustedAuthorizationClick) {
+      report("AUTHORIZATION_FAILED", { error_code: "TRUSTED_CLICK_REQUIRED", error: "Click Pair this browser in PosterPro, then retry." });
+      return;
+    }
+    if (Date.now() - lastTrustedAuthorizationClick > AUTHORIZATION_CLICK_WINDOW_MS) {
+      lastTrustedAuthorizationClick = 0;
+      report("AUTHORIZATION_FAILED", { error_code: "PAIRING_AUTHORIZATION_EXPIRED", error: "The pairing request took too long. Click Pair this browser again and retry." });
+      return;
+    }
     const code = String(data.pairing_code || "").trim();
-    if (code.length < 16 || code.length > 128) return;
+    if (code.length < 16 || code.length > 128) {
+      lastTrustedAuthorizationClick = 0;
+      report("AUTHORIZATION_FAILED", { error_code: "INVALID_PAIRING_CODE", error: "PosterPro returned an invalid pairing code. Refresh the page and try again." });
+      return;
+    }
     pairingInProgress = true;
     lastTrustedAuthorizationClick = 0;
     try {

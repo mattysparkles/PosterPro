@@ -9,8 +9,10 @@ function harness() {
   const listeners = {};
   const outbound = [];
   const runtimeMessages = [];
+  let now = 1_800_000_000_000;
+  class TestDate extends Date { static now() { return now; } }
   const context = {
-    Date,
+    Date: TestDate,
     location: { origin: "https://posterpro.sparkleserver.site" },
     document: { addEventListener: (type, callback) => { listeners[`document:${type}`] = callback; } },
     window: {
@@ -29,7 +31,7 @@ function harness() {
     },
   };
   vm.runInNewContext(source, context);
-  return { listeners, outbound, runtimeMessages, context };
+  return { listeners, outbound, runtimeMessages, context, advance: (ms) => { now += ms; } };
 }
 
 test("PosterPro page detects the extension and one trusted authorize click pairs without exposing a device token", async () => {
@@ -73,6 +75,34 @@ test("pairing reports a clear recovery action when extension runtime messaging i
   assert.equal(failure.type, "AUTHORIZATION_FAILED");
   assert.equal(failure.error_code, "EXTENSION_RUNTIME_UNAVAILABLE");
   assert.match(failure.error, /reload the extension.*refresh this PosterPro page/i);
+});
+
+test("pairing reports expiration instead of silently dropping a slow pairing-code response", async () => {
+  const h = harness();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  h.listeners["document:click"]({ isTrusted: true, target: { closest: () => ({}) } });
+  h.advance(60001);
+  await h.listeners["window:message"]({
+    source: h.context.window,
+    origin: h.context.location.origin,
+    data: { source: "posterpro-settings", type: "PAIR_EXTENSION", pairing_code: "x".repeat(32) },
+  });
+  assert.equal(h.runtimeMessages.length, 0);
+  assert.equal(h.outbound.at(-1).message.type, "AUTHORIZATION_FAILED");
+  assert.equal(h.outbound.at(-1).message.error_code, "PAIRING_AUTHORIZATION_EXPIRED");
+  assert.match(h.outbound.at(-1).message.error, /click Pair this browser again/i);
+});
+
+test("pairing code without an operator click reports the required action", async () => {
+  const h = harness();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await h.listeners["window:message"]({
+    source: h.context.window,
+    origin: h.context.location.origin,
+    data: { source: "posterpro-settings", type: "PAIR_EXTENSION", pairing_code: "x".repeat(32) },
+  });
+  assert.equal(h.runtimeMessages.length, 0);
+  assert.equal(h.outbound.at(-1).message.error_code, "TRUSTED_CLICK_REQUIRED");
 });
 
 test("Mercari local connect command opens through the paired extension without touching the hosted bridge", async () => {

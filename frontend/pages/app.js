@@ -66,6 +66,7 @@ import {
   updateCurrentUser,
   updateServerSettings,
 } from '../lib/api';
+import { requestCurrentBrowserPairing } from '../lib/extensionPairing';
 import { formatPosterProDate, posterProTimestamp } from '../lib/dateTime';
 
 const DEFAULT_OPERATOR_PROMPT =
@@ -327,8 +328,7 @@ export default function Dashboard() {
   const pairCurrentBrowser = async () => {
     setPairingBrowser(true);
     try {
-      const result = await createMarketplaceExtensionPairingCode('PosterPro browser');
-      window.postMessage({ source: 'posterpro-settings', type: 'PAIR_EXTENSION', pairing_code: result.pairing_code }, window.location.origin);
+      await requestCurrentBrowserPairing(createMarketplaceExtensionPairingCode, window);
       toast.success('Connecting this browser…');
     } catch (error) {
       toast.error(error.message || 'Could not pair this browser. Refresh the extension status and try again.');

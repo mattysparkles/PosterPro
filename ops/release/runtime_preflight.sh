@@ -16,8 +16,12 @@ root = pathlib.Path(sys.argv[1])
 manifest = json.loads((root / "release.json").read_text())
 source = root / "source"
 checks = {
-    "artifact_kind": manifest.get("artifact_kind") == "runtime_candidate",
-    "candidate_not_marked_eligible": manifest.get("production_eligible") is False,
+    "artifact_kind": manifest.get("artifact_kind") in {"runtime_candidate", "production_release"},
+    "eligibility_consistent_with_artifact_kind": (
+        manifest.get("artifact_kind") == "runtime_candidate" and manifest.get("production_eligible") is False
+    ) or (
+        manifest.get("artifact_kind") == "production_release" and manifest.get("production_eligible") is True and manifest.get("requires_operator_approval") is False
+    ),
     "source_exists": (source / "backend/app/main.py").is_file(),
     "bridge_source_exists": (source / "bridge/app/main.py").is_file(),
     "frontend_standalone_exists": (root / "frontend-runtime/server.js").is_file(),
@@ -45,6 +49,25 @@ for name, ok in checks.items():
 if not all(checks.values()):
     raise SystemExit(4)
 PY
+
+expected_backend_bridge_sha="$(python3 - "$candidate" <<'PY'
+import json,pathlib,sys
+root=pathlib.Path(sys.argv[1])
+manifest=json.loads((root/'release.json').read_text())
+helper=root/'source/ops/release/source_tree_fingerprint.py'
+if not helper.is_file():
+    print('')
+else:
+    import subprocess
+    result=subprocess.run([sys.executable,str(helper),str(root/'source'),'backend/app','backend/tests','backend/migrations','backend/runtime-requirements.lock','backend/runtime-python-version.txt','bridge'],check=True,capture_output=True,text=True)
+    print(result.stdout.strip())
+PY
+)"
+manifest_backend_bridge_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("backend_bridge_source_sha256",""))' "$candidate/release.json")"
+if [[ -n "$manifest_backend_bridge_sha" && "$expected_backend_bridge_sha" != "$manifest_backend_bridge_sha" ]]; then
+  echo "Backend/bridge source fingerprint does not match the release manifest." >&2
+  exit 4
+fi
 
 expected_python="$(cat "$candidate/source/backend/runtime-python-version.txt")"
 actual_python="$("$candidate/backend-venv/bin/python" -c 'import platform; print(platform.python_version())')"

@@ -78,6 +78,7 @@ import {
   updateServerSettings,
   upsertBridgeAccount,
 } from '../lib/api';
+import { requestCurrentBrowserPairing } from '../lib/extensionPairing';
 import { buildTemplateDraftForPage, CMS_PAGE_CONFIG, CMS_PAGE_KEYS, createDefaultCmsPages } from '../lib/cmsTemplates';
 import {
   BROWSER_CONNECT_MARKETPLACES,
@@ -1228,13 +1229,13 @@ export default function SettingsPage() {
   const issueMarketplaceExtensionPairingCode = async (authorizeThisBrowser = false) => {
     setLoadingExtensionPairing(true);
     try {
-      const result = await createMarketplaceExtensionPairingCode('PosterPro browser');
       if (authorizeThisBrowser && browserExtensionAvailable) {
-        window.postMessage({ source: 'posterpro-settings', type: 'PAIR_EXTENSION', pairing_code: result.pairing_code }, window.location.origin);
-      setMarketplaceExtensionPairingCode({ ...result, pairing_status: 'authorizing', connect_marketplace: String(selectedMarketplace || '').toLowerCase() });
+        const result = await requestCurrentBrowserPairing(createMarketplaceExtensionPairingCode, window);
+        setMarketplaceExtensionPairingCode({ ...result, pairing_status: 'authorizing', connect_marketplace: String(selectedMarketplace || '').toLowerCase() });
         toast.success('Authorizing this browser…');
         return;
       }
+      const result = await createMarketplaceExtensionPairingCode('PosterPro browser');
       setMarketplaceExtensionPairingCode(result);
       toast.success('One-time pairing code created. Enter it in the installed PosterPro extension within five minutes.');
     } catch (error) {

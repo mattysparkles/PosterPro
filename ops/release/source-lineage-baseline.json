@@ -1,0 +1,24 @@
+{
+  "legacy_release_id": "posterpro-20261111T230549Z-4eafdadbdc73",
+  "legacy_release_commit": "4eafdadbdc73ce3c574fcc6cee73b7e376c07f22",
+  "github_lineage_base_commit": "700d300f31d82529edee21206f086b097535ea57",
+  "production_application_source_sha256": "b5c39dd143d8647547df196e9688102ae3daa0f4d7cff1508d1d0c7128696f49",
+  "comparison_paths": [
+    "backend/app",
+    "backend/tests",
+    "backend/migrations",
+    "backend/runtime-requirements.lock",
+    "backend/runtime-python-version.txt",
+    "bridge",
+    "frontend",
+    "browser-extension",
+    "print-agent",
+    "scripts"
+  ],
+  "excluded_from_source_equivalence": [
+    "backend/data/tote_manifest_20261014_v1.json",
+    "backend/data/tote_manifest_20261014_v1_dryrun.json",
+    "generated .next/node_modules/pytest/python cache files"
+  ],
+  "verification": "The listed production application paths from the active release source and GitHub main tree at the lineage base have identical per-file SHA-256 fingerprints. The only app-tree differences are two unused tote seed/export data files excluded from the public repository."
+}

@@ -36,23 +36,18 @@ export default function ExtensionVersionStatus({ state, currentDeviceId = null, 
   const now = Date.now();
   const recent = devices.filter((device) => device.last_seen_at && now - new Date(device.last_seen_at).getTime() < ONLINE_WINDOW_MS)
     .sort((a, b) => new Date(b.last_seen_at) - new Date(a.last_seen_at));
-  // API/device IDs are numeric, but extension messaging and hydrated browser
-  // state can cross a JSON boundary as strings. Also, a fresh content-script
-  // presence message can arrive before its paired device ID has been hydrated
-  // into page state. In that case, recognize a single recent account device
-  // running the detected version instead of incorrectly prompting to pair it
-  // again. Ambiguous multi-device matches remain unassigned.
-  const matchedCurrentDevice = recent.find((device) => String(device.id) === String(currentDeviceId)) || null;
-  const detectedVersionMatches = detected && detectedPaired && detectedVersion
-    ? recent.filter((device) => String(device.extension_version || '') === String(detectedVersion))
-    : [];
-  const uniqueDetectedDevice = detectedVersionMatches.length === 1 ? detectedVersionMatches[0] : null;
-  const currentDevice = matchedCurrentDevice || uniqueDetectedDevice || (!detected ? recent[0] : null);
-  const otherRecent = recent.filter((device) => device.id !== currentDevice?.id);
-  const stale = devices.filter((device) => !recent.some((online) => online.id === device.id));
+  // A version is not a browser identity. Only an extension-reported device ID
+  // that matches this account's registered device can identify this browser.
+  // Keep a separate verified-but-unmatched state when the extension reports
+  // paired=true but the account/device association is not available yet.
+  const matchedCurrentDevice = devices.find((device) => String(device.id) === String(currentDeviceId)) || null;
+  const currentDevice = matchedCurrentDevice || (!detected ? recent[0] : null);
+  const pairedIdentityUnmatched = Boolean(detected && detectedPaired && !matchedCurrentDevice);
+  const otherRecent = recent.filter((device) => String(device.id) !== String(currentDevice?.id));
+  const stale = devices.filter((device) => String(device.id) !== String(currentDevice?.id) && !recent.some((online) => String(online.id) === String(device.id)));
   const newerDetected = Boolean(detected && currentDevice && versionGreater(detectedVersion, currentDevice.extension_version));
   const currentNeedsUpdate = Boolean(!newerDetected && (currentDevice?.update_required || (detected && versionLessThan(detectedVersion, minimum))));
-  const needsReconnect = newerDetected || Boolean(detected && !currentDevice);
+  const needsReconnect = newerDetected || Boolean(detected && !detectedPaired);
   const canPairHere = detected && typeof onPair === 'function' && needsReconnect;
   const pairLabel = currentDevice ? 'Reconnect this browser' : 'Pair this browser';
   const pairButton = <Button type="button" data-posterpro-extension-authorize="true" disabled={pairing} onClick={onPair}>{pairing ? 'Connecting…' : pairLabel}</Button>;
@@ -60,11 +55,12 @@ export default function ExtensionVersionStatus({ state, currentDeviceId = null, 
 
   if (compact) {
     if (currentDevice && !currentNeedsUpdate && !needsReconnect) return null;
-    const missing = !currentDevice && !detected;
+    const missing = !currentDevice && !detected && !pairedIdentityUnmatched;
+    const pairedUnknown = pairedIdentityUnmatched && !newerDetected;
     return (
       <div role="status" className={`flex flex-wrap items-center justify-between gap-3 rounded-xl border px-4 py-3 ${currentNeedsUpdate ? 'border-amber-300 bg-amber-50' : 'border-slate-200 bg-slate-50'}`}>
-        <div className="min-w-0"><p className={`text-sm font-semibold ${currentNeedsUpdate ? 'text-amber-950' : 'text-slate-900'}`}>{canPairHere ? (currentDevice ? 'New extension detected' : 'Extension detected; browser not paired') : currentNeedsUpdate ? 'Extension update required' : missing ? 'Browser extension is not connected' : 'Connect this browser'}</p><p className="mt-1 text-sm text-slate-700">{canPairHere ? `Detected v${detectedVersion}. Pair it here; existing listing and marketplace data will not be changed.` : currentNeedsUpdate ? `Installed v${currentDevice?.extension_version || detectedVersion || 'unknown'} · v${current} required` : 'PosterPro checks for the extension automatically while this page is open. You can also manually find or pair it here.'}</p>{currentNeedsUpdate && !canPairHere ? <p className="mt-2 max-w-2xl text-xs leading-5 text-amber-900">{updateCopy}</p> : null}</div>
-        <div className="flex flex-wrap gap-2">{canPairHere ? pairButton : currentNeedsUpdate ? <Button href="/settings?tab=marketplaces#browser-automation" variant="outline">Browser update instructions</Button> : needsReconnect ? <Button href="/settings?tab=marketplaces#browser-automation">Find or pair browser</Button> : <Button href="/settings?tab=marketplaces#browser-automation">{missing ? 'Find or pair browser' : 'Repair browser connection'}</Button>}<Button type="button" variant="outline" onClick={refreshStatus}>Check extension</Button></div>
+        <div className="min-w-0"><p className={`text-sm font-semibold ${currentNeedsUpdate ? 'text-amber-950' : 'text-slate-900'}`}>{pairedUnknown ? 'Extension reports an existing pairing' : canPairHere ? (currentDevice ? 'New extension detected' : 'Extension detected; browser not paired') : currentNeedsUpdate ? 'Extension update required' : missing ? 'Browser extension is not connected' : 'Connect this browser'}</p><p className="mt-1 text-sm text-slate-700">{pairedUnknown ? 'The extension reports that it is paired, but its device identity does not match a registered device for this account. No duplicate device was created.' : canPairHere ? `Detected v${detectedVersion}. Pair it here; existing listing and marketplace data will not be changed.` : currentNeedsUpdate ? `Installed v${currentDevice?.extension_version || detectedVersion || 'unknown'} · v${current} required` : 'PosterPro checks for the extension automatically while this page is open. You can also manually find or pair it here.'}</p>{currentNeedsUpdate && !canPairHere ? <p className="mt-2 max-w-2xl text-xs leading-5 text-amber-900">{updateCopy}</p> : null}</div>
+        <div className="flex flex-wrap gap-2">{canPairHere ? pairButton : currentNeedsUpdate ? <Button href="/settings?tab=marketplaces#browser-automation" variant="outline">Browser update instructions</Button> : pairedUnknown ? <Button href="/settings?tab=marketplaces#browser-automation">Check pairing in Marketplace settings</Button> : needsReconnect ? <Button href="/settings?tab=marketplaces#browser-automation">Find or pair browser</Button> : <Button href="/settings?tab=marketplaces#browser-automation">{missing ? 'Find or pair browser' : 'Repair browser connection'}</Button>}<Button type="button" variant="outline" onClick={refreshStatus}>Check extension</Button></div>
       </div>
     );
   }
@@ -80,9 +76,9 @@ export default function ExtensionVersionStatus({ state, currentDeviceId = null, 
       </div>
       <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
         <div className={`rounded-xl border p-3 ${currentDevice && !currentNeedsUpdate ? 'border-green-200 bg-green-50' : 'border-slate-200 bg-slate-50'}`}>
-          <p className="text-sm font-semibold text-slate-950">{matchedCurrentDevice ? 'This browser' : 'Most recently connected browser'}</p>
-          <p className="mt-1 text-sm text-slate-700">{currentDevice ? deviceLabel(currentDevice) : detected ? `Extension detected · v${detectedVersion || 'unknown'}` : 'No recent connection'}</p>
-          <p className="mt-1 text-xs text-slate-600">{currentDevice ? lastSeen(currentDevice) : detected ? 'This browser has not connected to your PosterPro account yet.' : 'Open PosterPro in Chrome or Edge with the extension installed.'}</p>
+          <p className="text-sm font-semibold text-slate-950">{matchedCurrentDevice ? 'This browser' : pairedIdentityUnmatched ? 'Extension pairing identity' : 'Most recently connected browser'}</p>
+          <p className="mt-1 text-sm text-slate-700">{currentDevice ? deviceLabel(currentDevice) : pairedIdentityUnmatched ? `Extension reports paired · v${detectedVersion || 'unknown'}` : detected ? `Extension detected · v${detectedVersion || 'unknown'}` : 'No recent connection'}</p>
+          <p className="mt-1 text-xs text-slate-600">{currentDevice ? lastSeen(currentDevice) : pairedIdentityUnmatched ? 'The extension reports an existing pairing, but its device ID is not present in this account’s registered devices. PosterPro will not claim another browser is current.' : detected ? 'This browser has not connected to your PosterPro account yet.' : 'Open PosterPro in Chrome or Edge with the extension installed.'}</p>
           {currentNeedsUpdate ? <p className="mt-2 text-sm font-semibold text-amber-900">Update required before using this browser.</p> : newerDetected ? <p className="mt-2 text-sm font-semibold text-blue-900">A newer extension is detected here (v{detectedVersion}); connect it to replace the older paired device.</p> : currentDevice ? <p className="mt-2 text-sm font-semibold text-green-900">Connected now</p> : detected ? <p className="mt-2 text-sm font-semibold text-blue-900">Ready to connect</p> : null}
         </div>
         {otherRecent.length ? <div className="rounded-xl border border-blue-200 bg-blue-50 p-3"><p className="text-sm font-semibold text-slate-950">Other connected browsers</p><ul className="mt-1 space-y-1 text-sm text-slate-700">{otherRecent.map((device) => <li key={device.id}>{deviceLabel(device)} · online</li>)}</ul></div> : null}
