@@ -20,7 +20,6 @@ commit="$(git rev-parse HEAD)"
 base_release="$(readlink -f "$active_link")"
 base_manifest="$base_release/release.json"
 [[ -f "$base_manifest" && -f "$base_release/SHA256SUMS" ]] || { echo "Active release is incomplete." >&2; exit 2; }
-(cd "$base_release" && sha256sum -c SHA256SUMS >/dev/null) || { echo "Active release checksum validation failed." >&2; exit 2; }
 active_commit="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["git_commit"])' "$base_manifest")"
 active_release_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_id"])' "$base_manifest")"
 comparison_commit="$active_commit"
@@ -48,7 +47,7 @@ fi
 changed_paths="$(git diff --name-only "$comparison_commit" "$commit")"
 [[ -n "$changed_paths" ]] || { echo "No source changes from active release." >&2; exit 2; }
 while IFS= read -r path; do
-  [[ "$path" == AGENTS.md || "$path" =~ ^(frontend/|browser-extension/|ops/release/) ]] || {
+  [[ "$path" == AGENTS.md || "$path" == ops/FEATURE_MANIFEST.csv || "$path" =~ ^(frontend/|browser-extension/|ops/release/) ]] || {
     echo "Change '$path' requires the full runtime builder." >&2; exit 4;
   }
 done <<< "$changed_paths"
@@ -59,6 +58,8 @@ done
 git diff --quiet "$comparison_commit" "$commit" -- backend/migrations backend/runtime-requirements.lock frontend/package-lock.json frontend/runtime-node-version.txt || {
   echo "Runtime dependencies or schema inputs changed; fast release is forbidden." >&2; exit 4;
 }
+
+(cd "$base_release" && sha256sum -c SHA256SUMS >/dev/null) || { echo "Active release checksum validation failed." >&2; exit 2; }
 
 base_source="$base_release/source"
 [[ -f "$base_release/backend-tests.txt" && -d "$base_release/backend-venv" && -f "$base_source/backend/runtime-requirements.lock" ]] || {
