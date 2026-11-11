@@ -25,7 +25,7 @@ function versionGreater(leftValue, rightValue) {
   return versionLessThan(rightValue, leftValue);
 }
 
-export default function ExtensionVersionStatus({ state, currentDeviceId = null, detected = false, detectedVersion = '', showAction = true, compact = false, onRefresh = null, onPair = null, pairing = false }) {
+export default function ExtensionVersionStatus({ state, currentDeviceId = null, detected = false, detectedVersion = '', detectedPaired = false, showAction = true, compact = false, onRefresh = null, onPair = null, pairing = false }) {
   const refreshStatus = () => {
     window.postMessage({ source: 'posterpro-settings', type: 'CHECK_EXTENSION' }, window.location.origin);
     if (typeof onRefresh === 'function') void onRefresh();
@@ -36,8 +36,18 @@ export default function ExtensionVersionStatus({ state, currentDeviceId = null, 
   const now = Date.now();
   const recent = devices.filter((device) => device.last_seen_at && now - new Date(device.last_seen_at).getTime() < ONLINE_WINDOW_MS)
     .sort((a, b) => new Date(b.last_seen_at) - new Date(a.last_seen_at));
-  const matchedCurrentDevice = recent.find((device) => device.id === currentDeviceId) || null;
-  const currentDevice = matchedCurrentDevice || (!detected ? recent[0] : null);
+  // API/device IDs are numeric, but extension messaging and hydrated browser
+  // state can cross a JSON boundary as strings. Also, a fresh content-script
+  // presence message can arrive before its paired device ID has been hydrated
+  // into page state. In that case, recognize a single recent account device
+  // running the detected version instead of incorrectly prompting to pair it
+  // again. Ambiguous multi-device matches remain unassigned.
+  const matchedCurrentDevice = recent.find((device) => String(device.id) === String(currentDeviceId)) || null;
+  const detectedVersionMatches = detected && detectedPaired && detectedVersion
+    ? recent.filter((device) => String(device.extension_version || '') === String(detectedVersion))
+    : [];
+  const uniqueDetectedDevice = detectedVersionMatches.length === 1 ? detectedVersionMatches[0] : null;
+  const currentDevice = matchedCurrentDevice || uniqueDetectedDevice || (!detected ? recent[0] : null);
   const otherRecent = recent.filter((device) => device.id !== currentDevice?.id);
   const stale = devices.filter((device) => !recent.some((online) => online.id === device.id));
   const newerDetected = Boolean(detected && currentDevice && versionGreater(detectedVersion, currentDevice.extension_version));

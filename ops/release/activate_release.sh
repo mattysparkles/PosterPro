@@ -9,6 +9,8 @@ health_url="${POSTERPRO_BACKEND_HEALTH_URL:-https://posterpro.sparkleserver.site
 frontend_url="${POSTERPRO_FRONTEND_HEALTH_URL:-https://posterpro.sparkleserver.site/}"
 canonical_repo="${POSTERPRO_CANONICAL_REPO:-/opt/apps/posterpro/integration-20261110}"
 units="${POSTERPRO_SYSTEMD_UNITS:-posterpro-backend.service posterpro-frontend.service}"
+health_retries="${POSTERPRO_HEALTH_RETRIES:-20}"
+health_retry_delay="${POSTERPRO_HEALTH_RETRY_DELAY:-2}"
 
 if [[ -z "$candidate" || "$candidate" != "$release_root/"* || ! -f "$candidate/release.json" ]]; then
   echo "Candidate must be an immutable release directory with release.json under $release_root." >&2
@@ -73,7 +75,19 @@ if ! systemctl restart "${unit_list[@]}"; then
   echo "Service restart failed; prior release restored." >&2
   exit 4
 fi
-if ! curl --fail --silent --show-error --max-time 15 "$health_url" >/dev/null || ! curl --fail --silent --show-error --max-time 15 "$frontend_url" >/dev/null; then
+wait_for_health() {
+  local url="$1"
+  local attempt
+  for ((attempt = 1; attempt <= health_retries; attempt++)); do
+    if curl --fail --silent --max-time 15 "$url" >/dev/null; then
+      return 0
+    fi
+    if (( attempt < health_retries )); then sleep "$health_retry_delay"; fi
+  done
+  echo "Health check did not become ready after ${health_retries} attempts: $url" >&2
+  return 1
+}
+if ! wait_for_health "$health_url" || ! wait_for_health "$frontend_url"; then
   ln -s "$previous" "$tmp_link"
   mv -Tf "$tmp_link" "$active_link"
   systemctl restart "${unit_list[@]}" || true

@@ -83,6 +83,12 @@ exit 0
 SH
 cat > "$tmp_root/fake-bin/curl" <<'SH'
 #!/usr/bin/env bash
+count_file="${POSTERPRO_TEST_CURL_COUNT_FILE:?}"
+count=0
+[[ ! -f "$count_file" ]] || count="$(cat "$count_file")"
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+if [[ "$count" -eq 1 ]]; then exit 22; fi
 exit 0
 SH
 chmod +x "$tmp_root/fake-bin/systemctl" "$tmp_root/fake-bin/curl"
@@ -91,9 +97,16 @@ POSTERPRO_RELEASE_ROOT="$release_root" \
 POSTERPRO_ACTIVE_RELEASE_LINK="$tmp_root/active" \
 POSTERPRO_DEPLOY_LOCK="$tmp_root/deploy.lock" \
 POSTERPRO_CANONICAL_REPO="$repo_root" \
+POSTERPRO_HEALTH_RETRIES=3 \
+POSTERPRO_HEALTH_RETRY_DELAY=0 \
+POSTERPRO_TEST_CURL_COUNT_FILE="$tmp_root/curl-count" \
 "$repo_root/ops/release/activate_release.sh" "$release_root/eligible" >/dev/null
 if [[ "$(readlink -f "$tmp_root/active")" != "$(readlink -f "$release_root/eligible")" ]]; then
   echo "Expected valid production_release to pass eligibility and activation guards." >&2
+  exit 1
+fi
+if [[ "$(cat "$tmp_root/curl-count")" -ne 3 ]]; then
+  echo "Expected health checks to retry one transient startup failure before verifying both endpoints." >&2
   exit 1
 fi
 echo "eligible candidate guard path passed with mocked service restart and public health checks"

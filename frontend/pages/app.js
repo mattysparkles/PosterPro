@@ -120,6 +120,7 @@ export default function Dashboard() {
   const [extensionState, setExtensionState] = useState({ devices: [], current_version: 'unknown', minimum_version: 'unknown' });
   const [browserExtensionDeviceId, setBrowserExtensionDeviceId] = useState(null);
   const [browserExtensionDetected, setBrowserExtensionDetected] = useState(false);
+  const [browserExtensionPaired, setBrowserExtensionPaired] = useState(false);
   const [browserExtensionVersion, setBrowserExtensionVersion] = useState('');
   const [pairingBrowser, setPairingBrowser] = useState(false);
   const [jobsOverview, setJobsOverview] = useState({ import_jobs: [], crosspost_jobs: [], system_status: null });
@@ -356,8 +357,11 @@ export default function Dashboard() {
         setBrowserExtensionDetected(true);
         setBrowserExtensionVersion(String(event.data.version || ''));
         if (event.data?.type === 'PRESENCE') {
+          setBrowserExtensionPaired(event.data.paired === true);
           const currentId = Number(event.data.device_id);
           setBrowserExtensionDeviceId(Number.isInteger(currentId) && currentId > 0 ? currentId : null);
+        } else {
+          setBrowserExtensionPaired(true);
         }
       }
       const deviceId = Number(event.data.device_id || event.data.device?.id);
@@ -1295,7 +1299,7 @@ export default function Dashboard() {
     ].filter(([key]) => alertsByType[key]);
     return (
       <div className="pp-dashboard">
-        <ExtensionVersionStatus state={extensionState} currentDeviceId={browserExtensionDeviceId} detected={browserExtensionDetected} detectedVersion={browserExtensionVersion} compact onRefresh={refreshMarketplaceExtensionState} onPair={pairCurrentBrowser} pairing={pairingBrowser} />
+        <ExtensionVersionStatus state={extensionState} currentDeviceId={browserExtensionDeviceId} detected={browserExtensionDetected} detectedVersion={browserExtensionVersion} detectedPaired={browserExtensionPaired} compact onRefresh={refreshMarketplaceExtensionState} onPair={pairCurrentBrowser} pairing={pairingBrowser} />
         <header className="pp-dashboard-header">
           <h1 className="pp-dashboard-title">Dashboard</h1>
           <div className="pp-dashboard-actions">

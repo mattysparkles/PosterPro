@@ -138,6 +138,7 @@ export default function SettingsPage() {
   const [marketplaceExtensionPairingCode, setMarketplaceExtensionPairingCode] = useState(null);
   const [mercariPairingPending, setMercariPairingPending] = useState(false);
   const [browserExtensionAvailable, setBrowserExtensionAvailable] = useState(false);
+  const [browserExtensionPaired, setBrowserExtensionPaired] = useState(false);
   const [browserExtensionDeviceId, setBrowserExtensionDeviceId] = useState(null);
   const [browserExtensionVersion, setBrowserExtensionVersion] = useState('');
   const [loadingExtensionPairing, setLoadingExtensionPairing] = useState(false);
@@ -521,6 +522,7 @@ export default function SettingsPage() {
       if (message.source !== 'posterpro-extension') return;
       if (message.type === 'PRESENCE') {
         setBrowserExtensionAvailable(true);
+        setBrowserExtensionPaired(message.paired === true);
         setBrowserExtensionVersion(String(message.version || ''));
         const deviceId = Number(message.device_id);
         setBrowserExtensionDeviceId(Number.isInteger(deviceId) && deviceId > 0 ? deviceId : null);
@@ -536,6 +538,7 @@ export default function SettingsPage() {
       }
       if (message.type === 'AUTHORIZED') {
         setBrowserExtensionAvailable(true);
+        setBrowserExtensionPaired(true);
         setBrowserExtensionVersion(String(message.version || ''));
         const deviceId = Number(message.device_id || message.device?.id);
         if (Number.isInteger(deviceId) && deviceId > 0) setBrowserExtensionDeviceId(deviceId);
@@ -627,7 +630,7 @@ export default function SettingsPage() {
   const extensionDevices = marketplaceExtensionState.devices || [];
   const activeExtensionDevices = extensionDevices.filter((device) => !device.revoked);
   const recentExtensionDevices = activeExtensionDevices.filter((device) => device.last_seen_at && Date.now() - new Date(device.last_seen_at).getTime() < 120000).sort((a, b) => new Date(b.last_seen_at) - new Date(a.last_seen_at));
-  const currentExtensionDeviceId = recentExtensionDevices.some((device) => device.id === browserExtensionDeviceId) ? browserExtensionDeviceId : null;
+  const currentExtensionDeviceId = recentExtensionDevices.some((device) => String(device.id) === String(browserExtensionDeviceId)) ? browserExtensionDeviceId : null;
   const currentExtensionDevice = recentExtensionDevices.find((device) => device.id === currentExtensionDeviceId) || null;
   const otherRecentExtensionDevices = recentExtensionDevices.filter((device) => device.id !== currentExtensionDeviceId);
   const staleExtensionDevices = activeExtensionDevices.filter((device) => !recentExtensionDevices.some((recent) => recent.id === device.id));
@@ -3095,7 +3098,7 @@ export default function SettingsPage() {
                       </div>
                       {extensionUpdateRequired && !browserNeedsPairing ? <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-950">A downloaded ZIP cannot update Chrome’s existing unpacked extension. Chrome runs the folder originally selected with <em>Load unpacked</em>. Replace that folder’s files, then click <em>Reload</em> on <code>chrome://extensions</code>. Loading a different folder installs a second extension instead.</p> : null}
                       {!browserExtensionAvailable ? <p className="mt-3 text-sm text-[#475467]">If you just used <em>Load unpacked</em>, Chrome does not inject the new extension into an already-open tab. Reload this PosterPro page once; the extension should then appear here and the Pair button will become available.</p> : null}
-                      <div className="mt-3"><ExtensionVersionStatus state={marketplaceExtensionState} currentDeviceId={currentExtensionDeviceId} detected={browserExtensionAvailable} detectedVersion={browserExtensionVersion} showAction={false} compact onRefresh={refreshMarketplaceExtensionState} onPair={() => issueMarketplaceExtensionPairingCode(true)} pairing={loadingExtensionPairing} /></div>
+                      <div className="mt-3"><ExtensionVersionStatus state={marketplaceExtensionState} currentDeviceId={currentExtensionDeviceId} detected={browserExtensionAvailable} detectedVersion={browserExtensionVersion} detectedPaired={browserExtensionPaired} showAction={false} compact onRefresh={refreshMarketplaceExtensionState} onPair={() => issueMarketplaceExtensionPairingCode(true)} pairing={loadingExtensionPairing} /></div>
                         <p className="mt-2 text-sm text-[#475467]">PosterPro works with marketplace accounts already signed in to this browser. Your passwords stay in your browser.</p>
                       <details className="mt-3 rounded-lg border border-[#d0d5dd] bg-white p-3">
                         <summary className="cursor-pointer text-sm font-semibold text-[#344054]">Advanced details and recovery pairing</summary>
