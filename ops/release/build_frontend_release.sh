@@ -48,7 +48,7 @@ fi
 changed_paths="$(git diff --name-only "$comparison_commit" "$commit")"
 [[ -n "$changed_paths" ]] || { echo "No source changes from active release." >&2; exit 2; }
 while IFS= read -r path; do
-  [[ "$path" =~ ^(frontend/|browser-extension/|ops/release/) ]] || {
+  [[ "$path" == AGENTS.md || "$path" =~ ^(frontend/|browser-extension/|ops/release/) ]] || {
     echo "Change '$path' requires the full runtime builder." >&2; exit 4;
   }
 done <<< "$changed_paths"
