@@ -1,0 +1,7 @@
+# Release build and activation
+
+`build_release.sh` accepts only a clean canonical `main` checkout, serializes builds, compiles/tests the backend, builds the frontend, and produces an immutable source/frontend/test manifest bundle under `/opt/apps/posterpro/releases/` (override with `POSTERPRO_RELEASE_ROOT`). It does not install dependencies. Set `POSTERPRO_PYTHON` and `POSTERPRO_PYTEST` to a reviewed environment.
+
+`activate_release.sh` acquires a deployment lock, checks the release manifest and monotonic build time, atomically switches a configured active symlink, restarts explicitly configured services, checks the public health endpoint, and rolls the symlink back on restart/health failure. It refuses manifests requiring approval. Physical printing is recorded disabled by the build script.
+
+The build defaults `POSTERPRO_RELEASE_REQUIRES_APPROVAL=true`; only explicitly reviewed routine releases may set it to `false`. Activation checks both public frontend/backend health and requires the candidate commit to descend from the active release commit. The current production units use direct working directories rather than the required active-release symlink and the first consolidation manifest requires operator review. Therefore activation intentionally refuses the current topology. Converting the units to a symlink-based release root, validating that cutover, and applying a reviewed production schema baseline are prerequisites; do not point this script at a live service until then. The deployed system is unchanged.

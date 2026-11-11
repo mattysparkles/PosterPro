@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 
-import { fetchMarketplaceStatus, publishListing } from '../lib/api';
+import { fetchMarketplaceStatus, publishListing, publishListingEbay } from '../lib/api';
 
 export function useMarketplacePublish() {
   const [publishing, setPublishing] = useState({});
@@ -33,11 +33,22 @@ export function useMarketplacePublish() {
     return () => clearInterval(timer);
   }, [tracking, refreshStatus]);
 
-  const publish = async (listingId, marketplaces) => {
+  const publish = async (listingId, marketplaces, extra = {}) => {
     setPublishing((prev) => ({ ...prev, [listingId]: true }));
     setErrors((prev) => ({ ...prev, [listingId]: '' }));
     try {
-      await publishListing(listingId, marketplaces);
+      const normalizedMarketplaces = Array.isArray(marketplaces)
+        ? marketplaces.map((market) => String(market).toLowerCase()).filter(Boolean)
+        : [];
+      let response;
+      if (normalizedMarketplaces.length === 1 && normalizedMarketplaces[0] === 'ebay') {
+        response = await publishListingEbay(listingId, extra);
+      } else {
+        response = await publishListing(listingId, marketplaces, extra);
+      }
+      if (response?.error) {
+        throw new Error(response.error);
+      }
       setTracking((prev) => [...new Set([...prev, listingId])]);
       await refreshStatus(listingId);
     } catch (err) {

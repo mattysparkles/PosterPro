@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
@@ -8,11 +9,12 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.enums import MarketplaceListingStatus, MarketplaceName
+from app.models.enums import MARKETPLACE_DESTINATION_VALUES, MarketplaceListingStatus, MarketplaceName
 from app.models.models import Listing, MarketplaceListing, User
+from app.services.marketplace_setup import MANUAL_WORKFLOW_READY, load_manual_marketplace_settings
 from app.services.ebay_service import publish_listing_to_ebay
 
-TODO_MESSAGE = "TODO – API keys coming"
+ASSISTED_WORKFLOW_MESSAGE = "Direct API publishing is not available for this marketplace in this deployment. Use the assisted marketplace workflow instead."
 
 
 @dataclass(slots=True)
@@ -33,8 +35,8 @@ class PlatformPublisher(ABC):
 class EbayPublisher(PlatformPublisher):
     marketplace = MarketplaceName.ebay.value
 
-    def publish(self, db: Session, listing: Listing) -> PublishResult:
-        response = asyncio.run(publish_listing_to_ebay(listing, db))
+    def publish(self, db: Session, listing: Listing, *, operator_authorization: dict[str, Any] | None = None) -> PublishResult:
+        response = asyncio.run(publish_listing_to_ebay(listing, db, operator_authorization=operator_authorization))
         return PublishResult(
             marketplace=self.marketplace,
             status=MarketplaceListingStatus.PUBLISHED,
@@ -50,7 +52,7 @@ class StubPlatformPublisher(PlatformPublisher):
         return PublishResult(
             marketplace=self.marketplace,
             status=MarketplaceListingStatus.FAILED,
-            response={"error": TODO_MESSAGE, "status": "TODO"},
+            response={"error": ASSISTED_WORKFLOW_MESSAGE, "status": "ASSISTED_WORKFLOW_REQUIRED"},
         )
 
 
@@ -69,11 +71,13 @@ class MultiPlatformPublisher:
             MarketplaceName.vinted.value: StubPlatformPublisher(MarketplaceName.vinted.value),
         }
 
-    def publish(self, db: Session, listing: Listing, marketplace: str) -> PublishResult:
+    def publish(self, db: Session, listing: Listing, marketplace: str, *, operator_authorization: dict[str, Any] | None = None) -> PublishResult:
         market = marketplace.lower()
         publisher = self._publishers.get(market)
         if not publisher:
             raise ValueError(f"Unsupported marketplace: {market}")
+        if market == MarketplaceName.ebay.value:
+            return publisher.publish(db, listing, operator_authorization=operator_authorization)
         return publisher.publish(db, listing)
 
 
@@ -88,13 +92,23 @@ def upsert_marketplace_listing(
     status: MarketplaceListingStatus,
     response: dict[str, Any] | None,
 ) -> MarketplaceListing:
+    # Provider responses can contain datetime/Decimal values.  They are useful
+    # diagnostics but must be normalized before assignment to the JSON column;
+    # otherwise a successful remote call is rolled back and Celery retries it.
+    response = json.loads(json.dumps(response or {}, default=str))
     market = MarketplaceName(marketplace.lower())
-    row = db.execute(
-        select(MarketplaceListing).where(
-            MarketplaceListing.listing_id == listing_id,
-            MarketplaceListing.marketplace == market,
+    row = (
+        db.execute(
+            select(MarketplaceListing)
+            .where(
+                MarketplaceListing.listing_id == listing_id,
+                MarketplaceListing.marketplace == market,
+            )
+            .order_by(MarketplaceListing.updated_at.desc(), MarketplaceListing.id.desc())
         )
-    ).scalar_one_or_none()
+        .scalars()
+        .first()
+    )
 
     if not row:
         row = MarketplaceListing(listing_id=listing_id, marketplace=market, status=status)
@@ -103,6 +117,7 @@ def upsert_marketplace_listing(
     row.raw_response = response
     row.marketplace_listing_id = (
         (response or {}).get("listing_id")
+        or (response or {}).get("marketplace_listing_id")
         or (response or {}).get("external_listing_id")
         or row.marketplace_listing_id
     )
@@ -111,10 +126,33 @@ def upsert_marketplace_listing(
 
 
 def get_enabled_platforms(user: User | None) -> list[str]:
-    configured = (user.enabled_platforms if user else None) or [MarketplaceName.ebay.value]
+    configured = list((user.enabled_platforms if user else None) or [])
     normalized: list[str] = []
     for name in configured:
         lowered = str(name).lower()
-        if lowered in MarketplaceName._value2member_map_ and lowered not in normalized:
+        if lowered in MARKETPLACE_DESTINATION_VALUES and lowered not in normalized:
             normalized.append(lowered)
-    return normalized or [MarketplaceName.ebay.value]
+
+    if normalized:
+        return normalized
+
+    inferred: list[str] = [MarketplaceName.ebay.value]
+    if not user:
+        return inferred
+
+    manual_settings = load_manual_marketplace_settings(user)
+    for marketplace, settings in manual_settings.items():
+        if marketplace == MarketplaceName.ebay.value:
+            continue
+        if str(settings.get("workflow_state") or "").strip().lower() != MANUAL_WORKFLOW_READY:
+            continue
+        if not (
+            str(settings.get("bridge_account_key") or "").strip()
+            or str(settings.get("account_handle") or "").strip()
+            or str(settings.get("display_name") or "").strip()
+        ):
+            continue
+        if marketplace not in inferred:
+            inferred.append(marketplace)
+
+    return inferred

@@ -104,7 +104,7 @@ def execute_secondary_marketplace_path(*, listing: Listing, marketplace: str, ex
             "renewal_plan": renewal_plan,
         }
 
-    if execution_mode == "browser_assist":
+    if execution_mode in {"browser_assist", "hosted_browser_assist"}:
         bridge_payload = {
             "marketplace": marketplace,
             "listing_id": listing.id,

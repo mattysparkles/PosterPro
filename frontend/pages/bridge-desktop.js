@@ -18,6 +18,7 @@ import {
 
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'canceled']);
 const MARKETPLACE_LABELS = {
+  ebay: 'eBay',
   facebook: 'Facebook Marketplace',
   mercari: 'Mercari',
   poshmark: 'Poshmark',
@@ -31,6 +32,20 @@ function statusTone(status) {
   if (normalized === 'failed' || normalized === 'canceled') return 'danger';
   if (normalized === 'waiting_for_login') return 'warning';
   return 'info';
+}
+
+function terminalSessionMessage(status, marketplaceLabel) {
+  const normalized = String(status || '').toLowerCase();
+  if (normalized === 'completed') {
+    return `${marketplaceLabel} session captured. Start a fresh session only if you need to reconnect or recapture browser state.`;
+  }
+  if (normalized === 'failed') {
+    return `This ${marketplaceLabel} connect session failed. Start a fresh session to reopen the bridge browser and try again.`;
+  }
+  if (normalized === 'canceled') {
+    return `This ${marketplaceLabel} connect session was canceled. Start a fresh session to reopen the bridge browser and continue.`;
+  }
+  return `This ${marketplaceLabel} connect session is no longer active. Start a fresh session to continue.`;
 }
 
 export default function BridgeDesktopPage() {
@@ -128,16 +143,18 @@ export default function BridgeDesktopPage() {
     let timeoutId;
 
     const load = async () => {
+      let nextStatus = '';
       try {
         const nextSession = await fetchBridgeConnectSession(connectSessionId);
         if (cancelled) return;
+        nextStatus = String(nextSession.status || '').toLowerCase();
         setSession(nextSession);
-        if (nextSession.desktop_access && !TERMINAL_STATUSES.has(String(nextSession.status || '').toLowerCase())) {
+        if (nextSession.desktop_access && !TERMINAL_STATUSES.has(nextStatus)) {
           setDesktopAccess(nextSession.desktop_access);
         } else {
           setDesktopAccess(null);
         }
-        if (String(nextSession.status || '').toLowerCase() === 'completed') {
+        if (nextStatus === 'completed') {
           localStorage.setItem(
             `posterpro-marketplace-connect-complete:${String(nextSession.marketplace || marketplace).toLowerCase()}`,
             JSON.stringify({
@@ -147,12 +164,15 @@ export default function BridgeDesktopPage() {
             }),
           );
         }
+        if (nextStatus === 'failed' && nextSession.error) {
+          setError(nextSession.error);
+        }
       } catch (requestError) {
         if (!cancelled) {
           setError(requestError.message || `Could not refresh the ${marketplaceLabel} connect session.`);
         }
       } finally {
-        if (!cancelled && !TERMINAL_STATUSES.has(String(session?.status || '').toLowerCase())) {
+        if (!cancelled && !TERMINAL_STATUSES.has(nextStatus)) {
           timeoutId = window.setTimeout(load, 2000);
         }
       }
@@ -164,7 +184,7 @@ export default function BridgeDesktopPage() {
       cancelled = true;
       if (timeoutId) window.clearTimeout(timeoutId);
     };
-  }, [connectSessionId, session?.status]);
+  }, [connectSessionId, marketplace, marketplaceLabel]);
 
   useEffect(() => {
     if (!desktopAccess?.token || !desktopAccess?.websocket_path || !viewerRef.current) return undefined;
@@ -173,9 +193,9 @@ export default function BridgeDesktopPage() {
 
     const connectViewer = async () => {
       try {
-        const module = await import('@novnc/novnc');
+        const novncModule = await import('@novnc/novnc');
         if (disposed || !viewerRef.current) return;
-        const RFB = module.default;
+        const RFB = novncModule.default;
         const url = buildBridgeDesktopWebsocketUrl(desktopAccess.websocket_path, desktopAccess.token);
         const rfb = new RFB(viewerRef.current, url);
         rfbRef.current = rfb;
@@ -223,13 +243,22 @@ export default function BridgeDesktopPage() {
   }, [desktopAccess?.token, desktopAccess?.websocket_path]);
 
   const sessionStatus = String(session?.status || (starting ? 'starting' : 'idle')).toLowerCase();
+  const sessionIsTerminal = TERMINAL_STATUSES.has(sessionStatus);
   const returnHref = `/settings?tab=marketplaces&marketplace=${encodeURIComponent(marketplace)}`;
   const desktopFrameUrl = connectSessionId ? buildBridgeDesktopFrameUrl(connectSessionId, frameVersion) : '';
   const canRestartSession = Boolean(accountKey) && !starting;
+  const desktopControlsEnabled = Boolean(connectSessionId) && !sessionIsTerminal;
+  const terminalMessage = terminalSessionMessage(sessionStatus, marketplaceLabel);
+
+  useEffect(() => {
+    if (!sessionIsTerminal) return;
+    setViewerState(sessionStatus);
+    setViewerMessage(terminalMessage);
+  }, [sessionIsTerminal, sessionStatus, terminalMessage]);
 
   useEffect(() => {
     if (!connectSessionId) return undefined;
-    if (TERMINAL_STATUSES.has(sessionStatus)) return undefined;
+    if (sessionIsTerminal) return undefined;
 
     refreshDesktopFrame();
     const intervalId = window.setInterval(() => {
@@ -239,14 +268,14 @@ export default function BridgeDesktopPage() {
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [connectSessionId, sessionStatus]);
+  }, [connectSessionId, sessionIsTerminal, sessionStatus]);
 
   const refreshDesktopFrame = () => {
     setFrameVersion(Date.now());
   };
 
   const runDesktopAction = async (action, payload) => {
-    if (!connectSessionId) return;
+    if (!desktopControlsEnabled) return;
     setRunningDesktopAction(true);
     try {
       await sendBridgeDesktopAction(connectSessionId, action, payload);
@@ -254,7 +283,12 @@ export default function BridgeDesktopPage() {
         refreshDesktopFrame();
       }, 300);
     } catch (requestError) {
-      toast.error(requestError.message || 'Desktop action failed.');
+      const message = requestError.message || 'Desktop action failed.';
+      setError(message);
+      if (message.toLowerCase().includes('no longer active')) {
+        setViewerMessage(terminalSessionMessage(sessionStatus, marketplaceLabel));
+      }
+      toast.error(message);
     } finally {
       setRunningDesktopAction(false);
     }
@@ -308,19 +342,21 @@ export default function BridgeDesktopPage() {
               <Button type="button" variant="outline" onClick={() => window.location.reload()}>
                 Refresh status
               </Button>
-              <Link href={returnHref}>
-                <Button type="button" variant="outline">
-                  Return to settings
-                </Button>
-              </Link>
+              <Button href={returnHref} variant="outline">
+                Return to settings
+              </Button>
             </div>
           )}
         />
 
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1.7fr)_minmax(320px,0.9fr)]">
           <SectionPanel
-            title="Live bridge desktop"
-            description={`Use this desktop surface to sign into ${marketplaceLabel} on the bridge-host Chromium session.`}
+            title={sessionIsTerminal && sessionStatus === 'completed' ? `${marketplaceLabel} connected` : 'Live bridge desktop'}
+            description={
+              sessionIsTerminal && sessionStatus === 'completed'
+                ? 'The browser session was captured successfully. Desktop access is intentionally closed once capture is complete.'
+                : `Use this desktop surface to sign into ${marketplaceLabel} on the bridge-host Chromium session.`
+            }
           >
             <div className="space-y-3">
               <div className="flex flex-wrap items-center gap-2">
@@ -332,14 +368,24 @@ export default function BridgeDesktopPage() {
                   </Button>
                 ) : null}
               </div>
-              <div className="rounded-[18px] border border-[#d0d5dd] bg-[#0f172a] p-3">
-                <div
-                  ref={viewerRef}
-                  className="min-h-[620px] w-full overflow-hidden rounded-[14px] bg-[#020617]"
-                />
-              </div>
-              <p className="text-sm text-[#475467]">{viewerMessage}</p>
-              <div className="rounded-[18px] border border-[#dbe7ff] bg-[#f7faff] p-4">
+              {sessionIsTerminal && sessionStatus === 'completed' ? (
+                <div className="rounded-[18px] border border-[#abefc6] bg-[#ecfdf3] p-6 text-sm text-[#067647]">
+                  <p className="text-base font-semibold text-[#027a48]">{marketplaceLabel} browser session captured</p>
+                  <p className="mt-2">You can return to Settings to see the active session and use the assisted listing workflow. Start a fresh session only if you need to switch accounts or recapture an expired login.</p>
+                  <div className="mt-4">
+                    <Button href={returnHref}>Return to marketplace settings</Button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div className="rounded-[18px] border border-[#d0d5dd] bg-[#0f172a] p-3">
+                    <div
+                      ref={viewerRef}
+                      className="min-h-[620px] w-full overflow-hidden rounded-[14px] bg-[#020617]"
+                    />
+                  </div>
+                  <p className="text-sm text-[#475467]">{viewerMessage}</p>
+                  <div className="rounded-[18px] border border-[#dbe7ff] bg-[#f7faff] p-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <p className="text-sm font-semibold text-[#101828]">Fallback login surface</p>
@@ -348,12 +394,16 @@ export default function BridgeDesktopPage() {
                       then use the controls to type and submit.
                     </p>
                   </div>
-                  <Button type="button" variant="outline" onClick={refreshDesktopFrame} disabled={!connectSessionId}>
+                  <Button type="button" variant="outline" onClick={refreshDesktopFrame} disabled={!desktopControlsEnabled}>
                     Refresh screenshot
                   </Button>
                 </div>
                 <div className="mt-4 overflow-hidden rounded-[16px] border border-[#d0d5dd] bg-[#0f172a]">
-                  {connectSessionId ? (
+                  {sessionIsTerminal ? (
+                    <div className="flex min-h-[420px] items-center justify-center px-6 text-center text-sm text-[#cbd5e1]">
+                      {terminalMessage}
+                    </div>
+                  ) : connectSessionId ? (
                     <img
                       src={desktopFrameUrl}
                       alt="Bridge desktop screenshot"
@@ -372,9 +422,10 @@ export default function BridgeDesktopPage() {
                     value={desktopText}
                     onChange={(event) => setDesktopText(event.target.value)}
                     placeholder="Type email, password, or MFA code"
+                    disabled={!desktopControlsEnabled}
                     className="h-11 rounded-[12px] border border-[#d0d5dd] bg-white px-4 text-sm text-[#101828] outline-none transition focus:border-[#111827]"
                   />
-                  <Button type="button" onClick={typeDesktopText} disabled={runningDesktopAction || !connectSessionId}>
+                  <Button type="button" onClick={typeDesktopText} disabled={runningDesktopAction || !desktopControlsEnabled}>
                     Type text
                   </Button>
                 </div>
@@ -383,7 +434,7 @@ export default function BridgeDesktopPage() {
                     type="button"
                     variant="outline"
                     onClick={clearFocusedField}
-                    disabled={runningDesktopAction || !connectSessionId}
+                    disabled={runningDesktopAction || !desktopControlsEnabled}
                   >
                     Clear field
                   </Button>
@@ -391,7 +442,7 @@ export default function BridgeDesktopPage() {
                     type="button"
                     variant="outline"
                     onClick={() => runDesktopAction('key', { key: 'Tab' })}
-                    disabled={runningDesktopAction || !connectSessionId}
+                    disabled={runningDesktopAction || !desktopControlsEnabled}
                   >
                     Tab
                   </Button>
@@ -399,7 +450,7 @@ export default function BridgeDesktopPage() {
                     type="button"
                     variant="outline"
                     onClick={() => runDesktopAction('key', { key: 'shift+Tab' })}
-                    disabled={runningDesktopAction || !connectSessionId}
+                    disabled={runningDesktopAction || !desktopControlsEnabled}
                   >
                     Shift+Tab
                   </Button>
@@ -407,7 +458,7 @@ export default function BridgeDesktopPage() {
                     type="button"
                     variant="outline"
                     onClick={() => runDesktopAction('key', { key: 'Return' })}
-                    disabled={runningDesktopAction || !connectSessionId}
+                    disabled={runningDesktopAction || !desktopControlsEnabled}
                   >
                     Enter
                   </Button>
@@ -415,7 +466,7 @@ export default function BridgeDesktopPage() {
                     type="button"
                     variant="outline"
                     onClick={() => runDesktopAction('key', { key: 'BackSpace' })}
-                    disabled={runningDesktopAction || !connectSessionId}
+                    disabled={runningDesktopAction || !desktopControlsEnabled}
                   >
                     Backspace
                   </Button>
@@ -423,12 +474,14 @@ export default function BridgeDesktopPage() {
                     type="button"
                     variant="outline"
                     onClick={() => runDesktopAction('key', { key: 'Escape' })}
-                    disabled={runningDesktopAction || !connectSessionId}
+                    disabled={runningDesktopAction || !desktopControlsEnabled}
                   >
                     Escape
                   </Button>
                 </div>
-              </div>
+                  </div>
+                </>
+              )}
             </div>
           </SectionPanel>
 
@@ -447,7 +500,7 @@ export default function BridgeDesktopPage() {
                       type="text"
                       value={sessionLoginHandle}
                       onChange={(event) => setSessionLoginHandle(event.target.value)}
-                      placeholder="onqdirector@gmail.com"
+                      placeholder="operator@example.com"
                       className="h-11 w-full rounded-[12px] border border-[#d0d5dd] bg-white px-4 text-sm text-[#101828] outline-none transition focus:border-[#111827]"
                     />
                     <p className="text-xs text-[#667085]">
@@ -459,9 +512,9 @@ export default function BridgeDesktopPage() {
                   <p className="font-semibold text-[#101828]">Bridge message</p>
                   <p className="mt-1">{session?.message || (starting ? `Starting the ${marketplaceLabel} connect session.` : 'Waiting for the bridge to report status.')}</p>
                 </div>
-                {TERMINAL_STATUSES.has(sessionStatus) ? (
+                {sessionIsTerminal ? (
                   <div className="rounded-[14px] border border-[#fde68a] bg-[#fffbeb] p-4 text-[#92400e]">
-                    {`This login session is no longer active. Start a fresh session to reopen the ${marketplaceLabel} browser and continue.`}
+                    {terminalMessage}
                   </div>
                 ) : null}
                 {session?.error || error ? (

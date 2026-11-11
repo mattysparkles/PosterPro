@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { fetchEbayAuthUrl } from '../lib/api';
 
-export function useEbayAuth(userId) {
+export function useEbayAuth(userId, redirectUri) {
   const { user } = useAuth();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -16,7 +16,7 @@ export function useEbayAuth(userId) {
       if (!resolvedUserId) {
         throw new Error('Sign in before connecting a marketplace');
       }
-      const data = await fetchEbayAuthUrl(resolvedUserId);
+      const data = await fetchEbayAuthUrl(resolvedUserId, redirectUri);
       window.open(data.auth_url, '_blank', 'noopener');
     } catch (err) {
       setError(err.message);

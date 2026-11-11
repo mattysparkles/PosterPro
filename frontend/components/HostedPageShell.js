@@ -148,7 +148,7 @@ function HostedPageFrame({
       : styles.accent;
 
   return (
-    <main className={previewMode ? 'min-h-0 px-0 py-0' : 'min-h-screen px-4 py-8 md:py-12'} style={styles.page}>
+    <main className={`pp-public ${previewMode ? 'min-h-0 px-0 py-0' : 'min-h-screen px-4 py-8 md:py-12'}`} style={styles.page}>
       <div className={`mx-auto overflow-hidden border shadow-[0_24px_80px_rgba(15,23,42,0.12)] ${previewMode ? 'rounded-[24px]' : 'rounded-[32px]'}`} style={{ ...styles.shell, ...styles.surface }}>
         <section className="px-6 py-8 md:px-8 md:py-10" style={styles.hero}>
             {showBrandBadge ? (

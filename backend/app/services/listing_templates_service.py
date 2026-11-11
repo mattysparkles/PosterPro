@@ -4,6 +4,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.models import Listing, ListingTemplate
+from app.services.listing_provenance import is_human_owned_field
 
 
 class ListingTemplateService:
@@ -67,8 +68,10 @@ class ListingTemplateService:
     def apply_template(self, db: Session, listing: Listing, template: ListingTemplate) -> Listing:
         for key, value in (template.fields or {}).items():
             if key in self.ALLOWED_FIELDS:
+                if key in {"category_id", "category_suggestion"} and is_human_owned_field(listing.source_metadata or {}, key):
+                    continue
                 setattr(listing, key, value)
-        if template.category_id and not listing.category_id:
+        if template.category_id and not listing.category_id and not is_human_owned_field(listing.source_metadata or {}, "category_id"):
             listing.category_id = template.category_id
         db.add(listing)
         db.commit()

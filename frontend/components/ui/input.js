@@ -4,8 +4,8 @@ export default function Input({ className, ...props }) {
   return (
     <input
       className={cn(
-        'pp-input h-10 w-full rounded-[10px] border border-[#e5e7eb] bg-white px-3 text-sm text-[#101828] outline-none transition placeholder:text-[#98a2b3] focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12',
-        className
+        'pp-input pp-input-shell h-11 w-full rounded-2xl px-3.5 text-sm text-[var(--pp-text)] outline-none transition placeholder:text-[var(--pp-muted)] focus:border-[var(--pp-primary)] focus:ring-4 focus:ring-[var(--pp-focus-ring)]/16',
+        className,
       )}
       {...props}
     />

@@ -54,12 +54,10 @@ export default function SetupChecklistPanel({ setupSummary }) {
                 connect credentials where available, and create the first real listing.
               </CardDescription>
             </div>
-            <Link href="/settings">
-              <Button size="lg" title="Open the Setup Center to finish onboarding steps.">
-                <Settings2 size={18} />
-                Open setup center
-              </Button>
-            </Link>
+            <Button href="/settings?tab=ebay" size="lg" title="Open the eBay setup panel to finish OAuth and verification steps.">
+              <Settings2 size={18} />
+              Open eBay setup
+            </Button>
           </div>
 
           <div className="mt-6 grid gap-4">

@@ -36,7 +36,6 @@ export default function HostedConnectPage() {
     const url = new URL(`${API_BASE}/ebay/callback`);
     url.searchParams.set('code', code);
     url.searchParams.set('state', state);
-
     fetch(url.toString(), { credentials: 'include' })
       .then(async (response) => {
         const data = await response.json().catch(() => ({}));

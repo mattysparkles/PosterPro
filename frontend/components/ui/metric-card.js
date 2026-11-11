@@ -1,23 +1,30 @@
+import { cn } from '../../lib/utils';
 import Link from 'next/link';
 
-export default function MetricCard({ label, value, detail, href }) {
-  const className = `pp-card min-h-[132px] p-4 ${href ? 'transition hover:bg-[#f9fafb]' : ''}`;
-
+export default function MetricCard({ label, value, detail, className, onClick, href, ...props }) {
+  const interactiveProps = onClick
+    ? {
+        role: 'button',
+        tabIndex: 0,
+        onKeyDown: (event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            onClick(event);
+          }
+        },
+      }
+    : {};
+  const classes = cn('pp-card pp-metric-card min-h-[122px] p-4 sm:p-5', onClick || href ? 'cursor-pointer transition hover:-translate-y-0.5 hover:shadow-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500' : '', className);
   const content = (
     <>
-      <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">{label}</p>
-      <p className="mt-3 text-[28px] font-semibold tracking-[-0.03em] text-[#101828]">{value}</p>
-      {detail ? <p className="mt-2 text-sm leading-6 text-[#667085]">{detail}</p> : null}
+      <div className="flex items-start justify-between gap-3">
+        <p className="text-[13px] font-semibold uppercase tracking-[0.08em] text-[var(--pp-muted)]">{label}</p>
+        <span className="pp-metric-card__dot" aria-hidden="true" />
+      </div>
+      <p className="font-[var(--pp-heading-font)] mt-3 text-[32px] font-semibold leading-none tracking-[-0.04em] text-[var(--pp-text)]">{value}</p>
+      {detail ? <p className="mt-2 text-sm leading-5 text-[var(--pp-muted)]">{detail}</p> : null}
     </>
   );
-
-  if (!href) {
-    return <div className={className}>{content}</div>;
-  }
-
-  return (
-    <Link href={href} className={`${className} block focus:outline-none focus-visible:ring-2 focus-visible:ring-[#2563eb]`}>
-      {content}
-    </Link>
-  );
+  if (href) return <Link href={href} className={classes} aria-label={`${label}: ${value}. ${detail || ''}`} {...props}>{content}</Link>;
+  return <div className={classes} onClick={onClick} {...interactiveProps} {...props}>{content}</div>;
 }

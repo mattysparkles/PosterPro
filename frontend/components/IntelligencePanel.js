@@ -69,11 +69,16 @@ export default function IntelligencePanel({ analytics, alerts, recommendation, p
         description="Suggestions for pricing, sell probability, and listing polish without crowding the primary workflow."
       >
         <div className="space-y-3">
-          {recommendation ? (
+          {recommendation && recommendation.recommendation_eligible !== false && recommendation.recommended_price ? (
             <div className="rounded-[16px] border border-[#e5e7eb] bg-[#f8fafc] p-4">
               <p className="text-xs font-bold uppercase tracking-[0.22em] text-slate-400">Suggested price</p>
               <p className="mt-2 text-2xl font-semibold text-slate-950">${recommendation.recommended_price}</p>
               <p className="mt-1 text-sm text-slate-600">Confidence {(recommendation.confidence * 100).toFixed(0)}%</p>
+            </div>
+          ) : recommendation?.recommendation_eligible === false ? (
+            <div role="status" className="rounded-[16px] border border-amber-300 bg-amber-50 p-4">
+              <p className="text-sm font-semibold text-amber-950">Price research needed</p>
+              <p className="mt-1 text-sm text-amber-900">No evidence-backed price recommendation is available yet. Category estimates are withheld.</p>
             </div>
           ) : null}
 

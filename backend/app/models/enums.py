@@ -4,6 +4,7 @@ import enum
 class ListingStatus(str, enum.Enum):
     draft = "draft"
     ready = "ready"
+    archived = "archived"
     posted = "posted"
     rejected = "rejected"
     INGESTED = "INGESTED"
@@ -21,7 +22,6 @@ class EbayPublishStatus(str, enum.Enum):
 
 class MarketplaceName(str, enum.Enum):
     ebay = "ebay"
-    amazon = "amazon"
     etsy = "etsy"
     facebook = "facebook"
     mercari = "mercari"
@@ -29,6 +29,13 @@ class MarketplaceName(str, enum.Enum):
     depop = "depop"
     whatnot = "whatnot"
     vinted = "vinted"
+    offerup = "offerup"
+    storefront_direct = "storefront_direct"
+
+
+MARKETPLACE_DESTINATION_VALUES = frozenset(
+    item.value for item in MarketplaceName if item is not MarketplaceName.storefront_direct
+)
 
 
 class MarketplaceListingStatus(str, enum.Enum):
@@ -37,4 +44,6 @@ class MarketplaceListingStatus(str, enum.Enum):
     UPDATED = "UPDATED"
     FAILED = "FAILED"
     DELETED = "DELETED"
+    SOLD = "SOLD"
+    CLOSED = "CLOSED"
     PENDING = "PENDING"

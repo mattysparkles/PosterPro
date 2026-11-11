@@ -1,156 +1,136 @@
+/* eslint-disable @next/next/no-html-link-for-pages */
 import Link from 'next/link';
 import { useRouter } from 'next/router';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { formatNotificationBadge } from '../../lib/notificationBadge.mjs';
+import { formatPosterProDate } from '../../lib/dateTime';
 import {
   BarChart3,
-  Bot,
+  Briefcase,
+  Bell,
   ChevronDown,
-  FileText,
-  FolderOpen,
-  Layers3,
+  FolderInput,
   LayoutDashboard,
-  Menu,
+  ListChecks,
   Package,
+  Rocket,
   Search,
+  ShieldCheck,
   Settings2,
   ShoppingCart,
   Store,
-  Tag,
-  Upload,
   User,
+  Wrench,
+  QrCode,
+  ScanLine,
+  Film,
+  ExternalLink,
 } from 'lucide-react';
+import toast from 'react-hot-toast';
 
 import { useAuth } from '../../contexts/AuthContext';
+import { fetchProcessNotifications, markAllProcessNotificationsRead, markProcessNotificationRead } from '../../lib/api';
 import Button from '../ui/button';
 import Drawer from '../ui/drawer';
 import Input from '../ui/input';
-import StatusPill from '../ui/status-pill';
 
 function buildNavGroups(user) {
   return [
     {
-      label: 'Command Center',
+      label: 'Workspace',
       items: [
-        {
-          href: '/app',
-          label: 'Overview',
-          icon: LayoutDashboard,
-          children: [
-            { href: '/app', label: 'Overview' },
-            { href: '/app#jobs', label: 'Jobs' },
-            { href: '/app#operations', label: 'Operations' },
-            { href: '/app#activity', label: 'Activity' },
-            { href: '/app#channels', label: 'Channels' },
-          ],
-        },
-        {
-          href: '/intake',
-          label: 'Intake & Uploads',
-          icon: FolderOpen,
-          children: [
-            { href: '/intake', label: 'Upload Workspace' },
-            { href: '/intake?tab=batches', label: 'Batch Queue' },
-            { href: '/intake?tab=grouped', label: 'Grouped Items' },
-            { href: '/intake#workflow', label: 'Workflow Guide' },
-          ],
-        },
-        {
-          href: '/listings',
-          label: 'Listings',
-          icon: FileText,
-          children: [
-            { href: '/listings', label: 'All Listings' },
-            { href: '/listings/new', label: 'New Item' },
-            { href: '/listings?tab=review', label: 'Review Queue' },
-          ],
-        },
-        {
-          href: '/inventory',
-          label: 'Inventory',
-          icon: Package,
-          children: [
-            { href: '/inventory', label: 'Catalog' },
-            { href: '/inventory?tab=batches', label: 'Batches' },
-            { href: '/inventory#bulk-actions', label: 'Bulk Actions' },
-          ],
-        },
-        ...(user?.can_access_vine_import ? [{ href: '/imports/vine', label: 'Vine Import', icon: Upload }] : []),
+        { href: '/app', label: 'Dashboard', icon: LayoutDashboard },
+        { href: '/intake', label: 'Intake', icon: FolderInput },
+        { href: '/intake/slate', label: 'Slate', icon: QrCode },
+        { href: '/intake/timeline', label: 'Photo Timeline', icon: Film },
+        { href: '/listings', label: 'Listings', icon: ListChecks },
+        { href: '/inventory', label: 'Inventory', icon: Package },
+        { href: '/inventory/census', label: 'Shelf Census', icon: ScanLine },
+        { href: '/inventory/find', label: 'Find my item', icon: Search },
+        { href: '/packing', label: 'Packing workstation', icon: ScanLine },
       ],
     },
     {
-      label: 'Commerce',
+      label: 'Selling',
       items: [
-        {
-          href: '/publishing',
-          label: 'Marketplace Publishing',
-          icon: Store,
-          children: [
-            { href: '/publishing?tab=queue', label: 'Queue' },
-            { href: '/publishing?tab=approvals', label: 'Approvals' },
-            { href: '/publishing?tab=live', label: 'Live Listings' },
-            { href: '/publishing?tab=sync', label: 'Sync Status' },
-            { href: '/jobs', label: 'Jobs Console' },
-          ],
-        },
-        {
-          href: '/sales',
-          label: 'Sales',
-          icon: ShoppingCart,
-          children: [
-            { href: '/sales', label: 'Orders' },
-            { href: '/sales#mix', label: 'Marketplace Mix' },
-            { href: '/sales#timeline', label: 'Sales Timeline' },
-          ],
-        },
-        {
-          href: '/offers',
-          label: 'Automation & Offers',
-          icon: Tag,
-          children: [
-            { href: '/offers', label: 'Offer Rules' },
-            { href: '/offers#history', label: 'Offer History' },
-          ],
-        },
+        { href: '/publishing', label: 'Publishing', icon: Rocket },
+        { href: '/settings/store', label: 'My Store', icon: Store },
+        { href: '/store', label: 'View Store', icon: ExternalLink },
+        { href: '/storefront/orders', label: 'Store Orders', icon: ShoppingCart },
+        { href: '/sales', label: 'Sales', icon: ShoppingCart },
+        { href: '/offers', label: 'Offers', icon: Store },
       ],
     },
     {
-      label: 'Insights & Admin',
+      label: 'System',
       items: [
-        {
-          href: '/analytics',
-          label: 'Analytics',
-          icon: BarChart3,
-          children: [
-            { href: '/analytics', label: 'Revenue' },
-            { href: '/analytics?tab=performance', label: 'Performance' },
-            { href: '/analytics?tab=pricing', label: 'Pricing' },
-          ],
-        },
-        {
-          href: '/settings?tab=ebay',
-          label: 'Integrations',
-          icon: Layers3,
-          children: [
-            { href: '/settings?tab=ebay', label: 'eBay OAuth' },
-            { href: '/settings?tab=marketplaces', label: 'Marketplaces' },
-            { href: '/settings?tab=api-keys', label: 'API Keys' },
-          ],
-        },
-        {
-          href: '/settings',
-          label: 'Settings',
-          icon: Settings2,
-          children: [
-            { href: '/settings?tab=overview', label: 'Overview' },
-            { href: '/settings?tab=profile', label: 'Profile' },
-            { href: '/settings?tab=workflow', label: 'Workflow' },
-            { href: '/settings?tab=automation', label: 'Automation' },
-            { href: '/settings?tab=server', label: 'Server' },
-          ],
-        },
+        { href: '/analytics', label: 'Analytics', icon: BarChart3 },
+        { href: '/settings?tab=marketplaces', label: 'Marketplaces', icon: ShoppingCart },
+        { href: '/jobs', label: 'Jobs', icon: Briefcase },
+        { href: '/notices', label: 'Notices', icon: Bell },
+        ...(user?.is_admin ? [
+          { href: '/admin/taxonomy-registry', label: 'Taxonomy registry', icon: Wrench },
+          { href: '/admin/mercari-taxonomy', label: 'Mercari taxonomy', icon: Wrench },
+        ] : []),
+        ...(user?.can_access_vine_import && user?.profile_preferences?.vine_features_enabled !== false ? [{ href: '/imports/vine', label: 'Vine Import', icon: ShieldCheck }] : []),
+      ],
+    },
+    {
+      label: 'Settings',
+      items: [
+        { href: '/settings', label: 'Overview', icon: Settings2, section: 'Overview' },
+        { href: '/settings?tab=profile', label: 'Profile', icon: User, section: 'Overview' },
+        { href: '/settings?tab=workflow', label: 'Workflow', icon: Wrench, section: 'Overview' },
+        { href: '/settings?tab=appearance', label: 'Appearance', icon: Settings2, section: 'Overview' },
+        { href: '/settings/ebay', label: 'eBay OAuth', icon: ShoppingCart, section: 'Channels' },
+        { href: '/settings?tab=amazon', label: 'Amazon Vine', icon: ShieldCheck, section: 'Channels' },
+        { href: '/settings?tab=automation', label: 'Automation', icon: Wrench, section: 'Admin' },
+        { href: '/settings?tab=api-keys', label: 'API Keys', icon: ShieldCheck, section: 'Admin' },
+        { href: '/settings?tab=email', label: 'Email', icon: Bell, section: 'Admin' },
+        { href: '/settings?tab=server', label: 'Server Readiness', icon: Wrench, section: 'Admin' },
       ],
     },
   ];
+}
+
+function findActiveNavItem(navGroups, isSelected) {
+  for (const group of navGroups) {
+    for (const item of Array.isArray(group?.items) ? group.items : []) {
+      if (isSelected(item.href)) {
+        return { group, item };
+      }
+    }
+  }
+  return null;
+}
+
+function NavGroup({ title, items, isSelected, onNavigate, collapsed = false }) {
+  return (
+    <details className="group pp-sidebar-panel p-2.5" open={!collapsed}>
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded-[16px] px-2 py-1.5 outline-none">
+        <div className="min-w-0">
+          {!collapsed ? <p className="pp-sidebar-label">{title}</p> : null}
+        </div>
+        <ChevronDown size={16} className="shrink-0 text-[var(--pp-shell-soft-copy)] transition-transform duration-200 group-open:rotate-180" />
+      </summary>
+      <div className="mt-2 space-y-1">
+        {items.map((item, index) => {
+          const Icon = item.icon;
+          const selected = isSelected(item.href);
+          return (
+            <div key={item.href}>
+              {!collapsed && item.section !== items[index - 1]?.section ? <p className="px-3 pb-1 pt-3 text-[10px] font-bold uppercase tracking-[0.16em] text-[var(--pp-shell-soft-copy)]">{item.section}</p> : null}
+              <Link href={item.href} onClick={onNavigate} title={collapsed ? item.label : undefined} className={['pp-sidebar-link flex items-center gap-3 rounded-xl px-3 py-2 transition', collapsed ? 'justify-center' : '', selected ? 'is-active' : ''].join(' ')}>
+                <span className="pp-sidebar-icon inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl"><Icon size={16} /></span>
+                {!collapsed ? <span className="min-w-0"><span className="block text-sm font-semibold leading-5">{item.label}</span></span> : null}
+              </Link>
+            </div>
+          );
+        })}
+      </div>
+    </details>
+  );
 }
 
 export default function AppShell({
@@ -161,57 +141,58 @@ export default function AppShell({
   subnav,
   contentClassName = '',
   contentWidth = 'default',
+  hideTopbarContext = false,
   children,
 }) {
   const { user, logout } = useAuth();
   const router = useRouter();
   const [searchValue, setSearchValue] = useState('');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [processNotifications, setProcessNotifications] = useState([]);
+  const [notificationUnreadCount, setNotificationUnreadCount] = useState(0);
+  const [notificationTotal, setNotificationTotal] = useState(0);
+  const [notificationOffset, setNotificationOffset] = useState(0);
+  const [notificationLoading, setNotificationLoading] = useState(false);
+  const [notificationFilter, setNotificationFilter] = useState('all');
+  const notificationsSeenRef = useRef(new Set());
+  const notificationsInitializedRef = useRef(false);
+  const notificationPopoverRef = useRef(null);
   const navGroups = buildNavGroups(user);
   const activePath = active || router.pathname;
   const activeHref = router.asPath || activePath;
-  const mobilePrimaryItems = [
-    { href: '/app', label: 'Dashboard', icon: LayoutDashboard },
-    { href: '/intake', label: 'Intake', icon: FolderOpen },
-    { href: '/listings', label: 'Listings', icon: FileText },
-    { href: '/publishing', label: 'Publish', icon: Store },
-  ];
 
   const normalizeHref = (href) => (href || '').replace(/#.*$/, '');
+  const activeNavHref = navGroups
+    .flatMap((group) => (Array.isArray(group?.items) ? group.items : []))
+    .map((item) => item.href)
+    .filter((href) => {
+      const candidate = normalizeHref(href);
+      const current = normalizeHref(activeHref);
+      const [candidatePath, candidateQuery] = candidate.split('?');
+      const [currentPath, currentQuery] = current.split('?');
+      if (candidateQuery && candidateQuery !== currentQuery) return false;
+      return currentPath === candidatePath || currentPath.startsWith(`${candidatePath}/`);
+    })
+    .sort((a, b) => normalizeHref(b).length - normalizeHref(a).length)[0] || normalizeHref(activeHref);
   const isSelected = (href) => {
     const normalizedHref = normalizeHref(href);
-    const normalizedActive = normalizeHref(activeHref);
-    return (
-      normalizedActive === normalizedHref ||
-      activePath === normalizedHref ||
-      activePath.startsWith(`${normalizedHref}/`) ||
-      normalizedActive.startsWith(`${normalizedHref}?`)
-    );
+    return normalizedHref === activeNavHref || normalizeHref(activePath) === normalizedHref;
   };
+  const activeNav = findActiveNavItem(navGroups, isSelected);
+  const subnavSections = Array.isArray(subnav?.sections)
+    ? subnav.sections
+        .filter((section) => section && Array.isArray(section.items))
+        .map((section) => ({
+          ...section,
+          items: section.items.filter(Boolean),
+        }))
+    : [];
 
-  const defaultExpanded = useMemo(() => {
-    const expanded = {};
-    navGroups.forEach((group) => {
-      group.items.forEach((item) => {
-        if (item.children?.some((child) => isSelected(child.href)) || isSelected(item.href)) {
-          expanded[item.href] = true;
-        }
-      });
-    });
-    return expanded;
-  }, [activeHref]);
-  const [expandedItems, setExpandedItems] = useState(defaultExpanded);
-
-  useEffect(() => {
-    setExpandedItems((current) => ({ ...defaultExpanded, ...current }));
-  }, [defaultExpanded]);
-
-  const toggleExpanded = (href) => {
-    setExpandedItems((current) => ({
-      ...current,
-      [href]: !current[href],
-    }));
-  };
+  const contentWidthClass = contentWidth === 'dashboard'
+    ? 'pp-dashboard-content'
+    : contentWidth === 'narrow' ? 'max-w-[940px]' : contentWidth === 'wide' ? 'max-w-[1320px]' : 'max-w-[1180px]';
+  const sidebarWidthClass = 'pp-sidebar-width';
 
   const submitSearch = (event) => {
     event.preventDefault();
@@ -219,325 +200,311 @@ export default function AppShell({
     router.push(value ? `/listings?q=${encodeURIComponent(value)}` : '/listings');
   };
 
-  const contentWidthClass =
-    contentWidth === 'narrow'
-      ? 'max-w-[880px]'
-      : contentWidth === 'wide'
-      ? 'max-w-[1180px]'
-      : 'max-w-[1040px]';
+  const loadProcessNotifications = useCallback(async ({ offset = 0, append = false } = {}) => {
+    if (!user?.id) return;
+    if (append) setNotificationLoading(true);
+    try {
+      const payload = await fetchProcessNotifications({ limit: 20, offset, unreadOnly: false });
+      const rows = Array.isArray(payload?.notifications) ? payload.notifications : [];
+      const unreadCount = Number(payload?.unread_count ?? rows.filter((row) => !row.read_at).length);
+      setProcessNotifications((current) => append
+        ? [...current, ...rows.filter((row) => !current.some((existing) => existing.id === row.id))]
+        : current.length > 20
+          ? [...rows, ...current.filter((existing) => !rows.some((row) => row.id === existing.id))]
+          : rows);
+      setNotificationUnreadCount(unreadCount);
+      setNotificationTotal(Number(payload?.total || 0));
+      setNotificationOffset((current) => Math.max(current, offset + rows.length));
+
+      const nextIds = new Set(rows.map((row) => row.id));
+      if (!notificationsInitializedRef.current) {
+        notificationsSeenRef.current = nextIds;
+        notificationsInitializedRef.current = true;
+        return;
+      }
+      if (append) return;
+
+      const newRows = rows.filter((row) => !notificationsSeenRef.current.has(row.id));
+      const shouldSuppressToast = (row) => {
+        const normalize = (value) => String(value || '').toLowerCase().replaceAll('_', ' ').replaceAll('-', ' ');
+        const type = normalize(row?.notification_type);
+        const title = normalize(row?.title);
+        const message = normalize(row?.message);
+        const combined = `${title} ${message}`;
+        return (
+          type.includes('blocked') ||
+          type.includes('generic_or_caption_identity') ||
+          type.includes('needs_image_identification') ||
+          type.includes('insufficient_identity_evidence') ||
+          type.includes('caption_identity') ||
+          combined.includes('needs attention') ||
+          combined.includes('generic or caption identity') ||
+          combined.includes('needs image identification') ||
+          combined.includes('insufficient identity evidence')
+        );
+      };
+      newRows.reverse().forEach((row) => {
+        if (shouldSuppressToast(row)) return;
+        const status = String(row?.metadata_json?.status || row?.metadata_json?.stage || '').toLowerCase();
+        const isError = ['failed', 'error', 'blocked'].some((token) => status.includes(token)) || /failed|error|blocked/i.test(`${row.title || ''} ${row.message || ''}`);
+        const message = row.message || row.title || 'Process update';
+        if (isError) {
+          toast.error(message);
+        } else if (status.includes('complete') || status.includes('completed') || status.includes('success')) {
+          toast.success(message);
+        } else {
+          toast(message);
+        }
+      });
+      notificationsSeenRef.current = nextIds;
+    } catch {
+      return;
+    } finally {
+      if (append) setNotificationLoading(false);
+    }
+  }, [user?.id]);
+
+  useEffect(() => {
+    loadProcessNotifications();
+    const interval = window.setInterval(() => loadProcessNotifications(), 60000);
+    return () => window.clearInterval(interval);
+  }, [loadProcessNotifications]);
+
+  useEffect(() => {
+    if (!notificationsOpen) return undefined;
+    const closeOnOutside = (event) => {
+      if (notificationPopoverRef.current && !notificationPopoverRef.current.contains(event.target)) setNotificationsOpen(false);
+    };
+    const closeOnEscape = (event) => { if (event.key === 'Escape') setNotificationsOpen(false); };
+    document.addEventListener('mousedown', closeOnOutside);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => { document.removeEventListener('mousedown', closeOnOutside); document.removeEventListener('keydown', closeOnEscape); };
+  }, [notificationsOpen]);
+
+  const handleMarkNotificationRead = async (notificationId) => {
+    try {
+      await markProcessNotificationRead(notificationId);
+      await loadProcessNotifications();
+    } catch (error) {
+      toast.error(error.message || 'Could not mark notification read.');
+    }
+  };
+
+  const handleMarkAllNotificationsRead = async () => {
+    try {
+      await markAllProcessNotificationsRead();
+      await loadProcessNotifications();
+      toast.success('Process notifications cleared.');
+    } catch (error) {
+      toast.error(error.message || 'Could not clear notifications.');
+    }
+  };
+
+  const filteredNotifications = processNotifications.filter((notification) => {
+    if (notificationFilter === 'unread') return !notification.read_at;
+    if (notificationFilter === 'errors') return /failed|error|blocked|urgent/i.test(`${notification.notification_type || ''} ${notification.title || ''} ${notification.message || ''}`);
+    return true;
+  });
+
+  const renderNav = (onNavigate) => (
+    <div className="space-y-4">
+      <section className="pp-sidebar-brand-panel rounded-2xl p-3 text-[var(--pp-shell-copy)]">
+        <Link href="/app" aria-label="PosterPro home" className="pp-wordmark block rounded-xl px-2 py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white">
+          <span className="block">PosterPro</span>
+        </Link>
+        <div className="mt-2 border-t border-white/10 px-2 pt-3">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-white/10 text-white"><User size={15} aria-hidden="true" /></span>
+            <div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold text-white">{user?.full_name || 'My account'}</p><p className="truncate text-xs text-[var(--pp-shell-soft-copy)]" title={user?.email || ''}>{user?.email || ''}</p></div>
+          </div>
+          <Link href="/settings?tab=profile" className="pp-account-link mt-2 inline-flex min-h-9 w-full items-center justify-center rounded-lg border border-white/20 px-3 text-sm font-semibold text-white hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white">My Account</Link>
+        </div>
+        {user?.is_admin && onToggleAutonomous ? <div className="mt-3 flex items-center justify-between rounded-xl border border-white/10 bg-white/5 px-2.5 py-2">
+          <span className="flex items-center gap-1.5 text-sm font-medium text-white">Automation <button type="button" title="ON may auto-publish supported photo and storage intake drafts. OFF keeps intake and auto-pricing available but pauses that automatic publishing. Manual actions and live listings are unchanged." aria-label="About automation" className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-white/40 text-xs font-bold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white">i</button></span>
+          <button type="button" role="switch" aria-label="Automation" aria-checked={Boolean(autonomousConfig?.autonomous_mode)} onClick={onToggleAutonomous} className={`inline-flex h-8 min-w-[56px] items-center justify-center rounded-full px-2 text-xs font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white ${autonomousConfig?.autonomous_mode ? 'bg-emerald-400 text-[#102a1f]' : 'bg-slate-200 text-slate-900'}`}><span>{autonomousConfig?.autonomous_mode ? 'ON' : 'OFF'}</span></button>
+        </div> : null}
+      </section>
+
+      {navGroups.filter(Boolean).map((group) => (
+        <NavGroup key={group.label} title={group.label} items={group.items} isSelected={isSelected} onNavigate={onNavigate} />
+      ))}
+
+      <section className="px-2 pb-2 text-[var(--pp-shell-copy)]">
+        <Button
+          variant="secondary"
+          size="sm"
+          className="mt-3 w-full justify-center border-white/10 bg-white/10 text-white hover:bg-white hover:text-[var(--pp-primary)]"
+          onClick={async () => {
+            await logout();
+            window.location.href = '/login';
+          }}
+        >
+          Sign out
+        </Button>
+      </section>
+    </div>
+  );
+
+  const sectionBadge = subnav ? (
+    <div className="pp-surface-panel p-5">
+      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+        <div>
+          <p className="pp-topbar-kicker">{subnav.eyebrow || 'Section'}</p>
+          <h2 className="pp-topbar-title mt-2 text-[1.4rem]">{subnav.title}</h2>
+          {subnav.description ? <p className="pp-topbar-subtitle mt-2 max-w-3xl text-sm leading-6">{subnav.description}</p> : null}
+        </div>
+      </div>
+      {subnavSections.length ? (
+      <div className="pp-shell-subnav-items mt-4 flex flex-wrap gap-2">
+          {subnavSections.flatMap((section) =>
+            section.items.map((item) => (
+              <button
+                key={item.key || item.label}
+                type="button"
+                onClick={typeof item.onClick === 'function' ? item.onClick : undefined}
+                className={[
+                  'pp-shell-chip rounded-full border px-3 py-2 text-sm font-semibold transition',
+                  item.active
+                    ? 'is-active border-[#bfd4ef] bg-[var(--pp-primary)] text-white'
+                    : 'border-[var(--pp-border)] bg-[var(--pp-surface-strong)] text-[var(--pp-muted)] hover:border-[#b8a98d] hover:bg-white hover:text-[var(--pp-text)]',
+                ].join(' ')}
+              >
+                {item.label}
+              </button>
+            )),
+          )}
+        </div>
+      ) : null}
+    </div>
+  ) : null;
 
   return (
-    <div className="posterpro-app-shell min-h-screen text-[#101828]">
-      <div className="grid min-h-screen lg:grid-cols-[272px_minmax(0,1fr)]">
-        <aside className="pp-app-sidebar hidden min-h-screen lg:block">
-          <div className="sticky top-0 p-5">
-            <div className="border-b border-[rgba(148,163,184,0.18)] pb-5">
-              <Link href="/app" className="block">
-                <strong className="pp-app-brand__title block">PosterPro</strong>
-                <span className="pp-app-brand__subtitle mt-1 block text-sm">CMS resale workspace</span>
-              </Link>
-            </div>
-            <div className="pp-app-status-card mt-5 p-4">
-              <p className="pp-app-status-card__label">Reseller OS</p>
-              <p className="pp-app-status-card__title mt-2 text-sm">
-                {autonomousConfig?.autonomous_mode ? 'Automation enabled' : 'Operator-led review'}
-              </p>
-              <p className="pp-app-status-card__copy mt-1 text-sm leading-6">Use one structured admin workspace for intake, review, publishing, and system setup.</p>
-            </div>
-            <nav className="mt-6 space-y-6">
-              {navGroups.map((group) => (
-                <div key={group.label}>
-                  <p className="pp-app-nav-group-label mb-2 px-3 text-xs">{group.label}</p>
-                  <div className="space-y-1.5">
-                    {group.items.map((item) => {
-                      const Icon = item.icon;
-                      const selected = isSelected(item.href);
-                      const expanded = item.children?.length ? !!expandedItems[item.href] : false;
-                      return (
-                        <div key={item.label} className="rounded-[14px]">
-                          <div
-                            className={`pp-app-nav-item group flex items-center rounded-[14px] border px-3 py-3 ${selected ? 'is-active' : ''}`}
-                          >
-                            <Link href={item.href} onClick={() => setMobileMenuOpen(false)} className="flex min-w-0 flex-1 items-center gap-3">
-                              <span className={`pp-app-nav-item__icon inline-flex h-9 w-9 items-center justify-center rounded-[11px] ${selected ? 'is-active' : ''}`}>
-                                <Icon size={17} />
-                              </span>
-                              <span className="min-w-0">
-                                <span className="pp-app-nav-item__title block truncate text-sm">{item.label}</span>
-                                {item.children?.length ? <span className="pp-app-nav-item__meta mt-0.5 block text-xs">{item.children.length} related views</span> : null}
-                              </span>
-                            </Link>
-                            {item.children?.length ? (
-                              <button
-                                type="button"
-                                onClick={() => toggleExpanded(item.href)}
-                                className="pp-app-nav-item__toggle ml-2 inline-flex h-8 w-8 items-center justify-center rounded-[10px]"
-                                aria-label={`Toggle ${item.label} menu`}
-                              >
-                                <ChevronDown size={16} className={`transition-transform ${expanded ? 'rotate-180' : ''}`} />
-                              </button>
-                            ) : null}
-                          </div>
-                          {item.children?.length && expanded ? (
-                            <div className="pp-app-nav-children mt-2 ml-5 border-l pl-4">
-                              <div className="space-y-1.5">
-                                {item.children.map((child) => {
-                                  const childSelected = isSelected(child.href);
-                                  return (
-                                    <Link
-                                      key={child.href}
-                                      href={child.href}
-                                      className={`pp-app-nav-child-link flex items-center rounded-[10px] px-3 py-2 text-sm ${childSelected ? 'is-active' : ''}`}
-                                    >
-                                      {child.label}
-                                    </Link>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                          ) : null}
-                        </div>
-                      );
-                    })}
-                  </div>
+    <div className={`pp-app posterpro-app-shell min-h-screen bg-[var(--pp-bg)] text-[var(--pp-text)] ${contentWidth === 'dashboard' ? 'pp-shell-dashboard' : ''}`}>
+      <aside className={`pp-shell-sidebar-rail pp-shell-sidebar-surface ${sidebarWidthClass}`}>
+        <div className="h-full overflow-y-auto px-4 py-5">{renderNav()}</div>
+      </aside>
+
+      <div className="pp-shell-main min-h-screen min-w-0">
+        <div className="pp-shell-content-wrap min-w-0">
+          <header className="pp-shell-header-surface sticky top-0 z-30">
+            <div className="pp-shell-topbar mx-auto flex w-full max-w-[1520px] items-center gap-3 py-3 px-4 sm:px-6 md:px-6">
+              <Button
+                variant="secondary"
+                size="sm"
+                className="pp-mobile-menu-button fixed left-4 top-4 z-[120] gap-2 px-3 shadow-none"
+                onClick={() => setMobileMenuOpen(true)}
+                aria-label="Open navigation menu"
+                title="Open navigation menu"
+              >
+                <span aria-hidden="true">☰</span><span className="sr-only">Open navigation menu</span>
+              </Button>
+
+              <div className={`min-w-0 flex-1 ${hideTopbarContext ? 'hidden' : ''}`}>
+                <div className="flex min-w-0 items-center gap-3">
+                  <p className="pp-topbar-kicker">
+                  {activeNav?.group?.label || 'PosterPro'}
+                  </p>
+                  <span className="hidden h-1.5 w-1.5 rounded-full bg-[#c3ac89] sm:inline-flex" />
+                  <h1 className="pp-topbar-title truncate text-[1.02rem]">{title}</h1>
                 </div>
-              ))}
-            </nav>
-          </div>
-        </aside>
-
-        <div className="min-w-0">
-          <header className="pp-app-header sticky top-0 z-30 border-b backdrop-blur">
-            <div className="mx-auto flex h-[68px] w-full max-w-[1320px] items-center gap-3 px-4 md:px-6">
-              <Link href="/app" className="pp-app-header__brand text-sm lg:hidden">
-                PosterPro
-              </Link>
-
-              <div className="min-w-0 flex-1">
-                <h1 className="pp-app-header__title truncate text-base">{title}</h1>
+                <p className="pp-topbar-subtitle hidden text-xs sm:block">{activeNav?.item?.label && activeNav.item.label !== title ? activeNav.item.label : 'Your reseller workspace'}</p>
               </div>
 
-              <div className="flex items-center gap-2">
+              <form onSubmit={submitSearch} className="relative hidden lg:block">
+                <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--pp-shell-soft-copy)]" size={16} />
+                <Input
+                  aria-label="Global search"
+                  value={searchValue}
+                  onChange={(event) => setSearchValue(event.target.value)}
+                  placeholder="Search listings"
+                  className="w-[280px] rounded-2xl border-[var(--pp-border)] bg-white pl-9"
+                />
+              </form>
+
+              <div className="relative ml-auto">
                 <Button
-                  variant="ghost"
-                  size="icon"
-                  className="lg:hidden"
-                  onClick={() => setMobileMenuOpen(true)}
-                  title="Open workspace navigation"
+                  variant="secondary"
+                  size="icon-sm"
+                  className="relative rounded-xl border-[var(--pp-border)] bg-white text-[var(--pp-text)] shadow-sm hover:bg-slate-50"
+                  onClick={() => setNotificationsOpen((current) => !current)}
+                  aria-label={`Open notifications. ${notificationUnreadCount.toLocaleString()} unread.`}
+                  aria-expanded={notificationsOpen}
+                  title="Notifications"
                 >
-                  <Menu size={18} />
+                  <Bell size={19} aria-hidden="true" />
+                  {formatNotificationBadge(notificationUnreadCount) ? <span aria-hidden="true" className="pp-notification-badge">{formatNotificationBadge(notificationUnreadCount)}</span> : null}
                 </Button>
-                <form onSubmit={submitSearch} className="relative hidden md:block">
-                  <Search className="pp-app-search__icon pointer-events-none absolute left-3 top-1/2 -translate-y-1/2" size={16} />
-                  <Input
-                    value={searchValue}
-                    onChange={(event) => setSearchValue(event.target.value)}
-                    placeholder="Search listings"
-                    className="pp-app-search w-[220px] pl-9"
-                  />
-                </form>
-                <button
-                  type="button"
-                  onClick={onToggleAutonomous}
-                  className="pp-app-mode-toggle inline-flex h-9 items-center gap-2 rounded-full border px-3 text-sm font-medium"
-                >
-                  <Bot size={14} className="text-[var(--pp-dashboard-accent)]" />
-                  <StatusPill
-                    status={autonomousConfig?.autonomous_mode ? 'success' : 'default'}
-                    label={autonomousConfig?.autonomous_mode ? 'Automation on' : 'Automation off'}
-                  />
-                </button>
-                <div className="pp-app-user-pill hidden items-center gap-2 rounded-[10px] border px-3 py-2 lg:flex">
-                  <span className="pp-app-user-pill__icon inline-flex h-8 w-8 items-center justify-center rounded-full">
-                    <User size={15} />
-                  </span>
-                  <span className="pp-app-user-pill__text max-w-[140px] truncate text-sm font-medium">
-                    {user?.full_name || user?.email || 'Account'}
-                  </span>
-                </div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="px-3"
-                  onClick={async () => {
-                    await logout();
-                    window.location.href = '/login';
-                  }}
-                >
-                  Sign out
-                </Button>
+                {notificationsOpen && typeof document !== 'undefined' ? createPortal((
+                  <div ref={notificationPopoverRef} role="dialog" aria-label="Notifications" className="pp-notification-popover overflow-hidden rounded-2xl border border-slate-200 bg-white text-slate-900 shadow-[0_24px_60px_rgba(16,24,40,0.24)]">
+                    <div className="flex items-start justify-between gap-3 border-b border-slate-200 bg-white px-4 py-4">
+                      <div><p className="text-base font-semibold text-slate-950">Notifications</p><p className="mt-1 text-sm text-slate-600">Unread {notificationUnreadCount.toLocaleString()}</p></div>
+                      <Button type="button" variant="tertiary" size="sm" onClick={handleMarkAllNotificationsRead} disabled={!notificationUnreadCount}>Mark all read</Button>
+                    </div>
+                    <div className="flex items-center justify-between gap-2 border-b border-slate-200 bg-slate-50 px-4 py-2">
+                      <div className="flex gap-1" role="group" aria-label="Filter notifications">{[['all', 'All'], ['unread', 'Unread'], ['errors', 'Errors']].map(([value, label]) => <Button key={value} type="button" variant={notificationFilter === value ? 'primary' : 'tertiary'} size="sm" aria-pressed={notificationFilter === value} onClick={() => setNotificationFilter(value)}>{label}</Button>)}</div>
+                      <Link href="/notices" onClick={() => setNotificationsOpen(false)} className="rounded-lg px-2 py-1.5 text-sm font-semibold text-blue-800 hover:bg-blue-50">View all notifications</Link>
+                    </div>
+                    <div className="pp-notification-list max-h-[min(52vh,440px)] overflow-y-auto bg-white p-3">
+                      {filteredNotifications.length ? (
+                        filteredNotifications.map((notification) => (
+                          <button
+                            key={notification.id}
+                            type="button"
+                            className={`pp-notification-item block w-full rounded-[14px] border px-3 py-3 text-left transition hover:bg-[#f9fafb] ${
+                              notification.read_at ? 'border-slate-200 bg-white' : 'border-blue-200 bg-blue-50'
+                            }`}
+                            onClick={async () => {
+                              if (notification.href) {
+                                await handleMarkNotificationRead(notification.id);
+                                router.push(notification.href);
+                              } else {
+                                await handleMarkNotificationRead(notification.id);
+                              }
+                              setNotificationsOpen(false);
+                            }}
+                          >
+                            <div className="flex items-start gap-2">
+                              <span className="mt-0.5">
+                                {String(notification.notification_type || '').includes('failed') || /failed|error|blocked/i.test(`${notification.title || ''} ${notification.message || ''}`) ? (
+                                  <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#fee4e2] text-[#b42318]">!</span>
+                                ) : (
+                                  <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#ecfdf3] text-[#027a48]">✓</span>
+                                )}
+                              </span>
+                              <div className="min-w-0 flex-1">
+                                <p className="truncate text-sm font-semibold text-[var(--pp-text)]">{notification.title || 'Process update'}</p>
+                                <p className="mt-1 text-sm leading-5 text-slate-700">{notification.message || 'Workflow update'}</p>
+                                <p className="mt-1 text-xs text-slate-500">
+                                  {notification.created_at ? formatPosterProDate(notification.created_at) : 'Just now'}
+                                </p>
+                              </div>
+                            </div>
+                          </button>
+                        ))
+                      ) : (
+                        <div className="rounded-xl border border-dashed border-slate-300 px-3 py-8 text-center text-sm text-slate-600">
+                          No notifications in this view.
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex items-center justify-between gap-3 border-t border-slate-200 bg-white px-4 py-3"><span className="text-xs text-slate-600">Showing {processNotifications.length} of {notificationTotal.toLocaleString()}</span>{processNotifications.length < notificationTotal ? <Button type="button" variant="primary" size="sm" disabled={notificationLoading} onClick={() => void loadProcessNotifications({ offset: notificationOffset, append: true })}>{notificationLoading ? 'Loading…' : 'Load more'}</Button> : null}</div>
+                  </div>
+                ), document.body) : null}
               </div>
             </div>
           </header>
 
-          <main className="mx-auto w-full max-w-[1320px] px-4 py-6 pb-24 md:px-6">
-            {subnav ? (
-              <div className="grid gap-6 lg:grid-cols-[240px_minmax(0,1fr)]">
-                <div className="lg:hidden">
-                  <div className="pp-app-subnav-card p-4">
-                    <p className="pp-app-subnav-card__label">{subnav.eyebrow || 'Section menu'}</p>
-                    <p className="pp-app-subnav-card__title mt-2 text-lg">{subnav.title}</p>
-                    {subnav.description ? <p className="pp-app-subnav-card__copy mt-2 text-sm leading-6">{subnav.description}</p> : null}
-                    <div className="mt-4 flex gap-2 overflow-x-auto pb-1">
-                      {subnav.sections?.flatMap((section) =>
-                        section.items.map((item) => (
-                          <button
-                            key={item.key || item.label}
-                            type="button"
-                            onClick={item.onClick}
-                            className={`pp-app-subnav-chip shrink-0 rounded-full border px-3 py-2 text-sm font-medium ${item.active ? 'is-active' : ''}`}
-                          >
-                            {item.label}
-                          </button>
-                        )),
-                      )}
-                    </div>
-                  </div>
-                </div>
-                <aside className="hidden lg:block">
-                  <div className="sticky top-[88px] space-y-4">
-                    <div className="pp-app-subnav-card p-4">
-                      <p className="pp-app-subnav-card__label">{subnav.eyebrow || 'Section menu'}</p>
-                      <p className="pp-app-subnav-card__title mt-2 text-lg">{subnav.title}</p>
-                      {subnav.description ? <p className="pp-app-subnav-card__copy mt-2 text-sm leading-6">{subnav.description}</p> : null}
-                    </div>
-                    <div className="pp-app-subnav-card p-3">
-                      <div className="space-y-4">
-                        {subnav.sections?.map((section) => (
-                          <div key={section.label}>
-                            <p className="pp-app-subnav-card__label mb-2 px-3 text-[11px]">{section.label}</p>
-                            <div className="space-y-1.5">
-                              {section.items.map((item) => (
-                                <button
-                                  key={item.key || item.label}
-                                  type="button"
-                                  onClick={item.onClick}
-                                  className={`pp-app-subnav-item flex w-full items-center justify-between rounded-[12px] px-3 py-3 text-left ${item.active ? 'is-active' : ''}`}
-                                >
-                                  <span className="min-w-0">
-                                    <span className="pp-app-subnav-item__title block truncate text-sm">{item.label}</span>
-                                    {item.description ? <span className="pp-app-subnav-item__copy mt-0.5 block truncate text-xs">{item.description}</span> : null}
-                                  </span>
-                                  {item.badge ? <span className="pp-app-subnav-item__badge ml-3 rounded-full px-2 py-1 text-[11px] font-semibold">{item.badge}</span> : null}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                </aside>
-
-                <div className={`min-w-0 ${contentWidthClass} space-y-5 ${contentClassName}`}>{children}</div>
-              </div>
-            ) : (
-              <div className={`${contentWidthClass} space-y-5 ${contentClassName}`}>{children}</div>
-            )}
+          <main className="pp-shell-main-content mx-auto w-full max-w-[1520px] px-4 py-4 pb-20 md:px-6">
+            <div className="space-y-4">
+              {sectionBadge}
+              <div className={`mx-auto w-full ${contentWidthClass} min-w-0 space-y-4 ${contentClassName}`}>{children}</div>
+            </div>
           </main>
         </div>
       </div>
 
-      <nav className="pp-app-mobile-bar fixed bottom-0 left-0 right-0 z-40 border-t p-2 backdrop-blur lg:hidden">
-        <div className="mx-auto grid max-w-3xl grid-cols-5 gap-1">
-          {mobilePrimaryItems.map((item) => {
-            const Icon = item.icon;
-            const selected = isSelected(item.href);
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={`pp-app-mobile-link flex flex-col items-center justify-center gap-1 rounded-[10px] px-2 py-2 text-[11px] font-medium ${selected ? 'is-active' : ''}`}
-              >
-                <Icon size={16} />
-                <span>{item.label}</span>
-              </Link>
-            );
-          })}
-          <button
-            type="button"
-            onClick={() => setMobileMenuOpen(true)}
-            className={`pp-app-mobile-link flex flex-col items-center justify-center gap-1 rounded-[10px] px-2 py-2 text-[11px] font-medium ${
-              isSelected('/settings') || mobileMenuOpen ? 'is-active' : ''
-            }`}
-          >
-            <Settings2 size={16} />
-            <span>More</span>
-          </button>
-        </div>
-      </nav>
-
-      <Drawer
-        open={mobileMenuOpen}
-        onClose={() => setMobileMenuOpen(false)}
-        title="Workspace navigation"
-        description="Move between setup, operations, and marketplace workflow."
-        widthClassName="max-w-[420px]"
-      >
-        <div className="space-y-5">
-          <div className="pp-app-subnav-card p-4">
-            <p className="pp-app-subnav-card__title text-sm">{user?.full_name || user?.email || 'PosterPro account'}</p>
-            <p className="pp-app-subnav-card__copy mt-1 text-sm">Signed in workspace operator</p>
-          </div>
-
-          {navGroups.map((group) => (
-            <div key={group.label}>
-              <p className="pp-app-nav-group-label mb-2 text-xs">{group.label}</p>
-              <div className="space-y-1">
-                {group.items.map((item) => {
-                  const Icon = item.icon;
-                  const selected = isSelected(item.href);
-                  return (
-                    <div key={item.href} className="pp-app-drawer-card rounded-[12px] border">
-                      <Link
-                        href={item.href}
-                        onClick={() => setMobileMenuOpen(false)}
-                        className={`pp-app-drawer-link flex items-center justify-between px-3 py-3 text-sm font-medium ${selected ? 'is-active' : ''}`}
-                      >
-                        <span className="flex items-center gap-3">
-                          <Icon size={17} className={selected ? 'text-[var(--pp-dashboard-accent)]' : 'text-[#6c7a91]'} />
-                          {item.label}
-                        </span>
-                        {selected ? <StatusPill status="success" label="Open" /> : null}
-                      </Link>
-                      {item.children?.length ? (
-                        <div className="border-t border-[#f2f4f7] px-3 py-2">
-                          <div className="flex flex-wrap gap-2">
-                            {item.children.map((child) => (
-                              <Link
-                                key={child.href}
-                                href={child.href}
-                                onClick={() => setMobileMenuOpen(false)}
-                                className={`rounded-full border px-3 py-1.5 text-xs font-medium ${
-                                  isSelected(child.href)
-                                    ? 'border-[#bfd2ff] bg-[#eef4ff] text-[#2563eb]'
-                                    : 'border-[#e5e7eb] bg-white text-[#667085]'
-                                }`}
-                              >
-                                {child.label}
-                              </Link>
-                            ))}
-                          </div>
-                        </div>
-                      ) : null}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          ))}
-
-          <Button
-            variant="outline"
-            className="w-full"
-            onClick={async () => {
-              await logout();
-              window.location.href = '/login';
-            }}
-          >
-            Sign out
-          </Button>
-        </div>
+      <Drawer open={mobileMenuOpen} onClose={() => setMobileMenuOpen(false)} side="left" title="Main menu" description="All core areas, marketplace setup, and settings are available here." widthClassName="max-w-[440px]">
+        <div className="space-y-4">{renderNav(() => setMobileMenuOpen(false))}</div>
       </Drawer>
     </div>
   );

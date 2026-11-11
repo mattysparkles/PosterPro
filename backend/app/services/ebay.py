@@ -14,9 +14,12 @@ class EbayService:
         }
 
     def enrich_price(self, title: str, barcode: str | None = None) -> dict:
-        if barcode:
-            return {"suggested_price": 29.99, "comparables": [{"title": title, "price": 28.5}]}
-        return {"suggested_price": 24.0, "comparables": [{"title": f"Sold {title}", "price": 22.0}]}
+        return {
+            "suggested_price": None,
+            "comparables": [],
+            "source": "unavailable",
+            "warning": "Sold comps unavailable from lightweight eBay provider.",
+        }
 
     def publish_listing(self, listing: dict) -> dict:
         return {"listing_id": f"EBAY-{listing['id']}", "status": "posted"}

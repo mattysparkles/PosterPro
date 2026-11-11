@@ -1,14 +1,31 @@
 import { X } from 'lucide-react';
+import { createPortal } from 'react-dom';
 
 import Button from './button';
 
-export default function Drawer({ open, title, description, widthClassName = 'xl:w-[480px]', onClose, children }) {
+export default function Drawer({
+  open,
+  title,
+  description,
+  widthClassName = 'xl:w-[480px]',
+  onClose,
+  children,
+  side = 'right',
+}) {
   if (!open) return null;
 
-  return (
+  const sideClassName = side === 'left' ? 'left-0 right-auto border-r border-l-0' : 'right-0 left-auto border-l border-r-0';
+
+  const drawer = (
     <>
-      <div className="fixed inset-0 z-40 bg-[#101828]/20 xl:hidden" onClick={onClose} />
-      <aside className={`fixed inset-y-0 right-0 z-50 w-full max-w-[480px] border-l border-[#e5e7eb] bg-white xl:static xl:inset-auto xl:z-auto xl:max-w-none xl:rounded-[12px] xl:border ${widthClassName}`}>
+      <div data-testid="drawer-backdrop" className="fixed inset-0 z-[9998] bg-[#101828]/35" onClick={onClose} aria-hidden="true" />
+      <aside
+        data-testid="drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        className={`fixed inset-y-0 z-[9999] w-full max-w-[480px] border-[#e5e7eb] bg-white shadow-2xl xl:max-w-none xl:rounded-[12px] xl:border ${sideClassName} ${widthClassName}`}
+      >
         <div className="flex h-full flex-col">
           <div className="flex items-start justify-between gap-4 border-b border-[#e5e7eb] px-5 py-4">
             <div>
@@ -24,4 +41,5 @@ export default function Drawer({ open, title, description, widthClassName = 'xl:
       </aside>
     </>
   );
+  return typeof document === 'undefined' ? null : createPortal(drawer, document.body);
 }

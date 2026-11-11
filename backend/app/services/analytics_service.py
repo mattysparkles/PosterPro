@@ -165,6 +165,8 @@ class AnalyticsService:
         sold_listing_ids = {sale.listing_id for sale in sales if sale.listing_id is not None}
         total_revenue = round(sum(float(sale.amount or 0) for sale in sales), 2)
         units_sold = int(sum(int(sale.quantity or 1) for sale in sales))
+        active_listings = [listing for listing in listings if listing.status in {"ready", "posted"} and listing.sold_at is None]
+
         return {
             "period_days": days,
             "kpis": {
@@ -172,7 +174,7 @@ class AnalyticsService:
                 "total_sales": len(sales),
                 "units_sold": units_sold,
                 "avg_order_value": round(total_revenue / len(sales), 2) if sales else 0.0,
-                "active_listings": len([listing for listing in listings if listing.status in {"ready", "posted"}]),
+                "active_listings": len(active_listings),
                 "sold_unique_items": len(sold_listing_ids),
             },
             "top_items": [row for row in top_items if row["units_sold"] > 0 or row["revenue"] > 0],

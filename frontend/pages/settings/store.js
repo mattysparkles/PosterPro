@@ -1,0 +1,76 @@
+import { useEffect, useState } from 'react';
+import AppShell from '../../components/layout/AppShell';
+import Button from '../../components/ui/button';
+import PageHeader from '../../components/ui/page-header';
+import Input from '../../components/ui/input';
+import Textarea from '../../components/ui/textarea';
+import Select from '../../components/ui/select';
+import FormSection from '../../components/ui/form-section';
+import Checkbox from '../../components/ui/checkbox';
+import { Card } from '../../components/ui/card';
+import { fetchStorefrontSettings, saveStorefrontSettings } from '../../lib/api';
+
+const COINS = ['BTC','ETH','XLM','XMR','DOGE','PEP','LTC','RVN','DASH','XRP'];
+const CRYPTO_CAPABILITIES = { XRP: 'Destination tag', XLM: 'Memo' };
+const defaults = { stripe: { enabled: false, label: 'Card', test_mode: true }, paypal: { enabled: false, label: 'PayPal', test_mode: true }, cashapp: { enabled: false, label: 'Cash App', handle: '', verification_mode: 'MANUAL_CONFIRMATION', discount_percent: 0 }, venmo: { enabled: false, label: 'Venmo', handle: '', verification_mode: 'MANUAL_CONFIRMATION', discount_percent: 0 }, crypto: { enabled: false, label: 'Crypto', currencies: [], wallets: {}, verification_mode: 'MANUAL_CONFIRMATION', discount_percent: 0 } };
+
+export default function StoreSettings() {
+  const [settings, setSettings] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
+  const [providerSecrets, setProviderSecrets] = useState({});
+  useEffect(() => { fetchStorefrontSettings().then(setSettings).catch((error) => setMessage(error.message)); }, []);
+  const profile = settings?.profile;
+  const payment = { ...defaults, ...(profile?.payment_settings || {}) };
+  const directCheckoutEntitled = Boolean(settings?.entitlements?.['storefront.direct_checkout']?.entitled && settings?.entitlements?.['payments.manual_methods']?.entitled);
+  const updateProfile = (key, value) => setSettings((old) => ({ ...old, profile: { ...old.profile, [key]: value } }));
+  const updateMethod = (method, key, value) => updateProfile('payment_settings', { ...payment, [method]: { ...payment[method], [key]: value } });
+  const save = async (event) => {
+    event.preventDefault(); setBusy(true); setMessage('');
+    try { const result = await saveStorefrontSettings({ ...profile, public_settings: profile.public_settings || {}, payment_settings: payment, provider_secrets: providerSecrets }); setSettings(result); setProviderSecrets({}); setMessage('Store settings saved.'); }
+    catch (error) { setMessage(error.message || 'Could not save settings.'); }
+    finally { setBusy(false); }
+  };
+  return <AppShell><main className="mx-auto max-w-5xl space-y-6 px-5 py-6">
+    <PageHeader title="Store & payments" description="Set up your public store and the payment options you may enable later." />
+    {message ? <p role="status" className="rounded-lg border border-slate-200 bg-white p-3 text-sm text-slate-700">{message}</p> : null}
+    {!profile ? <p className="text-slate-600">Loading store settings…</p> : <form onSubmit={save} className="mx-auto max-w-5xl space-y-6">
+      <FormSection title="Public store" description="A unique tenant store link, built from your own eligible inventory." className="bg-white shadow-sm">
+        <div className="mt-4 grid gap-4 sm:grid-cols-2">
+          <label className="text-sm font-medium">Store name<Input required value={profile.store_name || ''} onChange={(e) => updateProfile('store_name', e.target.value)} className="mt-1 w-full" /></label>
+          <label className="text-sm font-medium">Store link<Input required value={profile.slug || ''} onChange={(e) => updateProfile('slug', e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '-'))} className="mt-1 w-full" /><span className="text-xs text-slate-500">/store/{profile.slug}</span></label>
+          <label className="text-sm font-medium sm:col-span-2">Short description<Textarea rows="3" value={profile.description || ''} onChange={(e) => updateProfile('description', e.target.value)} className="mt-1" /></label>
+          <label className="text-sm font-medium">Logo image URL<Input value={profile.logo_url || ''} onChange={(e) => updateProfile('logo_url', e.target.value)} className="mt-1" /></label>
+          <label className="text-sm font-medium">Banner image URL<Input value={profile.banner_url || ''} onChange={(e) => updateProfile('banner_url', e.target.value)} className="mt-1" /></label>
+          <label className="text-sm font-medium">Public contact email<Input type="email" value={profile.contact_email || ''} onChange={(e) => updateProfile('contact_email', e.target.value)} className="mt-1" /></label>
+          <label className="text-sm font-medium">Brand color<Input type="color" value={profile.accent_color || '#1d4f7a'} onChange={(e) => updateProfile('accent_color', e.target.value)} className="mt-1 h-11 w-20 p-1" /></label>
+          <label className="text-sm font-medium">Default product sorting<Select value={profile.public_settings?.default_sort || 'newest'} onChange={(e) => updateProfile('public_settings', { ...(profile.public_settings || {}), default_sort: e.target.value })} className="mt-1"><option value="newest">Newest first</option><option value="price">Price: high to low</option><option value="name">Name</option><option value="featured">Featured items first</option></Select></label>
+        </div>
+        <Checkbox className="mt-4" label="Publish my public store" checked={Boolean(profile.enabled)} onChange={(e) => updateProfile('enabled', e.target.checked)} />
+        <div className="mt-4 grid gap-3 border-t border-slate-200 pt-4 sm:grid-cols-2">
+          <Checkbox label="Show confirmed marketplace purchase links" checked={profile.public_settings?.show_marketplace_links !== false} onChange={(e) => updateProfile('public_settings', { ...(profile.public_settings || {}), show_marketplace_links: e.target.checked })} />
+          <Checkbox label="Show contact email publicly" checked={Boolean(profile.public_settings?.show_contact_email)} onChange={(e) => updateProfile('public_settings', { ...(profile.public_settings || {}), show_contact_email: e.target.checked })} />
+          <Checkbox label="Show item SKU publicly" checked={Boolean(profile.public_settings?.show_sku)} onChange={(e) => updateProfile('public_settings', { ...(profile.public_settings || {}), show_sku: e.target.checked })} />
+          <label className="text-sm font-medium sm:col-span-2">Shipping message<Textarea rows="2" value={profile.public_settings?.shipping_message || ''} onChange={(e) => updateProfile('public_settings', { ...(profile.public_settings || {}), shipping_message: e.target.value })} placeholder="Shipping details are confirmed at purchase." className="mt-1" /></label>
+        </div>
+      </FormSection>
+      <Card className="bg-white shadow-sm">
+        <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-lg font-semibold">Payment methods</h2><p className="mt-1 text-sm text-slate-600">Cash App and Venmo orders require seller confirmation. Card and PayPal checkout remain closed until verified providers are connected.</p></div><span className={`rounded-full px-3 py-1 text-sm font-semibold ${directCheckoutEntitled ? 'bg-emerald-50 text-emerald-800' : 'bg-amber-50 text-amber-900'}`}>{directCheckoutEntitled ? 'Manual checkout available by entitlement' : 'Direct checkout not enabled for this account'}</span></div>
+        <div className="mt-4 space-y-4">
+          {['cashapp','venmo','paypal','stripe'].map((method) => <div key={method} className="grid gap-3 rounded-xl border border-slate-200 p-4 md:grid-cols-[1fr_1fr_auto] md:items-center">
+            <div><Checkbox label={method === 'cashapp' ? 'Cash App' : method === 'paypal' ? 'PayPal' : method} checked={Boolean(payment[method]?.enabled)} onChange={(e) => updateMethod(method, 'enabled', e.target.checked)} /><p className="mt-1 text-sm text-slate-500">{method === 'cashapp' || method === 'venmo' ? 'Manual confirmation only.' : 'Provider credentials and verified checkout are not configured.'}</p></div>
+            {method === 'cashapp' || method === 'venmo' ? <div className="grid gap-2"><label className="text-sm">{method === 'cashapp' ? 'Cash App tag' : 'Venmo username'}<Input value={payment[method]?.handle || ''} onChange={(e) => updateMethod(method, 'handle', e.target.value)} placeholder={method === 'cashapp' ? '$YourTag' : '@YourName'} className="mt-1 h-10" /></label><label className="text-sm">Payment instructions<Textarea value={payment[method]?.instructions || ''} onChange={(e) => updateMethod(method, 'instructions', e.target.value)} rows="2" className="mt-1 min-h-16" /></label><div className="flex gap-2"><label className="text-sm">Minimum $<Input type="number" min="0" step="0.01" value={payment[method]?.minimum_order || 0} onChange={(e) => updateMethod(method, 'minimum_order', Number(e.target.value))} className="mt-1 h-10 w-28" /></label><label className="text-sm">Maximum $ (0 = no limit)<Input type="number" min="0" step="0.01" value={payment[method]?.maximum_order || 0} onChange={(e) => updateMethod(method, 'maximum_order', Number(e.target.value))} className="mt-1 h-10 w-36" /></label></div></div> : <div className="text-sm text-slate-600">Configuration required</div>}
+            <label className="text-sm">Discount %<Input type="number" min="0" max="25" step="0.1" value={payment[method]?.discount_percent || 0} onChange={(e) => updateMethod(method, 'discount_percent', Number(e.target.value))} className="mt-1 h-10 w-24" /></label>
+            {method === 'stripe' ? <label className="text-sm md:col-span-3">Stripe secret key<Input type="password" autoComplete="new-password" value={providerSecrets.stripe_secret_key || ''} onChange={(e) => setProviderSecrets({ ...providerSecrets, stripe_secret_key: e.target.value })} placeholder={settings?.provider_credentials_configured ? 'Saved securely · enter only to replace' : 'sk_test_…'} className="mt-1" /></label> : null}
+            {method === 'paypal' ? <div className="grid gap-3 md:col-span-3 md:grid-cols-2"><label className="text-sm">PayPal client ID<Input type="password" autoComplete="new-password" value={providerSecrets.paypal_client_id || ''} onChange={(e) => setProviderSecrets({ ...providerSecrets, paypal_client_id: e.target.value })} placeholder="Saved securely if already configured" className="mt-1" /></label><label className="text-sm">PayPal client secret<Input type="password" autoComplete="new-password" value={providerSecrets.paypal_client_secret || ''} onChange={(e) => setProviderSecrets({ ...providerSecrets, paypal_client_secret: e.target.value })} placeholder="Saved securely if already configured" className="mt-1" /></label></div> : null}
+          </div>)}
+        </div>
+      </Card>
+      <FormSection title="Crypto wallets" description="Wallet details are private to your tenant. Automatic chain verification is not enabled; no order will be marked paid from a typed transaction ID." className="bg-white shadow-sm"><Checkbox label="Enable crypto wallet configuration" checked={Boolean(payment.crypto?.enabled)} onChange={(e) => updateMethod('crypto', 'enabled', e.target.checked)} /><label className="block text-sm font-medium">Default crypto discount %<Input type="number" min="0" max="25" step="0.1" value={payment.crypto?.discount_percent || 0} onChange={(e) => updateMethod('crypto', 'discount_percent', Number(e.target.value))} className="mt-1 w-28" /></label><div className="grid gap-3 sm:grid-cols-2">{COINS.map((coin) => { const wallet = payment.crypto?.wallets?.[coin] || {}; const active = (payment.crypto?.currencies || []).includes(coin); const memoLabel = CRYPTO_CAPABILITIES[coin]; return <div key={coin} className="rounded-xl border border-slate-200 p-3"><Checkbox label={coin} checked={active} onChange={(e) => { const currencies = new Set(payment.crypto?.currencies || []); e.target.checked ? currencies.add(coin) : currencies.delete(coin); updateMethod('crypto', 'currencies', [...currencies]); }} /><div className="mt-2 grid gap-2"><Input aria-label={`${coin} network`} value={wallet.network || ''} onChange={(e) => updateMethod('crypto', 'wallets', { ...(payment.crypto?.wallets || {}), [coin]: { ...wallet, network: e.target.value } })} placeholder="Network" className="h-10 text-sm" /><Input aria-label={`${coin} receive address`} value={wallet.address || ''} onChange={(e) => updateMethod('crypto', 'wallets', { ...(payment.crypto?.wallets || {}), [coin]: { ...wallet, address: e.target.value } })} placeholder="Receive address" className="h-10 text-sm" />{memoLabel ? <Input aria-label={`${coin} ${memoLabel}`} value={wallet.memo || ''} onChange={(e) => updateMethod('crypto', 'wallets', { ...(payment.crypto?.wallets || {}), [coin]: { ...wallet, memo: e.target.value } })} placeholder={`${memoLabel} (if required)`} className="h-10 text-sm" /> : null}</div></div>; })}</div></FormSection>
+      <Card className="bg-white"><h2 className="text-lg font-semibold">Affiliate links</h2><p className="mt-1 text-sm text-slate-600">Only eBay Partner Network attribution is supported, and only with a complete, approved campaign configuration. Other marketplaces use their normal links.</p><label className="mt-3 block max-w-md text-sm font-medium">eBay Custom ID<Input disabled={!settings?.entitlements?.['affiliate.custom_ids']?.entitled} value={profile.public_settings?.affiliate_ids?.ebay || ''} onChange={(e) => updateProfile('public_settings', { ...(profile.public_settings || {}), affiliate_ids: { ...(profile.public_settings?.affiliate_ids || {}), ebay: e.target.value } })} placeholder="Optional tracking Custom ID" /></label><p className="mt-2 text-sm text-slate-500">eBay: {settings?.affiliate_links?.ebay || 'Checking'} · tenant override: {settings?.entitlements?.['affiliate.custom_ids']?.status || 'Checking entitlement'} · conversions are not reported by PosterPro.</p></Card>
+      <div className="flex flex-wrap items-center gap-3"><Button type="submit" disabled={busy}>{busy ? 'Saving…' : 'Save store settings'}</Button>{profile.enabled ? <Button variant="secondary" href={`/store/${profile.slug}`} external>Open public store</Button> : null}</div>
+    </form>}
+  </main></AppShell>;
+}
+
+StoreSettings.requireAuth = true;

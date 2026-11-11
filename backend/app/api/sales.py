@@ -1,59 +1,314 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.orm import Session
 
-from app.api.schemas import SaleDetailsUpdateRequest, SaleDetectionConfigRequest
+from app.api.schemas import ManualSaleRequest, SaleDetailsUpdateRequest, SaleDetectionConfigRequest, SaleReconcileRequest
 from app.core.auth import ensure_user_owns_resource, get_current_user, resolve_user_scope
 from app.core.database import get_db
-from app.models.enums import MarketplaceName
+from app.models.enums import MARKETPLACE_DESTINATION_VALUES, MarketplaceName
 from app.models.models import AutomatedOfferLog, Listing, MarketplaceAccount, OfferAutomationRule, Sale, User
 from app.services.offer_service import OfferService
 from app.services.marketplace_setup import marketplace_status_snapshot
+from app.services.sale_detection_service import SaleDetectionService
+from app.services.ebay_service import EbayAPIClient, EbayIntegrationError, get_or_refresh_account
 
 router = APIRouter(prefix="/sales", tags=["sales"])
 offer_service = OfferService()
+sale_detection_service = SaleDetectionService()
+
+
+@router.post("/manual")
+def record_manual_sale(
+    payload: ManualSaleRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Record an offline/storefront sale and reconcile inventory once.
+
+    The sale is created with a stable local identity and the same quantity
+    fan-out used by marketplace detection, so partial-quantity sales do not
+    incorrectly end every destination.
+    """
+    listing = db.get(Listing, payload.listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    ensure_user_owns_resource(current_user, listing.user_id)
+    sold_at = payload.sold_at or datetime.now(timezone.utc).replace(tzinfo=None)
+    manual_order_id = f"MANUAL-{listing.id}-{int(sold_at.timestamp())}"
+    existing = db.execute(select(Sale).where(Sale.user_id == current_user.id, Sale.marketplace_order_id == manual_order_id)).scalar_one_or_none()
+    if existing:
+        return {"sale_id": existing.id, "listing_id": listing.id, "status": existing.status, "idempotent": True}
+    sale = Sale(
+        user_id=current_user.id,
+        listing_id=listing.id,
+        platform=MarketplaceName.storefront_direct,
+        marketplace_order_id=manual_order_id,
+        marketplace_listing_id=None,
+        quantity=payload.quantity,
+        amount=payload.amount,
+        currency="USD",
+        sold_at=sold_at,
+        status="DETECTED",
+        details={"source": "MANUAL", "channel": payload.channel, "notes": payload.notes} if payload.notes else {"source": "MANUAL", "channel": payload.channel},
+    )
+    db.add(sale)
+    db.flush()
+    outcome = asyncio.run(sale_detection_service._fanout_quantity_adjustment(db, listing, current_user, sold_platform=MarketplaceName.storefront_direct.value, quantity_sold=payload.quantity, dry_run=False, sale_amount=payload.amount))
+    sale.status = "SYNCED"
+    sale.details = {**(sale.details or {}), "reconciled": {"fanout": outcome}}
+    db.add(sale)
+    db.commit()
+    return {"sale_id": sale.id, "listing_id": listing.id, "status": sale.status, "fanout": outcome}
+
+
+def _ebay_fulfillment_counts(orders: list[dict], *, now: datetime | None = None) -> dict:
+    """Derive shipping work only from explicit eBay payment/fulfillment fields."""
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    today = current.date()
+    need_ship = due_today = overdue = 0
+    for order in orders:
+        payment = str(order.get("orderPaymentStatus") or "").upper()
+        fulfillment = str(order.get("orderFulfillmentStatus") or "").upper()
+        if payment != "PAID" or fulfillment in {"FULFILLED", "CANCELLED"}:
+            continue
+        need_ship += 1
+        instructions = order.get("fulfillmentStartInstructions") or []
+        ship_by = None
+        for instruction in instructions:
+            shipping_step = (instruction or {}).get("shippingStep") or {}
+            ship_by = shipping_step.get("shipByDate") or ship_by
+        if not ship_by:
+            continue
+        try:
+            deadline = datetime.fromisoformat(str(ship_by).replace("Z", "+00:00"))
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+            if deadline.date() < today:
+                overdue += 1
+            elif deadline.date() == today:
+                due_today += 1
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return {"need_to_ship": need_ship, "due_today": due_today, "overdue": overdue}
+
+
+@router.get("/operations-summary")
+async def sales_operations_summary(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Read-only eBay shipping + unread-message summary for the current tenant."""
+    account = db.execute(select(MarketplaceAccount).where(
+        MarketplaceAccount.user_id == current_user.id,
+        MarketplaceAccount.marketplace == MarketplaceName.ebay,
+    )).scalars().first()
+    if not account:
+        return {
+            "shipping": {"status": "NOT_CONFIGURED", "marketplace": "ebay", "counts": None},
+            "messages": {"status": "NOT_CONFIGURED", "marketplace": "ebay", "unread": None},
+        }
+    client = None
+    try:
+        account = await get_or_refresh_account(current_user.id, db)
+        client = EbayAPIClient(account.access_token)
+        orders: list[dict] = []
+        total_orders = None
+        offset = 0
+        page_size = 100
+        while offset < 1000:
+            response = await client.request("GET", "/sell/fulfillment/v1/order", params={"limit": page_size, "offset": offset})
+            page = [row for row in (response.get("orders") or []) if isinstance(row, dict)]
+            total_orders = response.get("total", total_orders)
+            orders.extend(page)
+            try:
+                reached_total = total_orders is not None and len(orders) >= int(total_orders)
+            except (TypeError, ValueError):
+                total_orders = None
+                reached_total = False
+            if len(page) < page_size or reached_total:
+                break
+            offset += len(page)
+        shipping_complete = total_orders is None or len(orders) >= int(total_orders) or len(orders) < 1000
+        shipping = {
+            "status": "REMOTE_VERIFIED" if shipping_complete else "PARTIAL_REMOTE_RESULT",
+            "marketplace": "ebay",
+            "counts": _ebay_fulfillment_counts(orders),
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }
+    except EbayIntegrationError as exc:
+        message = str(exc).lower()
+        state = "AUTH_REQUIRED" if "401" in message or "403" in message or "scope" in message or "token" in message else "NEEDS_ATTENTION"
+        shipping = {"status": state, "marketplace": "ebay", "counts": None}
+    except Exception:
+        shipping = {"status": "NEEDS_ATTENTION", "marketplace": "ebay", "counts": None}
+
+    if client is None:
+        messages = {"status": shipping.get("status", "NEEDS_ATTENTION"), "marketplace": "ebay", "unread": None}
+    else:
+        try:
+            # eBay's Commerce Message API supports unread conversation retrieval;
+            # only aggregate counts leave this request (no message body is stored).
+            message_response = await client.request(
+                "GET", "/commerce/message/v1/conversation",
+                params={"conversationStatus": "UNREAD", "conversation_type": "FROM_MEMBERS", "limit": 10, "offset": 0},
+            )
+            conversations = message_response.get("conversations") or message_response.get("conversation") or []
+            metadata = message_response.get("conversationsMetadata") or {}
+            total_unread = metadata.get("total") if isinstance(metadata, dict) else None
+            total_unread = total_unread if total_unread is not None else message_response.get("total")
+            try:
+                total_unread = int(total_unread) if total_unread is not None else None
+            except (TypeError, ValueError, OverflowError):
+                total_unread = None
+            messages = {
+                "status": "REMOTE_VERIFIED" if total_unread is not None or len(conversations) < 10 else "PARTIAL_REMOTE_RESULT",
+                "marketplace": "ebay",
+                "unread": total_unread if total_unread is not None else (len(conversations) if len(conversations) < 10 else None),
+                "at_least": 10 if total_unread is None and len(conversations) >= 10 else None,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+            }
+        except EbayIntegrationError as exc:
+            message = str(exc).lower()
+            state = "AUTH_REQUIRED" if "401" in message or "403" in message or "scope" in message or "token" in message else "NEEDS_ATTENTION"
+            messages = {"status": state, "marketplace": "ebay", "unread": None}
+        except Exception:
+            # A message-scope/API failure must not hide the successful fulfillment
+            # result. The UI reports this channel as needing a check.
+            messages = {"status": "NEEDS_ATTENTION", "marketplace": "ebay", "unread": None}
+    return {"shipping": shipping, "messages": messages}
 
 
 @router.get("/dashboard")
 def sales_dashboard(
     user_id: int | None = Query(None),
     limit: int = Query(50, ge=1, le=250),
+    search: str | None = Query(None),
+    marketplace: str | None = Query(None),
+    sort_by: str = Query("sold_at"),
+    sort_dir: str = Query("desc"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    scoped_user_id = resolve_user_scope(current_user, user_id)
-    sales = db.execute(
-        select(Sale).where(Sale.user_id == scoped_user_id).order_by(Sale.sold_at.desc().nullslast(), Sale.id.desc()).limit(limit)
-    ).scalars().all()
-    gross_sales = sum(float(s.amount or 0.0) for s in sales)
-    units = sum(int(s.quantity or 1) for s in sales)
-    by_platform = {
-        row[0].value: {"count": row[1], "gross": float(row[2] or 0)}
-        for row in db.execute(
-            select(Sale.platform, func.count(Sale.id), func.sum(Sale.amount)).where(Sale.user_id == scoped_user_id).group_by(Sale.platform)
-        ).all()
+    scoped_user_id = resolve_user_scope(current_user, user_id) if user_id is not None else current_user.id
+    stmt = select(Sale).join(Listing, Listing.id == Sale.listing_id, isouter=True)
+    if scoped_user_id is not None:
+        stmt = stmt.where(Sale.user_id == scoped_user_id)
+    if marketplace and marketplace in MARKETPLACE_DESTINATION_VALUES:
+        stmt = stmt.where(Sale.platform == MarketplaceName(marketplace))
+    if search:
+        term = f"%{search.strip()}%"
+        stmt = stmt.where(
+            or_(
+                Sale.marketplace_order_id.ilike(term),
+                Sale.marketplace_listing_id.ilike(term),
+                cast(Sale.id, String).ilike(term),
+                Listing.title.ilike(term),
+                Sale.status.ilike(term),
+            )
+        )
+
+    sort_columns = {
+        "sold_at": Sale.sold_at,
+        "amount": Sale.amount,
+        "fees_actual": Sale.fees_actual,
+        "shipping_cost": Sale.shipping_cost,
+        "promotional_fees": Sale.promotional_fees,
+        "marketplace_fees": Sale.marketplace_fees,
+        "profit": Sale.profit,
+        "platform": Sale.platform,
+        "created_at": Sale.created_at,
     }
+    sort_column = sort_columns.get(sort_by, Sale.sold_at)
+    if str(sort_dir or "desc").lower() == "asc":
+        stmt = stmt.order_by(sort_column.asc().nullslast(), Sale.id.asc())
+    else:
+        stmt = stmt.order_by(sort_column.desc().nullslast(), Sale.id.desc())
+    sales = db.execute(stmt.limit(limit)).scalars().all()
+    gross_sales = sum(float(s.amount or 0.0) for s in sales)
+    total_profit = sum(float(s.profit or 0.0) for s in sales)
+    units = sum(int(s.quantity or 1) for s in sales)
+    platform_stmt = select(
+        Sale.platform,
+        func.count(Sale.id),
+        func.sum(Sale.amount),
+        func.sum(Sale.fees_actual),
+        func.sum(Sale.shipping_cost),
+        func.sum(Sale.promotional_fees),
+        func.sum(Sale.marketplace_fees),
+        func.sum(Sale.profit),
+    )
+    if scoped_user_id is not None:
+        platform_stmt = platform_stmt.where(Sale.user_id == scoped_user_id)
+    platform_stmt = platform_stmt.group_by(Sale.platform)
+    by_platform = {
+        getattr(row[0], "value", row[0]): {
+            "count": row[1],
+            "gross": float(row[2] or 0),
+            "fees_actual": float(row[3] or 0),
+            "shipping_cost": float(row[4] or 0),
+            "promotional_fees": float(row[5] or 0),
+            "marketplace_fees": float(row[6] or 0),
+            "profit": float(row[7] or 0),
+        }
+        for row in db.execute(platform_stmt).all()
+    }
+    # Dashboard totals are full-history aggregates, not sums over the recent
+    # table page. Shipment state is intentionally not inferred from a sale
+    # detector status; PosterPro has no normalized fulfillment state yet.
+    summary_filters = [Sale.user_id == scoped_user_id] if scoped_user_id is not None else []
+    summary_row = db.execute(select(
+        func.count(Sale.id), func.coalesce(func.sum(Sale.quantity), 0),
+        func.coalesce(func.sum(Sale.amount), 0), func.coalesce(func.sum(Sale.profit), 0),
+    ).where(*summary_filters)).one()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    period_ranges = {
+        "today": now.replace(hour=0, minute=0, second=0, microsecond=0),
+        "last_7_days": now - timedelta(days=7),
+        "last_30_days": now - timedelta(days=30),
+    }
+    periods = {}
+    for period, start_at in period_ranges.items():
+        period_filters = [*summary_filters, Sale.sold_at >= start_at]
+        row = db.execute(select(
+            func.count(Sale.id), func.coalesce(func.sum(Sale.quantity), 0),
+            func.coalesce(func.sum(Sale.amount), 0),
+        ).where(*period_filters)).one()
+        periods[period] = {"sales": int(row[0] or 0), "units": int(row[1] or 0), "gross": float(row[2] or 0)}
+    full_history_count, full_history_units, full_history_gross, full_history_profit = summary_row
     return {
         "user_id": scoped_user_id,
-        "summary": {"total_sales": len(sales), "units": units, "gross": gross_sales, "by_platform": by_platform},
+        "summary": {"total_sales": int(full_history_count or 0), "units": int(full_history_units or 0), "gross": float(full_history_gross or 0), "total_profit": float(full_history_profit or 0), "pending_shipments": None, "fulfillment_status_available": False, "periods": periods, "by_platform": by_platform},
         "sales": [
             {
                 "id": sale.id,
                 "listing_id": sale.listing_id,
-                "platform": sale.platform.value,
+                "platform": getattr(sale.platform, "value", sale.platform),
                 "amount": sale.amount,
                 "currency": sale.currency,
                 "quantity": sale.quantity,
+                "fees_actual": sale.fees_actual,
+                "shipping_cost": sale.shipping_cost,
+                "promotional_fees": sale.promotional_fees,
+                "marketplace_fees": sale.marketplace_fees,
+                "profit": sale.profit,
+                "roi_percentage": sale.roi_percentage,
                 "sold_at": sale.sold_at.isoformat() if sale.sold_at else None,
                 "status": sale.status,
                 "marketplace_order_id": sale.marketplace_order_id,
                 "marketplace_listing_id": sale.marketplace_listing_id,
+                "listing_title": sale.listing.title if sale.listing else None,
+                "listing_status": getattr(sale.listing.status, "value", sale.listing.status) if sale.listing else None,
+                "matched": bool(sale.listing_id),
                 "details": sale.details,
                 "created_at": sale.created_at.isoformat() if sale.created_at else None,
             }
@@ -83,12 +338,64 @@ def update_sale_details(
         if listing:
             if payload.fees_actual is not None:
                 listing.fees_actual = payload.fees_actual
+                sale.fees_actual = payload.fees_actual
             if payload.shipping_cost is not None:
                 listing.shipping_cost = payload.shipping_cost
+                sale.shipping_cost = payload.shipping_cost
+            if payload.promotional_fees is not None:
+                sale.promotional_fees = payload.promotional_fees
+            if payload.marketplace_fees is not None:
+                sale.marketplace_fees = payload.marketplace_fees
+            if sale.amount is not None:
+                sale.profit = round(
+                    float(sale.amount or 0)
+                    - float(listing.purchase_cost or 0)
+                    - float(sale.fees_actual or 0)
+                    - float(sale.shipping_cost or 0)
+                    - float(sale.promotional_fees or 0)
+                    - float(sale.marketplace_fees or 0),
+                    2,
+                )
+                if listing and listing.purchase_cost not in (None, 0):
+                    basis = float(listing.purchase_cost or 0) + float(sale.fees_actual or 0) + float(sale.shipping_cost or 0) + float(sale.promotional_fees or 0) + float(sale.marketplace_fees or 0)
+                    if basis:
+                        sale.roi_percentage = round((float(sale.profit or 0) / basis) * 100.0, 2)
+                listing.sale_price = sale.amount
+                listing.profit = sale.profit
+                listing.roi_percentage = sale.roi_percentage
             db.add(listing)
     db.add(sale)
     db.commit()
     return {"sale_id": sale.id, "status": "updated", "details": sale.details}
+
+
+@router.post("/{sale_id}/reconcile")
+def reconcile_sale(
+    sale_id: int,
+    payload: SaleReconcileRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    sale = db.get(Sale, sale_id)
+    if not sale:
+        raise HTTPException(status_code=404, detail="Sale not found")
+    ensure_user_owns_resource(current_user, sale.user_id)
+    user = db.get(User, sale.user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    try:
+        result = sale_detection_service.reconcile_unmatched_sale(
+            db,
+            user,
+            sale,
+            listing_id=payload.listing_id,
+            dry_run=False,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if result.get("status") == "unmatched":
+        raise HTTPException(status_code=404, detail="No matching listing found for this sale")
+    return {"sale_id": sale.id, **result}
 
 
 @router.get("/settings/{user_id}")
@@ -116,7 +423,7 @@ def update_sale_detection_settings(
     user = db.get(User, scoped_user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    invalid = [name for name in payload.marketplaces if name not in MarketplaceName._value2member_map_]
+    invalid = [name for name in payload.marketplaces if name not in MARKETPLACE_DESTINATION_VALUES]
     if invalid:
         raise HTTPException(status_code=400, detail=f"Unsupported marketplaces: {', '.join(invalid)}")
     accounts = {
@@ -147,11 +454,14 @@ def export_sales_csv(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    scoped_user_id = resolve_user_scope(current_user, user_id)
-    sales = db.execute(select(Sale).where(Sale.user_id == scoped_user_id).order_by(Sale.sold_at.desc().nullslast())).scalars().all()
+    scoped_user_id = resolve_user_scope(current_user, user_id) if user_id is not None else current_user.id
+    stmt = select(Sale).order_by(Sale.sold_at.desc().nullslast())
+    if scoped_user_id is not None:
+        stmt = stmt.where(Sale.user_id == scoped_user_id)
+    sales = db.execute(stmt).scalars().all()
     buffer = io.StringIO()
     writer = csv.writer(buffer)
-    writer.writerow(["sale_id", "listing_id", "platform", "amount", "currency", "quantity", "sold_at", "status"])
+    writer.writerow(["sale_id", "listing_id", "platform", "amount", "currency", "quantity", "fees_actual", "shipping_cost", "promotional_fees", "marketplace_fees", "profit", "roi_percentage", "sold_at", "status"])
     for sale in sales:
         writer.writerow(
             [
@@ -161,6 +471,12 @@ def export_sales_csv(
                 sale.amount or 0,
                 sale.currency,
                 sale.quantity,
+                sale.fees_actual or "",
+                sale.shipping_cost or "",
+                sale.promotional_fees or "",
+                sale.marketplace_fees or "",
+                sale.profit or "",
+                sale.roi_percentage or "",
                 sale.sold_at.isoformat() if sale.sold_at else "",
                 sale.status,
             ]
@@ -178,8 +494,11 @@ def export_inventory_csv(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    scoped_user_id = resolve_user_scope(current_user, user_id)
-    listings = db.execute(select(Listing).where(Listing.user_id == scoped_user_id).order_by(Listing.updated_at.desc())).scalars().all()
+    scoped_user_id = resolve_user_scope(current_user, user_id) if user_id is not None else current_user.id
+    stmt = select(Listing).order_by(Listing.updated_at.desc())
+    if scoped_user_id is not None:
+        stmt = stmt.where(Listing.user_id == scoped_user_id)
+    listings = db.execute(stmt).scalars().all()
     buffer = io.StringIO()
     writer = csv.writer(buffer)
     writer.writerow(["listing_id", "title", "status", "marketplace", "listing_price", "sale_price", "quantity", "updated_at"])

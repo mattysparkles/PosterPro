@@ -79,7 +79,7 @@ const HERO_LISTINGS = [
 
 export default function LandingPage() {
   return (
-    <div className={styles.page}>
+    <div className={`pp-public ${styles.page}`}>
       <Head>
         <title>PosterPro | Reseller Listing Software</title>
         <meta

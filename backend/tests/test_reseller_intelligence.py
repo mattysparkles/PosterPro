@@ -1,21 +1,22 @@
-import os
+import pytest
 from datetime import datetime, timedelta
 from uuid import uuid4
 
-os.environ["DATABASE_URL"] = "sqlite:///./test_reseller_intelligence.db"
 
-from app.core.database import Base, SessionLocal, engine
 from app.models.models import Cluster, Listing, User
 from app.services.prediction_service import PredictionService
 from app.services.pricing_intelligence_service import PricingIntelligenceService
 from app.services.profit_service import ProfitService
 
-Base.metadata.drop_all(bind=engine)
-Base.metadata.create_all(bind=engine)
+
+@pytest.fixture(autouse=True)
+def _assert_isolated_test_database(db_session):
+    bind = db_session.get_bind()
+    assert bind.dialect.name == "sqlite"
+    assert "posterpro-test-" in str(bind.url)
 
 
-def seed_listing(sale_price=None, category="Sneakers"):
-    db = SessionLocal()
+def seed_listing(db, sale_price=None, category="Sneakers"):
     user = User(email=f"intel-{uuid4()}@example.com")
     db.add(user)
     db.commit()
@@ -49,33 +50,31 @@ def seed_listing(sale_price=None, category="Sneakers"):
     db.commit()
     db.refresh(listing)
     listing_id = listing.id
-    db.close()
     return listing_id, user_id
 
 
-def test_profit_calculation():
-    listing_id, _ = seed_listing(sale_price=80)
-    db = SessionLocal()
+def test_profit_calculation(db_session):
+    listing_id, _ = seed_listing(db_session, sale_price=80)
+    db = db_session
     listing = db.get(Listing, listing_id)
 
     result = ProfitService().calculate_profit(listing)
 
     assert result["profit"] > 0
     assert result["roi_percentage"] > 0
-    db.close()
 
 
-def test_pricing_recommendation_accuracy_signal():
-    listing_id, user_id = seed_listing(category="Jackets")
-    db = SessionLocal()
+def test_pricing_recommendation_accuracy_signal(db_session):
+    listing_id, user_id = seed_listing(db_session, category="Sneakers")
+    db = db_session
 
     # add historical sold comps to improve confidence
     for sale in [70, 74, 72, 69, 75, 73]:
         comp = Listing(
             user_id=user_id,
             cluster_id=db.get(Listing, listing_id).cluster_id,
-            category_suggestion="Jackets",
-            title="Comp",
+            category_suggestion="Sneakers",
+            title="Nike Air Max running sneakers",
             listing_price=70,
             sale_price=sale,
             purchase_cost=25,
@@ -87,16 +86,14 @@ def test_pricing_recommendation_accuracy_signal():
 
     assert rec["recommended_price"] > 0
     assert rec["confidence"] >= 0.8
-    db.close()
 
 
-def test_prediction_sanity():
-    listing_id, _ = seed_listing()
-    db = SessionLocal()
+def test_prediction_sanity(db_session):
+    listing_id, _ = seed_listing(db_session)
+    db = db_session
 
     pred = PredictionService().predict_sell_through(db, listing_id)
 
     assert 0 <= pred["probability_sale_7d"] <= 1
     assert 0 <= pred["probability_sale_30d"] <= 1
     assert pred["probability_sale_30d"] >= pred["probability_sale_7d"]
-    db.close()

@@ -1,25 +1,36 @@
 import Link from 'next/link';
+import { useRouter } from 'next/router';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
 
 import AppShell from '../../components/layout/AppShell';
+import { PageAside, PageBand, PageFrame, PageMain, PageSplit } from '../../components/layout/PageFrame';
+import ActionBar from '../../components/ui/action-bar';
 import Button from '../../components/ui/button';
+import CollapsiblePanel from '../../components/ui/collapsible-panel';
 import DataTable from '../../components/ui/data-table';
 import EmptyState from '../../components/ui/empty-state';
+import ErrorState from '../../components/ui/error-state';
+import LoadingSkeleton from '../../components/ui/loading-skeleton';
 import PageHeader from '../../components/ui/page-header';
-import SectionPanel from '../../components/ui/section-panel';
 import StatusPill from '../../components/ui/status-pill';
 import { useAuth } from '../../contexts/AuthContext';
 import useDashboardData from '../../hooks/useDashboardData';
 import {
+  autoBuildVineDrafts,
   createVineDrafts,
   createVineInventory,
   fetchVineBatch,
   fetchVineBatches,
   fetchVineMedia,
+  applyEbayLaunchRepair,
+  repairVineImages,
+  refreshVineDraftMetadata,
   toggleAutonomousMode,
+  updateCurrentUser,
   updateVineItem,
   uploadVineReport,
+  retryVineItemDiscovery,
 } from '../../lib/api';
 
 function formatDate(value) {
@@ -45,8 +56,28 @@ function buildSkippedCsv(items) {
   return rows.map((row) => row.map((value) => `"${String(value).replaceAll('"', '""')}"`).join(',')).join('\n');
 }
 
+function isDuplicateVineRow(item) {
+  return (item.parse_warnings_json || []).some((warning) => String(warning).toLowerCase().startsWith('duplicate of prior vine import row'));
+}
+
+// Older Vine batches recorded the created Listing FK in inventory_item_id
+// before listing_id became the canonical field.  Both fields point to the
+// same durable Listing; treating only listing_id as proof of creation made
+// already-created inventory appear as "Not created" in this table.
+function linkedListingId(item) {
+  return item?.listing_id || item?.inventory_item_id || null;
+}
+
+function getVineImageStatus(item) {
+  if (isDuplicateVineRow(item)) return 'duplicate';
+  if (item.media_status === 'cached' || item.media_status === 'fetched') return 'images';
+  if (!item.media_status || item.media_status === 'pending') return 'needs_images';
+  return String(item.media_status || 'pending');
+}
+
 export default function VineImportPage() {
-  const { user } = useAuth();
+  const router = useRouter();
+  const { user, refreshUser } = useAuth();
   const { autonomousConfig, reload } = useDashboardData(user?.id);
   const fileInputRef = useRef(null);
   const [uploading, setUploading] = useState(false);
@@ -54,42 +85,121 @@ export default function VineImportPage() {
   const [batches, setBatches] = useState([]);
   const [activeBatch, setActiveBatch] = useState(null);
   const [selectedIds, setSelectedIds] = useState([]);
-  const [allowDraftsWithoutMedia, setAllowDraftsWithoutMedia] = useState(false);
-  const [lastCreatedListingIds, setLastCreatedListingIds] = useState([]);
+  const [lastDraftListingIds, setLastDraftListingIds] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState('');
+  const [enforceSixMonthLock, setEnforceSixMonthLock] = useState(true);
+  const [draftProgress, setDraftProgress] = useState(null);
+  const [workflowStage, setWorkflowStage] = useState('');
+  const [filterMode, setFilterMode] = useState('all');
 
-  const canAccess = !!user?.can_access_vine_import;
+  const runAutoBuild = async (batchId, options = {}) => {
+    setBusyAction('auto-build');
+    try {
+      const result = await autoBuildVineDrafts(batchId, options);
+      const listingIds = Array.isArray(result?.listing_ids) ? result.listing_ids : [];
+      setLastDraftListingIds(listingIds);
+      setFilterMode('new');
+      await loadBatches(batchId);
+      const created = Number(result?.draft_result?.created || 0);
+      const updated = Number(result?.draft_result?.updated || 0);
+      const skipped = Number(result?.draft_result?.skipped || 0);
+      const duplicates = Number(result?.duplicates_skipped || 0);
+      const bridgeRefetched = Number(result?.repair_result?.bridge_refetched || 0);
+      const bridgeFailed = Number(result?.repair_result?.bridge_failed || 0);
+      toast.success(
+        `Auto-build finished (${created} created, ${updated} updated, ${skipped} skipped, ${duplicates} duplicates ignored, ${bridgeRefetched} image repairs, ${bridgeFailed} image gaps).`,
+      );
+      return result;
+    } catch (error) {
+      toast.error(error.message || 'Auto-build failed.');
+      throw error;
+    } finally {
+      setBusyAction('');
+    }
+  };
+
+  const waitForAutoBuild = async (batchId) => {
+    // Upload owns the initial build (synchronously in development, durable
+    // worker in production). Poll its status instead of enqueueing a second
+    // build from the browser.
+    for (let attempt = 0; attempt < 180; attempt += 1) {
+      const history = await fetchVineBatches();
+      const batchStatus = (history || []).find((entry) => Number(entry.id) === Number(batchId));
+      const status = String(batchStatus?.stats_json?.auto_build_status || '').toLowerCase();
+      if (status === 'failed') {
+        throw new Error(batchStatus?.stats_json?.auto_build_error || 'Vine draft generation failed.');
+      }
+      if (status !== 'queued' && status !== 'processing') return fetchVineBatch(batchId);
+      setWorkflowStage(`Batch #${batchId} is building drafts (${status})…`);
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+    }
+    throw new Error('Vine draft generation is still running. The batch remains saved; refresh it to check progress.');
+  };
+
+  const canAccess = !!user?.can_access_vine_import && user?.profile_preferences?.vine_features_enabled !== false;
+
+  useEffect(() => {
+    setEnforceSixMonthLock(user?.vine_enforce_six_month_lock ?? true);
+  }, [user?.vine_enforce_six_month_lock]);
 
   const loadBatches = async (batchId = null) => {
     if (!canAccess) return;
-    const history = await fetchVineBatches();
-    setBatches(history || []);
-    const targetId = batchId || activeBatch?.id || history?.[0]?.id;
-    if (targetId) {
-      const details = await fetchVineBatch(targetId);
-      setActiveBatch(details);
-      setSelectedIds([]);
-    } else {
-      setActiveBatch(null);
+    setLoading(true);
+    setLoadError('');
+    try {
+      const history = await fetchVineBatches();
+      setBatches(history || []);
+      const targetId = batchId || activeBatch?.id || history?.[0]?.id;
+      if (targetId) {
+        const details = await fetchVineBatch(targetId);
+        setActiveBatch(details);
+        setSelectedIds([]);
+      } else {
+        setActiveBatch(null);
+      }
+    } catch (error) {
+      setLoadError(error.message || 'Failed to load Vine import history.');
+    } finally {
+      setLoading(false);
     }
   };
 
   useEffect(() => {
-    loadBatches().catch(() => undefined);
-  }, [canAccess]);
+    if (!router.isReady) return;
+    const requestedBatchId = Number.parseInt(String(router.query.batch || ''), 10);
+    loadBatches(Number.isFinite(requestedBatchId) ? requestedBatchId : null).catch(() => undefined);
+  }, [canAccess, router.isReady, router.query.batch]);
 
   const items = activeBatch?.items || [];
-  const selectedItems = useMemo(() => items.filter((item) => selectedIds.includes(item.id)), [items, selectedIds]);
-  const selectedHasAsinWithoutMedia = useMemo(
-    () =>
-      selectedItems.some(
-        (item) => item.asin && !['cached', 'fetched'].includes(String(item.media_status || '').toLowerCase()),
-      ),
-    [selectedItems],
-  );
+  const hasSelection = selectedIds.length > 0;
+  const duplicateCount = activeBatch?.stats_json?.rows_duplicate ?? items.filter(isDuplicateVineRow).length;
+  const newCount = activeBatch?.stats_json?.rows_new ?? Math.max((activeBatch?.parsed_count || items.length) - duplicateCount, 0);
+  const filteredItems = useMemo(() => {
+    const normalizedFilter = String(filterMode || 'all');
+    return items.filter((item) => {
+      if (normalizedFilter === 'all') return true;
+      if (normalizedFilter === 'new') return !isDuplicateVineRow(item);
+      if (normalizedFilter === 'eligible') return item.eligibility_status === 'eligible' && !isDuplicateVineRow(item);
+      if (normalizedFilter === 'locked') return String(item.eligibility_status || '').startsWith('locked_until_');
+      if (normalizedFilter === 'cancelled') return item.eligibility_status === 'cancelled';
+      if (normalizedFilter === 'duplicates') return isDuplicateVineRow(item);
+      if (normalizedFilter === 'drafts_created') return Boolean(linkedListingId(item));
+      if (normalizedFilter === 'not_created') return !linkedListingId(item);
+      if (normalizedFilter === 'needs_images') return getVineImageStatus(item) === 'needs_images';
+      return true;
+    });
+  }, [filterMode, items]);
+  const filteredSelection = useMemo(() => filteredItems.filter((item) => selectedIds.includes(item.id)), [filteredItems, selectedIds]);
+  const selectedFilteredIds = filteredSelection.map((item) => item.id);
 
   const toggleRow = (id) => {
     setSelectedIds((current) => (current.includes(id) ? current.filter((value) => value !== id) : [...current, id]));
   };
+
+  useEffect(() => {
+    setSelectedIds((current) => current.filter((id) => filteredItems.some((item) => item.id === id)));
+  }, [filteredItems]);
 
   const exportSkippedRows = () => {
     const csv = buildSkippedCsv(items);
@@ -124,13 +234,15 @@ export default function VineImportPage() {
       }}
     >
       <PageHeader
+        eyebrow="Imports"
+        breadcrumbs={[{ label: 'Imports' }, { label: 'Amazon Vine', active: true }]}
         title="Amazon Vine Import"
-        description="Import Amazon Vine itemized reports and create draft listings from eligible items."
+        description="Import Amazon Vine itemized reports and create robust draft listings, including rows marked locked/cancelled when needed."
         actions={
           <div className="flex gap-2">
-            <Link href="/inventory">
-              <Button variant="outline">Back to inventory</Button>
-            </Link>
+            <Button href="/inventory" variant="outline">
+              Back to inventory
+            </Button>
             <Button onClick={() => fileInputRef.current?.click()} disabled={uploading}>
               {uploading ? 'Uploading...' : 'Upload report'}
             </Button>
@@ -138,25 +250,82 @@ export default function VineImportPage() {
         }
       />
 
-      <SectionPanel title="Upload" description="Accepted formats: .xlsx preferred, .pdf supported with required preflight review.">
+      <PageFrame>
+      <PageSplit columnsClassName="xl:grid-cols-[minmax(0,1fr)_340px]">
+      <PageMain>
+      <CollapsiblePanel
+        title="Upload"
+        description="Accepted formats: .xlsx and .csv preferred, .pdf supported with required preflight review."
+        defaultOpen
+        badge={activeBatch ? `Batch #${activeBatch.id}` : 'No batch'}
+      >
+        <div className="mb-3 rounded-[12px] border border-[#e4e7ec] bg-[#f9fafb] px-4 py-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold text-[#101828]">6-month eligibility lock</p>
+              <p className="mt-1 text-xs text-[#667085]">
+                Keep this on to enforce lock windows. Turn it off to treat lock dates as informational only; rows still draft and keep their &quot;Eligible After&quot; date for reference.
+              </p>
+            </div>
+            <label className="inline-flex items-center gap-2 text-sm font-medium text-[#344054]">
+              <input
+                type="checkbox"
+                checked={!!enforceSixMonthLock}
+                onChange={async (event) => {
+                  const nextValue = event.target.checked;
+                  setEnforceSixMonthLock(nextValue);
+                  try {
+                    await updateCurrentUser({ vine_enforce_six_month_lock: nextValue });
+                    await refreshUser();
+                    toast.success(nextValue ? '6-month lock enforcement enabled.' : '6-month lock enforcement disabled.');
+                  } catch (error) {
+                    setEnforceSixMonthLock((user?.vine_enforce_six_month_lock ?? true));
+                    toast.error(error.message || 'Failed to update Vine lock preference.');
+                  }
+                }}
+              />
+              Enforce 6-month lock
+            </label>
+          </div>
+        </div>
         <div className="flex flex-wrap items-center gap-3 rounded-[12px] border border-dashed border-[#d0d5dd] bg-white px-4 py-5">
           <input
             ref={fileInputRef}
             type="file"
-            accept=".xlsx,.pdf"
+            accept=".xlsx,.csv,.pdf"
             className="hidden"
             onChange={async (event) => {
-              const file = event.target.files?.[0];
-              if (!file) return;
-              setUploading(true);
-              try {
-                const batch = await uploadVineReport(file);
-                setActiveBatch(batch);
-                setSelectedIds([]);
+      const file = event.target.files?.[0];
+      if (!file) return;
+      setUploading(true);
+      setWorkflowStage('Uploading and parsing the Vine report…');
+      try {
+        const batch = await uploadVineReport(file);
+        setWorkflowStage(`Batch #${batch.id} created. Waiting for its automatic draft build…`);
+        setActiveBatch(batch);
+        setSelectedIds([]);
+        const duplicateRows = Number(batch?.stats_json?.rows_duplicate || 0);
+        const newRows = Number(batch?.stats_json?.rows_new || 0);
+                toast.success(
+                  duplicateRows
+                ? `Vine report parsed (${newRows} new, ${duplicateRows} duplicate row${duplicateRows === 1 ? '' : 's'} ignored).`
+                : 'Vine report parsed.',
+                );
+                setWorkflowStage(`Batch #${batch.id} uploaded. Waiting for draft generation…`);
+                const completedBatch = await waitForAutoBuild(batch.id);
+                setLastDraftListingIds((completedBatch?.items || []).map(linkedListingId).filter(Boolean));
+                setFilterMode('new');
                 await loadBatches(batch.id);
-                toast.success('Vine report parsed.');
+                setWorkflowStage(`Batch #${batch.id} ready for review.`);
               } catch (error) {
-                toast.error(error.message);
+                if (String(error.message || '').includes('Vine draft generation is still running')) {
+                  await loadBatches(batch?.id || null);
+                  setWorkflowStage(`Batch #${batch?.id} is saved and still building drafts. You can leave this page; check Draft build in Import History for progress.`);
+                  toast('The import is saved. Draft creation is continuing in the background.');
+                } else {
+                  toast.error(error.message);
+                  setWorkflowStage(`Vine import failed: ${error.message || 'unknown error'}`);
+                }
               } finally {
                 setUploading(false);
                 event.target.value = '';
@@ -165,12 +334,40 @@ export default function VineImportPage() {
           />
           <div>
             <p className="text-sm font-medium text-[#101828]">Upload Amazon Vine itemized report</p>
-            <p className="mt-1 text-sm text-[#667085]">Use XLSX when possible. PDF imports stay in manual-review mode until you verify the parse.</p>
+            <p className="mt-1 text-sm text-[#667085]">Use XLSX or CSV when possible. PDF imports stay in manual-review mode until you verify the parse.</p>
+            {workflowStage ? <p className="mt-2 text-sm font-medium text-[#2563eb]">{workflowStage}</p> : null}
+          </div>
+          <div className="ml-auto">
+            <StatusPill status={uploading || busyAction ? 'info' : 'default'} label={uploading ? 'Uploading' : busyAction ? 'Working' : 'Idle'} />
           </div>
         </div>
-      </SectionPanel>
+      </CollapsiblePanel>
+      {loadError ? <ErrorState title="Could not load Vine imports" description={loadError} action={<Button variant="outline" onClick={() => loadBatches(activeBatch?.id || null)}>Retry</Button>} /> : null}
+      {loading ? <LoadingSkeleton lines={4} className="mb-4" /> : null}
 
-      <SectionPanel title="Import History" description="Recent private Vine imports for this account.">
+      </PageMain>
+
+      <PageAside>
+      <PageBand className="space-y-3">
+        <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--pp-shell-soft-copy)]">Batch context</p>
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
+          <div className="rounded-[16px] border border-[var(--pp-border)] bg-white p-4">
+            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--pp-shell-soft-copy)]">Active batch</p>
+            <p className="mt-2 text-sm font-semibold text-[var(--pp-text)]">{activeBatch ? `Batch #${activeBatch.id}` : 'No batch selected'}</p>
+            <p className="mt-1 text-sm text-[var(--pp-muted)]">{activeBatch?.filename || 'Upload or open a batch to continue.'}</p>
+          </div>
+          <div className="rounded-[16px] border border-[var(--pp-border)] bg-white p-4">
+            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--pp-shell-soft-copy)]">Review scope</p>
+            <p className="mt-2 text-sm font-semibold text-[var(--pp-text)]">{String(filterMode || 'all').replaceAll('_', ' ')}</p>
+            <p className="mt-1 text-sm text-[var(--pp-muted)]">{filteredItems.length} visible row{filteredItems.length === 1 ? '' : 's'} in the current filter.</p>
+          </div>
+        </div>
+      </PageBand>
+
+      <CollapsiblePanel title="Import History" description="Recent private Vine imports for this account." defaultOpen={false} badge={`${batches.length} batches`}>
+        <div className="mb-3 flex justify-end">
+          <Button size="sm" variant="outline" disabled={loading} onClick={() => loadBatches(activeBatch?.id || null)}>Refresh import history</Button>
+        </div>
         <DataTable
           columns={[
             { key: 'filename', label: 'Filename' },
@@ -180,6 +377,16 @@ export default function VineImportPage() {
             { key: 'locked', label: 'Locked', render: (row) => row.locked_count },
             { key: 'cancelled', label: 'Cancelled', render: (row) => row.cancelled_count },
             { key: 'drafts', label: 'Drafts created', render: (row) => row.drafts_created_count || 0 },
+            {
+              key: 'draft_build',
+              label: 'Draft build',
+              render: (row) => {
+                const state = String(row.stats_json?.auto_build_status || 'not_started').replaceAll('_', ' ');
+                const error = row.stats_json?.auto_build_error;
+                const tone = state === 'complete' ? 'success' : state === 'failed' ? 'error' : ['queued', 'processing'].includes(state) ? 'info' : 'default';
+                return <div><StatusPill status={tone} label={state} />{error ? <p className="mt-1 max-w-[220px] text-xs text-red-700">{error}</p> : null}</div>;
+              },
+            },
             { key: 'status', label: 'Status', render: (row) => <StatusPill status={row.status} label={row.status} /> },
             {
               key: 'open',
@@ -195,40 +402,90 @@ export default function VineImportPage() {
           rowKey={(row) => row.id}
           emptyState={<EmptyState title="No imports yet" description="Upload your first Vine report to begin the preflight review." className="border-0 p-0 py-6" />}
         />
-      </SectionPanel>
+      </CollapsiblePanel>
+      </PageAside>
+      </PageSplit>
+      </PageFrame>
 
-      <SectionPanel title="Preflight Review" description="Review parsed rows before creating inventory or drafts. Cancelled, locked, restricted, and low-confidence rows stay gated.">
+      <CollapsiblePanel
+        title="Preflight Review"
+        description="Review parsed rows before creating inventory or drafts. For this workflow, locked/cancelled rows can still be drafted so nothing gets stranded."
+        defaultOpen
+        badge={activeBatch ? `${filteredItems.length} visible` : 'No active batch'}
+      >
         {activeBatch ? (
           <>
+            {!enforceSixMonthLock ? (
+              <div className="mb-3 rounded-[10px] border border-[#fec84b] bg-[#fffaeb] px-3 py-2 text-xs text-[#7a2e0e]">
+                Lock enforcement is currently off for your account. Lock dates are recorded for reference only; rows still flow into drafts while keeping their <strong>Eligible After</strong> date visible.
+              </div>
+            ) : null}
             <div className="mb-4 flex flex-wrap items-center gap-2">
-              <StatusPill status="default" label={`${activeBatch.parsed_count} parsed`} />
-              <StatusPill status="success" label={`${activeBatch.eligible_count} eligible`} />
-              <StatusPill status="warning" label={`${activeBatch.locked_count} locked`} />
-              <StatusPill status="danger" label={`${activeBatch.cancelled_count} cancelled`} />
+              <Button size="sm" variant={filterMode === 'all' ? 'default' : 'outline'} onClick={() => setFilterMode('all')}>
+                All ({items.length})
+              </Button>
+              <Button size="sm" variant={filterMode === 'new' ? 'default' : 'outline'} onClick={() => setFilterMode('new')}>
+                New ({newCount})
+              </Button>
+              <Button size="sm" variant={filterMode === 'eligible' ? 'default' : 'outline'} onClick={() => setFilterMode('eligible')}>
+                Eligible ({activeBatch.eligible_count})
+              </Button>
+              {enforceSixMonthLock ? (
+                <Button size="sm" variant={filterMode === 'locked' ? 'default' : 'outline'} onClick={() => setFilterMode('locked')}>
+                  Locked ({activeBatch.locked_count})
+                </Button>
+              ) : null}
+              <Button size="sm" variant={filterMode === 'cancelled' ? 'default' : 'outline'} onClick={() => setFilterMode('cancelled')}>
+                Cancelled ({activeBatch.cancelled_count})
+              </Button>
+              <Button size="sm" variant={filterMode === 'duplicates' ? 'default' : 'outline'} onClick={() => setFilterMode('duplicates')}>
+                Duplicates ignored ({duplicateCount})
+              </Button>
+              <Button size="sm" variant={filterMode === 'drafts_created' ? 'default' : 'outline'} onClick={() => setFilterMode('drafts_created')}>
+                Drafts created ({items.filter((item) => linkedListingId(item)).length})
+              </Button>
+              <Button size="sm" variant={filterMode === 'needs_images' ? 'default' : 'outline'} onClick={() => setFilterMode('needs_images')}>
+                Needs images ({items.filter((item) => getVineImageStatus(item) === 'needs_images').length})
+              </Button>
               {activeBatch.source_type === 'pdf' ? <StatusPill status="warning" label="PDF requires review" /> : null}
             </div>
+            <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-[#667085]">
+              <span className="font-medium text-[#344054]">Showing {filteredItems.length} of {items.length} rows</span>
+              {filterMode !== 'all' ? (
+                <Button size="sm" variant="ghost" onClick={() => setFilterMode('all')}>
+                  Clear filter
+                </Button>
+              ) : null}
+            </div>
 
-            {selectedIds.length ? (
-              <div className="mb-4 flex flex-wrap items-center gap-2 rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-3">
+            <div className="mb-4 flex flex-wrap items-center gap-2 rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-3">
                 <span className="text-sm font-medium text-[#101828]">{selectedIds.length} selected</span>
-                <label className="flex items-center gap-2 text-sm text-[#475467]">
-                  <input
-                    type="checkbox"
-                    checked={allowDraftsWithoutMedia}
-                    onChange={(event) => setAllowDraftsWithoutMedia(event.target.checked)}
-                  />
-                  Allow drafts without photos
-                </label>
+                <Button size="sm" variant="outline" onClick={() => setSelectedIds(filteredItems.map((item) => item.id))} disabled={!filteredItems.length}>
+                  Select all
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => setSelectedIds([])} disabled={!hasSelection}>
+                  Clear
+                </Button>
                 <Button
                   size="sm"
                   variant="outline"
-                  disabled={!!busyAction}
+                  disabled={!!busyAction || !selectedFilteredIds.length}
                   onClick={async () => {
                     setBusyAction('media');
                     try {
-                      await fetchVineMedia(activeBatch.id, selectedIds);
+                      const result = await fetchVineMedia(activeBatch.id, selectedFilteredIds);
                       await loadBatches(activeBatch.id);
-                      toast.success('Image lookup finished.');
+                      const fetched = Number(result?.fetched || 0);
+                      const blocked = Number(result?.blocked || 0);
+                      if (fetched && !blocked) {
+                        toast.success(`Image lookup finished (${fetched} fetched).`);
+                      } else if (fetched && blocked) {
+                        toast.success(`Image lookup finished (${fetched} fetched, ${blocked} blocked).`);
+                      } else if (blocked) {
+                        toast.error(`Image lookup blocked for ${blocked} item(s). Check the Amazon ASIN, manual URL, or bridge/session availability, then retry.`);
+                      } else {
+                        toast.success('Image lookup finished.');
+                      }
                     } catch (error) {
                       toast.error(error.message);
                     } finally {
@@ -241,11 +498,125 @@ export default function VineImportPage() {
                 <Button
                   size="sm"
                   variant="outline"
-                  disabled={!!busyAction}
+                  disabled={!!busyAction || !selectedFilteredIds.length}
+                  onClick={async () => {
+                    setBusyAction('repair-images');
+                    try {
+                      const result = await repairVineImages(activeBatch.id, selectedFilteredIds);
+                      await loadBatches(activeBatch.id);
+                      const updated = Number(result?.updated || 0);
+                      const removedUnsafe = Number(result?.removed_unsafe || 0);
+                      toast.success(
+                        removedUnsafe || updated
+                          ? `Image repair finished (${updated} listings refreshed, ${removedUnsafe} unsafe image(s) removed).`
+                          : 'Image repair finished.',
+                      );
+                    } catch (error) {
+                      toast.error(error.message);
+                    } finally {
+                      setBusyAction('');
+                    }
+                  }}
+                >
+                  Repair Amazon images
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!!busyAction || !activeBatch}
+                  onClick={async () => {
+                    setBusyAction('refresh-metadata');
+                    try {
+                      const result = await refreshVineDraftMetadata(activeBatch.id);
+                      await loadBatches(activeBatch.id);
+                      toast.success(
+                        `Draft metadata refreshed: ${Number(result?.updated || 0)} updated, ${Number(result?.missing_facts || 0)} missing-fact row(s).`,
+                      );
+                    } catch (error) {
+                      toast.error(error.message);
+                    } finally {
+                      setBusyAction('');
+                    }
+                  }}
+                >
+                  Refresh categories & condition
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!!busyAction || !selectedFilteredIds.length}
+                  onClick={async () => {
+                    setBusyAction('repair-ebay');
+                    try {
+                      const results = await Promise.all(
+                        filteredSelection.map((item) =>
+                          applyEbayLaunchRepair(item.id, { apply_category_suggestion: true, validate_images: true }),
+                        ),
+                      );
+                      const applied = results.filter(Boolean).length;
+                      await loadBatches(activeBatch.id);
+                      toast.success(`Applied safe eBay repairs to ${applied} row${applied === 1 ? '' : 's'}.`);
+                    } catch (error) {
+                      toast.error(error.message);
+                    } finally {
+                      setBusyAction('');
+                    }
+                  }}
+                >
+                  Apply safe eBay repairs
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!!busyAction || !selectedFilteredIds.length}
+                  onClick={async () => {
+                    const manualUrl = window.prompt('Paste Amazon product URL to use for selected rows');
+                    if (!manualUrl) return;
+                    setBusyAction('manual-url');
+                    try {
+                      await Promise.all(
+                        filteredSelection.map((item) =>
+                          updateVineItem(item.id, { manual_amazon_url: manualUrl.trim() }).then(() => retryVineItemDiscovery(item.id)),
+                        ),
+                      );
+                      await loadBatches(activeBatch.id);
+                      toast.success('Manual Amazon URL saved and discovery retried.');
+                    } catch (error) {
+                      toast.error(error.message);
+                    } finally {
+                      setBusyAction('');
+                    }
+                  }}
+                >
+                  Set manual Amazon URL + retry
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!!busyAction || !selectedFilteredIds.length}
+                  onClick={async () => {
+                    setBusyAction('retry-discovery');
+                    try {
+                      await Promise.all(filteredSelection.map((item) => retryVineItemDiscovery(item.id)));
+                      await loadBatches(activeBatch.id);
+                      toast.success('Discovery retried for selected rows.');
+                    } catch (error) {
+                      toast.error(error.message);
+                    } finally {
+                      setBusyAction('');
+                    }
+                  }}
+                >
+                  Retry match/image discovery
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!!busyAction || !selectedFilteredIds.length}
                   onClick={async () => {
                     setBusyAction('inventory');
                     try {
-                      await createVineInventory(activeBatch.id, selectedIds, true);
+                      await createVineInventory(activeBatch.id, selectedFilteredIds, true, true);
                       await loadBatches(activeBatch.id);
                       toast.success('Inventory records created.');
                     } catch (error) {
@@ -259,51 +630,64 @@ export default function VineImportPage() {
                 </Button>
                 <Button
                   size="sm"
-                  variant="secondary"
-                  disabled={!!busyAction}
+                  variant="outline"
+                  disabled={!!busyAction || !activeBatch}
                   onClick={async () => {
-                    setBusyAction('drafts');
-                    try {
-                      const result = await createVineDrafts(activeBatch.id, selectedIds, {
-                        fetchMediaFirst: true,
-                        requireMediaForAsin: true,
-                        allowDraftsWithoutMedia,
-                      });
-                      await loadBatches(activeBatch.id);
-                      setLastCreatedListingIds(result?.created_listing_ids || []);
-                      toast.success('Listing drafts created.');
-                    } catch (error) {
-                      toast.error(error.message);
-                    } finally {
-                      setBusyAction('');
-                    }
+                    if (!activeBatch) return;
+                    await runAutoBuild(activeBatch.id, { newOnly: true, includeCancelled: true });
                   }}
                 >
-                  Fetch images + generate drafts
+                  Auto-build new drafts
                 </Button>
                 <Button
                   size="sm"
-                  variant="outline"
-                  disabled={!!busyAction || (selectedHasAsinWithoutMedia && !allowDraftsWithoutMedia)}
+                  disabled={!!busyAction || !selectedFilteredIds.length}
                   onClick={async () => {
-                    setBusyAction('drafts-no-media');
+                    setBusyAction('drafts');
                     try {
-                      const result = await createVineDrafts(activeBatch.id, selectedIds, {
-                        fetchMediaFirst: false,
-                        requireMediaForAsin: false,
-                        allowDraftsWithoutMedia: true,
-                      });
+                      const chunkSize = 5;
+                      const chunks = [];
+                      for (let index = 0; index < selectedFilteredIds.length; index += chunkSize) {
+                        chunks.push(selectedFilteredIds.slice(index, index + chunkSize));
+                      }
+
+                      let totalCreated = 0;
+                      let totalUpdated = 0;
+                      let totalSkipped = 0;
+                      let combinedListingIds = [];
+
+                      for (let index = 0; index < chunks.length; index += 1) {
+                        const chunk = chunks[index];
+                        setDraftProgress({ current: index + 1, total: chunks.length });
+                        const result = await createVineDrafts(activeBatch.id, chunk, {
+                          fetchMediaFirst: false,
+                          requireMediaForAsin: false,
+                          allowDraftsWithoutMedia: true,
+                          includeCancelled: true,
+                        });
+                        totalCreated += Number(result?.created || 0);
+                        totalUpdated += Number(result?.updated || 0);
+                        totalSkipped += Number(result?.skipped || 0);
+                        const listingIds = result?.listing_ids || result?.created_listing_ids || [];
+                        if (Array.isArray(listingIds) && listingIds.length) {
+                          combinedListingIds = [...combinedListingIds, ...listingIds];
+                        }
+                      }
+
+                      setLastDraftListingIds(combinedListingIds);
                       await loadBatches(activeBatch.id);
-                      setLastCreatedListingIds(result?.created_listing_ids || []);
-                      toast.success('Listing drafts created (no image fetch).');
+                      toast.success(`Listing drafts ready (${totalCreated} created, ${totalUpdated} updated, ${totalSkipped} skipped).`);
                     } catch (error) {
                       toast.error(error.message);
                     } finally {
+                      setDraftProgress(null);
                       setBusyAction('');
                     }
                   }}
                 >
-                  Generate drafts (no image fetch)
+                  {busyAction === 'drafts' && draftProgress
+                    ? `Generating drafts ${draftProgress.current}/${draftProgress.total}...`
+                    : 'Fetch images + generate drafts'}
                 </Button>
                 <Button size="sm" variant="outline" onClick={exportSkippedRows}>
                   Export skipped/error rows
@@ -311,11 +695,11 @@ export default function VineImportPage() {
                 <Button
                   size="sm"
                   variant="outline"
-                  disabled={!!busyAction}
+                  disabled={!!busyAction || !hasSelection}
                   onClick={async () => {
                     setBusyAction('reviewed');
                     try {
-                      await Promise.all(selectedItems.map((item) => updateVineItem(item.id, { reviewed: true })));
+                      await Promise.all(filteredSelection.map((item) => updateVineItem(item.id, { reviewed: true })));
                       await loadBatches(activeBatch.id);
                       toast.success('Marked as reviewed.');
                     } catch (error) {
@@ -327,31 +711,32 @@ export default function VineImportPage() {
                 >
                   Mark as reviewed
                 </Button>
-                <Link href="/listings">
-                  <Button size="sm" variant="outline">Open created drafts</Button>
-                </Link>
-                {lastCreatedListingIds.length ? (
-                  <div className="w-full text-sm text-[#475467]">
-                    Created drafts:{' '}
-                    {lastCreatedListingIds.slice(0, 6).map((id, index) => (
-                      <span key={id}>
-                        {index ? ', ' : ''}
-                        <Link href={`/listings/${id}`} className="text-[#2563eb] underline">
-                          #{id}
-                        </Link>
-                      </span>
+                {lastDraftListingIds.length ? (
+                  <>
+                    {lastDraftListingIds.slice(0, 6).map((listingId) => (
+                      <Button key={listingId} href={`/listings/${listingId}`} size="sm" variant="outline">
+                        Open draft #{listingId}
+                      </Button>
                     ))}
-                    {lastCreatedListingIds.length > 6 ? ` (+${lastCreatedListingIds.length - 6} more)` : null}
-                  </div>
-                ) : null}
+                    <Button href="/listings" size="sm" variant="outline">
+                      Open all listings
+                    </Button>
+                  </>
+                ) : (
+                  <Button href="/listings" size="sm" variant="outline">
+                    Open listings
+                  </Button>
+                )}
               </div>
-            ) : null}
 
             <DataTable
               columns={[
                 { key: 'status', label: 'Status', render: (item) => <StatusPill status={item.eligibility_status.includes('locked') ? 'warning' : item.eligibility_status} label={item.eligibility_status.replace('locked_until_', 'Locked until ')} /> },
+                { key: 'import_state', label: 'Import State', render: (item) => isDuplicateVineRow(item) ? <StatusPill status="default" label="Duplicate" /> : <StatusPill status="success" label="New" /> },
                 { key: 'product_name', label: 'Product Name', cellClassName: 'min-w-[240px]', render: (item) => <div><p className="font-medium text-[#101828]">{item.product_name || 'Untitled item'}</p>{item.restricted_review_required ? <p className="mt-1 text-xs text-[#b42318]">{(item.restricted_reasons || []).join(', ')}</p> : null}</div> },
                 { key: 'asin', label: 'ASIN' },
+                { key: 'brand', label: 'Brand' },
+                { key: 'category', label: 'Category' },
                 { key: 'order_number', label: 'Order Number' },
                 { key: 'order_type', label: 'Order Type' },
                 { key: 'order_date', label: 'Order Date', render: (item) => formatDate(item.order_date) },
@@ -359,38 +744,24 @@ export default function VineImportPage() {
                 { key: 'cancelled_date', label: 'Cancelled Date', render: (item) => formatDate(item.cancelled_date) },
                 { key: 'estimated_tax_value', label: 'Estimated Tax Value', render: (item) => item.estimated_tax_value == null ? '—' : `$${Number(item.estimated_tax_value).toFixed(2)}` },
                 { key: 'eligible_after', label: 'Eligible After', render: (item) => formatDate(item.eligible_after) },
+                { key: 'match_status', label: 'Amazon Match', render: (item) => <StatusPill status={item.amazon_match_status || 'default'} label={item.amazon_match_status || 'pending'} /> },
                 { key: 'image_status', label: 'Image Status', render: (item) => <StatusPill status={item.media_status || 'default'} label={item.media_status || 'pending'} /> },
-                {
-                  key: 'draft_status',
-                  label: 'Draft',
-                  render: (item) =>
-                    item.listing_id ? (
-                      <div className="flex items-center gap-2">
-                        <StatusPill status="success" label="Created" />
-                        <Link href={`/listings/${item.listing_id}`}>
-                          <Button size="sm" variant="outline">
-                            Open
-                          </Button>
-                        </Link>
-                      </div>
-                    ) : (
-                      <StatusPill status="default" label="Not created" />
-                    ),
-                },
+                { key: 'draft_status', label: 'Draft Status', render: (item) => linkedListingId(item) ? <StatusPill status="success" label="Created" /> : <StatusPill status="default" label="Not created" /> },
+                { key: 'manual_amazon_url', label: 'Manual URL', render: (item) => item.manual_amazon_url ? 'Set' : '—' },
               ]}
-              rows={items}
+              rows={filteredItems}
               rowKey={(row) => row.id}
               selectedRows={selectedIds}
               onToggleRow={toggleRow}
-              allSelected={items.length > 0 && selectedIds.length === items.length}
-              onToggleAll={() => setSelectedIds(selectedIds.length === items.length ? [] : items.map((item) => item.id))}
+              allSelected={filteredItems.length > 0 && selectedIds.length === filteredItems.length}
+              onToggleAll={() => setSelectedIds(selectedIds.length === filteredItems.length ? [] : filteredItems.map((item) => item.id))}
               emptyState={<EmptyState title="No parsed rows" description="Upload a Vine report to populate the preflight review table." className="border-0 p-0 py-6" />}
             />
           </>
         ) : (
           <EmptyState title="No active batch" description="Select an import from history or upload a new report to review parsed Vine rows." className="border-0 p-0 py-6" />
         )}
-      </SectionPanel>
+      </CollapsiblePanel>
     </AppShell>
   );
 }

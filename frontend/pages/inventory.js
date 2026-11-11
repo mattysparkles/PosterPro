@@ -5,6 +5,7 @@ import toast from 'react-hot-toast';
 import { useRouter } from 'next/router';
 
 import AppShell from '../components/layout/AppShell';
+import ActionBar from '../components/ui/action-bar';
 import PhotoEditorModal from '../components/PhotoEditorModal';
 import Button from '../components/ui/button';
 import DataTable from '../components/ui/data-table';
@@ -12,6 +13,7 @@ import DataTableRowAction from '../components/ui/data-table-row-action';
 import EmptyState from '../components/ui/empty-state';
 import { Tabs } from '../components/ui/tabs';
 import Input from '../components/ui/input';
+import Select from '../components/ui/select';
 import MetricCard from '../components/ui/metric-card';
 import PageHeader from '../components/ui/page-header';
 import SectionPanel from '../components/ui/section-panel';
@@ -19,12 +21,14 @@ import StatusPill from '../components/ui/status-pill';
 import Toolbar from '../components/ui/toolbar';
 import { useAuth } from '../contexts/AuthContext';
 import useDashboardData from '../hooks/useDashboardData';
-import { fetchInventory, processListingPhoto, runInventoryBulkJob, toggleAutonomousMode, toPublicImageUrl } from '../lib/api';
+import { fetchInventory, fetchInventorySummary, processListingPhoto, runInventoryBulkJob, toggleAutonomousMode, toPublicImageUrl } from '../lib/api';
 
 const INVENTORY_TABS = [
-  { value: 'intake', label: 'Intake' },
   { value: 'active', label: 'Active' },
+  { value: 'intake', label: 'Intake' },
   { value: 'sold', label: 'Sold' },
+  { value: 'stale', label: 'Stale' },
+  { value: 'multi', label: 'Multi-quantity' },
   { value: 'batches', label: 'Batches' },
 ];
 
@@ -46,13 +50,26 @@ function getBatchLabel(item, storageBatches) {
   return batch?.name || (item.batch_id ? `Batch ${item.batch_id}` : 'Unassigned');
 }
 
+function inferIsStale(item) {
+  if (typeof item?.is_stale === 'boolean') return item.is_stale;
+  const latest = item?.last_synced_at || item?.updated_at || item?.listed_at || item?.created_at;
+  if (!latest) return false;
+  const ts = new Date(latest).getTime();
+  if (Number.isNaN(ts)) return false;
+  const ageDays = (Date.now() - ts) / (1000 * 60 * 60 * 24);
+  return ageDays >= 30;
+}
+
 export default function InventoryPage() {
   const { user } = useAuth();
+  const vineFeaturesEnabled = !!user?.can_access_vine_import && user?.profile_preferences?.vine_features_enabled !== false;
   const router = useRouter();
   const { autonomousConfig, reload, storageBatches, clusters } = useDashboardData(user?.id);
   const [activeTab, setActiveTab] = useState('active');
   const [search, setSearch] = useState('');
   const [inventory, setInventory] = useState([]);
+  const [summary, setSummary] = useState(null);
+  const [summaryError, setSummaryError] = useState(false);
   const [selectedIds, setSelectedIds] = useState([]);
   const [filter, setFilter] = useState('all');
   const [isLoading, setIsLoading] = useState(false);
@@ -79,6 +96,17 @@ export default function InventoryPage() {
   }, [loadInventory]);
 
   useEffect(() => {
+    let active = true;
+    fetchInventorySummary().then((result) => {
+      if (active) { setSummary(result); setSummaryError(false); }
+    }).catch((error) => {
+      if (active) setSummaryError(true);
+      console.error('Unable to load inventory totals', error);
+    });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
     if (!router.isReady) return;
     const requestedTab = typeof router.query.tab === 'string' ? router.query.tab : 'active';
     if (INVENTORY_TABS.some((tab) => tab.value === requestedTab)) {
@@ -94,6 +122,8 @@ export default function InventoryPage() {
   };
 
   const filteredInventory = useMemo(() => {
+    if (activeTab === 'multi') return inventory.filter((item) => Number(item.quantity || 0) > 1);
+    if (activeTab === 'stale') return inventory.filter((item) => inferIsStale(item));
     if (activeTab === 'sold') return inventory.filter((item) => item.quantity <= 0);
     if (activeTab === 'intake') return inventory.filter((item) => item.status === 'ingested' || item.status === 'INGESTED');
     if (activeTab === 'active') {
@@ -104,12 +134,14 @@ export default function InventoryPage() {
 
   const tabCounts = useMemo(
     () => ({
-      intake: inventory.filter((item) => item.status === 'ingested' || item.status === 'INGESTED').length,
-      active: inventory.filter((item) => item.quantity > 0 && item.status !== 'archived' && item.status !== 'ingested' && item.status !== 'INGESTED').length,
-      sold: inventory.filter((item) => item.quantity <= 0).length,
+      intake: summary?.intake_listings ?? 0,
+      active: summary?.active_listings ?? 0,
+      sold: summary?.sold_listings ?? 0,
+      stale: summary?.stale_listings ?? 0,
+      multi: summary?.multi_quantity_listings ?? 0,
       batches: storageBatches.length || clusters.length,
     }),
-    [clusters.length, inventory, storageBatches.length],
+    [clusters.length, storageBatches.length, summary],
   );
 
   const toggleRow = (id) => {
@@ -144,12 +176,16 @@ export default function InventoryPage() {
       }));
   const inventoryMetrics = useMemo(
     () => [
-      { label: 'Intake rows', value: tabCounts.intake, detail: 'Photos and fresh items still early in the pipeline.' },
-      { label: 'Active inventory', value: tabCounts.active, detail: 'Current unsold listings and tracked items.' },
-      { label: 'Sold items', value: tabCounts.sold, detail: 'Inventory rows already marked sold or depleted.' },
-      { label: 'Batches', value: tabCounts.batches, detail: 'Batch containers or grouped clusters in the system.' },
+      { label: 'Owned listings', value: summary?.all_listings ?? (summaryError ? 'Unavailable' : 'Loading…'), detail: 'All listing records owned by this account, across statuses and archive state.' },
+      { label: 'Active / unsold listings', value: summary?.active_listings ?? (summaryError ? 'Unavailable' : 'Loading…'), detail: 'Not archived, no recorded sale, and quantity greater than zero.' },
+      { label: 'Draft listings', value: summary?.draft_listings ?? (summaryError ? 'Unavailable' : 'Loading…'), detail: 'Listings whose saved workflow status is Draft.' },
+      { label: 'Published placements', value: summary?.published_marketplace_placements ?? (summaryError ? 'Unavailable' : 'Loading…'), detail: 'Marketplace destination records with a published/updated status and a remote listing ID. One product can count more than once.' },
+      { label: 'Sold listings', value: summary?.sold_listings ?? (summaryError ? 'Unavailable' : 'Loading…'), detail: 'Listings with a sale timestamp or zero/negative available quantity.' },
+      { label: 'Archived listings', value: summary?.archived_listings ?? (summaryError ? 'Unavailable' : 'Loading…'), detail: 'Listing rows explicitly marked archived.' },
+      { label: 'Canonical inventory items', value: summary?.canonical_inventory_items ?? (summaryError ? 'Unavailable' : 'Loading…'), detail: 'Distinct canonical item identities. These are not marketplace placements.' },
+      { label: 'Physical stock records', value: summary?.physical_stock_records ?? (summaryError ? 'Unavailable' : 'Loading…'), detail: `${summary?.physical_stock_products ?? '—'} tracked product records; ${summary?.physical_units_on_hand ?? '—'} units on hand. This separate stock workflow does not represent all listings.` },
     ],
-    [tabCounts],
+    [summary],
   );
 
   const inventorySubnav = useMemo(
@@ -204,15 +240,13 @@ export default function InventoryPage() {
         title="Inventory"
         description="Track intake, active inventory, sold items, and batches."
         actions={
-          user?.can_access_vine_import ? (
-            <Link href="/imports/vine">
-              <Button>Import Vine report</Button>
-            </Link>
+          vineFeaturesEnabled ? (
+            <Button href="/imports/vine">Import Vine report</Button>
           ) : null
         }
       />
 
-      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+      <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {inventoryMetrics.map((card) => (
           <MetricCard key={card.label} label={card.label} value={card.value} detail={card.detail} />
         ))}
@@ -262,18 +296,17 @@ export default function InventoryPage() {
               />
             </div>
             <div className="relative w-full sm:w-[220px]">
-              <select
+              <Select
                 value={filter}
                 onChange={(event) => setFilter(event.target.value)}
-                className="pp-input h-10 w-full appearance-none rounded-[10px] border border-[#e5e7eb] bg-white px-3 pr-10 text-sm text-[#101828] outline-none focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/12"
+                className="h-10 w-full rounded-xl sm:w-[220px]"
               >
                 {FILTER_OPTIONS.map((option) => (
                   <option key={option.value} value={option.value}>
                     {option.label}
                   </option>
                 ))}
-              </select>
-              <ChevronDown size={16} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[#98a2b3]" />
+              </Select>
             </div>
             <Button variant="outline" onClick={loadInventory}>
               <RefreshCcw size={16} />
@@ -285,31 +318,33 @@ export default function InventoryPage() {
       />
 
       <Tabs
-        items={INVENTORY_TABS.map((tab) => ({ ...tab, count: tabCounts[tab.value] || 0 }))}
+        items={INVENTORY_TABS.map((tab) => ({ ...tab, count: summary ? (tabCounts[tab.value] || 0) : (summaryError ? '—' : '…') }))}
         value={activeTab}
         onChange={selectTab}
       />
 
       {selectedIds.length && activeTab !== 'batches' ? (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-[12px] border border-[#e5e7eb] bg-white px-4 py-3">
-          <p className="text-sm font-medium text-[#101828]">{selectedIds.length} selected</p>
-          <div className="flex flex-wrap gap-2">
-            <Button variant="outline" size="sm" onClick={() => setSelectedIds([])}>
-              Clear
-            </Button>
-            <Button variant="outline" size="sm" onClick={() => runBulkAction('label')}>
-              <Tag size={14} />
-              Label
-            </Button>
-            <Button variant="outline" size="sm" onClick={() => runBulkAction('delist')}>
-              <Trash2 size={14} />
-              Delist
-            </Button>
-            <Button size="sm" onClick={() => runBulkAction('mark_sold')}>
-              Mark sold
-            </Button>
-          </div>
-        </div>
+        <ActionBar
+          left={<p className="text-sm font-medium text-[#101828]">{selectedIds.length} selected</p>}
+          right={
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" size="sm" onClick={() => setSelectedIds([])}>
+                Clear
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => runBulkAction('label')}>
+                <Tag size={14} />
+                Label
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => runBulkAction('delist')}>
+                <Trash2 size={14} />
+                Delist
+              </Button>
+              <Button size="sm" onClick={() => runBulkAction('mark_sold')}>
+                Mark sold
+              </Button>
+            </div>
+          }
+        />
       ) : null}
 
       <div id="inventory-table">
@@ -347,6 +382,7 @@ export default function InventoryPage() {
               ),
             },
             { key: 'photos', label: 'Photos', render: (item) => item.image_urls?.length || 0 },
+            { key: 'quantity', label: 'Qty', render: (item) => Number(item.quantity || 0) },
             {
               key: 'status',
               label: 'Status',
@@ -355,6 +391,7 @@ export default function InventoryPage() {
                 return <StatusPill status={status.label.toLowerCase()} label={status.label} />;
               },
             },
+            { key: 'stale', label: 'Stale', render: (item) => <StatusPill status={inferIsStale(item) ? 'warning' : 'success'} label={inferIsStale(item) ? 'Stale' : 'Fresh'} /> },
             { key: 'batch', label: 'Batch', render: (item) => getBatchLabel(item, storageBatches) },
             { key: 'value', label: 'Value', render: (item) => `$${Number(item.price || item.suggested_price || 0).toFixed(0)}` },
             {

@@ -12,6 +12,7 @@ Input signals:
 PHOTO_EXTRACTION_TEMPLATES = {
     "generate_listing_intelligence": """
 You are a resale listing analyst building a marketplace draft from partial item signals.
+Your primary deliverable is professional, buyer-facing sales copy a capable human reseller would publish—not a short summary or a non-empty field.
 Return strict JSON with these keys:
 {
   "title": "...",
@@ -28,7 +29,13 @@ Return strict JSON with these keys:
 }
 Rules:
 - Keep the title under 80 characters and factual.
-- The description must be plain, concise, and resale-safe.
+- Write a substantive, product-specific description using the available verified facts. Give fact-rich products enough detail to sell them well; do not force a short summary. Simple products may be shorter when the evidence is genuinely limited.
+- Structure useful copy with a clear product-specific opening, benefit-oriented feature sections, scannable key details, condition/included-items information when verified, and a natural product-appropriate call to action.
+- Translate important features into reasonable buyer benefits without overstating them. Use natural buyer search terms derived from the verified brand, product type, model, fit, size, capacity, and features; never keyword-stuff.
+- When source_facts are provided, synthesize original buyer-facing copy from those structured values; never reproduce customer-facing source prose or a feature bullet verbatim, and do not dump raw bullets into the description.
+- Never mention PosterPro, AI, a listing-generation pipeline, a database, stored/source/verified facts, retrieved data, Amazon scraping, or how the information was obtained. State supported facts directly as product details.
+- Do not use generic wrappers such as "marketplace listing built from available details," "this product offers quality and convenience," or similar copy that could fit unrelated products.
+- Use only supported product identity, use, features, dimensions, materials, compatibility, and included components. Do not add generic filler or unsupported benefits.
 - Never invent authenticity, year, accessories, or working condition unless supported by the signals.
 - "missing_information" should list facts the operator still needs to confirm before publishing.
 - "photo_notes" should describe what appears incomplete or unclear from the provided signals.

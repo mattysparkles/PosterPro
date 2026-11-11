@@ -41,7 +41,18 @@ def review_vine_product(product_name: str | None) -> VinePolicyResult:
     reasons: list[str] = []
     category: str | None = None
 
+    battery_accessory_only = (
+        ("bms" in lowered or "battery management" in lowered)
+        and any(term in lowered for term in ("board", "controller", "protection"))
+        and not any(term in lowered for term in ("battery pack", "replacement battery", "power bank", "battery cells"))
+    )
+
     for reason, keywords in RESTRICTION_RULES.items():
+        # A battery-management/protection board shipped without battery cells
+        # is an electronic accessory, not itself a lithium battery/hazmat item.
+        # Keep the policy review for actual battery packs and cells.
+        if reason == "battery-hazmat" and battery_accessory_only:
+            continue
         if any(keyword in lowered for keyword in keywords):
             reasons.append(reason)
             category = category or CATEGORY_GUESSES.get(reason)

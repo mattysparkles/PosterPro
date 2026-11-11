@@ -1,6 +1,10 @@
 import asyncio
 import contextlib
 import logging
+import os
+import subprocess
+from datetime import datetime, UTC
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket
@@ -9,6 +13,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from sqlalchemy import inspect
+from sqlalchemy import select
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -17,24 +22,65 @@ from app.api.ebay import router as ebay_router
 from app.api.inventory import bulk_router as bulk_jobs_router
 from app.api.inventory import router as inventory_router
 from app.api.intelligence import router as intelligence_router
+from app.api.intake import router as intake_router
+from app.api.media import router as media_router
+from app.api.browser_extension import router as browser_extension_router
+from app.api.marketplace_extension import router as marketplace_extension_router
+from app.api.processing import router as processing_router
+from app.api.notifications import router as notifications_router
 from app.api.marketplaces import router as marketplaces_router
+from app.api.admin_diagnostics import router as admin_diagnostics_router
 from app.api.marketplace_jobs import router as marketplace_jobs_router
+from app.api.mercari_taxonomy import public_router as mercari_taxonomy_public_router, router as mercari_taxonomy_router
+from app.api.mercari_spreadsheet import router as mercari_spreadsheet_router
+from app.api.taxonomy_registry import router as taxonomy_registry_router
+from app.api.onboarding import router as onboarding_router
 from app.api.routes import router
 from app.api.sales import router as sales_router
+from app.api.storefront import router as storefront_router
 from app.api.vine_imports import router as vine_imports_router
+from app.api.variants import router as variants_router
 from app.core.auth import SESSION_COOKIE_NAME, parse_session_token
 from app.core.config import settings
 from app.core.database import Base, SessionLocal, engine
 from app.models.models import User
+from app.services.automation_bridge import AutomationBridgeError, get_bridge_connect_session
 from app.services.bridge_desktop import BridgeDesktopTokenError, bridge_desktop_target, parse_bridge_desktop_token
 
 logger = logging.getLogger(__name__)
 
-def _add_column_if_missing(connection, table_name: str, column_name: str, ddl: str) -> None:
+# Keep startup-time schema mutation intentionally narrow.
+# Most schema evolution is already represented in repo migrations and should not
+# continue to drift through application startup side effects.
+_LEGACY_STARTUP_COLUMNS: dict[str, list[tuple[str, str]]] = {
+    "users": [
+        ("full_name", "full_name VARCHAR(255)"),
+        ("settings_json", "settings_json JSON"),
+    ],
+    "vine_import_items": [
+        ("brand", "brand VARCHAR(255)"),
+        ("category", "category VARCHAR(255)"),
+        ("source_status", "source_status VARCHAR(64)"),
+        ("review_deadline", "review_deadline DATE"),
+        ("item_url", "item_url TEXT"),
+        ("manual_amazon_url", "manual_amazon_url TEXT"),
+        ("amazon_match_status", "amazon_match_status VARCHAR(64)"),
+        ("amazon_match_confidence", "amazon_match_confidence VARCHAR(32)"),
+        ("amazon_match_asin", "amazon_match_asin VARCHAR(16)"),
+        ("amazon_match_title", "amazon_match_title VARCHAR(512)"),
+        ("amazon_source_page_url", "amazon_source_page_url TEXT"),
+        ("image_import_status", "image_import_status VARCHAR(64)"),
+        ("image_import_error", "image_import_error TEXT"),
+    ],
+}
+
+def _add_column_if_missing(connection, table_name: str, column_name: str, ddl: str) -> bool:
     inspector = inspect(connection)
     existing = {column["name"] for column in inspector.get_columns(table_name)}
     if column_name not in existing:
         connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {ddl}"))
+        return True
+    return False
 
 
 def _cors_origins() -> list[str]:
@@ -57,85 +103,315 @@ def _cors_origins() -> list[str]:
     return origins
 
 
-def _bootstrap_database() -> None:
+def _bootstrap_database() -> dict[str, object]:
     Base.metadata.create_all(bind=engine)
+    applied_legacy_columns: list[str] = []
     with engine.begin() as connection:
-        _add_column_if_missing(connection, "users", "password_hash", "password_hash TEXT")
-        _add_column_if_missing(connection, "users", "is_admin", "is_admin BOOLEAN NOT NULL DEFAULT FALSE")
-        _add_column_if_missing(connection, "users", "role", "role VARCHAR(32) NOT NULL DEFAULT 'public'")
-        _add_column_if_missing(connection, "users", "settings_json", "settings_json JSON")
-        _add_column_if_missing(connection, "users", "enabled_platforms", "enabled_platforms JSON")
-        _add_column_if_missing(connection, "users", "sale_detection_platforms", "sale_detection_platforms JSON")
-        _add_column_if_missing(connection, "listings", "image_urls", "image_urls JSON")
-        _add_column_if_missing(connection, "listings", "raw_photo_path", "raw_photo_path TEXT")
-        _add_column_if_missing(connection, "listings", "storage_unit_name", "storage_unit_name VARCHAR(255)")
-        _add_column_if_missing(connection, "listings", "category_id", "category_id VARCHAR(255)")
-        _add_column_if_missing(connection, "listings", "item_specifics", "item_specifics JSON")
-        _add_column_if_missing(connection, "listings", "estimated_value", "estimated_value DOUBLE PRECISION")
-        _add_column_if_missing(connection, "listings", "listing_price", "listing_price DOUBLE PRECISION")
-        _add_column_if_missing(connection, "listings", "purchase_cost", "purchase_cost DOUBLE PRECISION")
-        _add_column_if_missing(connection, "listings", "fees_estimated", "fees_estimated DOUBLE PRECISION")
-        _add_column_if_missing(connection, "listings", "fees_actual", "fees_actual DOUBLE PRECISION")
-        _add_column_if_missing(connection, "listings", "shipping_cost", "shipping_cost DOUBLE PRECISION")
-        _add_column_if_missing(connection, "listings", "sale_price", "sale_price DOUBLE PRECISION")
-        _add_column_if_missing(connection, "listings", "profit", "profit DOUBLE PRECISION")
-        _add_column_if_missing(connection, "listings", "roi_percentage", "roi_percentage DOUBLE PRECISION")
-        _add_column_if_missing(connection, "listings", "sold_at", "sold_at TIMESTAMP WITHOUT TIME ZONE")
-        _add_column_if_missing(connection, "listings", "photo_quality_score", "photo_quality_score DOUBLE PRECISION")
-        _add_column_if_missing(connection, "listings", "condition", "condition VARCHAR(64)")
-        _add_column_if_missing(connection, "listings", "quantity", "quantity INTEGER NOT NULL DEFAULT 1")
-        _add_column_if_missing(connection, "listings", "platform_quantities", "platform_quantities JSON")
-        _add_column_if_missing(connection, "listings", "custom_labels", "custom_labels JSON")
-        _add_column_if_missing(connection, "listings", "last_refreshed", "last_refreshed TIMESTAMP WITHOUT TIME ZONE")
-        _add_column_if_missing(connection, "listings", "stale_flag", "stale_flag BOOLEAN NOT NULL DEFAULT FALSE")
-        _add_column_if_missing(connection, "listings", "source_type", "source_type VARCHAR(64)")
-        _add_column_if_missing(connection, "listings", "source_metadata", "source_metadata JSON")
-        _add_column_if_missing(connection, "listings", "needs_review", "needs_review BOOLEAN NOT NULL DEFAULT FALSE")
-        _add_column_if_missing(connection, "listings", "restricted_review_required", "restricted_review_required BOOLEAN NOT NULL DEFAULT FALSE")
-        _add_column_if_missing(connection, "listings", "restricted_reasons", "restricted_reasons JSON")
-        _add_column_if_missing(connection, "listings", "detected_category_guess", "detected_category_guess VARCHAR(255)")
-        _add_column_if_missing(connection, "listings", "marketplace_allowed_status", "marketplace_allowed_status VARCHAR(64)")
+        if settings.startup_schema_compat_enabled:
+            for table_name, columns in _LEGACY_STARTUP_COLUMNS.items():
+                for column_name, ddl in columns:
+                    if _add_column_if_missing(connection, table_name, column_name, ddl):
+                        applied_legacy_columns.append(f"{table_name}.{column_name}")
+        elif _LEGACY_STARTUP_COLUMNS:
+            logger.info("Startup schema compatibility shim is disabled.")
+    if applied_legacy_columns:
+        logger.warning(
+            "Startup schema compatibility applied legacy columns at runtime: %s",
+            ", ".join(applied_legacy_columns),
+        )
+    return {
+        "startup_schema_compat_enabled": bool(settings.startup_schema_compat_enabled),
+        "legacy_schema_columns_applied": applied_legacy_columns,
+    }
 
+
+def _resolve_media_root() -> Path:
+    configured = Path(settings.storage_root)
+    candidates: list[Path] = []
+    if configured.is_absolute():
+        if configured.exists() and configured.is_dir():
+            return configured
+        candidates.append(configured)
+    else:
+        cwd_configured = (Path.cwd() / configured).resolve()
+        if cwd_configured.exists() and cwd_configured.is_dir():
+            return cwd_configured
+        candidates.append(cwd_configured)
+        candidates.append((Path(__file__).resolve().parents[3] / configured).resolve())
+    candidates.append((Path(__file__).resolve().parents[3] / "storage").resolve())
+    candidates.append((Path(__file__).resolve().parents[2] / "storage").resolve())
+    candidates.append((Path(__file__).resolve().parents[1] / "storage").resolve())
+
+    existing: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        if candidate.exists() and candidate.is_dir():
+            existing.append(candidate)
+    if not existing:
+        return candidates[0]
+
+    def _score(path: Path) -> int:
+        score = 0
+        if (path / "amazon-vine").exists():
+            score += 120
+        if (path / "vine-search").exists():
+            score += 100
+        if (path / "vine-search-fallback").exists():
+            score += 60
+        if (path / "imports").exists():
+            score += 10
+        return score
+
+    best = max(existing, key=_score)
+    return best
+
+
+def _repair_unsafe_vine_images_on_startup() -> dict[str, object]:
+    environment = str(settings.environment or "").strip().lower()
+    if environment not in {"production", "staging"}:
+        return {"ran": False, "reason": "environment_not_production"}
+    if not settings.startup_vine_image_repair_enabled:
+        return {"ran": False, "reason": "startup_vine_image_repair_disabled"}
+    if not settings.amazon_vine_import_enabled:
+        return {"ran": False, "reason": "vine_import_disabled"}
+    if settings.autonomous_dry_run:
+        return {"ran": False, "reason": "dry_run_mode_requires_manual_repair"}
+
+    from app.services.listing_review import normalize_listing_images
+    from app.services.vine_import_service import VineImportService, _is_unsafe_vine_image
+
+    scanned = 0
+    repair_map: dict[int, list[int]] = {}
+    with SessionLocal() as db:
+        rows = db.execute(
+            text(
+                "select id, user_id, listing_images, image_urls "
+                "from listings where source_type = 'amazon_vine'"
+            )
+        ).all()
+        for row in rows:
+            scanned += 1
+            normalized = normalize_listing_images(
+                listing_images=row.listing_images,
+                image_urls=row.image_urls,
+                source_platform="amazon_vine",
+                default_is_reference=True,
+                approved=False,
+            )
+            if not normalized or any(_is_unsafe_vine_image(image) for image in normalized):
+                repair_map.setdefault(int(row.user_id), []).append(int(row.id))
+
+        service = VineImportService()
+        repaired = 0
+        processed_users = 0
+        for user_id, listing_ids in repair_map.items():
+            result = service.repair_vine_listing_images(
+                db,
+                user_id=user_id,
+                listing_ids=listing_ids,
+                include_archived=False,
+                force_refresh=True,
+                use_bridge_session=False,
+                only_missing_images=False,
+            )
+            processed_users += 1
+            repaired += int(result.get("updated") or 0)
+    return {
+        "ran": bool(repair_map),
+        "scanned": scanned,
+        "repaired": repaired,
+        "users": processed_users,
+        "unsafe_listing_count": sum(len(listing_ids) for listing_ids in repair_map.values()),
+    }
+
+
+def _run_live_intake_probe() -> None:
+    """Retained compatibility hook; startup probes must never mutate provider or inventory data."""
+    app.state.live_intake_probe = {
+        "status": "not_run",
+        "probe_type": "read_only_configuration_only",
+        "reason": "External startup probes are disabled; run explicit authenticated setup checks instead.",
+        "checked_at": datetime.now(UTC).isoformat(),
+    }
+
+PROCESS_STARTED_AT = datetime.now(UTC)
 app = FastAPI(title="PosterPro API")
+
+@app.get("/deployment")
+def deployment_identity():
+    """Expose non-secret immutable release metadata for live verification."""
+    repo = Path(__file__).resolve().parents[2]
+    commit = os.getenv("POSTERPRO_BACKEND_COMMIT", "").strip()
+    if not commit:
+        try:
+            commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True, timeout=2).strip()
+        except Exception:
+            commit = "unknown"
+    return {
+        "release_id": os.getenv("POSTERPRO_RELEASE_ID", "unreleased"),
+        "backend_build_id": commit,
+        "frontend_build_id": os.getenv("POSTERPRO_FRONTEND_BUILD_ID", "unknown"),
+        "schema_version": os.getenv("POSTERPRO_SCHEMA_VERSION", "uninitialized"),
+        "deployment_timestamp": os.getenv("POSTERPRO_DEPLOYMENT_TIMESTAMP", "unknown"),
+        "process_started_at": PROCESS_STARTED_AT.isoformat(),
+        "environment": os.getenv("ENVIRONMENT", "unknown"),
+    }
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins(),
+    allow_origin_regex=r"chrome-extension://.*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 app.include_router(auth_router)
-app.include_router(router)
 app.include_router(ebay_router)
+app.include_router(browser_extension_router)
+app.include_router(marketplace_extension_router)
+app.include_router(processing_router)
+app.include_router(notifications_router)
 app.include_router(marketplaces_router)
+app.include_router(admin_diagnostics_router)
 app.include_router(marketplace_jobs_router)
+app.include_router(mercari_taxonomy_router)
+app.include_router(mercari_taxonomy_public_router)
+app.include_router(mercari_spreadsheet_router)
+app.include_router(taxonomy_registry_router)
+app.include_router(onboarding_router)
 app.include_router(intelligence_router)
+app.include_router(intake_router)
+app.include_router(media_router)
 app.include_router(inventory_router)
 app.include_router(bulk_jobs_router)
 app.include_router(sales_router)
 app.include_router(vine_imports_router)
-app.mount("/media", StaticFiles(directory=Path(settings.storage_root)), name="media")
+app.include_router(variants_router)
+app.include_router(storefront_router)
+app.include_router(router)
+app.mount("/media", StaticFiles(directory=_resolve_media_root()), name="media")
 
 
 @app.on_event("startup")
 def startup() -> None:
     try:
-        _bootstrap_database()
+        bootstrap_summary = _bootstrap_database()
+        vine_repair_summary = _repair_unsafe_vine_images_on_startup()
         app.state.database_ready = True
         app.state.database_error = None
+        app.state.bootstrap_summary = {**bootstrap_summary, "vine_image_repair": vine_repair_summary}
+        _run_live_intake_probe()
     except SQLAlchemyError as exc:
         logger.exception("PosterPro database bootstrap failed")
         app.state.database_ready = False
         app.state.database_error = exc.__class__.__name__
+        app.state.bootstrap_summary = {
+            "startup_schema_compat_enabled": bool(settings.startup_schema_compat_enabled),
+            "legacy_schema_columns_applied": [],
+            "vine_image_repair": {"ran": False, "reason": "bootstrap_failed"},
+        }
+
+
+def _run_intake_monitor_for_user(user_id: int) -> None:
+    """Run blocking provider I/O off the ASGI event loop with a scoped session."""
+    from app.models.models import User
+    from app.services.intake_slate import IntakeSlateService
+
+    db = SessionLocal()
+    try:
+        user = db.get(User, user_id)
+        if user:
+            IntakeSlateService().monitor_google_album(db, user=user)
+    finally:
+        db.close()
+
+
+async def _intake_monitor_loop() -> None:
+    from app.models.models import User
+    from app.services.intake_slate import IntakeSlateService
+
+    service = IntakeSlateService()
+    while True:
+        await asyncio.sleep(60)
+        try:
+            db = SessionLocal()
+            users = db.execute(select(User.id).order_by(User.id.asc())).scalars().all()
+            now = datetime.now(UTC)
+            due_user_ids: list[int] = []
+            for user_id in users:
+                user = db.get(User, user_id)
+                if user is None:
+                    continue
+                settings_payload = service.settings_for_user(user)
+                if not settings_payload.get("enabled"):
+                    continue
+                if not str(settings_payload.get("album_url") or settings_payload.get("folder_id") or "").strip():
+                    continue
+                last_synced = service._parse_datetime(settings_payload.get("last_synced_at"))  # noqa: SLF001
+                poll_seconds = max(60, int(settings_payload.get("poll_interval_seconds") or 300))
+                if last_synced and (now - last_synced.astimezone(UTC)).total_seconds() < poll_seconds:
+                    continue
+                due_user_ids.append(user.id)
+            db.close()
+            for user_id in due_user_ids:
+                try:
+                    await asyncio.to_thread(_run_intake_monitor_for_user, user_id)
+                except Exception:
+                    logger.exception("PosterPro intake monitor failed for user %s", user_id)
+                    failure_db = SessionLocal()
+                    try:
+                        failed_user = failure_db.get(User, user_id)
+                        if failed_user:
+                            settings_payload = service.settings_for_user(failed_user)
+                            service.save_settings(
+                                db=failure_db,
+                                user=failed_user,
+                                payload={
+                                    **settings_payload,
+                                    "last_error": "Automatic intake monitor failed. Check backend logs.",
+                                },
+                            )
+                    finally:
+                        failure_db.close()
+        except Exception:
+            logger.exception("PosterPro intake monitor loop error")
+        finally:
+            with contextlib.suppress(UnboundLocalError):
+                db.close()
+
+
+@app.on_event("startup")
+async def startup_intake_monitor() -> None:
+    if settings.intake_monitor_enabled:
+        app.state.intake_monitor_task = asyncio.create_task(_intake_monitor_loop())
+    else:
+        app.state.intake_monitor_task = None
+
+
+@app.on_event("shutdown")
+async def shutdown_intake_monitor() -> None:
+    task = getattr(app.state, "intake_monitor_task", None)
+    if task:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 @app.get("/health")
 def health():
     database_ready = bool(getattr(app.state, "database_ready", False))
+    bootstrap_summary = getattr(app.state, "bootstrap_summary", {}) or {}
     payload = {
         "ok": database_ready,
         "database_ready": database_ready,
         "database_error": getattr(app.state, "database_error", None),
+        "startup_schema_compat_enabled": bool(bootstrap_summary.get("startup_schema_compat_enabled", settings.startup_schema_compat_enabled)),
+        "legacy_schema_columns_applied": bootstrap_summary.get("legacy_schema_columns_applied", []),
+        "vine_image_repair": bootstrap_summary.get("vine_image_repair", {}),
+        "live_intake_probe": getattr(app.state, "live_intake_probe", None),
     }
     if database_ready:
         return payload
@@ -157,6 +433,15 @@ def _websocket_user_id(websocket: WebSocket) -> int:
         db.close()
 
 
+def _bridge_desktop_session_is_active(connect_session_id: str) -> bool:
+    try:
+        session = get_bridge_connect_session(connect_session_id)
+    except AutomationBridgeError:
+        return False
+    status_value = str(session.get("status") or "").strip().lower()
+    return status_value in {"queued", "launching_browser", "opening_marketplace", "waiting_for_login", "validating_session"}
+
+
 @app.websocket("/marketplace-jobs/bridge-desktop/ws")
 async def bridge_desktop_websocket(websocket: WebSocket) -> None:
     token = websocket.query_params.get("token") or ""
@@ -165,6 +450,9 @@ async def bridge_desktop_websocket(websocket: WebSocket) -> None:
         current_user_id = _websocket_user_id(websocket)
         if int(claims["user_id"]) != current_user_id:
             raise PermissionError("Bridge desktop token does not match the current user")
+        connect_session_id = str(claims["connect_session_id"])
+        if not _bridge_desktop_session_is_active(connect_session_id):
+            raise PermissionError("Bridge desktop session is no longer active")
     except (BridgeDesktopTokenError, PermissionError, Exception):
         await websocket.close(code=1008)
         return
@@ -206,9 +494,23 @@ async def bridge_desktop_websocket(websocket: WebSocket) -> None:
         finally:
             await websocket.close()
 
+    async def _watch_session_status() -> None:
+        try:
+            while True:
+                await asyncio.sleep(2)
+                still_active = await asyncio.to_thread(_bridge_desktop_session_is_active, connect_session_id)
+                if still_active:
+                    continue
+                await websocket.close(code=1008, reason="Bridge desktop session is no longer active")
+                break
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
     client_task = asyncio.create_task(_client_to_vnc())
     vnc_task = asyncio.create_task(_vnc_to_client())
-    done, pending = await asyncio.wait({client_task, vnc_task}, return_when=asyncio.FIRST_COMPLETED)
+    watch_task = asyncio.create_task(_watch_session_status())
+    done, pending = await asyncio.wait({client_task, vnc_task, watch_task}, return_when=asyncio.FIRST_COMPLETED)
     for task in pending:
         task.cancel()
     for task in done:

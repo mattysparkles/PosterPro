@@ -21,6 +21,7 @@ from app.browser_runner import BrowserRunnerConfig, BrowserRunnerError, create_m
 
 
 class BridgeSettings(BaseSettings):
+    app_base_url: str | None = Field(default=None, validation_alias="APP_BASE_URL")
     bridge_api_key: str = Field(default="", validation_alias="AUTOMATION_BRIDGE_API_KEY")
     data_dir: Path = Field(default=Path("./data"), validation_alias="AUTOMATION_BRIDGE_DATA_DIR")
     runner_mode: str = Field(default="simulated", validation_alias="AUTOMATION_BRIDGE_RUNNER_MODE")
@@ -150,6 +151,14 @@ class BridgeAssetResponse(BaseModel):
     expires_at: str
     source_url: str | None = None
     download_path: str
+
+
+def _sanitize_connect_session_account_result(account: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(account, dict):
+        return None
+    sanitized = deepcopy(account)
+    sanitized["session_payload"] = {}
+    return sanitized
 
 
 class JobStore:
@@ -298,9 +307,10 @@ class JobStore:
         source_marketplace = str(payload.get("source_marketplace") or "unknown").lower()
         execution_mode = job["execution_mode"]
         bridge_account = None
-        if execution_mode in {"provider_assist", "browser_assist"}:
+        requires_account = execution_mode in {"provider_assist", "browser_assist", "hosted_browser_assist"} and source_marketplace != "amazon"
+        if requires_account:
             bridge_account = account_store.resolve_account(source_marketplace, execution_mode, payload)
-        if execution_mode == "browser_assist" and settings.runner_mode in {"playwright", "browser"}:
+        if execution_mode in {"browser_assist", "hosted_browser_assist"} and settings.runner_mode in {"playwright", "browser"}:
             runner = create_marketplace_browser_runner(
                 source_marketplace,
                 BrowserRunnerConfig(
@@ -308,6 +318,7 @@ class JobStore:
                     timeout_ms=settings.browser_timeout_ms,
                     submit_enabled=settings.browser_submit_enabled,
                     screenshots_dir=settings.browser_screenshots_dir,
+                    app_base_url=settings.app_base_url,
                     asset_persistor=asset_store.create_asset,
                 ),
             )
@@ -367,9 +378,9 @@ class JobStore:
         execution_mode = job["execution_mode"]
         base_payload = payload.get("payload") or payload
         bridge_account = None
-        if execution_mode in {"provider_assist", "browser_assist"}:
+        if execution_mode in {"provider_assist", "browser_assist", "hosted_browser_assist"}:
             bridge_account = account_store.resolve_account(marketplace, execution_mode, payload)
-        if execution_mode == "browser_assist" and settings.runner_mode in {"playwright", "browser"}:
+        if execution_mode in {"browser_assist", "hosted_browser_assist"} and settings.runner_mode in {"playwright", "browser"}:
             runner = create_marketplace_browser_runner(
                 marketplace,
                 BrowserRunnerConfig(
@@ -377,14 +388,17 @@ class JobStore:
                     timeout_ms=settings.browser_timeout_ms,
                     submit_enabled=settings.browser_submit_enabled,
                     screenshots_dir=settings.browser_screenshots_dir,
+                    app_base_url=settings.app_base_url,
                     asset_persistor=asset_store.create_asset,
                 ),
             )
-            result = runner.run_crosspost(
-                job_id=job["job_id"],
-                bridge_account=bridge_account,
-                payload=payload,
-            )
+            operation = str(payload.get("operation") or "").upper()
+            if marketplace == "facebook" and operation == "AUDIT":
+                result = runner.run_facebook_selling_audit(job_id=job["job_id"], bridge_account=bridge_account, payload=payload)
+            elif marketplace == "facebook" and operation == "REPAIR_EXISTING_CATEGORY":
+                result = runner.run_facebook_existing_listing_category_repair(job_id=job["job_id"], bridge_account=bridge_account, payload=payload)
+            else:
+                result = runner.run_crosspost(job_id=job["job_id"], bridge_account=bridge_account, payload=payload)
             session_state = result.get("session_state")
             if session_state and bridge_account:
                 account_store.update_session(
@@ -401,16 +415,10 @@ class JobStore:
                 "bridge_runner": settings.runner_mode,
             }
         if execution_mode == "direct_api":
-            return {
-                "job_id": job["job_id"],
-                "job_type": "crosspost",
-                "execution_mode": execution_mode,
-                "status": "published",
-                "bridge_runner": settings.runner_mode,
-                "marketplace": marketplace,
-                "external_listing_id": f"{marketplace.upper()}-{listing_id}-{job['job_id'][:8]}",
-                "submitted_payload": base_payload,
-            }
+            raise RuntimeError(
+                "Direct API actions must be executed by PosterPro's marketplace adapter; "
+                "the browser bridge cannot report a synthetic marketplace listing ID."
+            )
 
         if execution_mode == "provider_assist":
             return {
@@ -433,7 +441,7 @@ class JobStore:
                 ],
             }
 
-        if execution_mode == "browser_assist":
+        if execution_mode in {"browser_assist", "hosted_browser_assist"}:
             return {
                 "job_id": job["job_id"],
                 "job_type": "crosspost",
@@ -594,11 +602,11 @@ class AccountStore:
             candidates = [item for item in candidates if str(item["account_key"]).lower() == requested_key or str(item.get("login_handle") or "").lower() == requested_key]
         if execution_mode == "provider_assist":
             candidates = [item for item in candidates if item.get("provider_enabled")]
-        if execution_mode == "browser_assist":
+        if execution_mode in {"browser_assist", "hosted_browser_assist"}:
             candidates = [item for item in candidates if item.get("browser_enabled")]
-        if execution_mode in {"provider_assist", "browser_assist"}:
+        if execution_mode in {"provider_assist", "browser_assist", "hosted_browser_assist"}:
             candidates = [item for item in candidates if item.get("credential_secret")]
-        if execution_mode == "browser_assist":
+        if execution_mode in {"browser_assist", "hosted_browser_assist"}:
             candidates = [item for item in candidates if str(item.get("session_state") or "").lower() in {"ready", "active", "valid"}]
         if not candidates:
             raise RuntimeError(f"No bridge account is ready for marketplace '{marketplace}' and execution mode '{execution_mode}'")
@@ -655,7 +663,9 @@ class ConnectSessionStore:
         return datetime.now(UTC).isoformat()
 
     def _serialize(self, session: dict[str, Any]) -> dict[str, Any]:
-        return deepcopy(session)
+        serialized = deepcopy(session)
+        serialized["result"] = _sanitize_connect_session_account_result(serialized.get("result"))
+        return serialized
 
     def _active_session_locked(self) -> dict[str, Any] | None:
         for session in self.sessions.values():
@@ -764,6 +774,7 @@ class ConnectSessionStore:
                 timeout_ms=settings.browser_timeout_ms,
                 submit_enabled=False,
                 screenshots_dir=settings.browser_screenshots_dir,
+                app_base_url=settings.app_base_url,
             ),
         )
 
@@ -796,7 +807,7 @@ class ConnectSessionStore:
                 status="completed",
                 completed_at=self._now(),
                 message=f"{marketplace.capitalize()} account connected and session captured.",
-                result=account,
+                result=_sanitize_connect_session_account_result(account),
                 error=None,
             )
         except BrowserRunnerError as exc:
@@ -949,6 +960,17 @@ def _require_connect_session(connect_session_id: str) -> dict[str, Any]:
     session = connect_session_store.get_session(connect_session_id.strip())
     if not session:
         raise HTTPException(status_code=404, detail="Bridge connect session not found")
+    return session
+
+
+def _require_live_connect_session(connect_session_id: str) -> dict[str, Any]:
+    session = _require_connect_session(connect_session_id)
+    status_value = str(session.get("status") or "").strip().lower()
+    if status_value not in ConnectSessionStore.ACTIVE_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Bridge connect session is no longer active (status: {status_value or 'unknown'})",
+        )
     return session
 
 
@@ -1109,7 +1131,7 @@ def update_account_session(marketplace: str, account_key: str, payload: BridgeAc
 def _prepare_connect_account(marketplace: str, account_key: str, payload: BridgeAccountConnectRequest) -> tuple[str, str, dict[str, Any], dict[str, Any] | None]:
     normalized_marketplace = marketplace.strip().lower()
     normalized_key = account_key.strip().lower()
-    supported_marketplaces = {"facebook", "mercari", "poshmark", "etsy", "whatnot"}
+    supported_marketplaces = {"amazon", "ebay", "facebook", "mercari", "poshmark", "etsy", "depop", "whatnot", "vinted"}
     if normalized_marketplace not in supported_marketplaces:
         raise HTTPException(
             status_code=400,
@@ -1159,7 +1181,7 @@ def get_connect_session(connect_session_id: str) -> BridgeConnectSessionResponse
 
 @app.get("/connect-sessions/{connect_session_id}/desktop-frame", dependencies=[Depends(_require_auth)])
 def get_connect_session_desktop_frame(connect_session_id: str) -> Response:
-    _require_connect_session(connect_session_id)
+    _require_live_connect_session(connect_session_id)
     return Response(
         content=_desktop_frame_png(),
         media_type="image/png",
@@ -1187,7 +1209,7 @@ def get_asset(asset_id: str) -> Response:
 
 @app.post("/connect-sessions/{connect_session_id}/desktop-actions/click", dependencies=[Depends(_require_auth)])
 def click_connect_session_desktop(connect_session_id: str, payload: BridgeDesktopActionRequest) -> dict[str, Any]:
-    _require_connect_session(connect_session_id)
+    _require_live_connect_session(connect_session_id)
     if payload.x is None or payload.y is None:
         raise HTTPException(status_code=400, detail="Desktop click requires x and y coordinates")
     _run_xdotool(["mousemove", "--sync", str(int(payload.x)), str(int(payload.y)), "click", "1"])
@@ -1196,7 +1218,7 @@ def click_connect_session_desktop(connect_session_id: str, payload: BridgeDeskto
 
 @app.post("/connect-sessions/{connect_session_id}/desktop-actions/type", dependencies=[Depends(_require_auth)])
 def type_connect_session_desktop(connect_session_id: str, payload: BridgeDesktopActionRequest) -> dict[str, Any]:
-    _require_connect_session(connect_session_id)
+    _require_live_connect_session(connect_session_id)
     text = str(payload.text or "")
     if not text:
         raise HTTPException(status_code=400, detail="Desktop type requires text")
@@ -1206,7 +1228,7 @@ def type_connect_session_desktop(connect_session_id: str, payload: BridgeDesktop
 
 @app.post("/connect-sessions/{connect_session_id}/desktop-actions/key", dependencies=[Depends(_require_auth)])
 def key_connect_session_desktop(connect_session_id: str, payload: BridgeDesktopActionRequest) -> dict[str, Any]:
-    _require_connect_session(connect_session_id)
+    _require_live_connect_session(connect_session_id)
     key = str(payload.key or "").strip()
     if not key:
         raise HTTPException(status_code=400, detail="Desktop key action requires a key")
@@ -1224,6 +1246,7 @@ def connect_account(marketplace: str, account_key: str, payload: BridgeAccountCo
             timeout_ms=settings.browser_timeout_ms,
             submit_enabled=False,
             screenshots_dir=settings.browser_screenshots_dir,
+            app_base_url=settings.app_base_url,
         )
     )
     try:
