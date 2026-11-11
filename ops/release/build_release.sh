@@ -62,7 +62,7 @@ git -C "$repo_root" archive --format=tar "$commit" | gzip -n > "$release_dir/sou
 tar -C "$repo_root/frontend" -czf "$release_dir/frontend-build.tar.gz" .next
 cp "$build_log" "$release_dir/test-results.txt"
 frontend_build_id="$(cat "$repo_root/frontend/.next/BUILD_ID")"
-manifest_hash="$(sha256sum "$repo_root/ops/POSTERPRO_FEATURE_MANIFEST_2026-11-10.csv" | awk '{print $1}')"
+manifest_hash="$(sha256sum "$repo_root/ops/FEATURE_MANIFEST.csv" | awk '{print $1}')"
 migration_hash="$(sha256sum "$repo_root/backend/migrations/20261109_shelf_census.sql" | awk '{print $1}')"
 
 cat > "$release_dir/release.json" <<EOF

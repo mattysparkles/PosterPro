@@ -96,7 +96,7 @@ if [[ "$python_version" != "$expected_python" || "$node_major" != "$expected_nod
 fi
 
 schema_version="${POSTERPRO_DATABASE_SCHEMA_VERSION:-baseline-existing-schema}"
-feature_manifest_sha="$(sha256sum "$source_root/ops/POSTERPRO_FEATURE_MANIFEST_2026-11-10.csv" | awk '{print $1}')"
+feature_manifest_sha="$(sha256sum "$source_root/ops/FEATURE_MANIFEST.csv" | awk '{print $1}')"
 python_lock_sha="$(sha256sum "$source_root/backend/runtime-requirements.lock" | awk '{print $1}')"
 node_lock_sha="$(sha256sum "$source_root/frontend/package-lock.json" | awk '{print $1}')"
 migration_plan="20261109_shelf_census.sql,20261110_amazon_media_retry_state.sql"

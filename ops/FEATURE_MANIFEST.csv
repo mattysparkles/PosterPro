@@ -1,0 +1,11 @@
+feature_id,feature,scope
+APP-001,"Amazon Vine intake","CSV imports with persistent drafts, product matching, image enrichment, and retryable per-item failures"
+APP-002,"Listing lifecycle","Marketplace-specific readiness, operator approval, publication state, and existing listing identity"
+APP-003,"eBay integration","Inventory offers, shipping configuration, publishing preflight, and order synchronization"
+APP-004,"Assisted marketplaces","Facebook Marketplace and Mercari connector and browser-assisted workflows"
+APP-005,"Google Photos intake","Photo import, slate workflows, and product draft preparation"
+APP-006,"Inventory","Products, quantities, packages, totes, locations, scanning, and movement history"
+APP-007,"Shelf Census","Physical item confirmation, persistent shelf sessions, item identity, and label jobs"
+APP-008,"Product labels","58 x 40 mm thermal label templates, QR and Code 128 identity, browser printing, and optional local agent transport"
+APP-009,"Browser extension","Paired browser collector, marketplace assistance, and authenticated job transport"
+APP-010,"Operations","Immutable releases, migration preflight, health checks, deployment locking, and rollback"

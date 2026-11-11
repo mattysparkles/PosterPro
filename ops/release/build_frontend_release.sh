@@ -141,7 +141,7 @@ expected_python="$(cat "$source_root/backend/runtime-python-version.txt")"
 # source archives. It remains in frontend-runtime and test-results instead.
 rm -rf "$source_root/frontend/node_modules" "$source_root/frontend/.next" "$source_root/.pytest_cache"
 schema_version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("database_schema_version",""))' "$base_manifest")"
-feature_sha="$(sha256sum "$source_root/ops/POSTERPRO_FEATURE_MANIFEST_2026-11-10.csv" | awk '{print $1}')"
+feature_sha="$(sha256sum "$source_root/ops/FEATURE_MANIFEST.csv" | awk '{print $1}')"
 python_lock_sha="$(sha256sum "$source_root/backend/runtime-requirements.lock" | awk '{print $1}')"
 node_lock_sha="$(sha256sum "$source_root/frontend/package-lock.json" | awk '{print $1}')"
 source_tree_sha="$("$repo_root/ops/release/source_tree_fingerprint.py" "$source_root" backend/app backend/tests backend/migrations backend/runtime-requirements.lock backend/runtime-python-version.txt bridge)"
