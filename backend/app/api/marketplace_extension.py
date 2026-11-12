@@ -1851,11 +1851,11 @@ def _collector_binding_payload(row) -> dict:
 
 
 def _authorized_collector_binding(db: Session, *, device_id: int, owner_id: int, session_id: str,
-                                  statuses: tuple[str, ...] = ("ACTIVE", "RUNNING", "PAUSED")):
+                                  statuses: tuple[str, ...] = ("ACTIVE", "RUNNING", "PAUSED", "ERROR")):
     row = db.execute(text("""SELECT b.* FROM marketplace_facebook_taxonomy_collector_bindings b
         JOIN marketplace_taxonomy_test_sessions s ON s.session_id=b.authorized_session_id
         WHERE b.device_id=:device AND b.owner_user_id=:owner AND b.authorized_session_id=:session
-          AND b.status IN ('ACTIVE','RUNNING','PAUSED') AND s.status='AUTHORIZED' AND s.expires_at>:now
+          AND b.status IN ('ACTIVE','RUNNING','PAUSED','ERROR') AND s.status='AUTHORIZED' AND s.expires_at>:now
           AND s.authorized_device_id=:device AND s.owner_user_id=:owner"""),
         {"device": device_id, "owner": owner_id, "session": session_id,
          "now": datetime.now(UTC).replace(tzinfo=None)}).mappings().first()
@@ -2084,11 +2084,17 @@ def create_taxonomy_test_job(payload: TaxonomyTestJobCreateRequest,
         {"session": payload.session_id}).scalar_one()
     if int(queued_count or 0) >= 40:
         raise HTTPException(status_code=429, detail={"code": "TAXONOMY_TEST_SESSION_JOB_LIMIT"})
-    if payload.command in {"SELECT_CATEGORY_OPTION", "BACKTRACK_CATEGORY"} and not payload.parameters.get("path"):
+    if payload.command == "BACKTRACK_CATEGORY" and not payload.parameters.get("path"):
         raise HTTPException(status_code=422, detail={"code": "TAXONOMY_TEST_CATEGORY_PATH_REQUIRED"})
     binding = _authorized_collector_binding(db, device_id=device.id, owner_id=current_user.id, session_id=payload.session_id)
     if not binding:
         raise HTTPException(status_code=409, detail={"code": "FACEBOOK_COLLECTOR_WINDOW_NOT_BOUND"})
+    if binding["status"] == "ERROR" and payload.command not in {
+        "GET_COLLECTOR_STATE", "INSPECT_FORM", "INSPECT_CATEGORY_PICKER", "OPEN_CATEGORY_PICKER",
+        "ENUMERATE_VISIBLE_OPTIONS", "SCROLL_CATEGORY_LIST", "SELECT_CATEGORY_OPTION",
+        "BACKTRACK_CATEGORY", "RUN_COLLECTION_STEP", "STOP_COLLECTION",
+    }:
+        raise HTTPException(status_code=409, detail={"code": "FACEBOOK_COLLECTOR_RECOVERY_COMMAND_REQUIRED"})
     job_id = secrets.token_urlsafe(24)
     expires = now + timedelta(seconds=payload.expires_in_seconds)
     db.execute(text("""INSERT INTO marketplace_taxonomy_test_jobs
@@ -2125,11 +2131,17 @@ def create_authorized_taxonomy_test_job(payload: AuthorizedTaxonomyTestJobReques
         raise HTTPException(status_code=403, detail={"code": "TAXONOMY_TEST_DEVICE_REVOKED"})
     if str(device.extension_version or "") != CURRENT_EXTENSION_VERSION or not device.last_seen_at or device.last_seen_at < now - timedelta(minutes=3):
         raise HTTPException(status_code=409, detail={"code": "TAXONOMY_TEST_DEVICE_NOT_CURRENTLY_AVAILABLE"})
-    if payload.command in {"SELECT_CATEGORY_OPTION", "BACKTRACK_CATEGORY"} and not payload.parameters.get("path"):
+    if payload.command == "BACKTRACK_CATEGORY" and not payload.parameters.get("path"):
         raise HTTPException(status_code=422, detail={"code": "TAXONOMY_TEST_CATEGORY_PATH_REQUIRED"})
     binding = _authorized_collector_binding(db, device_id=device.id, owner_id=session["owner_user_id"], session_id=payload.session_id)
     if not binding:
         raise HTTPException(status_code=409, detail={"code": "FACEBOOK_COLLECTOR_WINDOW_NOT_BOUND"})
+    if binding["status"] == "ERROR" and payload.command not in {
+        "GET_COLLECTOR_STATE", "INSPECT_FORM", "INSPECT_CATEGORY_PICKER", "OPEN_CATEGORY_PICKER",
+        "ENUMERATE_VISIBLE_OPTIONS", "SCROLL_CATEGORY_LIST", "SELECT_CATEGORY_OPTION",
+        "BACKTRACK_CATEGORY", "RUN_COLLECTION_STEP", "STOP_COLLECTION",
+    }:
+        raise HTTPException(status_code=409, detail={"code": "FACEBOOK_COLLECTOR_RECOVERY_COMMAND_REQUIRED"})
     queued_count = db.execute(text("SELECT COUNT(*) FROM marketplace_taxonomy_test_jobs WHERE session_id=:session"),
         {"session": payload.session_id}).scalar_one()
     if int(queued_count or 0) >= 40:
@@ -2229,7 +2241,10 @@ def claim_taxonomy_test_job(payload: TaxonomyTestClaimRequest,
             WHERE b.device_id=:device AND b.owner_user_id=:owner
               AND b.collection_session_id=:collection AND b.window_id=:window AND b.tab_id=:tab
               AND b.authorized_session_id=j.session_id
-              AND b.status IN ('ACTIVE','RUNNING','PAUSED'))
+              AND (b.status IN ('ACTIVE','RUNNING','PAUSED')
+                OR (b.status='ERROR' AND j.command IN ('GET_COLLECTOR_STATE','INSPECT_FORM','INSPECT_CATEGORY_PICKER',
+                  'OPEN_CATEGORY_PICKER','ENUMERATE_VISIBLE_OPTIONS','SCROLL_CATEGORY_LIST','SELECT_CATEGORY_OPTION',
+                  'BACKTRACK_CATEGORY','RUN_COLLECTION_STEP','STOP_COLLECTION'))))
           AND (command='STOP_COLLECTION' OR EXISTS (SELECT 1 FROM marketplace_taxonomy_test_sessions s
             WHERE s.session_id=j.session_id AND s.owner_user_id=:owner
               AND s.authorized_device_id=:device AND s.status='AUTHORIZED' AND s.expires_at>:now))

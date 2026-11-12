@@ -1597,6 +1597,17 @@ async def test_taxonomy_test_bridge_requires_opt_in_scopes_jobs_and_persists_san
     assert saved["evidence"]["items"][0]["label"] == "Household"
     assert saved["evidence"]["submission_performed"] is False
     assert [event["event_type"] for event in saved["audit"]] == ["QUEUED", "CLAIMED", "COMPLETED"]
+    errored_binding = await async_client.put("/browser-extension/taxonomy/facebook/collector-binding", headers=headers,
+        json={"collection_session_id": "collector-session-for-test-0001", "window_id": 5, "tab_id": 37,
+            "extension_version": CURRENT_EXTENSION_VERSION, "status": "ERROR", "last_error_code": "TEST_STALL"})
+    assert errored_binding.status_code == 200, errored_binding.text
+    root_selection = await async_client.post("/taxonomy-test/authorized-jobs", json={"session_id": session_id,
+        "command": "SELECT_CATEGORY_OPTION", "parameters": {"path": [], "identities": [], "label": "Electronics"}})
+    assert root_selection.status_code == 200, root_selection.text
+    assert root_selection.json()["status"] == "QUEUED"
+    root_backtrack = await async_client.post("/taxonomy-test/authorized-jobs", json={"session_id": session_id,
+        "command": "BACKTRACK_CATEGORY", "parameters": {"path": [], "identities": []}})
+    assert root_backtrack.status_code == 422
     cancelled = await async_client.delete(f"/taxonomy-test/sessions/{session_id}")
     assert cancelled.status_code == 200 and cancelled.json()["status"] == "CANCELLED"
     stop = await async_client.post("/browser-extension/taxonomy-test/jobs/claim", headers=headers, json={"collector_running": True, **target})
