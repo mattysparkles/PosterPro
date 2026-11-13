@@ -1,5 +1,17 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "/api";
 
+function frontendOrigin() {
+  if (typeof window !== "undefined" && window.location?.origin) return window.location.origin;
+  return process.env.NEXT_PUBLIC_APP_ORIGIN || "http://127.0.0.1:3030";
+}
+
+// NEXT_PUBLIC_API_BASE is sometimes a same-origin path ("/api") in immutable
+// builds. Always give URL a base so those builds work the same as absolute API
+// base configurations.
+export function resolveApiUrl(path, origin = frontendOrigin()) {
+  return new URL(path, origin);
+}
+
 const DEFAULT_TIMEOUT_MS = Number(process.env.NEXT_PUBLIC_API_TIMEOUT_MS || 15000);
 
 function formatApiErrorMessage(detail, fallback) {
@@ -766,7 +778,7 @@ export async function repairAllVineListingImages(options = {}) {
 }
 
 export async function fetchListingPage(params = {}) {
-  const url = new URL(`${API_BASE}/listings`);
+  const url = resolveApiUrl(`${API_BASE}/listings`);
   if (params.page) url.searchParams.set("page", String(params.page));
   if (params.pageSize) url.searchParams.set("page_size", String(params.pageSize));
   if (params.sourceType && params.sourceType !== "all") url.searchParams.set("source_type", params.sourceType);
@@ -799,7 +811,7 @@ export async function createListing(body) {
 }
 
 export async function fetchCrosspostPreview(id, marketplaces = []) {
-  const url = new URL(`${API_BASE}/listings/${id}/crosspost-preview`);
+  const url = resolveApiUrl(`${API_BASE}/listings/${id}/crosspost-preview`);
   if (marketplaces.length) {
     url.searchParams.set("marketplaces", marketplaces.join(","));
   }
@@ -1017,7 +1029,7 @@ export async function runAutomationBridgeSmokeTest() {
 }
 
 export async function fetchBridgeAccounts(marketplace) {
-  const url = new URL(`${API_BASE}/marketplace-jobs/bridge-accounts`);
+  const url = resolveApiUrl(`${API_BASE}/marketplace-jobs/bridge-accounts`);
   if (marketplace) {
     url.searchParams.set("marketplace", marketplace);
   }
@@ -1025,7 +1037,7 @@ export async function fetchBridgeAccounts(marketplace) {
 }
 
 export async function fetchMarketplaceExtensionDevices(currentDeviceId) {
-  const url = new URL(`${API_BASE}/browser-extension/devices`);
+  const url = resolveApiUrl(`${API_BASE}/browser-extension/devices`);
   if (currentDeviceId) url.searchParams.set('current_device_id', String(currentDeviceId));
   return jsonFetch(url.toString());
 }
@@ -1115,7 +1127,7 @@ export async function sendBridgeDesktopAction(connectSessionId, action, body) {
 }
 
 export function buildBridgeDesktopWebsocketUrl(websocketPath, token) {
-  const apiUrl = new URL(API_BASE);
+  const apiUrl = resolveApiUrl(API_BASE);
   const basePath = apiUrl.pathname.endsWith("/") ? apiUrl.pathname : `${apiUrl.pathname}/`;
   const normalizedPath = String(websocketPath || "").replace(/^\/+/, "");
   const websocketUrl = new URL(normalizedPath, `${apiUrl.origin}${basePath}`);
@@ -1229,7 +1241,7 @@ export async function deleteListingsBulk(listingIds = []) {
 }
 
 export async function fetchListingTemplates(userId, categoryId) {
-  const url = new URL(`${API_BASE}/listing-templates`);
+  const url = resolveApiUrl(`${API_BASE}/listing-templates`);
   if (userId) url.searchParams.set("user_id", String(userId));
   if (categoryId) url.searchParams.set("category_id", categoryId);
   return jsonFetch(url.toString());
@@ -1341,7 +1353,7 @@ export async function publishMarketplaceReadyBulk(body) {
 }
 
 export async function fetchLaunchCandidates(params = {}) {
-  const url = new URL(`${API_BASE}/marketplaces/launch-candidates`);
+  const url = resolveApiUrl(`${API_BASE}/marketplaces/launch-candidates`);
   if (params.marketplace) url.searchParams.set("marketplace", params.marketplace);
   if (Number.isFinite(Number(params.max_items))) url.searchParams.set("max_items", String(Number(params.max_items)));
   if (Number.isFinite(Number(params.max_price))) url.searchParams.set("max_price", String(Number(params.max_price)));
@@ -1352,7 +1364,7 @@ export async function fetchLaunchCandidates(params = {}) {
 }
 
 export async function fetchEbayLaunchRepairQueue(params = {}) {
-  const url = new URL(`${API_BASE}/marketplaces/ebay/launch-repair-queue`);
+  const url = resolveApiUrl(`${API_BASE}/marketplaces/ebay/launch-repair-queue`);
   if (Number.isFinite(Number(params.max_items))) url.searchParams.set("max_items", String(Number(params.max_items)));
   if (Number.isFinite(Number(params.max_price))) url.searchParams.set("max_price", String(Number(params.max_price)));
   if (params.image_status) url.searchParams.set("image_status", params.image_status);
@@ -1382,7 +1394,7 @@ export async function fetchEbayAccountReadiness() {
 }
 
 export async function fetchEbayPolicies(marketplaceId = 'EBAY_US') {
-  const url = new URL(`${API_BASE}/marketplaces/ebay/policies`);
+  const url = resolveApiUrl(`${API_BASE}/marketplaces/ebay/policies`);
   if (marketplaceId) url.searchParams.set('marketplace_id', marketplaceId);
   return jsonFetch(url.toString());
 }
@@ -1442,20 +1454,20 @@ export async function fetchMarketplaces() {
 }
 
 export async function connectMarketplace(name, userId) {
-  const url = new URL(`${API_BASE}/marketplaces/${name}/connect`);
+  const url = resolveApiUrl(`${API_BASE}/marketplaces/${name}/connect`);
   if (userId) url.searchParams.set("user_id", String(userId));
   return jsonFetch(url.toString(), { method: "POST" });
 }
 
 export async function fetchEbayAuthUrl(userId, redirectUri) {
-  const url = new URL(`${API_BASE}/ebay/auth/url`);
+  const url = resolveApiUrl(`${API_BASE}/ebay/auth/url`);
   url.searchParams.set("user_id", userId);
   if (redirectUri) url.searchParams.set("redirect_uri", redirectUri);
   return jsonFetch(url.toString());
 }
 
 export async function importEbayTokens(body, userId) {
-  const url = new URL(`${API_BASE}/ebay/account/manual`);
+  const url = resolveApiUrl(`${API_BASE}/ebay/account/manual`);
   if (userId) url.searchParams.set("user_id", String(userId));
   return jsonFetch(url.toString(), {
     method: "PUT",
@@ -1473,13 +1485,13 @@ export async function fetchEbayStatus(id) {
 }
 
 export async function fetchAnalyticsOverview(userId) {
-  const url = new URL(`${API_BASE}/analytics/overview`);
+  const url = resolveApiUrl(`${API_BASE}/analytics/overview`);
   if (userId) url.searchParams.set("user_id", String(userId));
   return jsonFetch(url.toString());
 }
 
 export async function fetchAnalyticsDashboard(userId, days = 30) {
-  const url = new URL(`${API_BASE}/analytics/dashboard`);
+  const url = resolveApiUrl(`${API_BASE}/analytics/dashboard`);
   if (userId) url.searchParams.set("user_id", String(userId));
   url.searchParams.set("days", String(days));
   return jsonFetch(url.toString());
@@ -1536,7 +1548,7 @@ export async function fetchPrediction(id) {
 }
 
 export async function fetchAlerts(userId) {
-  const url = new URL(`${API_BASE}/alerts`);
+  const url = resolveApiUrl(`${API_BASE}/alerts`);
   if (userId) url.searchParams.set("user_id", String(userId));
   return jsonFetch(url.toString());
 }
@@ -1583,7 +1595,7 @@ export async function fetchAIUsageBudget() {
 }
 
 export async function fetchEbayOfferDashboard(userId) {
-  const url = new URL(`${API_BASE}/ebay/offers/dashboard`);
+  const url = resolveApiUrl(`${API_BASE}/ebay/offers/dashboard`);
   if (userId) url.searchParams.set("user_id", String(userId));
   return jsonFetch(url.toString());
 }
@@ -1678,7 +1690,7 @@ export async function runAllOvernightBatches() {
 }
 
 export async function fetchInventory(filters = {}) {
-  const url = new URL(`${API_BASE}/inventory`);
+  const url = resolveApiUrl(`${API_BASE}/inventory`);
   if (filters.label) url.searchParams.set("label", filters.label);
   if (filters.quantityGtOne) url.searchParams.set("quantity_gt_one", "true");
   if (filters.stale) url.searchParams.set("stale", "true");
@@ -1819,7 +1831,7 @@ export async function fetchBulkJob(jobId) {
 }
 
 export async function fetchSalesDashboard(userId, limit = 100, options = {}) {
-  const url = new URL(`${API_BASE}/sales/dashboard`);
+  const url = resolveApiUrl(`${API_BASE}/sales/dashboard`);
   if (userId) url.searchParams.set("user_id", String(userId));
   url.searchParams.set("limit", String(limit));
   if (options.search) url.searchParams.set("search", options.search);
@@ -1868,7 +1880,7 @@ export async function refreshEbayInventory(body = {}) {
 }
 
 export async function previewEbayShippingHandlingOperations(userId) {
-  const url = new URL(`${API_BASE}/ebay/operations/shipping-handling-preview`);
+  const url = resolveApiUrl(`${API_BASE}/ebay/operations/shipping-handling-preview`);
   if (userId) url.searchParams.set('user_id', String(userId));
   return jsonFetch(url.toString(), { method: 'POST', timeoutMs: 180000 });
 }
@@ -1936,7 +1948,7 @@ export async function sendOffersNow(userId) {
 }
 
 export async function fetchOfferHistory(userId) {
-  const url = new URL(`${API_BASE}/sales/offers/history`);
+  const url = resolveApiUrl(`${API_BASE}/sales/offers/history`);
   if (userId) url.searchParams.set("user_id", String(userId));
   return jsonFetch(url.toString());
 }

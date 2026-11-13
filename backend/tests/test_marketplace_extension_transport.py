@@ -1597,6 +1597,23 @@ async def test_taxonomy_test_bridge_requires_opt_in_scopes_jobs_and_persists_san
     assert saved["evidence"]["items"][0]["label"] == "Household"
     assert saved["evidence"]["submission_performed"] is False
     assert [event["event_type"] for event in saved["audit"]] == ["QUEUED", "CLAIMED", "COMPLETED"]
+    expired_db = database_module.SessionLocal()
+    try:
+        expired_db.execute(__import__("sqlalchemy").text("""UPDATE marketplace_taxonomy_test_sessions
+            SET expires_at=:expires WHERE session_id=:id"""), {
+                "expires": datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=1), "id": session_id,
+            })
+        expired_db.commit()
+    finally:
+        expired_db.close()
+    renewed = await async_client.post("/taxonomy-test/sessions", json={"device_id": device_id, "operator_opt_in": True})
+    assert renewed.status_code == 200, renewed.text
+    session_id = renewed.json()["session_id"]
+    assert renewed.json()["collector_binding_reactivated"] is True
+    rebound = await async_client.get("/browser-extension/taxonomy/facebook/collector-binding", headers=headers)
+    assert rebound.status_code == 200
+    assert rebound.json()["binding"]["authorized_session_id"] == session_id
+    assert rebound.json()["binding"]["status"] == "ACTIVE"
     errored_binding = await async_client.put("/browser-extension/taxonomy/facebook/collector-binding", headers=headers,
         json={"collection_session_id": "collector-session-for-test-0001", "window_id": 5, "tab_id": 37,
             "extension_version": CURRENT_EXTENSION_VERSION, "status": "ERROR", "last_error_code": "TEST_STALL"})
@@ -1612,6 +1629,23 @@ async def test_taxonomy_test_bridge_requires_opt_in_scopes_jobs_and_persists_san
     assert cancelled.status_code == 200 and cancelled.json()["status"] == "CANCELLED"
     stop = await async_client.post("/browser-extension/taxonomy-test/jobs/claim", headers=headers, json={"collector_running": True, **target})
     assert stop.status_code == 200 and stop.json()["job"]["command"] == "STOP_COLLECTION"
+    expired_db = database_module.SessionLocal()
+    try:
+        expired_db.execute(__import__("sqlalchemy").text("""UPDATE marketplace_taxonomy_test_sessions
+            SET status='AUTHORIZED', expires_at=:expires WHERE session_id=:id"""), {
+                "expires": datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=1), "id": session_id,
+            })
+        expired_db.commit()
+    finally:
+        expired_db.close()
+    session_status = await async_client.get("/taxonomy-test/sessions")
+    assert session_status.status_code == 200
+    assert session_status.json()["items"] == []
+    assert session_status.json()["latest_expired"] == {
+        "device_id": device_id,
+        "expires_at": session_status.json()["latest_expired"]["expires_at"],
+    }
+    assert "session_id" not in session_status.json()["latest_expired"]
 
 
 @pytest.mark.anyio

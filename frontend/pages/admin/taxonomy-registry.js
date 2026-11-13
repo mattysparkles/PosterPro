@@ -38,8 +38,12 @@ export default function TaxonomyRegistryPage() {
   const [candidateBusy, setCandidateBusy] = useState('');
   const [candidateReport, setCandidateReport] = useState(null);
   const [devices, setDevices] = useState([]);
+  const [devicesLoading, setDevicesLoading] = useState(true);
+  const [devicesError, setDevicesError] = useState('');
+  const [deviceCurrentVersion, setDeviceCurrentVersion] = useState('');
   const [testDeviceId, setTestDeviceId] = useState('');
   const [testSession, setTestSession] = useState(null);
+  const [expiredTestSession, setExpiredTestSession] = useState(null);
   const [testOptIn, setTestOptIn] = useState(false);
   const [testCommand, setTestCommand] = useState('INSPECT_FORM');
   const [testParametersText, setTestParametersText] = useState('{}');
@@ -73,6 +77,37 @@ export default function TaxonomyRegistryPage() {
     finally { setBusy(false); }
   }
 
+  async function refreshDevices() {
+    setDevicesLoading(true); setDevicesError('');
+    try {
+      const result = await fetchMarketplaceExtensionDevices();
+      const paired = (result.devices || []).filter((device) => !device.revoked);
+      setDevices(paired);
+      setDeviceCurrentVersion(result.current_version || '');
+      const eligible = paired.find((device) => device.extension_version === result.current_version
+        && device.last_seen_at && Date.now() - Date.parse(device.last_seen_at) <= 180000);
+      setTestDeviceId((selected) => paired.some((device) => String(device.id) === selected) ? selected : (eligible ? String(eligible.id) : ''));
+    } catch (e) {
+      setDevices([]); setTestDeviceId(''); setDevicesError(e.message || 'Could not load paired browser devices.');
+    } finally { setDevicesLoading(false); }
+  }
+
+  async function refreshTestSessions() {
+    try {
+      const result = await fetchTaxonomyTestSessions();
+      setTestSession(result.items?.[0] || null);
+      setExpiredTestSession(result.items?.length ? null : (result.latest_expired || null));
+    } catch (e) { setError(e.message || 'Could not load taxonomy authorization status.'); }
+  }
+
+  function deviceUnavailableReason(device) {
+    if (device.revoked) return 'revoked';
+    if (device.extension_version !== deviceCurrentVersion) return `needs extension ${deviceCurrentVersion || 'update'}`;
+    const seen = Date.parse(device.last_seen_at || '');
+    if (!Number.isFinite(seen) || Date.now() - seen > 180000) return 'offline';
+    return '';
+  }
+
   async function syncLocalSnapshots() {
     setBusy(true); setError(''); setMessage('');
     try {
@@ -99,14 +134,9 @@ export default function TaxonomyRegistryPage() {
   useEffect(() => { refreshStatus(); }, []);
   useEffect(() => {
     let cancelled = false;
-    fetchMarketplaceExtensionDevices().then((result) => {
-      if (cancelled) return;
-      const current = (result.devices || []).filter((device) => device.extension_version === result.current_version && !device.revoked);
-      setDevices(current);
-      if (current[0]) setTestDeviceId((selected) => selected || String(current[0].id));
-    }).catch((e) => { if (!cancelled) setError(e.message || 'Could not load paired browser devices.'); });
+    refreshDevices().catch(() => {});
     fetchTaxonomyTestJobs().then((result) => { if (!cancelled) setTestJobs(result.items || []); }).catch(() => {});
-    fetchTaxonomyTestSessions().then((result) => { if (!cancelled && result.items?.[0]) setTestSession(result.items[0]); }).catch(() => {});
+    refreshTestSessions().catch(() => {});
     return () => { cancelled = true; };
   }, []);
   useEffect(() => {
@@ -118,8 +148,13 @@ export default function TaxonomyRegistryPage() {
   async function authorizeTaxonomyTestSession() {
     setTestBusy(true); setError('');
     try {
+      if (!testOptIn) throw new Error('Check the authorization consent before creating a taxonomy test session.');
+      const selectedDevice = devices.find((device) => String(device.id) === testDeviceId);
+      if (!selectedDevice) throw new Error('Select an eligible paired browser before authorizing the session.');
+      const unavailable = deviceUnavailableReason(selectedDevice);
+      if (unavailable) throw new Error(`The selected paired browser is ${unavailable}. Refresh the device list and retry when it is online and compatible.`);
       const result = await createTaxonomyTestSession({ device_id: Number(testDeviceId), operator_opt_in: testOptIn, expires_in_seconds: 1800 });
-      setTestSession(result); setMessage(`Facebook taxonomy test session authorized for device ${result.device_id} until ${new Date(result.expires_at).toLocaleTimeString()}.`);
+      setTestSession(result); setExpiredTestSession(null); setMessage(`Facebook taxonomy test session authorized for device ${result.device_id} until ${new Date(result.expires_at).toLocaleTimeString()}.${result.collector_binding_reactivated ? ' The existing collector window binding is ready to resume.' : ''}`);
     } catch (e) { setError(e.message || 'Could not authorize the taxonomy test session.'); }
     finally { setTestBusy(false); }
   }
@@ -164,12 +199,17 @@ export default function TaxonomyRegistryPage() {
       <p className="mt-1 max-w-4xl text-sm text-slate-600">Short-lived, device-scoped inspection commands run inside the paired Chrome session. Commands are allowlisted and cannot submit or publish listings. Open a blank Facebook Marketplace item-create form before collection steps.</p>
       {!testSession ? <div className="mt-3 flex flex-wrap items-center gap-3">
         <label className="text-sm">Paired browser
-          <select className="ml-2 rounded border px-2 py-2" aria-label="Taxonomy test browser" value={testDeviceId} onChange={(e) => setTestDeviceId(e.target.value)}>
-            <option value="">Select device</option>{devices.map((device) => <option key={device.id} value={device.id}>{device.name} · {device.extension_version} · #{device.id}</option>)}
+          <select className="ml-2 rounded border px-2 py-2" aria-label="Taxonomy test browser" value={testDeviceId} onChange={(e) => setTestDeviceId(e.target.value)} disabled={devicesLoading || !!devicesError}>
+            <option value="">Select device</option>{devices.map((device) => {
+              const unavailable = deviceUnavailableReason(device);
+              return <option key={device.id} value={device.id} disabled={!!unavailable}>{device.name} · {device.extension_version} · #{device.id}{unavailable ? ` · ${unavailable}` : ''}</option>;
+            })}
           </select>
         </label>
         <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={testOptIn} onChange={(e) => setTestOptIn(e.target.checked)} />Authorize up to 30 minutes of Facebook taxonomy tests (max 40 commands)</label>
-        <Button disabled={testBusy || !testOptIn || !testDeviceId} onClick={authorizeTaxonomyTestSession}>Authorize test session</Button>
+        <Button disabled={testBusy || devicesLoading || !!devicesError || !testOptIn || !testDeviceId || !devices.some((device) => String(device.id) === testDeviceId && !deviceUnavailableReason(device))} onClick={authorizeTaxonomyTestSession}>Authorize test session</Button>
+        <Button variant="outline" disabled={devicesLoading} onClick={refreshDevices}>{devicesLoading ? 'Loading devices…' : 'Retry device list'}</Button>
+        <span role="status" className="text-sm text-slate-600">{expiredTestSession ? `Previous taxonomy authorization expired ${new Date(expiredTestSession.expires_at).toLocaleString()}; authorize a new session for a paired device.` : 'No active taxonomy authorization.'}</span>
       </div> : <div className="mt-3 flex flex-wrap items-center gap-3">
         <span className="text-sm">Authorized until {new Date(testSession.expires_at).toLocaleTimeString()}</span>
         <label className="text-sm">Command
@@ -184,6 +224,9 @@ export default function TaxonomyRegistryPage() {
         <Button disabled={testBusy} variant="outline" onClick={stopTaxonomyTestSession}>Stop session</Button>
         <code className="max-w-full break-all text-xs text-slate-500">Session capability: {testSession.session_id}</code>
       </div>}
+      {devicesError ? <div role="alert" className="mt-2 text-sm text-red-700">Paired browser list failed: {devicesError} <button className="underline" type="button" onClick={refreshDevices}>Retry</button></div> : null}
+      {!devicesLoading && !devicesError && devices.length === 0 ? <p className="mt-2 text-sm text-amber-800">No non-revoked paired browser devices are registered to this account.</p> : null}
+      {!devicesLoading && !devicesError && devices.length > 0 && !devices.some((device) => !deviceUnavailableReason(device)) ? <p className="mt-2 text-sm text-amber-800">Paired devices exist, but none is currently online and compatible. Device options show their status; retry after its heartbeat or version changes.</p> : null}
       {testJobs.length ? <div className="mt-4 overflow-x-auto"><table className="w-full text-left text-xs"><thead><tr><th className="p-2">Created</th><th className="p-2">Command</th><th className="p-2">Status</th><th className="p-2">Evidence</th><th className="p-2">Action</th></tr></thead><tbody>
         {testJobs.slice(0, 12).map((job) => <tr key={job.job_id} className="border-t"><td className="p-2">{job.created_at ? new Date(job.created_at).toLocaleTimeString() : '—'}</td><td className="p-2">{job.command}</td><td className="p-2">{job.status}{job.error_code ? ` · ${job.error_code}` : ''}</td><td className="max-w-md p-2"><pre className="max-h-24 overflow-auto whitespace-pre-wrap">{job.evidence ? JSON.stringify(job.evidence, null, 2) : 'Waiting for paired browser'}</pre></td><td className="p-2">{['QUEUED','CLAIMED'].includes(job.status) ? <button className="underline" onClick={() => cancelTaxonomyTestJob(job.job_id).then(() => fetchTaxonomyTestJobs()).then((result) => setTestJobs(result.items || [])).catch((e) => setError(e.message))}>Cancel</button> : '—'}</td></tr>)}
       </tbody></table></div> : null}

@@ -2014,11 +2014,20 @@ def create_taxonomy_test_session(payload: TaxonomyTestSessionCreateRequest,
     db.execute(text("""INSERT INTO marketplace_taxonomy_test_sessions
         (session_id,owner_user_id,authorized_device_id,status,expires_at) VALUES (:id,:owner,:device,'AUTHORIZED',:expires)"""),
         {"id": session_id, "owner": current_user.id, "device": device.id, "expires": expires})
+    rebound = db.execute(text("""UPDATE marketplace_facebook_taxonomy_collector_bindings
+        SET authorized_session_id=:session,status='ACTIVE',last_error_code=NULL,updated_at=:now
+        WHERE device_id=:device AND owner_user_id=:owner AND extension_version=:version
+          AND collection_session_id IS NOT NULL AND window_id IS NOT NULL AND tab_id IS NOT NULL"""), {
+        "session": session_id, "now": now, "device": device.id, "owner": current_user.id,
+        "version": CURRENT_EXTENSION_VERSION,
+    }).rowcount == 1
     _taxonomy_test_event(db, job_id=session_id, owner_id=current_user.id, actor_type="operator", actor_id=current_user.id,
-        event_type="SESSION_AUTHORIZED", event={"device_id": device.id, "expires_at": expires.isoformat(), "submission_allowed": False})
+        event_type="SESSION_AUTHORIZED", event={"device_id": device.id, "expires_at": expires.isoformat(),
+            "collector_binding_reactivated": rebound, "submission_allowed": False})
     db.commit()
     return {"ok": True, "session_id": session_id, "status": "AUTHORIZED", "device_id": device.id,
-        "expires_at": expires.isoformat(), "max_jobs": 40, "submission_allowed": False}
+        "expires_at": expires.isoformat(), "max_jobs": 40, "collector_binding_reactivated": rebound,
+        "submission_allowed": False}
 
 
 @router.delete("/taxonomy-test/sessions/{session_id}")
@@ -2057,7 +2066,12 @@ def get_taxonomy_test_sessions(db: Session = Depends(get_db), current_user: User
     rows = db.execute(text("""SELECT session_id,authorized_device_id,status,expires_at,created_at
         FROM marketplace_taxonomy_test_sessions WHERE owner_user_id=:owner AND expires_at>:now
         ORDER BY created_at DESC LIMIT 10"""), {"owner": current_user.id, "now": now}).mappings().all()
-    return {"items": [dict(row) for row in rows]}
+    expired = db.execute(text("""SELECT authorized_device_id,expires_at FROM marketplace_taxonomy_test_sessions
+        WHERE owner_user_id=:owner AND status='AUTHORIZED' AND expires_at<=:now
+        ORDER BY expires_at DESC LIMIT 1"""), {"owner": current_user.id, "now": now}).mappings().first()
+    return {"items": [dict(row) for row in rows],
+        "latest_expired": ({"device_id": expired["authorized_device_id"], "expires_at": expired["expires_at"]}
+            if expired else None)}
 
 
 @router.post("/taxonomy-test/jobs")
