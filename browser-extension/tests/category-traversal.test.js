@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
-  createCheckpoint, traverse, traverseWithStorage, captureVisibleCategoryEvidence,
+  createCheckpoint, projectCompactCheckpoint, traverse, traverseWithStorage, captureVisibleCategoryEvidence,
 } = require("../category-traversal.js");
 
 function fixtureAdapter() {
@@ -35,6 +35,55 @@ function fixtureAdapter() {
     get backtracks() { return backtracks; },
   };
 }
+
+test("26 observed Facebook roots survive compact checkpoint persistence and resume into child traversal", async () => {
+  const checkpoint = createCheckpoint("facebook", "facebook-seller-form-ui-v2");
+  checkpoint.session_id = "session-fixture";
+  checkpoint.status = "partial_unresolved";
+  checkpoint.frontier = [{ path: ["Clothing"], identities: ["id:root-clothing"] }];
+  checkpoint.branch_evidence = { "": { end_reached: true, loading: false, pagination_control: false, option_count: 26 } };
+  for (let index = 0; index < 26; index += 1) {
+    const label = index === 0 ? "Clothing" : `Observed root ${index + 1}`;
+    const identity = `id:root-${index + 1}`;
+    const key = `${label.toLocaleLowerCase()}\u001e${identity}`;
+    checkpoint.categories[key] = {
+      marketplace: "facebook", category_id: identity.slice(3), category_name: label,
+      category_identity: identity, identity_path: [identity], parent_path: [], full_path: [label], depth: 1,
+      terminal_status: "unknown", required_fields_schema_status: "uncollected", source: "authorized_live_interface",
+    };
+  }
+
+  const serialized = JSON.stringify(projectCompactCheckpoint(checkpoint, {
+    sessionId: "session-fixture", sourceVersion: "facebook-seller-form-ui-v2",
+    persistedCategoryKeys: Object.keys(checkpoint.categories),
+  }));
+  const database = JSON.parse(serialized); // mirrors remote save/reload across a process boundary
+  const rootsDiscovered = Object.values(database.categories).filter((node) => Array.isArray(node.full_path) && node.full_path.length === 1).length;
+  assert.equal(rootsDiscovered, 26);
+  assert.equal(database.branch_evidence[""].option_count, 26);
+  assert.equal(database.categories["clothing\u001eid:root-1"].identity_path[0], "id:root-1");
+
+  const local = {
+    value: structuredClone(database),
+    async get(key) { return { [key]: JSON.parse(JSON.stringify(this.value)) }; },
+    async set(value) { this.value = JSON.parse(JSON.stringify(Object.values(value)[0])); },
+  };
+  const adapter = {
+    isLive: false,
+    async readChildren(path) { return path.join(" > ") === "Clothing" ? [{ label: "T-shirts", category_id: "shirt-leaf" }] : []; },
+    async select(option) { return { category_id: option.category_id, terminal: true,
+      terminal_evidence: "resumed seller-form child selection", children: [], children_complete: true }; },
+    async captureRequiredFields() { return { fields: [], complete: true, evidence: "resumed form schema inspection" }; },
+    async backtrack() {},
+  };
+  const resumed = await traverseWithStorage(adapter, { marketplace: "facebook", sourceVersion: "facebook-seller-form-ui-v2" }, local, "checkpoint");
+  const durable = JSON.parse(JSON.stringify(local.value));
+  assert.equal(Object.values(durable.categories).filter((node) => Array.isArray(node.full_path) && node.full_path.length === 1).length, 26);
+  const leaf = Object.values(resumed.checkpoint.categories).find((node) => node.category_id === "shirt-leaf");
+  assert.deepEqual(leaf.full_path, ["Clothing", "T-shirts"]);
+  assert.equal(leaf.terminal_status, "confirmed_leaf");
+  assert.equal(durable.categories["clothing\u001eid:root-1"].source, "authorized_live_interface");
+});
 
 test("taxonomy traversal records paths, ids, leaf evidence, fields and checkpoints across resume", async () => {
   const adapter = fixtureAdapter();

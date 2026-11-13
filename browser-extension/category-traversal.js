@@ -52,6 +52,28 @@
     return checkpoint;
   }
 
+  // Remote checkpoints may omit bulky observation evidence, but they must
+  // retain the canonical identity/path needed to resume traversal and count
+  // already observed roots. The traversal key alone is not a path contract.
+  function projectCompactCheckpoint(state, { sessionId = null, sourceVersion = null, persistedCategoryKeys = [] } = {}) {
+    const compact = { ...state, session_id: sessionId || state.session_id || null,
+      source_version: sourceVersion || state.source_version || null,
+      persisted_category_keys: Array.from(new Set(persistedCategoryKeys || state.persisted_category_keys || [])) };
+    compact.categories = Object.fromEntries(Object.entries(state.categories || {}).map(([key, value]) => [key, {
+      category_id: value?.category_id ?? null,
+      category_name: value?.category_name || value?.full_path?.at?.(-1) || null,
+      category_identity: value?.category_identity || null,
+      identity_path: Array.isArray(value?.identity_path) ? value.identity_path.slice() : [],
+      parent_path: Array.isArray(value?.parent_path) ? value.parent_path.slice() : [],
+      full_path: Array.isArray(value?.full_path) ? value.full_path.slice() : [],
+      depth: Number.isInteger(value?.depth) ? value.depth : (Array.isArray(value?.full_path) ? value.full_path.length : 0),
+      source: value?.source || null,
+      terminal_status: value?.terminal_status || "unknown",
+      required_fields_schema_status: value?.required_fields_schema_status || "uncollected",
+    }]));
+    return compact;
+  }
+
   function requireAuthorization(adapter, grant, marketplace) {
     if (!adapter || typeof adapter.readChildren !== "function" || typeof adapter.select !== "function"
         || typeof adapter.backtrack !== "function" || typeof adapter.captureRequiredFields !== "function") {
@@ -406,7 +428,7 @@
     };
   }
 
-  const api = { SCHEMA_VERSION, normalizeLabel, pathKey, createCheckpoint, validateCheckpoint, traverse, traverseWithStorage, captureVisibleCategoryEvidence };
+  const api = { SCHEMA_VERSION, normalizeLabel, pathKey, createCheckpoint, validateCheckpoint, projectCompactCheckpoint, traverse, traverseWithStorage, captureVisibleCategoryEvidence };
   root.PosterProCategoryTraversal = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);

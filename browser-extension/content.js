@@ -5834,15 +5834,9 @@ function ppRunFacebookTaxonomyCollection(options = {}) {
       const prior = initial.checkpoint;
       sessionId = prior?.session_id || (crypto.randomUUID ? crypto.randomUUID() : "fb-" + Date.now() + "-" + Math.random().toString(36).slice(2, 10));
       persisted = new Set(Array.isArray(prior?.persisted_category_keys) ? prior.persisted_category_keys : []);
-      const project = (state) => {
-        const compact = { ...state, session_id: sessionId, source_version: sourceVersion,
-          persisted_category_keys: Array.from(persisted) };
-        compact.categories = Object.fromEntries(Object.entries(state.categories || {}).map(([key, value]) => [key, {
-          terminal_status: value?.terminal_status || "unknown",
-          required_fields_schema_status: value?.required_fields_schema_status || "uncollected",
-        }]));
-        return compact;
-      };
+      const project = (state) => engine.projectCompactCheckpoint(state, {
+        sessionId, sourceVersion, persistedCategoryKeys: Array.from(persisted),
+      });
       notifyProgress("RUNNING");
       currentStage = "READING_ROOTS";
       await notifyProgress("STARTING");
