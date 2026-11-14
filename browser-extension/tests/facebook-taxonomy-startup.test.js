@@ -102,7 +102,7 @@ function harness(options = {}) {
     },
     scripting: { async executeScript({ target, files }) { if (options.injectionError) throw new Error(options.injectionError); return [{ target, files }]; } },
   };
-  let serverBinding = options.serverBinding || state.posterproFacebookTaxonomyCollectorBinding || null;
+  let serverBinding = options.serverBinding !== undefined ? options.serverBinding : state.posterproFacebookTaxonomyCollectorBinding || null;
   const fetch = async (url, request) => {
     requests.push({ url: String(url), method: request.method, body: request.body });
     const endpoint = String(url);
@@ -124,7 +124,7 @@ function harness(options = {}) {
   const backgroundSource = fs.readFileSync(path.join(__dirname, "..", "background.js"), "utf8")
     .replace("const FACEBOOK_TAXONOMY_TAB_DISCOVERY_TIMEOUT_MS = 12000;",
       `const FACEBOOK_TAXONOMY_TAB_DISCOVERY_TIMEOUT_MS = ${Number(options.discoveryTimeoutMs || 12000)};`);
-  const source = `${backgroundSource}\nglobalThis.__test = { startFacebookTaxonomyCollection, runTaxonomyTestJob, claimAndRunTaxonomyTestJob, ensureDedicatedFacebookTaxonomyWindow, discoverFacebookCreateTab };`;
+  const source = `${backgroundSource}\nglobalThis.__test = { startFacebookTaxonomyCollection, runTaxonomyTestJob, claimAndRunTaxonomyTestJob, pollMarketplaceQueue, ensureDedicatedFacebookTaxonomyWindow, discoverFacebookCreateTab };`;
   const context = { chrome, fetch, URL, Date, Promise, setTimeout, clearTimeout, AbortController, console, crypto: { randomUUID: () => "new-collector-session-0123456789" } };
   context.globalThis = context;
   vm.runInNewContext(source, context);
@@ -296,6 +296,30 @@ test("taxonomy poll refreshes a reauthorized server binding before claiming with
   assert.equal(JSON.parse(claim.body).collector_tab_id, fresh.tab_id);
   assert.equal(h.focusedUpdates.length, 0);
   assert.deepEqual(h.createdWindowIds, []);
+});
+
+test("a successful heartbeat with no valid taxonomy binding is diagnosed before any claim request", async () => {
+  const h = harness({ bound: false, serverBinding: null });
+  await h.api.pollMarketplaceQueue();
+  assert.ok(h.requests.some((entry) => entry.url.endsWith("/browser-extension/heartbeat")));
+  assert.equal(h.state.posterproExtensionBuildId, "posterpro-0.3.103-taxonomy-poller-diagnostics");
+  assert.ok(h.requests.some((entry) => entry.url.endsWith("/browser-extension/taxonomy/facebook/collector-binding")));
+  assert.equal(h.requests.some((entry) => entry.url.endsWith("/browser-extension/taxonomy-test/jobs/claim")), false);
+  assert.equal(h.state.posterproTaxonomyTransport.poller_status, "TAXONOMY_POLLER_RUNNING");
+  assert.equal(h.state.posterproTaxonomyTransport.last_poll_error_code, "NO_VALID_AUTHORIZED_COLLECTOR_BINDING");
+  assert.equal(h.focusedUpdates.length, 0);
+});
+
+test("an expired local binding is never claimed after the server reports no active authorization", async () => {
+  const stale = makeBinding({ authorized_session_id: "expired-session-0123456789" });
+  const h = harness({ binding: stale, serverBinding: null });
+  const handled = await h.api.claimAndRunTaxonomyTestJob();
+  assert.equal(handled, false);
+  assert.equal(h.requests.some((entry) => entry.url.endsWith("/browser-extension/taxonomy-test/jobs/claim")), false);
+  assert.equal(h.state.posterproTaxonomyTransport.collector_binding_valid, false);
+  assert.equal(h.state.posterproTaxonomyTransport.last_poll_error_code, "NO_VALID_AUTHORIZED_COLLECTOR_BINDING");
+  assert.equal(h.state.posterproFacebookTaxonomyCollectorBinding.authorized_session_id, stale.authorized_session_id);
+  assert.equal(h.focusedUpdates.length, 0);
 });
 
 test("pause and stop target only the bound tab; only explicit Show Collector Window may focus it", async () => {

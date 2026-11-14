@@ -15,6 +15,7 @@ const MARKETPLACE_HOST_HINTS = [
 ];
 
 const EXTENSION_VERSION = "0.3.103";
+const EXTENSION_BUILD_ID = "posterpro-0.3.103-taxonomy-poller-diagnostics";
 const FACEBOOK_FORM_NO_PROGRESS_MS = 150000;
 const FACEBOOK_FORM_MAX_DURATION_MS = 8 * 60 * 1000;
 const FACEBOOK_FORM_CANCEL_DRAIN_MS = 15000;
@@ -848,6 +849,7 @@ async function noteSuccessfulDeviceHeartbeat(heartbeat) {
   await chrome.storage.local.set({
     posterproDevice: heartbeat.device,
     posterproLastSuccessfulHeartbeatAt: heartbeat.device.last_seen_at || new Date().toISOString(),
+    posterproExtensionBuildId: EXTENSION_BUILD_ID,
     posterproAgentError: null,
     posterproAgentErrorAt: null,
   });
@@ -2748,6 +2750,10 @@ async function runTaxonomyTestJob(job) {
   if (!response || response.ok !== true) throw Object.assign(new Error(response?.error || "Browser taxonomy command failed."), {
     code: response?.error_code || "TAXONOMY_TEST_COMMAND_FAILED", evidence: response || null,
   });
+  await recordTaxonomyTransport({
+    last_command_executed: { command, at: new Date().toISOString(), job_id: job.job_id },
+    current_checkpoint_revision: Number(response.checkpoint_revision ?? binding.checkpoint_revision ?? 0),
+  });
   await persistTaxonomyCollectorBinding(binding, binding.status || "ACTIVE", {
     checkpoint_revision: Number(response.checkpoint_revision ?? binding.checkpoint_revision ?? 0),
     current_path: Array.isArray(response.current_path) ? response.current_path.slice(0, 16) : binding.current_path,
@@ -2768,10 +2774,21 @@ async function runTaxonomyTestJob(job) {
     method: "POST", body: JSON.stringify({ status: "COMPLETED", evidence: result,
       collection_session_id: binding.collection_session_id, collector_window_id: binding.window_id, collector_tab_id: binding.tab_id }),
   });
+  await recordTaxonomyTransport({ last_result_acknowledged: { job_id: job.job_id, at: new Date().toISOString() } });
   return { ok: true, job_id: job.job_id, status: "COMPLETED" };
 }
 
+async function recordTaxonomyTransport(patch) {
+  const stored = await chrome.storage.local.get(["posterproTaxonomyTransport"]);
+  await chrome.storage.local.set({ posterproTaxonomyTransport: {
+    ...(stored.posterproTaxonomyTransport || {}),
+    ...patch,
+    updated_at: new Date().toISOString(),
+  } });
+}
+
 async function claimAndRunTaxonomyTestJob() {
+  await recordTaxonomyTransport({ poller_status: "TAXONOMY_POLLER_RUNNING", last_poll_started_at: new Date().toISOString() });
   const local = await chrome.storage.local.get(["posterproFacebookTaxonomyCollectorBinding"]);
   let binding = local.posterproFacebookTaxonomyCollectorBinding;
   // Authorization is renewed in the server-side consent UI. Refresh the
@@ -2784,22 +2801,53 @@ async function claimAndRunTaxonomyTestJob() {
       binding = { ...(binding || {}), ...fresh.binding };
       await chrome.storage.local.set({ posterproFacebookTaxonomyCollectorBinding: binding,
         posterproTaxonomyCollectionTabId: binding.tab_id });
+      await recordTaxonomyTransport({ collector_binding_valid: true,
+        collector_binding_refreshed_at: new Date().toISOString(), current_checkpoint_revision: Number(binding.checkpoint_revision || 0) });
+    } else {
+      // An authoritative empty response means the prior local authorization is
+      // no longer usable. Keep it for recovery evidence, but never claim with it.
+      binding = null;
+      await recordTaxonomyTransport({ collector_binding_valid: false, last_poll_error_code: "NO_ACTIVE_COLLECTOR_BINDING" });
     }
-  } catch (_) {
+  } catch (error) {
     // Preserve the last known binding; transport errors are retried next poll.
+    await recordTaxonomyTransport({ collector_binding_valid: false,
+      last_binding_refresh_error: { code: error?.code || "COLLECTOR_BINDING_REFRESH_FAILED", http_status: error?.status || null,
+        at: new Date().toISOString() } });
   }
   if (!binding || !binding.authorized_session_id || !binding.collection_session_id
-      || !Number.isInteger(Number(binding.window_id)) || !Number.isInteger(Number(binding.tab_id))) return false;
+      || !Number.isInteger(Number(binding.window_id)) || !Number.isInteger(Number(binding.tab_id))) {
+    await recordTaxonomyTransport({ last_poll_error_code: "NO_VALID_AUTHORIZED_COLLECTOR_BINDING" });
+    return false;
+  }
   const target = await resolveBoundCollectorTab(binding);
-  if (!target?.tab) return false;
+  if (!target?.tab) {
+    await recordTaxonomyTransport({ last_poll_error_code: "BOUND_COLLECTOR_TAB_UNAVAILABLE" });
+    return false;
+  }
   const probe = await probeTaxonomyContent(binding.tab_id);
-  const response = await deviceRequest("/browser-extension/taxonomy-test/jobs/claim", {
-    method: "POST", body: JSON.stringify({ collector_running: probe?.collector_running === true,
-      collection_session_id: binding.collection_session_id, collector_window_id: binding.window_id,
-      collector_tab_id: binding.tab_id }),
-  });
+  await recordTaxonomyTransport({ last_claim_attempt_at: new Date().toISOString(),
+    last_command_received: null, last_poll_error_code: null });
+  let response;
+  try {
+    response = await deviceRequest("/browser-extension/taxonomy-test/jobs/claim", {
+      method: "POST", body: JSON.stringify({ collector_running: probe?.collector_running === true,
+        collection_session_id: binding.collection_session_id, collector_window_id: binding.window_id,
+        collector_tab_id: binding.tab_id }),
+    });
+    await recordTaxonomyTransport({ last_claim_http_status: 200, last_claim_completed_at: new Date().toISOString() });
+  } catch (error) {
+    await recordTaxonomyTransport({ last_claim_http_status: error?.status || null,
+      last_claim_error_code: error?.code || "TAXONOMY_JOB_CLAIM_FAILED", last_poll_error_code: error?.code || "TAXONOMY_JOB_CLAIM_FAILED" });
+    throw error;
+  }
   const job = response?.job;
-  if (!job) return false;
+  if (!job) {
+    await recordTaxonomyTransport({ last_poll_completed_at: new Date().toISOString(), poller_status: "WAITING_FOR_COMMAND" });
+    return false;
+  }
+  await recordTaxonomyTransport({ last_command_received: { job_id: job.job_id, command: job.command,
+    received_at: new Date().toISOString() } });
   try {
     await runTaxonomyTestJob(job);
   } catch (error) {
@@ -2810,10 +2858,15 @@ async function claimAndRunTaxonomyTestJob() {
       ok: false, error_code: error?.code || "TAXONOMY_TEST_COMMAND_FAILED",
       error: safeTaxonomyError(error?.message || error), submission_performed: false,
     };
-    await deviceRequest(`/browser-extension/taxonomy-test/jobs/${encodeURIComponent(job.job_id)}/result`, {
-      method: "POST", body: JSON.stringify({ status: "FAILED", error_code: error?.code || "TAXONOMY_TEST_COMMAND_FAILED", evidence,
-        collection_session_id: binding.collection_session_id, collector_window_id: binding.window_id, collector_tab_id: binding.tab_id }),
-    }).catch(() => {});
+    try {
+      await deviceRequest(`/browser-extension/taxonomy-test/jobs/${encodeURIComponent(job.job_id)}/result`, {
+        method: "POST", body: JSON.stringify({ status: "FAILED", error_code: error?.code || "TAXONOMY_TEST_COMMAND_FAILED", evidence,
+          collection_session_id: binding.collection_session_id, collector_window_id: binding.window_id, collector_tab_id: binding.tab_id }),
+      });
+      await recordTaxonomyTransport({ last_result_acknowledged: { job_id: job.job_id, status: "FAILED", at: new Date().toISOString() } });
+    } catch (ackError) {
+      await recordTaxonomyTransport({ last_result_acknowledgment_error: ackError?.code || "TAXONOMY_RESULT_ACK_FAILED" });
+    }
   }
   return true;
 }
@@ -3225,7 +3278,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (action === "get_state") {
     Promise.all([
       chrome.storage.sync.get(DEFAULT_SETTINGS),
-      chrome.storage.local.get(["posterproLastSessionSnapshot", "posterproLastImportResponse", "posterproLastImportAt", "posterproDevice", "posterproDeviceToken", "posterproActiveJob", "posterproLastJob", "posterproLastExecutionDiagnostic", "posterproAgentError", "posterproAgentErrorAt", "posterproLastSuccessfulHeartbeatAt", "posterproAutomationPaused", "posterproFacebookTaxonomyCollection", "posterproFacebookTaxonomyDiagnosticHistory", "posterproTaxonomyCollectionTabId", "posterproFacebookTaxonomyCollectorBinding"]),
+      chrome.storage.local.get(["posterproLastSessionSnapshot", "posterproLastImportResponse", "posterproLastImportAt", "posterproDevice", "posterproDeviceToken", "posterproActiveJob", "posterproLastJob", "posterproLastExecutionDiagnostic", "posterproAgentError", "posterproAgentErrorAt", "posterproLastSuccessfulHeartbeatAt", "posterproAutomationPaused", "posterproFacebookTaxonomyCollection", "posterproFacebookTaxonomyDiagnosticHistory", "posterproTaxonomyCollectionTabId", "posterproFacebookTaxonomyCollectorBinding", "posterproTaxonomyTransport", "posterproExtensionBuildId"]),
     ]).then(([settings, local]) => {
       sendResponse({ ok: true, settings, local });
     });

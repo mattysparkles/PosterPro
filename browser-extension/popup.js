@@ -29,7 +29,7 @@ function render(local = {}) {
   const agentError = staleConnectionError ? null : local.posterproAgentError;
   el("connectionStatus").textContent = !paired ? "Not connected" : updateRequired ? "Update required" : agentError ? "Connection needs attention" : "Connected · automatic";
   el("deviceLabel").textContent = device ? `${device.name || "Browser"} · ${device.browser || "Chrome"}` : "This browser";
-  el("versionLabel").textContent = device?.extension_version || "Not paired";
+  el("versionLabel").textContent = `${device?.extension_version || "Not paired"}${local.posterproExtensionBuildId ? ` · ${local.posterproExtensionBuildId}` : " · build not observed"}`;
   el("heartbeatLabel").textContent = device?.last_seen_at ? new Date(device.last_seen_at).toLocaleString() : "Waiting for first heartbeat";
   el("activeJobLabel").textContent = job ? `#${job.id} · ${job.marketplace} · ${job.action} · ${job.status}` : "None";
   const result = job?.fill_result || {};
@@ -44,10 +44,31 @@ function render(local = {}) {
   el("startFacebookTaxonomyButton").hidden = !paired || updateRequired;
   el("stopFacebookTaxonomyButton").hidden = !paired;
   el("pauseButton").textContent = paused ? "Resume automation" : "Pause automation";
-  setDiagnostic(agentError ? `${agentError}${local.posterproAgentErrorAt ? ` · ${new Date(local.posterproAgentErrorAt).toLocaleString()}` : ""}` : "No diagnostic events.");
   const probe = local.posterproFacebookDescriptionDomProbe;
   const taxonomy = local.posterproFacebookTaxonomyCollection;
   const binding = local.posterproFacebookTaxonomyCollectorBinding;
+  const transport = local.posterproTaxonomyTransport || {};
+  const transportTime = (value) => value ? new Date(value).toLocaleString() : "never";
+  const lastClaim = transport.last_claim_attempt_at
+    ? `${transportTime(transport.last_claim_attempt_at)} · HTTP ${transport.last_claim_http_status ?? "no response"}${transport.last_claim_error_code ? ` · ${transport.last_claim_error_code}` : ""}`
+    : "never (heartbeat does not mean a claim was attempted)";
+  const received = transport.last_command_received
+    ? `${transport.last_command_received.command} · ${transport.last_command_received.job_id} · ${transportTime(transport.last_command_received.received_at)}` : "none";
+  const executed = transport.last_command_executed
+    ? `${transport.last_command_executed.command} · ${transport.last_command_executed.job_id} · ${transportTime(transport.last_command_executed.at)}` : "none";
+  const acknowledged = transport.last_result_acknowledged
+    ? `${transport.last_result_acknowledged.status || "COMPLETED"} · ${transport.last_result_acknowledged.job_id} · ${transportTime(transport.last_result_acknowledged.at)}` : "none";
+  const transportDiagnostic = [
+    `Collector binding: ${transport.collector_binding_valid === true ? "valid" : transport.collector_binding_valid === false ? "missing/invalid" : "unknown"}`,
+    `Taxonomy poller: ${transport.poller_status || "not observed"}`,
+    `Last claim attempt: ${lastClaim}`,
+    `Last command received: ${received}`,
+    `Last command executed: ${executed}`,
+    `Last result acknowledged: ${acknowledged}`,
+    `Checkpoint revision: ${transport.current_checkpoint_revision ?? binding?.checkpoint_revision ?? "unknown"}`,
+    transport.last_poll_error_code ? `Last poll error: ${transport.last_poll_error_code}` : "",
+  ].filter(Boolean).join("\n");
+  setDiagnostic(`${transportDiagnostic}${agentError ? `\nAgent error: ${agentError}${local.posterproAgentErrorAt ? ` · ${new Date(local.posterproAgentErrorAt).toLocaleString()}` : ""}` : ""}`);
   el("facebookTaxonomyStatus").textContent = taxonomy
     ? "Facebook seller-form collection: " + (taxonomy.stage || taxonomy.status) + " · " + taxonomy.status
       + (taxonomy.roots_discovered ? ` · ${taxonomy.roots_discovered} roots / ` : " · ") + (taxonomy.captured_nodes || 0) + " persisted nodes"
@@ -86,7 +107,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   await loadState();
   chrome.storage.onChanged?.addListener((changes, area) => {
     if (area === "local" && (changes.posterproFacebookTaxonomyCollection || changes.posterproFacebookTaxonomyError
-      || changes.posterproFacebookTaxonomyCollectorBinding || changes.posterproAgentError || changes.posterproDevice || changes.posterproLastSuccessfulHeartbeatAt)) {
+      || changes.posterproFacebookTaxonomyCollectorBinding || changes.posterproTaxonomyTransport
+      || changes.posterproAgentError || changes.posterproDevice || changes.posterproLastSuccessfulHeartbeatAt
+      || changes.posterproExtensionBuildId)) {
       void loadState();
     }
   });
