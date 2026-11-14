@@ -2773,7 +2773,21 @@ async function runTaxonomyTestJob(job) {
 
 async function claimAndRunTaxonomyTestJob() {
   const local = await chrome.storage.local.get(["posterproFacebookTaxonomyCollectorBinding"]);
-  const binding = local.posterproFacebookTaxonomyCollectorBinding;
+  let binding = local.posterproFacebookTaxonomyCollectorBinding;
+  // Authorization is renewed in the server-side consent UI. Refresh the
+  // device-scoped binding before polling so a stale local session id cannot
+  // permanently suppress taxonomy job claims. This is read-only and never
+  // discovers, opens, focuses, or selects a browser tab.
+  try {
+    const fresh = await deviceRequest("/browser-extension/taxonomy/facebook/collector-binding", { method: "GET" });
+    if (fresh?.binding) {
+      binding = { ...(binding || {}), ...fresh.binding };
+      await chrome.storage.local.set({ posterproFacebookTaxonomyCollectorBinding: binding,
+        posterproTaxonomyCollectionTabId: binding.tab_id });
+    }
+  } catch (_) {
+    // Preserve the last known binding; transport errors are retried next poll.
+  }
   if (!binding || !binding.authorized_session_id || !binding.collection_session_id
       || !Number.isInteger(Number(binding.window_id)) || !Number.isInteger(Number(binding.tab_id))) return false;
   const target = await resolveBoundCollectorTab(binding);

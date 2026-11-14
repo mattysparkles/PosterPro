@@ -1544,9 +1544,28 @@ async def test_taxonomy_test_bridge_requires_opt_in_scopes_jobs_and_persists_san
             "extension_version": CURRENT_EXTENSION_VERSION, "status": "ACTIVE"})
     assert binding_response.status_code == 200, binding_response.text
     assert binding_response.json()["binding"]["tab_id"] == 37
+    initial = binding_response.json()["initial_command"]
+    assert initial["status"] == "QUEUED" and initial["command"] == "GET_COLLECTOR_STATE"
     live_binding = await async_client.get("/browser-extension/taxonomy/facebook/collector-binding", headers=headers)
     assert live_binding.status_code == 200
     assert live_binding.json()["binding"]["collection_session_id"] == "collector-session-for-test-0001"
+    target = {"collection_session_id": "collector-session-for-test-0001", "collector_window_id": 5, "collector_tab_id": 37}
+    first_claim = await async_client.post("/browser-extension/taxonomy-test/jobs/claim", headers=headers,
+        json={"collector_running": False, **target})
+    assert first_claim.status_code == 200
+    assert first_claim.json()["job"]["job_id"] == initial["job_id"]
+    initial_result = await async_client.post(f"/browser-extension/taxonomy-test/jobs/{initial['job_id']}/result",
+        headers=headers, json={"status": "COMPLETED", "evidence": {"ok": True, "collector_running": False}, **target})
+    assert initial_result.status_code == 200
+    assert initial_result.json()["next_dispatch"]["command"] == "RUN_COLLECTION_STEP"
+    start_claim = await async_client.post("/browser-extension/taxonomy-test/jobs/claim", headers=headers,
+        json={"collector_running": False, **target})
+    assert start_claim.status_code == 200 and start_claim.json()["job"]["command"] == "RUN_COLLECTION_STEP"
+    start_result = await async_client.post(f"/browser-extension/taxonomy-test/jobs/{start_claim.json()['job']['job_id']}/result",
+        headers=headers, json={"status": "COMPLETED", "evidence": {"ok": True, "stage": "RUNNING"}, **target})
+    assert start_result.status_code == 200
+    resumed = await async_client.post(f"/taxonomy-test/sessions/{session_id}/start")
+    assert resumed.status_code == 200 and resumed.json()["dispatch"]["created"] is False
     job_response = await async_client.post("/taxonomy-test/authorized-jobs", json={"session_id": session_id,
         "command": "INSPECT_CATEGORY_PICKER"})
     assert job_response.status_code == 200, job_response.text
@@ -1554,7 +1573,6 @@ async def test_taxonomy_test_bridge_requires_opt_in_scopes_jobs_and_persists_san
     invalid = await async_client.post("/taxonomy-test/authorized-jobs", json={"session_id": session_id,
         "command": "EXECUTE_SCRIPT"})
     assert invalid.status_code == 422
-    target = {"collection_session_id": "collector-session-for-test-0001", "collector_window_id": 5, "collector_tab_id": 37}
     held = await async_client.post("/browser-extension/taxonomy-test/jobs/claim", headers=headers, json={"collector_running": True, **target})
     assert held.status_code == 200 and held.json()["job"] is None
     stale_target = {"collection_session_id": "collector-session-for-test-0001", "collector_window_id": 9, "collector_tab_id": 99}

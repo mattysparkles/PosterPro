@@ -102,7 +102,7 @@ function harness(options = {}) {
     },
     scripting: { async executeScript({ target, files }) { if (options.injectionError) throw new Error(options.injectionError); return [{ target, files }]; } },
   };
-  let serverBinding = state.posterproFacebookTaxonomyCollectorBinding || null;
+  let serverBinding = options.serverBinding || state.posterproFacebookTaxonomyCollectorBinding || null;
   const fetch = async (url, request) => {
     requests.push({ url: String(url), method: request.method, body: request.body });
     const endpoint = String(url);
@@ -116,7 +116,7 @@ function harness(options = {}) {
       return response({ ok: true, authorized_session_id: serverBinding.authorized_session_id, binding: serverBinding });
     }
     if (endpoint.endsWith("/collector-binding")) return response({ binding: serverBinding });
-    if (endpoint.endsWith("/browser-extension/taxonomy-test/jobs/claim")) return response({ job: null });
+    if (endpoint.endsWith("/browser-extension/taxonomy-test/jobs/claim")) return response({ job: options.claimJob || null });
     if (endpoint.includes("/taxonomy-test/jobs/") && endpoint.endsWith("/result")) return response({ ok: true, status: "COMPLETED" });
     if (endpoint.endsWith("/collector-diagnostic")) return response({ ok: true });
     return response({ revision: 6, checkpoint: { marketplace: "facebook", frontier: [], categories: {}, status: "in_progress" } });
@@ -279,6 +279,23 @@ test("a bound bridge command returns the immutable session and exact window/tab 
   assert.equal(posted.collection_session_id, binding.collection_session_id);
   assert.equal(posted.collector_window_id, binding.window_id);
   assert.equal(posted.collector_tab_id, binding.tab_id);
+});
+
+test("taxonomy poll refreshes a reauthorized server binding before claiming without changing browser focus", async () => {
+  const fresh = makeBinding({ authorized_session_id: "new-authorized-session-0123456789",
+    collection_session_id: "collector-session-012345678901", window_id: 2, tab_id: 18 });
+  const h = harness({ binding: makeBinding({ authorized_session_id: "expired-session-0123456789" }),
+    serverBinding: fresh });
+  const handled = await h.api.claimAndRunTaxonomyTestJob();
+  assert.equal(handled, false);
+  assert.equal(h.state.posterproFacebookTaxonomyCollectorBinding.authorized_session_id, fresh.authorized_session_id);
+  const claim = h.requests.find((entry) => entry.url.endsWith("/browser-extension/taxonomy-test/jobs/claim"));
+  assert.ok(claim);
+  assert.equal(JSON.parse(claim.body).collection_session_id, fresh.collection_session_id);
+  assert.equal(JSON.parse(claim.body).collector_window_id, fresh.window_id);
+  assert.equal(JSON.parse(claim.body).collector_tab_id, fresh.tab_id);
+  assert.equal(h.focusedUpdates.length, 0);
+  assert.deepEqual(h.createdWindowIds, []);
 });
 
 test("pause and stop target only the bound tab; only explicit Show Collector Window may focus it", async () => {

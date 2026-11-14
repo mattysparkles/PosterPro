@@ -1862,6 +1862,110 @@ def _authorized_collector_binding(db: Session, *, device_id: int, owner_id: int,
     return row
 
 
+def _queue_initial_taxonomy_command(db: Session, *, session, binding, now: datetime | None = None) -> dict:
+    """Idempotently dispatch a read-only probe when an authorized collector is ready."""
+    now = now or datetime.now(UTC).replace(tzinfo=None)
+    session_id = str(session["session_id"])
+    owner_id = int(session["owner_user_id"])
+    device_id = int(session["authorized_device_id"])
+    expires_at = _taxonomy_test_datetime(session["expires_at"])
+    if str(session["status"]) != "AUTHORIZED" or expires_at <= now:
+        return {"status": "BLOCKED", "error_code": "TAXONOMY_TEST_SESSION_INVALID_OR_EXPIRED"}
+    if not binding or int(binding["device_id"]) != device_id or int(binding["owner_user_id"]) != owner_id:
+        return {"status": "BLOCKED", "error_code": "FACEBOOK_COLLECTOR_WINDOW_NOT_BOUND"}
+    if str(binding["extension_version"]) != CURRENT_EXTENSION_VERSION:
+        return {"status": "BLOCKED", "error_code": "TAXONOMY_TEST_EXTENSION_VERSION_MISMATCH"}
+    if str(binding["status"]) not in {"ACTIVE", "RUNNING", "PAUSED"}:
+        return {"status": "BLOCKED", "error_code": "FACEBOOK_COLLECTOR_NOT_READY"}
+
+    existing = db.execute(text("""SELECT job_id,status,error_code,expires_at FROM marketplace_taxonomy_test_jobs
+        WHERE session_id=:session AND command='GET_COLLECTOR_STATE'
+        ORDER BY created_at DESC LIMIT 1"""), {"session": session_id}).mappings().first()
+    if existing:
+        if str(existing["status"]) in {"QUEUED", "CLAIMED", "COMPLETED"}:
+            return {"status": str(existing["status"]), "job_id": existing["job_id"], "created": False}
+        attempts = db.execute(text("""SELECT COUNT(*) FROM marketplace_taxonomy_test_jobs
+            WHERE session_id=:session AND command='GET_COLLECTOR_STATE'"""), {"session": session_id}).scalar_one()
+        if int(attempts or 0) >= 2:
+            return {"status": "INTERRUPTED", "job_id": existing["job_id"],
+                    "error_code": existing["error_code"] or "TAXONOMY_INITIAL_COMMAND_RETRY_LIMIT"}
+
+    queued_count = db.execute(text("SELECT COUNT(*) FROM marketplace_taxonomy_test_jobs WHERE session_id=:session"),
+        {"session": session_id}).scalar_one()
+    if int(queued_count or 0) >= 40:
+        return {"status": "BLOCKED", "error_code": "TAXONOMY_TEST_SESSION_JOB_LIMIT"}
+    job_id = secrets.token_urlsafe(24)
+    job_expires = min(expires_at, now + timedelta(seconds=180))
+    db.execute(text("""INSERT INTO marketplace_taxonomy_test_jobs
+        (job_id,session_id,owner_user_id,authorized_device_id,marketplace,command,parameters_json,status,expires_at)
+        VALUES (:job,:session,:owner,:device,'facebook','GET_COLLECTOR_STATE','{}','QUEUED',:expires)"""), {
+        "job": job_id, "session": session_id, "owner": owner_id, "device": device_id, "expires": job_expires,
+    })
+    db.execute(text("""INSERT INTO marketplace_taxonomy_test_job_targets
+        (job_id,collection_session_id,collector_window_id,collector_tab_id)
+        VALUES (:job,:collection,:window,:tab)"""), {
+        "job": job_id, "collection": binding["collection_session_id"],
+        "window": binding["window_id"], "tab": binding["tab_id"],
+    })
+    _taxonomy_test_event(db, job_id=job_id, owner_id=owner_id, actor_type="system", actor_id=None,
+        event_type="INITIAL_COMMAND_QUEUED", event={"command": "GET_COLLECTOR_STATE", "stage": "INITIAL_COMMAND_QUEUED",
+            "device_id": device_id, "submission_allowed": False})
+    return {"status": "QUEUED", "job_id": job_id, "command": "GET_COLLECTOR_STATE", "created": True}
+
+
+def _expire_unclaimed_taxonomy_jobs(db: Session, *, owner_id: int, now: datetime | None = None) -> int:
+    now = now or datetime.now(UTC).replace(tzinfo=None)
+    rows = db.execute(text("""SELECT job_id,command FROM marketplace_taxonomy_test_jobs
+        WHERE owner_user_id=:owner AND status='QUEUED' AND expires_at<=:now"""),
+        {"owner": owner_id, "now": now}).mappings().all()
+    for row in rows:
+        updated = db.execute(text("""UPDATE marketplace_taxonomy_test_jobs SET status='EXPIRED',completed_at=:now,
+            error_code='TAXONOMY_COMMAND_NOT_CLAIMED' WHERE job_id=:job AND status='QUEUED' AND expires_at<=:now"""),
+            {"job": row["job_id"], "now": now})
+        if updated.rowcount:
+            _taxonomy_test_event(db, job_id=row["job_id"], owner_id=owner_id, actor_type="system", actor_id=None,
+                event_type="INTERRUPTED", event={"stage": "INITIAL_COMMAND_QUEUED", "error_code": "TAXONOMY_COMMAND_NOT_CLAIMED",
+                    "command": row["command"], "recoverable": True,
+                    "next_action": "Refresh the authorized collector binding and retry within the active consent session.",
+                    "operator_interaction_required": False})
+    if rows:
+        db.commit()
+    return len(rows)
+
+
+def _queue_taxonomy_collection_step(db: Session, *, session, binding, now: datetime) -> dict:
+    """Start the installed granular collector once after a successful idle-state probe."""
+    session_id = str(session["session_id"])
+    existing = db.execute(text("""SELECT job_id,status,error_code FROM marketplace_taxonomy_test_jobs
+        WHERE session_id=:session AND command='RUN_COLLECTION_STEP' ORDER BY created_at DESC LIMIT 1"""),
+        {"session": session_id}).mappings().first()
+    if existing and str(existing["status"]) in {"QUEUED", "CLAIMED", "COMPLETED"}:
+        return {"status": str(existing["status"]), "job_id": existing["job_id"], "created": False}
+    attempts = db.execute(text("""SELECT COUNT(*) FROM marketplace_taxonomy_test_jobs
+        WHERE session_id=:session AND command='RUN_COLLECTION_STEP'"""), {"session": session_id}).scalar_one()
+    if int(attempts or 0) >= 2:
+        return {"status": "INTERRUPTED", "error_code": "TAXONOMY_COLLECTION_START_RETRY_LIMIT"}
+    if (str(session["status"]) != "AUTHORIZED" or _taxonomy_test_datetime(session["expires_at"]) <= now
+            or not binding or str(binding["status"]) not in {"ACTIVE", "RUNNING", "PAUSED"}):
+        return {"status": "BLOCKED", "error_code": "TAXONOMY_TEST_SESSION_OR_BINDING_INVALID"}
+    job_id = secrets.token_urlsafe(24)
+    expires = min(_taxonomy_test_datetime(session["expires_at"]), now + timedelta(seconds=180))
+    db.execute(text("""INSERT INTO marketplace_taxonomy_test_jobs
+        (job_id,session_id,owner_user_id,authorized_device_id,marketplace,command,parameters_json,status,expires_at)
+        VALUES (:job,:session,:owner,:device,'facebook','RUN_COLLECTION_STEP',:parameters,'QUEUED',:expires)"""), {
+        "job": job_id, "session": session_id, "owner": session["owner_user_id"],
+        "device": session["authorized_device_id"], "parameters": json.dumps({"max_nodes": 200}), "expires": expires,
+    })
+    db.execute(text("""INSERT INTO marketplace_taxonomy_test_job_targets
+        (job_id,collection_session_id,collector_window_id,collector_tab_id)
+        VALUES (:job,:collection,:window,:tab)"""), {"job": job_id,
+        "collection": binding["collection_session_id"], "window": binding["window_id"], "tab": binding["tab_id"]})
+    _taxonomy_test_event(db, job_id=job_id, owner_id=session["owner_user_id"], actor_type="system", actor_id=None,
+        event_type="COLLECTION_STEP_QUEUED", event={"stage": "INITIAL_COMMAND_QUEUED", "command": "RUN_COLLECTION_STEP",
+            "max_nodes": 200, "submission_allowed": False})
+    return {"status": "QUEUED", "job_id": job_id, "command": "RUN_COLLECTION_STEP", "created": True}
+
+
 @router.post("/browser-extension/taxonomy/facebook/collector-binding")
 def create_facebook_taxonomy_collector_binding(payload: FacebookTaxonomyCollectorBindingRequest,
                                                authorization: str | None = Header(default=None), db: Session = Depends(get_db)):
@@ -1932,10 +2036,12 @@ def create_facebook_taxonomy_collector_binding(payload: FacebookTaxonomyCollecto
         event_type="COLLECTOR_WINDOW_BOUND", event={"collection_session_id": payload.collection_session_id,
             "window_id": payload.window_id, "tab_id": payload.tab_id, "extension_version": payload.extension_version,
             "submission_allowed": False})
-    db.commit()
     row = db.execute(text("SELECT * FROM marketplace_facebook_taxonomy_collector_bindings WHERE device_id=:device"),
         {"device": device.id}).mappings().one()
-    return {"ok": True, "authorized_session_id": session["session_id"], "binding": _collector_binding_payload(row)}
+    initial_command = _queue_initial_taxonomy_command(db, session=session, binding=row, now=now)
+    db.commit()
+    return {"ok": True, "authorized_session_id": session["session_id"], "binding": _collector_binding_payload(row),
+        "initial_command": initial_command}
 
 
 def _collector_binding_params(payload, device, authorized_session_id: str, now: datetime) -> dict:
@@ -2024,9 +2130,45 @@ def create_taxonomy_test_session(payload: TaxonomyTestSessionCreateRequest,
     _taxonomy_test_event(db, job_id=session_id, owner_id=current_user.id, actor_type="operator", actor_id=current_user.id,
         event_type="SESSION_AUTHORIZED", event={"device_id": device.id, "expires_at": expires.isoformat(),
             "collector_binding_reactivated": rebound, "submission_allowed": False})
+    initial_command = {"status": "BLOCKED", "error_code": "FACEBOOK_COLLECTOR_WINDOW_NOT_BOUND"}
+    if rebound:
+        active_session = db.execute(text("SELECT * FROM marketplace_taxonomy_test_sessions WHERE session_id=:id"),
+            {"id": session_id}).mappings().one()
+        active_binding = db.execute(text("SELECT * FROM marketplace_facebook_taxonomy_collector_bindings WHERE device_id=:device"),
+            {"device": device.id}).mappings().one()
+        initial_command = _queue_initial_taxonomy_command(db, session=active_session, binding=active_binding, now=now)
     db.commit()
     return {"ok": True, "session_id": session_id, "status": "AUTHORIZED", "device_id": device.id,
         "expires_at": expires.isoformat(), "max_jobs": 40, "collector_binding_reactivated": rebound,
+        "initial_command": initial_command, "submission_allowed": False}
+
+
+@router.post("/taxonomy-test/sessions/{session_id}/start")
+def start_authorized_taxonomy_test_session(session_id: str, db: Session = Depends(get_db),
+                                           current_user: User = Depends(get_current_user)):
+    """Resume only an existing, still-authorized session; never renew consent here."""
+    now = datetime.now(UTC).replace(tzinfo=None)
+    session = db.execute(text("""SELECT * FROM marketplace_taxonomy_test_sessions
+        WHERE session_id=:session AND owner_user_id=:owner"""),
+        {"session": session_id, "owner": current_user.id}).mappings().first()
+    if not session or session["status"] != "AUTHORIZED" or _taxonomy_test_datetime(session["expires_at"]) <= now:
+        raise HTTPException(status_code=403, detail={"code": "TAXONOMY_TEST_SESSION_NOT_AUTHORIZED"})
+    device = db.get(MarketplaceExtensionDevice, session["authorized_device_id"])
+    if not device or device.user_id != current_user.id or device.revoked_at:
+        raise HTTPException(status_code=403, detail={"code": "TAXONOMY_TEST_DEVICE_REVOKED"})
+    if str(device.extension_version or "") != CURRENT_EXTENSION_VERSION:
+        raise HTTPException(status_code=409, detail={"code": "TAXONOMY_TEST_EXTENSION_VERSION_MISMATCH"})
+    if not device.last_seen_at or device.last_seen_at < now - timedelta(minutes=3):
+        raise HTTPException(status_code=409, detail={"code": "TAXONOMY_TEST_DEVICE_OFFLINE"})
+    binding = _authorized_collector_binding(db, device_id=device.id, owner_id=current_user.id, session_id=session_id)
+    dispatch = _queue_initial_taxonomy_command(db, session=session, binding=binding, now=now)
+    if dispatch.get("status") == "BLOCKED":
+        db.rollback()
+        raise HTTPException(status_code=409, detail={"code": dispatch["error_code"]})
+    _taxonomy_test_event(db, job_id=session_id, owner_id=current_user.id, actor_type="operator", actor_id=current_user.id,
+        event_type="COLLECTOR_RESUME_REQUESTED", event={"initial_command": dispatch, "submission_allowed": False})
+    db.commit()
+    return {"ok": True, "session_id": session_id, "device_id": device.id, "dispatch": dispatch,
         "submission_allowed": False}
 
 
@@ -2183,6 +2325,7 @@ def create_authorized_taxonomy_test_job(payload: AuthorizedTaxonomyTestJobReques
 @router.get("/taxonomy-test/jobs")
 def list_taxonomy_test_jobs(limit: int = Query(default=20, ge=1, le=100),
                             db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    _expire_unclaimed_taxonomy_jobs(db, owner_id=current_user.id)
     rows = db.execute(text("""SELECT j.*,t.collection_session_id,t.collector_window_id,t.collector_tab_id
         FROM marketplace_taxonomy_test_jobs j LEFT JOIN marketplace_taxonomy_test_job_targets t ON t.job_id=j.job_id
         WHERE j.owner_user_id=:owner ORDER BY j.created_at DESC LIMIT :limit"""),
@@ -2328,8 +2471,21 @@ def complete_taxonomy_test_job(job_id: str, payload: TaxonomyTestJobResultReques
          "error": error_code, "now": now, "job": job_id})
     _taxonomy_test_event(db, job_id=job_id, owner_id=device.user_id, actor_type="device", actor_id=device.id,
         event_type=payload.status, event={"error_code": error_code, "evidence_keys": sorted(safe.keys())})
+    next_dispatch = None
+    if (payload.status == "COMPLETED" and row["command"] == "GET_COLLECTOR_STATE"
+            and safe.get("collector_running") is False):
+        session = db.execute(text("""SELECT * FROM marketplace_taxonomy_test_sessions
+            WHERE session_id=:session AND owner_user_id=:owner AND authorized_device_id=:device"""),
+            {"session": row["session_id"], "owner": device.user_id, "device": device.id}).mappings().first()
+        active_binding = _authorized_collector_binding(db, device_id=device.id, owner_id=device.user_id,
+            session_id=row["session_id"])
+        if session and active_binding:
+            next_dispatch = _queue_taxonomy_collection_step(db, session=session, binding=active_binding, now=now)
+            _taxonomy_test_event(db, job_id=row["session_id"], owner_id=device.user_id, actor_type="system", actor_id=None,
+                event_type="COLLECTOR_START_DISPATCHED", event={"dispatch": next_dispatch, "submission_allowed": False})
     db.commit()
-    return {"ok": True, "job_id": job_id, "status": payload.status, "evidence": safe}
+    return {"ok": True, "job_id": job_id, "status": payload.status, "evidence": safe,
+        **({"next_dispatch": next_dispatch} if next_dispatch is not None else {})}
 
 
 @router.post("/browser-extension/taxonomy/facebook/collector-diagnostic")
