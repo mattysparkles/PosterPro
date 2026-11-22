@@ -443,7 +443,58 @@ async def get_ebay_trading_item(account: MarketplaceAccount, item_id: str) -> di
         package_weight = float(_ebay_trading_value(item, "e:ShippingDetails/e:ShippingPackageDetails/e:WeightMajor") or 0) + float(_ebay_trading_value(item, "e:ShippingDetails/e:ShippingPackageDetails/e:WeightMinor") or 0) / 16.0
     except ValueError:
         package_weight = None
-    return {"ack": ack, "item_id": item_id, "title": _ebay_trading_value(item, "e:Title"), "sku": _ebay_trading_value(item, "e:SKU") or None, "listing_type": listing_type, "listing_status": listing_status, "quantity": _ebay_trading_value(item, "e:Quantity"), "quantity_sold": quantity_sold, "end_time": end_time, "item_location": _ebay_trading_value(item, "e:Location") or None, "handling_time_days": _ebay_trading_value(item, "e:DispatchTimeMax") or None, "shipping_policy_id": shipping_profile_id, "shipping_policy_name": shipping_profile_name, "shipping": {"shipping_type": shipping_type or None, "service": service or None, "shipping_cost": service_cost or None, "free_shipping": free_shipping, "calculated": str(shipping_type).lower() == "calculated", "buyer_pays_shipping": bool(not free_shipping and str(shipping_type).lower() != "calculated" and service_cost not in {"", "0", "0.0", "0.00"}), "package_weight": package_weight if package_weight and package_weight > 0 else None, "package_dimensions": dimensions, "provenance": "ebay_trading_get_item"}, "has_variations": variation_node is not None, "inventory_tracking_method": inventory_tracking or None, "pictures": pictures, "external_picture_urls": external, "gallery_urls": gallery, "picture_count": len(pictures), "raw_item_source": "EBAY_TRADING_GETITEM"}
+    return {"ack": ack, "item_id": item_id, "title": _ebay_trading_value(item, "e:Title"), "sku": _ebay_trading_value(item, "e:SKU") or None, "listing_type": listing_type, "listing_status": listing_status, "quantity": _ebay_trading_value(item, "e:Quantity"), "quantity_sold": quantity_sold, "end_time": end_time, "item_location": _ebay_trading_value(item, "e:Location") or None, "postal_code": _ebay_trading_value(item, "e:PostalCode") or None, "handling_time_days": _ebay_trading_value(item, "e:DispatchTimeMax") or None, "shipping_policy_id": shipping_profile_id, "shipping_policy_name": shipping_profile_name, "shipping": {"shipping_type": shipping_type or None, "service": service or None, "shipping_cost": service_cost or None, "free_shipping": free_shipping, "calculated": str(shipping_type).lower() == "calculated", "buyer_pays_shipping": bool(not free_shipping and str(shipping_type).lower() != "calculated" and service_cost not in {"", "0", "0.0", "0.00"}), "package_weight": package_weight if package_weight and package_weight > 0 else None, "package_dimensions": dimensions, "provenance": "ebay_trading_get_item"}, "has_variations": variation_node is not None, "inventory_tracking_method": inventory_tracking or None, "pictures": pictures, "external_picture_urls": external, "gallery_urls": gallery, "picture_count": len(pictures), "raw_item_source": "EBAY_TRADING_GETITEM"}
+
+
+def _validate_trading_item_origin(item: dict[str, Any], policy_settings: dict[str, Any]) -> None:
+    """Fail closed when adopting an active legacy item with a stale item-level origin."""
+    expected = _normalize_merchant_location_origin(policy_settings)
+    if policy_settings.get("merchant_location_verified") is not True or not expected.get("address_line1"):
+        raise EbayIntegrationError(
+            "EBAY_SHIP_FROM_UNVERIFIED: verify the configured merchant location before reconciling or relisting an active Trading API item.",
+            provider_call_attempted=False,
+            endpoint="trading_item_origin_validation",
+        )
+    actual_city_state = re.sub(r"\s+", " ", str(item.get("item_location") or "")).strip().casefold()
+    expected_city = re.sub(r"\s+", " ", expected.get("city") or "").strip().casefold()
+    state = str(expected.get("state_or_province") or "").strip().upper()
+    state_names = {"NY": {"ny", "new york"}, "CA": {"ca", "california"}, "NJ": {"nj", "new jersey"}}
+    allowed_states = state_names.get(state, {state.casefold()})
+    city_state_matches = any(actual_city_state == f"{expected_city}, {alias}" for alias in allowed_states)
+    actual_postal = str(item.get("postal_code") or "").strip()
+    expected_postal = str(expected.get("postal_code") or "").strip()
+    if not city_state_matches or not expected_postal or actual_postal != expected_postal:
+        raise EbayIntegrationError(
+            "EBAY_ITEM_SHIP_FROM_MISMATCH: active Trading API item location does not match the verified PosterPro origin; operator correction is required before relist reconciliation.",
+            provider_call_attempted=False,
+            endpoint="trading_item_origin_validation",
+            provider_response={
+                "expected_city": expected.get("city"),
+                "expected_state": expected.get("state_or_province"),
+                "expected_postal_code": expected_postal,
+                "actual_location": item.get("item_location"),
+                "actual_postal_code": actual_postal,
+            },
+        )
+
+
+def _validate_inventory_offer_origin(offer: dict[str, Any], policy_settings: dict[str, Any]) -> None:
+    """Do not adopt/relist an Inventory API offer on a stale location key."""
+    expected_key = str(policy_settings.get("merchant_location_key") or "").strip()
+    actual_key = str(offer.get("merchantLocationKey") or "").strip()
+    if policy_settings.get("merchant_location_verified") is not True or not expected_key:
+        raise EbayIntegrationError(
+            "EBAY_SHIP_FROM_UNVERIFIED: verify the configured merchant location before reconciling or relisting an Inventory API offer.",
+            provider_call_attempted=False,
+            endpoint="inventory_offer_origin_validation",
+        )
+    if not actual_key or actual_key != expected_key or actual_key in {"posterpro-default", "posterpro-1", "posterpro-2"}:
+        raise EbayIntegrationError(
+            "EBAY_MERCHANT_LOCATION_MISMATCH: existing Inventory API offer does not use the verified PosterPro merchant location; reconcile it before relisting.",
+            provider_call_attempted=False,
+            endpoint="inventory_offer_origin_validation",
+            provider_response={"expected_merchant_location_key": expected_key, "actual_merchant_location_key": actual_key},
+        )
 
 
 async def get_ebay_supported_handling_times(account: MarketplaceAccount) -> dict[str, Any]:
@@ -5304,6 +5355,21 @@ async def publish_listing_to_ebay(
                 publish_data = {"listingId": str(remote_row.get("source_identifiers", {}).get("ebay_listing_id") or ""), "status": "EXISTING_LISTING_RECONCILED", "publisher_path": "TRADING_API_MOTORS", "response": {"source": "GetMyeBaySelling", "sku": sku}}
                 if not publish_data["listingId"]:
                     raise EbayIntegrationError("REMOTE_STATE_UNKNOWN / RECONCILIATION_REQUIRED: active SKU match has no remote ItemID", provider_response={"remote_state_unknown": True})
+                # An active SKU match can be an old/out-of-band relist whose
+                # item-level location predates the currently verified account
+                # origin. Never silently adopt it as a successful relist.
+                existing_item = await get_ebay_trading_item(account, publish_data["listingId"])
+                if (
+                    str(existing_item.get("ack") or "").lower() not in {"success", "warning"}
+                    or str(existing_item.get("listing_status") or "").upper() not in {"ACTIVE", "PUBLISHED", "LISTED"}
+                    or str(existing_item.get("sku") or "").strip().lower() != sku.lower()
+                ):
+                    raise EbayIntegrationError(
+                        "REMOTE_STATE_UNKNOWN / RECONCILIATION_REQUIRED: active Trading SKU match failed exact item/status verification.",
+                        provider_response={"remote_state_unknown": True, "item_id": publish_data["listingId"]},
+                    )
+                _validate_trading_item_origin(existing_item, plan.get("policy_settings") or {})
+                publish_data["verification"] = existing_item
             elif prior_unknown:
                 raise EbayIntegrationError("REMOTE_STATE_UNKNOWN / RECONCILIATION_REQUIRED: prior Trading submission is ambiguous; active snapshot has no match, so automatic replay is prohibited", provider_response={"remote_state_unknown": True})
             else:
@@ -5376,6 +5442,8 @@ async def publish_listing_to_ebay(
                     "REMOTE_STATE_UNKNOWN / RECONCILIATION_REQUIRED: the exact SKU is published under a different eBay listing ID.",
                     provider_response={"remote_state_unknown": True, "known_listing_id": known_listing_id, "remote_listing_id": remote_listing_id},
                 )
+            remote_offer = offer_state.get("offer") if isinstance(offer_state.get("offer"), dict) else {}
+            _validate_inventory_offer_origin(remote_offer, plan.get("policy_settings") or {})
             publish_data = {
                 "listingId": remote_listing_id,
                 "offerId": offer_state.get("offer_id"),

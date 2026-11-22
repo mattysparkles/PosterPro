@@ -53,7 +53,7 @@ class DummyListing:
 @pytest.mark.anyio
 async def test_trading_get_item_extracts_shipping_business_policy_identity(monkeypatch):
     xml = b'''<?xml version="1.0"?><GetItemResponse xmlns="urn:ebay:apis:eBLBaseComponents">
-      <Ack>Success</Ack><Item><ItemID>123</ItemID><Location>Huntington Station, NY</Location><DispatchTimeMax>1</DispatchTimeMax>
+      <Ack>Success</Ack><Item><ItemID>123</ItemID><Location>Huntington Station, NY</Location><PostalCode>11746</PostalCode><DispatchTimeMax>1</DispatchTimeMax>
         <SellerProfiles><SellerShippingProfile><ShippingProfileID>profile-7</ShippingProfileID>
           <ShippingProfileName>Standard shipping</ShippingProfileName></SellerShippingProfile></SellerProfiles>
       </Item></GetItemResponse>'''
@@ -78,6 +78,56 @@ async def test_trading_get_item_extracts_shipping_business_policy_identity(monke
     assert result["shipping_policy_id"] == "profile-7"
     assert result["shipping_policy_name"] == "Standard shipping"
     assert result["item_location"] == "Huntington Station, NY"
+    assert result["postal_code"] == "11746"
+
+
+@pytest.mark.parametrize("remote_location", ["Farmingdale, NY", "Farmingdale, New York"])
+def test_trading_active_relist_requires_verified_matching_city_state_and_postal(remote_location):
+    settings = {
+        "merchant_location_verified": True,
+        "merchant_location_address_line1": "2091 New Highway",
+        "merchant_location_city": "Farmingdale",
+        "merchant_location_state_or_province": "NY",
+        "merchant_location_postal_code": "11735",
+        "merchant_location_country": "US",
+    }
+    ebay_service._validate_trading_item_origin(
+        {"item_location": remote_location, "postal_code": "11735"}, settings
+    )
+
+
+def test_trading_active_relist_rejects_stale_california_origin():
+    settings = {
+        "merchant_location_verified": True,
+        "merchant_location_address_line1": "2091 New Highway",
+        "merchant_location_city": "Farmingdale",
+        "merchant_location_state_or_province": "NY",
+        "merchant_location_postal_code": "11735",
+        "merchant_location_country": "US",
+    }
+    with pytest.raises(ebay_service.EbayIntegrationError, match="EBAY_ITEM_SHIP_FROM_MISMATCH"):
+        ebay_service._validate_trading_item_origin(
+            {"item_location": "San Jose, California", "postal_code": "95125"}, settings
+        )
+
+
+def test_trading_active_relist_requires_operator_verified_origin():
+    with pytest.raises(ebay_service.EbayIntegrationError, match="EBAY_SHIP_FROM_UNVERIFIED"):
+        ebay_service._validate_trading_item_origin(
+            {"item_location": "Farmingdale, NY", "postal_code": "11735"},
+            {"merchant_location_verified": False},
+        )
+
+
+def test_inventory_api_relist_requires_the_verified_merchant_location_key():
+    settings = {"merchant_location_verified": True, "merchant_location_key": "posterpro-farmingdale-ny-11735"}
+    ebay_service._validate_inventory_offer_origin(
+        {"merchantLocationKey": "posterpro-farmingdale-ny-11735"}, settings
+    )
+    with pytest.raises(ebay_service.EbayIntegrationError, match="EBAY_MERCHANT_LOCATION_MISMATCH"):
+        ebay_service._validate_inventory_offer_origin(
+            {"merchantLocationKey": "posterpro-default"}, settings
+        )
 
 
 @pytest.mark.anyio
