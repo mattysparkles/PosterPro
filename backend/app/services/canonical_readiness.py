@@ -8,7 +8,7 @@ import json
 import re
 import math
 
-from app.services.listing_review import derive_shipping_profile, shipping_policy_for_user, summarize_listing_readiness
+from app.services.listing_review import derive_shipping_profile, is_legacy_global_photo_blocker, is_verified_amazon_vine_source, shipping_policy_for_user, summarize_listing_readiness
 from app.services.listing_specificity import classify_listing_reviewability, is_generic_sellable_title
 from app.services.listing_ai import assess_description_quality
 from app.services.category_rules import is_source_noise_category, verified_category_id
@@ -432,7 +432,9 @@ def hydrate_authoritative_listing_price(listing: Any) -> bool:
 def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None) -> dict[str, Any]:
     """Combine processing, content, and destination readiness without hiding blockers."""
     source_type_value = str(getattr(listing, "source_type", None) or "").strip().lower()
-    is_amazon_vine = source_type_value == "amazon_vine"
+    is_amazon_vine = is_verified_amazon_vine_source(listing=listing)
+    if is_amazon_vine:
+        source_type_value = "amazon_vine"
     # Historical Vine rows carry an explicit archive label even when their
     # legacy enum status was left as PROCESSED.  They are not current sellable
     # inventory and must not inflate the Processing queue or be re-enqueued by
@@ -451,7 +453,7 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
     listing_images = getattr(listing, "listing_images", None)
     if not listing_images:
         image_urls = getattr(listing, "image_urls", None) or []
-        listing_images = [{"storage_path": str(url), "operator_state": "approved", "role": "primary"} for url in image_urls if str(url).strip()]
+        listing_images = [{"storage_path": str(url), "operator_state": "suggested", "role": "primary", "source_platform": getattr(listing, "source_type", None) or "unknown"} for url in image_urls if str(url).strip()]
     listing_for_shipping = {
         "title": getattr(listing, "title", None),
         "description": getattr(listing, "canonical_description", None) or getattr(listing, "description", None),
@@ -522,7 +524,7 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
         condition_data=getattr(listing, "condition_data", None),
         shipping_profile=usable_shipping_profile,
         listing={"category_id": getattr(listing, "category_id", None), "category_suggestion": getattr(listing, "category_suggestion", None), "listing_price": getattr(listing, "listing_price", None), "suggested_price": getattr(listing, "suggested_price", None)},
-        source_type=getattr(listing, "source_type", None),
+        source_type=source_type_value,
     )
     shipping_checklist = base.get("shipping_checklist") if isinstance(base.get("shipping_checklist"), dict) else {}
     derived_shipping_setup_required = bool(usable_shipping_profile.get("shipping_setup_required"))
@@ -601,7 +603,10 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
         derived_shipping_setup_required and not product_preflight_ready
     )
     review_shipping_setup_required = shipping_setup_required and not selected_product_preflight_ready
-    blockers = list(dict.fromkeys([*(stored.get("blockers") or []), *(base.get("blockers") or [])]))
+    blockers = list(dict.fromkeys([
+        *(reason for reason in (stored.get("blockers") or []) if not is_legacy_global_photo_blocker(reason)),
+        *(reason for reason in (base.get("blockers") or []) if not is_legacy_global_photo_blocker(reason)),
+    ]))
     warnings = list(dict.fromkeys([*(stored.get("warnings") or []), *(base.get("warnings") or [])]))
     # Missing measured parcel data is an explicit operator setup task, not a
     # product-identification defect. Keep it visible in the review result,
@@ -650,7 +655,7 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
     stale_generation_marker = False
     stale_aggregate_preflight = "every selected marketplace must pass current preflight" in processing_blocker.lower()
     persisted_destination_blocker = processing_blocker if _is_destination_blocker(processing_blocker) else ""
-    if processing_blocker and not stale_price_blocker and not (policy_exempts_packed_measurements and _packed_measurement_or_stale_shipping_setup(processing_blocker)) and not stale_generation_marker and not stale_aggregate_preflight and not persisted_destination_blocker and not (trusted_category_resolution and "categor" in processing_blocker.lower()):
+    if processing_blocker and not is_legacy_global_photo_blocker(processing_blocker) and not stale_price_blocker and not (policy_exempts_packed_measurements and _packed_measurement_or_stale_shipping_setup(processing_blocker)) and not stale_generation_marker and not stale_aggregate_preflight and not persisted_destination_blocker and not (trusted_category_resolution and "categor" in processing_blocker.lower()):
         blockers.append(processing_blocker)
     missing_required_aspects = [str(value).strip() for value in (stored.get("missing_required_aspects") or []) if str(value).strip()]
     if missing_required_aspects:

@@ -21,7 +21,7 @@ from app.services.automation_bridge import submit_bridge_job, wait_for_bridge_jo
 from app.services.amazon_media import AmazonProductMediaProvider, _normalize_dimension_facts
 from app.services.amazon_product_discovery import AmazonProductDiscoveryService
 from app.services.ebay_service import _clip_specific_value, _derive_color, _derive_item_type, _fallback_aspect_value
-from app.services.listing_review import _shipping_number, derive_condition_data, derive_shipping_profile, normalize_listing_images, shipping_policy_for_user
+from app.services.listing_review import _shipping_number, classify_listing_image, derive_condition_data, derive_shipping_profile, normalize_listing_images, shipping_policy_for_user
 from app.services.listing_workspace import normalize_marketplace_data
 # Vine retries may update machine-owned placeholders, but must preserve both
 # operator edits and Codex-recovered verified copy/data.
@@ -572,17 +572,14 @@ class VineImportService:
                     report["images_requiring_retrieval"] += 1
                     report["unresolved_records"] += 1
 
-            actual_photo_exists = any(
-                not image.get("is_reference") and image.get("operator_state") == "approved"
-                for image in usable_images
-            )
+            actual_photo_exists = any(classify_listing_image(image)["seller_photographed"] for image in usable_images)
             targets = (listing.marketplace_data or {}).get("targets", []) if isinstance(listing.marketplace_data, dict) else []
             facebook_requires_actual = "facebook" in [str(target).lower() for target in (targets or [])] and not actual_photo_exists
             preflight = (listing.marketplace_data or {}).get("marketplace_preflight", {}) if isinstance(listing.marketplace_data, dict) else {}
             by_marketplace = preflight.get("by_marketplace", {}) if isinstance(preflight, dict) else {}
             destination_photo_failures = {
                 str(marketplace).lower(): any(
-                    str(issue.get("code") or "").upper() == "ACTUAL_PHOTOS_MISSING"
+                    str(issue.get("code") or "").upper() in {"ACTUAL_PHOTOS_MISSING", "PRODUCT_IMAGE_MISSING", "NEEDS_PHOTO"}
                     for issue in (
                         (result.get("execution_blockers") or [])
                         + (result.get("preparation_blockers") or [])
@@ -2953,13 +2950,16 @@ class VineImportService:
                     "storage_path": url,
                     "source_page_url": source_page_url,
                     "source_platform": "amazon",
-                    "operator_state": "approved",
+                    # A trusted ASIN match verifies product identity, not
+                    # operator review or redistribution rights.
+                    "operator_state": "suggested",
                     # Amazon catalog imagery is useful for reference and
                     # preparation, but it is not a photo of the physical
                     # operator-owned Vine unit.
                     "is_reference": True,
                     "metadata": {
                         "source": "amazon_vine",
+                        "image_provenance": "product_catalog",
                         "asin": asin,
                         "product_name": product_name,
                         "trusted_catalog_match": True,
@@ -2970,7 +2970,7 @@ class VineImportService:
             source_page_url=source_page_url,
             source_platform="amazon",
             default_is_reference=True,
-            approved=True,
+            approved=False,
         )
 
     def _to_public_media_path(self, path: str) -> str:
@@ -3068,10 +3068,7 @@ class VineImportService:
                 approved=False,
             )
             unsafe_images = [image for image in normalized_images if _is_unsafe_vine_image(image)]
-            has_approved_actual = any(
-                not image.get("is_reference") and image.get("operator_state") == "approved"
-                for image in normalized_images
-            )
+            has_approved_actual = any(classify_listing_image(image)["seller_photographed"] for image in normalized_images)
             if only_missing_images and normalized_images and not unsafe_images and has_approved_actual:
                 already_present += 1
                 continue

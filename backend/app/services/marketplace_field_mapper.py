@@ -252,14 +252,17 @@ def _specific(item_specifics: dict[str, Any], *names: str) -> Any:
     return None
 
 
-def _canonical_marketplace_images(listing: Listing) -> list[str]:
+def _canonical_marketplace_images(listing: Listing, marketplace: str | None = None) -> list[str]:
     """Resolve normalized canonical media in its persisted order, then legacy URLs.
 
     The Timeline primary-photo selection is materialized as display_order zero.
-    Rejected, reference-only, deleted, and Slate assets are never sent to a
-    marketplace adapter.
+    Rejected, internal reference, deleted, and Slate assets are excluded.
+    Verified exact-product catalog images may be included in draft previews for
+    assisted marketplaces; eBay additionally requires approval and verified
+    redistribution authorization.
     """
     from app.services.ebay_service import _to_public_image_url
+    from app.services.listing_review import classify_listing_image
 
     result: list[str] = []
     rows = list(getattr(listing, "listing_images", None) or [])
@@ -270,8 +273,7 @@ def _canonical_marketplace_images(listing: Listing) -> list[str]:
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
         role = str(row.get("timeline_role") or metadata.get("timeline_role") or "").upper()
         if (
-            row.get("is_reference")
-            or row.get("timeline_deleted")
+            row.get("timeline_deleted")
             or row.get("is_slate")
             or metadata.get("timeline_deleted")
             or metadata.get("is_slate")
@@ -279,19 +281,27 @@ def _canonical_marketplace_images(listing: Listing) -> list[str]:
             or str(row.get("operator_state") or "").lower() == "rejected"
         ):
             continue
+        image_class = classify_listing_image(row)
+        if marketplace == "ebay":
+            eligible = image_class["ebay_eligible"]
+        else:
+            exact_product = metadata.get("trusted_catalog_match") is True or metadata.get("exact_product_match_verified") is True
+            eligible = image_class["seller_photographed"] or (image_class["kind"] in {"catalog", "manufacturer"} and exact_product)
+        if not eligible:
+            continue
         candidate = str(row.get("storage_path") or row.get("url") or row.get("local_path") or "").strip()
         resolved = _to_public_image_url(candidate) if candidate else ""
         if resolved and resolved not in result:
             result.append(resolved)
     if not result:
-        for candidate in listing.image_urls or []:
+        for candidate in (listing.image_urls or []) if not getattr(listing, "listing_images", None) and str(getattr(listing, "source_type", "") or "").lower() != "amazon_vine" else []:
             resolved = _to_public_image_url(str(candidate or "").strip())
             if resolved and resolved not in result:
                 result.append(resolved)
     return result
 
 
-def _shared_payload(listing: Listing) -> dict[str, Any]:
+def _shared_payload(listing: Listing, marketplace: str | None = None) -> dict[str, Any]:
     marketplace_shipping = ((listing.marketplace_data or {}).get("shipping") or {}) if isinstance(listing.marketplace_data, dict) else {}
     shipping_profile = listing.shipping_profile if isinstance(listing.shipping_profile, dict) else {}
     shipping = {
@@ -333,7 +343,7 @@ def _shared_payload(listing: Listing) -> dict[str, Any]:
         "inventory_id": source_metadata.get("inventory_id") or str(listing.id),
         # Workflow/source labels are operational metadata, never buyer tags.
         "tags": _customer_facing_tags(listing.tags),
-        "image_urls": _canonical_marketplace_images(listing),
+        "image_urls": _canonical_marketplace_images(listing, marketplace),
         "shipping": {
             "mode": shipping.get("mode"),
             "domestic_service": shipping.get("domestic_service"),
@@ -363,7 +373,7 @@ def _facebook_image_urls(image_urls: list[str]) -> list[str]:
 
 def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, Any]:
     market = marketplace.lower()
-    shared = _shared_payload(listing)
+    shared = _shared_payload(listing, market)
     shipping = shared["shipping"]
 
     if market == "ebay":

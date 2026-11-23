@@ -638,6 +638,7 @@ class PricingResearchService:
 
 
 def compute_listing_quality_summary(listing: Listing, pricing_analysis: dict | None = None) -> dict:
+    from app.services.listing_review import is_legacy_global_photo_blocker
     pricing_analysis = pricing_analysis if isinstance(pricing_analysis, dict) else {}
     readiness = getattr(listing, "readiness_summary", None) or {}
     if not isinstance(readiness, dict):
@@ -645,7 +646,7 @@ def compute_listing_quality_summary(listing: Listing, pricing_analysis: dict | N
     condition_data = listing.condition_data if isinstance(listing.condition_data, dict) else {}
     shipping_profile = listing.shipping_profile if isinstance(listing.shipping_profile, dict) else {}
     score = 0
-    blockers = list(readiness.get("blockers") or [])
+    blockers = [reason for reason in (readiness.get("blockers") or []) if not is_legacy_global_photo_blocker(reason)]
     warnings = list(readiness.get("warnings") or [])
     if pricing_analysis.get("recommendation_eligible") is False:
         blockers.append(str(pricing_analysis.get("publication_price_blocker") or "Pricing research is insufficient for a publication-ready recommendation."))
@@ -706,12 +707,13 @@ def compute_listing_quality_summary(listing: Listing, pricing_analysis: dict | N
         "specificity_blockers": specificity.get("blockers") or [],
         "specificity_evidence": specificity.get("specificity_evidence") or [],
         "ready_for_ebay": not blockers and not shipping_profile.get("manual_measurement_needed", True) and bool(pricing_analysis.get("current_price")),
-        "ready_for_facebook": not blockers and bool(pricing_analysis.get("current_price")) and bool(listing.description) and bool((listing.image_urls or [])),
+        "ready_for_facebook": not blockers and bool(pricing_analysis.get("current_price")) and bool(listing.description),
         "ready_for_publish_queue": ready_for_publish_queue,
     }
 
 
 def validate_marketplace_readiness(*, listing: Listing, marketplace: str, pricing_analysis: dict | None = None) -> list[str]:
+    from app.services.listing_review import is_legacy_global_photo_blocker
     pricing_analysis = pricing_analysis if isinstance(pricing_analysis, dict) else {}
     readiness = getattr(listing, "readiness_summary", None) or summarize_listing_readiness(
         listing_images=listing.listing_images,
@@ -726,7 +728,7 @@ def validate_marketplace_readiness(*, listing: Listing, marketplace: str, pricin
     )
     if not isinstance(readiness, dict):
         readiness = {}
-    blockers = list(readiness.get("blockers") or [])
+    blockers = [reason for reason in (readiness.get("blockers") or []) if not is_legacy_global_photo_blocker(reason)]
     shipping = listing.shipping_profile if isinstance(listing.shipping_profile, dict) else {}
     specificity = _specificity_summary(listing)
     blockers.extend(specificity.get("blockers") or [])
@@ -743,8 +745,6 @@ def validate_marketplace_readiness(*, listing: Listing, marketplace: str, pricin
         blockers.append("Quantity must be at least 1")
     if not listing.condition:
         blockers.append("Condition missing")
-    if not (listing.image_urls or []):
-        blockers.append("Photos missing")
     if marketplace == "ebay":
         if not (listing.category_id or listing.category_suggestion):
             blockers.append("eBay category missing")

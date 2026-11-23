@@ -1343,7 +1343,7 @@ def test_create_listing_drafts_attaches_cached_amazon_images_and_is_idempotent(d
     assert all("needs_photos" not in (listing.custom_labels or []) for listing in created_listings)
     assert all((listing.listing_images or []) for listing in created_listings)
     assert all(
-        image.get("operator_state") == "approved" and image.get("is_reference") is True
+        image.get("operator_state") == "suggested" and image.get("is_reference") is True
         for listing in created_listings
         for image in (listing.listing_images or [])
     )
@@ -1403,7 +1403,7 @@ def test_create_listing_drafts_uses_amazon_discovery_for_images_and_description(
     listing = db_session.query(Listing).filter(Listing.user_id == user.id, Listing.source_type == "amazon_vine", Listing.id == eligible_item.listing_id).one()
     assert listing.image_urls == ["/media/amazon-vine/good.jpg"]
     assert listing.listing_images
-    assert listing.listing_images[0]["operator_state"] == "approved"
+    assert listing.listing_images[0]["operator_state"] == "suggested"
     assert listing.listing_images[0]["is_reference"] is True
     assert "vine" not in (listing.description or "").lower()
     assert listing.condition == "New"
@@ -1728,7 +1728,7 @@ def test_repair_vine_listing_images_replaces_unsafe_sources_with_amazon_cache(db
     assert all("vine-search" not in str(image.get("storage_path") or "") for image in (refreshed.listing_images or []))
     assert refreshed.image_urls and refreshed.image_urls[0] == "/media/amazon-vine/good.jpg"
     assert refreshed.listing_images
-    assert all(image.get("operator_state") == "approved" for image in (refreshed.listing_images or []))
+    assert all(image.get("operator_state") == "suggested" for image in (refreshed.listing_images or []))
     assert all(image.get("is_reference") is True for image in (refreshed.listing_images or []))
     assert "vine" not in (refreshed.description or "").lower()
     assert refreshed.condition == "New"
@@ -1951,7 +1951,7 @@ def test_create_listing_drafts_fetch_media_first_uses_bridge_fallback_when_image
     assert listing is not None
     assert listing.image_urls == ["/media/amazon-vine/b000fetch1-primary.jpg", "/media/amazon-vine/b000fetch1-secondary.jpg"]
     assert listing.listing_images
-    assert all(image.get("operator_state") == "approved" for image in listing.listing_images)
+    assert all(image.get("operator_state") == "suggested" for image in listing.listing_images)
 
 
 def test_repair_all_vine_listing_images_chunks_the_full_catalog(db_session, monkeypatch):

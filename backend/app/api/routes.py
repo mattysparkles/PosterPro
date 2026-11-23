@@ -1319,7 +1319,7 @@ def _apply_listing_review_defaults(listing: Listing) -> None:
             listing.source_type in {"amazon_vine", "google_photos_album"}
             or str((listing.source_metadata or {}).get("source_marketplace") or "").strip()
         ),
-        approved=listing.source_type in {"upload", "storage_batch", "google_photos_album"},
+        approved=False,
     )
     listing.image_urls = [item["storage_path"] for item in (listing.listing_images or []) if item.get("operator_state") != "rejected"]
     listing.condition_data = derive_condition_data(
@@ -1723,10 +1723,11 @@ def _create_storage_batch(
                     "source_platform": "upload",
                     "role": "primary",
                     "confidence": 1.0,
-                    "operator_state": "approved",
+                    "operator_state": "suggested",
                     "display_order": 0,
-                    "is_reference": False,
                     "label": "Batch intake photo",
+                    "metadata": {"provenance": "seller_photographed", "seller_photo_attestation": True},
+                    "is_reference": False,
                 }
             ],
             raw_photo_path=raw_path,
@@ -2821,10 +2822,11 @@ def backfill_vine_listing_images(
                     "storage_path": url,
                     "source_page_url": source_page_url,
                     "source_platform": "amazon",
-                    "operator_state": "approved",
-                    "is_reference": False,
+                    "operator_state": "suggested",
+                    "is_reference": True,
                     "metadata": {
                         "source": "amazon_vine",
+                        "image_provenance": "product_catalog",
                         "asin": asin,
                         "product_name": product_name,
                         "trusted_catalog_match": True,
@@ -2835,7 +2837,7 @@ def backfill_vine_listing_images(
             source_page_url=source_page_url,
             source_platform="amazon",
             default_is_reference=False,
-            approved=True,
+            approved=False,
         )
     processed = 0
 

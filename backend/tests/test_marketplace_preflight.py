@@ -14,11 +14,12 @@ from app.api.marketplaces import _bulk_preflight_response_to_csv
 from app.api.routes import _matches_readiness_filter, refresh_listing_readiness, update_listing
 from app.api.schemas import ListingUpdateRequest, MarketplacePreflightResponse
 from fastapi import BackgroundTasks, HTTPException
-from app.services.ebay_service import _cached_category_aspects, build_ebay_publish_plan
+from app.services.ebay_service import _build_ebay_image_urls, _cached_category_aspects, build_ebay_publish_plan
 from app.services.ebay_service import _sync_ebay_marketplace_listing
 from app.services.marketplace_error_translation import translate_marketplace_error
 from app.services.marketplace_preflight import MarketplacePreflightService, compute_payload_hash
 from app.services.marketplace_field_mapper import build_marketplace_payload
+from app.services.listing_review import classify_listing_image, summarize_listing_readiness
 
 
 def test_compact_preflight_preserves_qualified_category_identity():
@@ -402,6 +403,7 @@ def _seed_user_and_listing(db_session, *, title="Canon EOS Camera", condition="U
                 "operator_state": "approved",
                 "display_order": 0,
                 "is_reference": False,
+                "metadata": {"provenance": "seller_photographed", "seller_photo_attestation": True},
                 "confidence": 1.0,
             }
         ],
@@ -427,6 +429,119 @@ def _seed_user_and_listing(db_session, *, title="Canon EOS Camera", condition="U
     db_session.add(listing)
     db_session.flush()
     return user, listing
+
+
+def _vine_catalog_image(*, authorized=False, state="approved"):
+    return {
+        "storage_path": "https://images.example.test/exact-vine-product.jpg",
+        "source_platform": "amazon",
+        "role": "primary",
+        "operator_state": state,
+        "is_reference": True,
+        "metadata": {
+            "source": "amazon_vine",
+            "image_provenance": "product_catalog",
+            "trusted_catalog_match": True,
+            **({"redistribution_authorized": True, "rights_source": "documented_license"} if authorized else {}),
+        },
+    }
+
+
+def test_sealed_vine_authorized_catalog_image_is_not_misclassified_as_seller_photo(db_session, monkeypatch):
+    _, listing = _seed_user_and_listing(db_session, title="Sealed Vine Organizer", condition="New")
+    listing.source_type = "amazon_vine"
+    listing.condition = "New"
+    listing.listing_images = [_vine_catalog_image(authorized=True)]
+    listing.image_urls = [listing.listing_images[0]["storage_path"]]
+
+    readiness = summarize_listing_readiness(
+        listing_images=listing.listing_images,
+        condition_data={"condition": "New", "operator_review_required": False},
+        shipping_profile={},
+        listing={"category_suggestion": "Home > Storage", "listing_price": 25},
+        source_type="amazon_vine",
+    )
+    classification = classify_listing_image(listing.listing_images[0])
+    assert readiness["blockers"] == []
+    assert readiness["actual_image_count"] == 0
+    assert readiness["ebay_eligible_image_count"] == 1
+    assert readiness["marketplace_readiness"]["facebook"]["photos_ready"] is True
+    assert classification["kind"] == "catalog"
+    assert classification["seller_photographed"] is False
+    monkeypatch.setattr("app.services.ebay_service._image_meets_ebay_policy", lambda _path: True)
+    assert _build_ebay_image_urls(listing) == [listing.listing_images[0]["storage_path"]]
+
+
+def test_vine_without_images_keeps_global_readiness_clear_and_image_work_destination_scoped():
+    readiness = summarize_listing_readiness(
+        listing_images=[], condition_data={"condition": "New"}, shipping_profile={},
+        listing={"category_suggestion": "Home > Storage", "listing_price": 25},
+        source_type="amazon_vine",
+    )
+    assert readiness["blockers"] == []
+    assert readiness["images_missing"] is True
+    assert readiness["manual_photo_needed"] is True
+    assert readiness["marketplace_readiness"]["ebay"]["submission_photos_ready"] is False
+    assert readiness["marketplace_readiness"]["facebook"]["submission_photos_ready"] is False
+
+
+def test_seller_photo_requires_explicit_capture_provenance_and_approval():
+    seller_photo = {
+        "storage_path": "/media/item/front.jpg", "source_platform": "actual_upload",
+        "operator_state": "approved", "is_reference": False,
+        "metadata": {"provenance": "seller_photographed", "seller_photo_attestation": True},
+    }
+    readiness = summarize_listing_readiness(
+        listing_images=[seller_photo], condition_data={}, shipping_profile={},
+        listing={"category_suggestion": "Home > Storage", "listing_price": 25},
+        source_type="amazon_vine",
+    )
+    assert readiness["actual_image_count"] == 1
+    assert classify_listing_image(seller_photo)["seller_photographed"] is True
+    pending = {**seller_photo, "operator_state": "suggested"}
+    assert classify_listing_image(pending)["seller_photographed"] is False
+
+
+def test_used_item_actual_photo_is_separate_from_catalog_rights():
+    photo = {
+        "storage_path": "/media/used/item.jpg", "source_platform": "actual_upload",
+        "operator_state": "approved", "is_reference": False,
+        "metadata": {"provenance": "seller_photographed"},
+    }
+    readiness = summarize_listing_readiness(
+        listing_images=[photo], condition_data={}, shipping_profile={},
+        listing={"category_suggestion": "Electronics > Cameras", "listing_price": 50},
+        source_type="manual",
+    )
+    assert readiness["actual_image_count"] == 1
+    assert classify_listing_image(photo)["ebay_eligible"] is True
+
+
+def test_unlicensed_exact_catalog_image_is_draft_only_for_facebook_and_mercari(db_session):
+    _, listing = _seed_user_and_listing(db_session, title="Unlicensed Vine Catalog Item", condition="New")
+    listing.source_type = "amazon_vine"
+    listing.condition = "New"
+    listing.listing_images = [_vine_catalog_image(authorized=False)]
+    listing.image_urls = [listing.listing_images[0]["storage_path"]]
+    listing.marketplace_data = {"marketplace_category_mappings": {"mercari": {
+        "category_id": "leaf-17", "category_path": "Home > Storage",
+        "verification_status": "operator_confirmed", "terminal_status": "terminal",
+        "publishability_status": "publishable", "staleness_status": "fresh",
+        "required_attributes": [],
+    }}}
+
+    assert _build_ebay_image_urls(listing) == []
+    facebook = build_marketplace_payload(listing, "facebook")
+    mercari = build_marketplace_payload(listing, "mercari")
+    assert facebook["image_urls"] == [listing.listing_images[0]["storage_path"]]
+    assert mercari["image_urls"] == [listing.listing_images[0]["storage_path"]]
+    mercari_preflight = MarketplacePreflightService().preflight_listing(db_session, listing, "mercari")
+    assert mercari_preflight["draft_export_ready"] is True
+    assert mercari_preflight["manual_handoff_required"] is True
+    assert mercari_preflight["image_compliance_status"] == "unresolved"
+    assert mercari_preflight["final_submission_blocked"] is True
+    assert "MERCARI_SELLER_PHOTO_REQUIRED" in {issue["code"] for issue in mercari_preflight["submission_blockers"]}
+    assert "MERCARI_SELLER_PHOTO_REQUIRED" not in {issue["code"] for issue in mercari_preflight["preparation_blockers"]}
 
 
 def test_needs_review_implies_publishability_for_same_eBay_evaluator(db_session, monkeypatch):
@@ -1346,7 +1461,9 @@ def test_ebay_image_requirement_is_destination_specific(db_session, monkeypatch)
     assert "EBAY_IMAGES_MISSING" in codes
     assert "ACTUAL_PHOTOS_MISSING" not in codes
     assert not any(issue.get("message") == "No images attached" for issue in result["blockers"])
-    assert any(issue["code"] == "IMAGE_ENRICHMENT_PENDING" for issue in result["warnings"])
+    assert result["final_submission_blocked"] is True
+    assert {issue["code"] for issue in result["submission_blockers"]} == {"EBAY_IMAGES_MISSING"}
+    assert "EBAY_IMAGES_MISSING" not in {issue["code"] for issue in result["preparation_blockers"]}
 
 
 def test_marketplace_error_translation_normalizes_common_failures():

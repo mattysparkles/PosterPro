@@ -224,8 +224,9 @@ def test_shipping_estimate_structure_and_readiness_blockers():
 
     assert shipping["fragile"] is True
     assert shipping["battery"] is True
-    assert readiness["blocked_for_publish"] is True
-    assert "Only source/reference images attached" in readiness["blockers"]
+    assert readiness["blocked_for_publish"] is False
+    assert "Only source/reference images attached" not in readiness["blockers"]
+    assert any("seller-photographed" in warning for warning in readiness["warnings"])
     assert readiness["shipping_checklist"]["manual_measurement_needed"] is True
     assert "Package shipping profile is incomplete" not in readiness["blockers"]
     assert shipping["shipping_measurements_required"] is False
@@ -275,10 +276,10 @@ def test_manual_override_behavior_survives_serialization(db_session):
 
     assert payload["condition_data"]["condition_source"] == "operator"
     assert payload["shipping_profile"]["shipping_class_suggestion"] == "ups_ground"
-    assert payload["readiness_summary"]["ready_for_publish"] is True
+    assert payload["readiness_summary"]["ready_for_publish"] is False
 
 
-def test_sync_listing_review_state_promotes_vine_source_images_for_review(db_session):
+def test_sync_listing_review_state_keeps_vine_source_images_unapproved(db_session):
     user = User(email="vine-reference@example.com")
     db_session.add(user)
     db_session.flush()
@@ -295,7 +296,7 @@ def test_sync_listing_review_state_promotes_vine_source_images_for_review(db_ses
     sync_listing_review_state(listing=listing)
 
     assert listing.listing_images[0]["is_reference"] is False
-    assert listing.listing_images[0]["operator_state"] == "approved"
+    assert listing.listing_images[0]["operator_state"] == "suggested"
 
 
 def test_sync_listing_review_state_treats_google_slate_photos_as_item_media(db_session):
@@ -316,7 +317,7 @@ def test_sync_listing_review_state_treats_google_slate_photos_as_item_media(db_s
 
     image = listing.listing_images[0]
     assert image["is_reference"] is False
-    assert image["operator_state"] == "approved"
+    assert image["operator_state"] == "suggested"
     readiness = summarize_listing_readiness(
         listing_images=listing.listing_images,
         condition_data=listing.condition_data,
@@ -324,8 +325,10 @@ def test_sync_listing_review_state_treats_google_slate_photos_as_item_media(db_s
         listing={"title": listing.title, "category_suggestion": listing.category_suggestion},
         source_type=listing.source_type,
     )
-    assert readiness["actual_image_count"] == 1
-    assert readiness["manual_photo_needed"] is False
+    assert readiness["actual_image_count"] == 0
+    assert readiness["manual_photo_needed"] is True
+    assert readiness["ready_for_publish"] is False
+    assert not any("photo" in blocker.lower() or "image" in blocker.lower() for blocker in readiness["blockers"])
 
 
 def test_listing_response_redacts_marketplace_credentials():

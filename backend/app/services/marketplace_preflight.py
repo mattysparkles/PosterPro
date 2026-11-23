@@ -18,7 +18,7 @@ from app.core.config import settings
 from app.models.enums import ListingStatus, MarketplaceName
 from app.models.models import Listing, MarketplaceExtensionDevice, MarketplaceExtensionJob
 from app.services.ebay_service import _ebay_effective_price, build_ebay_execution_contract, build_ebay_publish_plan
-from app.services.listing_review import normalize_listing_images, summarize_listing_readiness
+from app.services.listing_review import classify_listing_image, is_verified_amazon_vine_source, normalize_listing_images, summarize_listing_readiness
 from app.services.marketplace_error_translation import translate_marketplace_error
 from app.services.marketplace_field_mapper import build_marketplace_payload
 from app.services.pricing_research_service import compute_listing_quality_summary
@@ -27,10 +27,8 @@ from app.services.physical_inventory_availability import availability_for_listin
 from app.services.shipping_profitability_policy import estimated_parcel_fields, unverified_parcel_fields
 
 PRELIGHT_CACHE_TTL = timedelta(hours=24)
-PRELIGHT_CACHE_VERSION = "preflight_v2"
+PRELIGHT_CACHE_VERSION = "preflight_v3"
 LAUNCH_REPAIR_CODES = {
-    "ACTUAL_PHOTOS_MISSING",
-    "REFERENCE_IMAGES_ONLY",
     "EBAY_IMAGE_URL_INVALID",
     "CATEGORY_MISSING",
     "EBAY_CATEGORY_MISSING",
@@ -244,7 +242,7 @@ def _normalized_listing_images(listing: Listing) -> list[dict[str, Any]]:
         source_page_url=source_metadata.get("amazon_source_page_url"),
         source_platform=listing.source_type or "upload",
         default_is_reference=bool(
-            source_type_value in {"amazon_vine", "google_photos_album"}
+            is_verified_amazon_vine_source(listing=listing) or source_type_value == "google_photos_album"
             or str(source_metadata.get("source_marketplace") or "").strip()
         ),
         approved=source_type_value in {"upload", "storage_batch"},
@@ -253,7 +251,9 @@ def _normalized_listing_images(listing: Listing) -> list[dict[str, Any]]:
 
 def _image_summary(listing: Listing, readiness: dict[str, Any]) -> dict[str, Any]:
     listing_images = [image for image in _normalized_listing_images(listing) if isinstance(image, dict)]
-    actual_images = [image for image in listing_images if not image.get("is_reference") and image.get("operator_state") == "approved"]
+    image_classes = [(image, classify_listing_image(image)) for image in listing_images]
+    actual_images = [image for image, result in image_classes if result["seller_photographed"]]
+    ebay_images = [image for image, result in image_classes if result["ebay_eligible"]]
     pending_actual_images = [image for image in listing_images if not image.get("is_reference") and image.get("operator_state") not in {"approved", "rejected"}]
     reference_images = [image for image in listing_images if image.get("is_reference") or image.get("warning")]
     storage_root = Path(settings.storage_root).resolve() if settings.storage_root else None
@@ -287,9 +287,9 @@ def _image_summary(listing: Listing, readiness: dict[str, Any]) -> dict[str, Any
         storage_path = str(image.get("storage_path") or "").strip()
         check = build_check(storage_path)
         all_file_checks.append(check)
-        if image.get("is_reference"):
+        if classify_listing_image(image)["kind"] in {"catalog", "manufacturer", "internal_reference"}:
             reference_file_checks.append(check)
-        else:
+        if classify_listing_image(image)["seller_photographed"]:
             actual_file_checks.append(check)
     return {
         "attached_count": len(listing_images),
@@ -299,6 +299,7 @@ def _image_summary(listing: Listing, readiness: dict[str, Any]) -> dict[str, Any
         "actual_image_present": bool(actual_images),
         "actual_pending_present": bool(pending_actual_images),
         "reference_only": bool(listing_images) and not bool(actual_images),
+        "ebay_eligible_count": len(ebay_images),
         "manual_photo_needed": bool(readiness.get("manual_photo_needed")),
         "file_checks": all_file_checks,
         "actual_file_checks": actual_file_checks,
@@ -358,10 +359,6 @@ def _category_hint_from_listing(listing: Listing) -> dict[str, Any] | None:
 
 
 def _repair_action_for_listing(*, blocker_codes: set[str], image_summary: dict[str, Any], suggested_category: dict[str, Any] | None) -> tuple[str, str]:
-    if "ACTUAL_PHOTOS_MISSING" in blocker_codes or "REFERENCE_IMAGES_ONLY" in blocker_codes:
-        if image_summary.get("attached_count"):
-            return "Open image review and require actual photos", "easy"
-        return "Require actual photos", "medium"
     if "EBAY_IMAGE_URL_INVALID" in blocker_codes:
         return "Validate image URLs", "easy"
     if "CATEGORY_MISSING" in blocker_codes or "EBAY_CATEGORY_MISSING" in blocker_codes:
@@ -483,6 +480,7 @@ class MarketplacePreflightService:
                 "listing_price": getattr(listing, "listing_price", None),
                 "suggested_price": getattr(listing, "suggested_price", None),
             },
+            source_type="amazon_vine" if is_verified_amazon_vine_source(listing=listing) else listing.source_type,
         )
         # Keep preflight's marketplace-specific diagnostics, but expose the
         # canonical readiness contract so callers do not have to reconcile a
@@ -537,7 +535,7 @@ class MarketplacePreflightService:
                 continue
             if not message or message.lower() in existing_blocker_messages:
                 continue
-            if str(getattr(listing, "source_type", "") or "").lower() == "amazon_vine" and message.lower() in {
+            if is_verified_amazon_vine_source(listing=listing) and message.lower() in {
                 "no images attached", "only source/reference images attached",
             }:
                 warnings.append(_issue(
@@ -603,7 +601,16 @@ class MarketplacePreflightService:
         # and a valid payload.  Account/session readiness is reported
         # separately: an unconnected marketplace must not make the product
         # incomplete or prevent a different destination from publishing it.
-        preparation_blockers = [issue for issue in blockers if not _is_account_execution_blocker(issue)]
+        destination_image_blocker_codes = {
+            "EBAY_IMAGES_MISSING", "EBAY_IMAGE_URL_INVALID", "EBAY_REFERENCE_ONLY_IMAGES",
+            "FACEBOOK_PHOTOS_MISSING", "MERCARI_SELLER_PHOTO_REQUIRED",
+        }
+        submission_blockers = [issue for issue in blockers if str(issue.get("code") or "").upper() in destination_image_blocker_codes]
+        preparation_blockers = [
+            issue for issue in blockers
+            if not _is_account_execution_blocker(issue)
+            and str(issue.get("code") or "").upper() not in destination_image_blocker_codes
+        ]
         # Legacy listings can remain preparation-complete while carrying the
         # non-blocking migration reminder that their physical stock has not
         # yet been linked. It is surfaced in ``warnings`` and the returned
@@ -648,6 +655,10 @@ class MarketplacePreflightService:
             "connection_blockers": connection_blockers,
             "preparation_status": preparation_status,
             "preparation_blockers": preparation_blockers,
+            "submission_blockers": submission_blockers,
+            "image_compliance_status": "unresolved" if submission_blockers else "ready",
+            "manual_handoff_required": market == MarketplaceName.mercari.value,
+            "final_submission_blocked": bool(submission_blockers),
             "preparation_warnings": preparation_warnings,
             "warnings": warnings,
             "missing_fields": [issue["field"] for issue in execution_blockers if issue.get("field")],
@@ -803,7 +814,7 @@ class MarketplacePreflightService:
             warnings.append(_issue("PRICING_STALE", "Pricing data is stale.", field="marketplace_data.pricing_analysis", fix_hint="Rerun pricing before queueing this listing.", severity="warning"))
         if pricing.get("price_confidence") is not None and float(pricing.get("price_confidence") or 0) < 0.45:
             warnings.append(_issue("PRICING_WEAK", "Pricing confidence is weak.", field="marketplace_data.pricing_analysis", fix_hint="Review comparable listings or enter a manual comp.", severity="warning"))
-        if readiness.get("reference_image_count") and not readiness.get("actual_image_count"):
+        if readiness.get("reference_image_count") and not readiness.get("actual_image_count") and not readiness.get("ebay_eligible_image_count"):
             warnings.append(_issue("REFERENCE_ONLY_IMAGES", "Only source/reference images are available.", field="listing_images", fix_hint="Approve real item photos if available.", severity="warning"))
         if marketplace == MarketplaceName.facebook.value and (listing.shipping_profile or {}).get("oversize"):
             warnings.append(_issue("FACEBOOK_OVERSIZE", "Item looks oversized for easy local sale.", field="shipping_profile", fix_hint="Mark local pickup if shipping is not practical.", severity="warning"))
@@ -833,7 +844,7 @@ class MarketplacePreflightService:
             blockers.append(_issue("FACEBOOK_DESCRIPTION_MISSING", "Facebook description is missing.", field="description", fix_hint="Write a short operator-friendly description."))
         if not readiness.get("actual_image_count"):
             blockers.append(_issue("FACEBOOK_PHOTOS_MISSING", "Facebook publish needs actual photos.", field="listing_images", fix_hint="Upload or approve actual item photos before handing off."))
-        if readiness.get("manual_photo_needed"):
+        if readiness.get("manual_photo_needed") and not readiness.get("facebook_draft_image_count"):
             warnings.append(_issue("FACEBOOK_REFERENCE_ONLY", "Only source/reference images are attached.", field="listing_images", fix_hint="Facebook performs better with actual item photos.", severity="warning"))
         if pricing.get("price_confidence") is not None and float(pricing.get("price_confidence") or 0) < 0.45:
             warnings.append(_issue("FACEBOOK_PRICING_WEAK", "Pricing confidence is weak.", field="marketplace_data.pricing_analysis", fix_hint="Recheck the price before assisted publish.", severity="warning"))
@@ -841,6 +852,7 @@ class MarketplacePreflightService:
             warnings.append(_issue("FACEBOOK_LOCAL_PICKUP_RECOMMENDED", "Local pickup appears more practical than shipping.", field="shipping_profile", fix_hint="Use local pickup notes in the Facebook handoff.", severity="warning"))
         return {
             "blockers": blockers,
+            "submission_blockers": [item for item in blockers if item.get("code") == "FACEBOOK_PHOTOS_MISSING"],
             "warnings": warnings,
             "payload_preview": payload,
             "policy_summary": {
@@ -900,12 +912,7 @@ class MarketplacePreflightService:
         images = list(getattr(listing, "listing_images", None) or [])
         seller_photo_count = 0
         for image in images:
-            if not isinstance(image, dict) or image.get("operator_state") != "approved" or image.get("is_reference"):
-                continue
-            metadata = image.get("metadata") if isinstance(image.get("metadata"), dict) else {}
-            provenance = str(metadata.get("provenance") or "").casefold()
-            source = str(image.get("source_platform") or "").casefold()
-            if provenance == "seller_photographed" or source in {"google_photos_album", "photo_intake", "shelf_census"}:
+            if isinstance(image, dict) and classify_listing_image(image)["seller_photographed"]:
                 seller_photo_count += 1
         if not seller_photo_count:
             blockers.append(_issue(
@@ -941,6 +948,7 @@ class MarketplacePreflightService:
             ))
         return {
             "blockers": blockers,
+            "submission_blockers": [item for item in blockers if item.get("code") == "MERCARI_SELLER_PHOTO_REQUIRED"],
             "warnings": warnings,
             "payload_preview": payload,
             "category_summary": {
@@ -960,6 +968,9 @@ class MarketplacePreflightService:
                 "category_schema_verified": required is not None,
                 "readiness_semantics": "data_ready_and_manual_draft_export_only; not_authorized_for_automated_publishing",
             },
+            "image_compliance_status": "ready" if seller_photo_count else "unresolved",
+            "manual_handoff_required": True,
+            "final_submission_blocked": seller_photo_count == 0,
         }
 
     def _build_ebay_preflight(
@@ -995,6 +1006,16 @@ class MarketplacePreflightService:
         except Exception as exc:
             translated = translate_marketplace_error("ebay", exc)
             retryable_warning = bool(translated.get("retryable")) and str(translated.get("severity") or "").lower() == "warning"
+            error_text = str(exc).lower()
+            if "no images to send to ebay" in error_text:
+                image_issue = _issue(
+                    "EBAY_IMAGES_MISSING",
+                    "eBay submission requires at least one approved seller photo or authorized catalog/manufacturer image.",
+                    field="listing_images",
+                    fix_hint="Acquire an eligible image or confirm redistribution rights and approve a verified exact-product image.",
+                    retryable=True,
+                )
+                return {"blockers": [image_issue], "warnings": [], "payload_preview": {}, "policy_summary": {}, "category_summary": {}}
             return {
                 "blockers": [] if retryable_warning else [translated],
                 "warnings": [translated] if retryable_warning else [],
@@ -1102,7 +1123,7 @@ class MarketplacePreflightService:
             warnings.append(_issue("EBAY_CATEGORY_METADATA_UNAVAILABLE", "eBay category metadata could not be fetched right now.", field="category_id", fix_hint="Retry preflight when eBay metadata is available.", severity="warning", retryable=True))
         elif not listing.category_id:
             warnings.append(_issue("EBAY_CATEGORY_NEEDS_REVIEW", "eBay category was inferred instead of explicitly chosen.", field="category_id", fix_hint="Review the category suggestion before publishing.", severity="warning"))
-        if str(getattr(listing, "source_type", "") or "").lower() == "amazon_vine" and category.get("leaf_verified") is not True:
+        if is_verified_amazon_vine_source(listing=listing) and category.get("leaf_verified") is not True:
             blockers.append(_issue(
                 "EBAY_CATEGORY_LEAF_UNVERIFIED",
                 "The resolved Vine eBay category has not been confirmed as a current leaf category.",
@@ -1212,13 +1233,13 @@ class MarketplacePreflightService:
             # remains retryable and does not make the shared draft incomplete.
             blockers.append(_issue(
                 "EBAY_IMAGES_MISSING",
-                "eBay publication requires at least one product image.",
+                "eBay submission requires at least one approved seller photo or authorized catalog/manufacturer image.",
                 field="listing_images",
                 fix_hint="Retry image enrichment or attach an eligible product image before publishing.",
                 retryable=True,
             ))
-        if readiness.get("manual_photo_needed"):
-            warnings.append(_issue("EBAY_REFERENCE_ONLY_IMAGES", "eBay will work better with actual item photos instead of reference images.", field="listing_images", fix_hint="Approve actual item photos before publishing.", severity="warning"))
+        if readiness.get("manual_photo_needed") and not readiness.get("ebay_eligible_image_count"):
+            warnings.append(_issue("EBAY_REFERENCE_ONLY_IMAGES", "No approved seller photo or rights-verified catalog/manufacturer image is available for eBay submission.", field="listing_images", fix_hint="Add an approved seller photo or verify catalog image redistribution rights.", severity="warning"))
         if image_summary.get("actual_image_present") and not image_summary.get("reference_only") and not image_summary.get("public_image_ready"):
             blockers.append(_issue("EBAY_IMAGE_URL_INVALID", "At least one actual item photo is missing, empty, or not publicly reachable.", field="listing_images", fix_hint="Approve actual item photos and verify the image file exists before publishing."))
 
@@ -1318,6 +1339,10 @@ class MarketplacePreflightService:
             "draft_export_ready": preflight.get("draft_export_ready", str(preflight.get("preparation_status", status)).lower() in {"ready", "ready_with_warnings"}),
             "authorized_publishing_ready": preflight.get("authorized_publishing_ready", False),
             "preparation_blockers": preflight.get("preparation_blockers", blockers),
+            "submission_blockers": preflight.get("submission_blockers", []),
+            "image_compliance_status": preflight.get("image_compliance_status", "ready"),
+            "manual_handoff_required": bool(preflight.get("manual_handoff_required", preflight.get("marketplace") == MarketplaceName.mercari.value)),
+            "final_submission_blocked": bool(preflight.get("final_submission_blocked", False)),
             "preparation_warnings": preflight.get("preparation_warnings", warnings),
             # Preserve the normalized issue objects, not only parallel code
             # and message arrays. Consumers such as Draft Editor, Jobs, and
@@ -1749,7 +1774,7 @@ class MarketplacePreflightService:
                 for code in market_result.get("blocker_codes") or []:
                     if code:
                         blocker_counter[code] += 1
-                        if code in {"ACTUAL_PHOTOS_MISSING", "FACEBOOK_PHOTOS_MISSING", "EBAY_REFERENCE_ONLY_IMAGES", "REFERENCE_IMAGES_ONLY"}:
+                        if code in {"EBAY_IMAGES_MISSING", "FACEBOOK_PHOTOS_MISSING", "MERCARI_SELLER_PHOTO_REQUIRED", "EBAY_REFERENCE_ONLY_IMAGES"}:
                             summary["missing_photos"] += 1
                         if code in {"PRICING_WEAK", "EBAY_PRICING_WEAK", "FACEBOOK_PRICING_WEAK"}:
                             summary["weak_pricing"] += 1
@@ -2186,10 +2211,8 @@ class MarketplacePreflightService:
             summary["included"] += 1
             for code in blocker_codes:
                 blocker_counter[code] += 1
-            if "ACTUAL_PHOTOS_MISSING" in blocker_codes:
+            if "FACEBOOK_PHOTOS_MISSING" in blocker_codes or "MERCARI_SELLER_PHOTO_REQUIRED" in blocker_codes:
                 summary["missing_actual_photos"] += 1
-            if "REFERENCE_IMAGES_ONLY" in blocker_codes:
-                summary["reference_only_images"] += 1
             if "EBAY_IMAGE_URL_INVALID" in blocker_codes:
                 summary["invalid_image_url"] += 1
             if image_status == "actual_pending_review":

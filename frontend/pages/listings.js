@@ -310,7 +310,6 @@ function isCompleteForOperatorReview(listing) {
   const hasPrice = Boolean(listing?.listing_price || listing?.suggested_price || listing?.price);
   const hasCategory = Boolean(listing?.category_id || listing?.category_suggestion || listing?.detected_category_guess);
   const hasCondition = Boolean(listing?.condition || listing?.condition_data?.condition_bucket);
-  const imageCount = Number(readiness?.actual_image_count || getListingImageCount(listing) || 0);
   return Boolean(
     qualityReady
       && preflightReady
@@ -318,8 +317,7 @@ function isCompleteForOperatorReview(listing) {
       && listing?.description
       && hasPrice
       && hasCategory
-      && hasCondition
-      && imageCount > 0,
+      && hasCondition,
   );
 }
 
@@ -2233,7 +2231,7 @@ export default function ListingsPage() {
   const uploadActualPhotosToListing = async (listingId, files) => {
     if (!files?.length) return null;
     const sellerPhotographed = typeof window !== 'undefined' && window.confirm(
-      'Are these photos of this exact physical item, taken by you or otherwise authorized for your listing? Mercari does not accept stock or advertisement photos.'
+      'Were these photos taken by you or your team of this exact physical item? This records photo provenance only; each marketplace still checks image rights and listing rules.'
     );
     try {
       await uploadListingPhotos(listingId, {
@@ -2251,7 +2249,7 @@ export default function ListingsPage() {
           loadMarketplacePreviewData(listingId),
         ]);
       }
-      toast.success(`Uploaded ${files.length} photo${files.length === 1 ? '' : 's'} to listing #${listingId}.${sellerPhotographed ? ' Seller-photo provenance recorded.' : ' Mercari seller-photo verification remains incomplete.'}`);
+      toast.success(`Uploaded ${files.length} photo${files.length === 1 ? '' : 's'} to listing #${listingId}.${sellerPhotographed ? ' Seller-photo provenance recorded; operator approval is still required.' : ' Seller-photo provenance remains unverified.'}`);
       return true;
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Photo upload failed.');
