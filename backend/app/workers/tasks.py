@@ -4147,6 +4147,7 @@ def process_marketplace_taxonomy_suggestion_job(job_id: str) -> dict:
     """Process one durable page; persisted cursor makes retries/restarts safe."""
     from app.services.marketplace_category_suggestions import build_suggestions, persist_suggestions
 
+    max_item_attempts = 3
     processed = 0
     errors: list[dict] = []
     has_more = False
@@ -4157,8 +4158,13 @@ def process_marketplace_taxonomy_suggestion_job(job_id: str) -> dict:
                 BulkJob.id == job_id,
                 BulkJob.action == "suggest_marketplace_categories",
             ).with_for_update(skip_locked=True).first()
-            if not job or job.status in {"completed", "completed_with_errors", "failed", "cancelled"}:
-                return {"job_id": job_id, "status": getattr(job, "status", "missing"), "processed": 0}
+            if not job:
+                # A concurrent delivery may have the row lock, or the job may
+                # have been removed. Do not misreport a lock miss as a missing
+                # job and, critically, do not claim or mutate it.
+                return {"job_id": job_id, "status": "not_claimed", "processed": 0}
+            if job.status in {"completed", "completed_with_errors", "failed", "cancelled"}:
+                return {"job_id": job_id, "status": job.status, "processed": 0}
             payload = dict(job.payload) if isinstance(job.payload, dict) else {}
             review_counts = dict(payload.get("review_counts") or {})
             for key in ("candidate_count", "review_required_count", "reference_only_count", "no_candidate_count", "confirmed_preserved_count", "ambiguous_identity_count"):
@@ -4166,16 +4172,45 @@ def process_marketplace_taxonomy_suggestion_job(job_id: str) -> dict:
             listing_ids = payload.get("listing_ids") if isinstance(payload.get("listing_ids"), list) else []
             cursor = max(0, int(payload.get("cursor") or 0))
             batch_size = max(1, min(int(payload.get("batch_size") or 25), 50))
-            batch = [int(value) for value in listing_ids[cursor:cursor + batch_size]]
+            retry_items = payload.get("retry_items") if isinstance(payload.get("retry_items"), list) else []
+            if cursor < len(listing_ids):
+                batch = [{"listing_id": int(value), "attempt": 0} for value in listing_ids[cursor:cursor + batch_size]]
+                cursor_advance = len(batch)
+                retry_items_to_process: list[dict] = []
+            else:
+                now = datetime.utcnow()
+                eligible = []
+                for item in retry_items:
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        due = datetime.fromisoformat(str(item.get("next_attempt_at") or ""))
+                    except ValueError:
+                        due = now
+                    if due <= now:
+                        eligible.append(item)
+                if not eligible:
+                    job.status = "queued"
+                    job.updated_at = datetime.utcnow()
+                    db.commit()
+                    return {"job_id": job_id, "status": "queued", "processed": 0, "retry_wait": True}
+                batch = [{"listing_id": int(item["listing_id"]), "attempt": int(item.get("attempt") or 1)}
+                         for item in eligible[:batch_size]]
+                retry_items_to_process = eligible[:batch_size]
+                cursor_advance = 0
             job.status = "running"
             job.updated_at = datetime.utcnow()
-            rows = db.query(Listing).filter(Listing.user_id == job.user_id, Listing.id.in_(batch)).with_for_update().all() if batch else []
+            batch_ids = [item["listing_id"] for item in batch]
+            rows = db.query(Listing).filter(Listing.user_id == job.user_id, Listing.id.in_(batch_ids)).with_for_update().all() if batch_ids else []
             by_id = {int(row.id): row for row in rows}
             marketplaces = payload.get("marketplaces") if isinstance(payload.get("marketplaces"), list) else ["facebook", "ebay", "mercari"]
-            for listing_id in batch:
+            terminal_errors: list[dict] = []
+            new_retry_items: list[dict] = []
+            for batch_item in batch:
+                listing_id = batch_item["listing_id"]
                 listing = by_id.get(listing_id)
                 if listing is None:
-                    errors.append({"listing_id": listing_id, "error": "Listing is missing or no longer belongs to this operator"})
+                    terminal_errors.append({"listing_id": listing_id, "error": "Listing is missing or no longer belongs to this operator"})
                     continue
                 try:
                     with db.begin_nested():
@@ -4197,15 +4232,32 @@ def process_marketplace_taxonomy_suggestion_job(job_id: str) -> dict:
                             review_counts["review_required_count"] += 1
                         review_counts["reference_only_count"] += sum(1 for item in candidates if item.get("reference_only"))
                 except Exception as exc:
-                    errors.append({"listing_id": listing_id, "error": str(exc)[:400]})
-            payload["cursor"] = min(len(listing_ids), cursor + len(batch))
+                    attempt = int(batch_item.get("attempt") or 0) + 1
+                    failure = {"listing_id": listing_id, "error": str(exc)[:400], "attempt": attempt}
+                    if attempt < max_item_attempts:
+                        delay_seconds = min(300, 30 * (2 ** (attempt - 1)))
+                        failure["next_attempt_at"] = (datetime.utcnow() + timedelta(seconds=delay_seconds)).isoformat()
+                        new_retry_items.append(failure)
+                    else:
+                        terminal_errors.append({"listing_id": listing_id, "error": str(exc)[:400], "attempts": attempt})
+            if retry_items_to_process:
+                processed_retry_ids = {int(item["listing_id"]) for item in retry_items_to_process}
+                retry_items = [item for item in retry_items if not isinstance(item, dict) or int(item.get("listing_id") or 0) not in processed_retry_ids]
+            payload["retry_items"] = [*retry_items, *new_retry_items]
+            payload["cursor"] = min(len(listing_ids), cursor + cursor_advance)
             payload["last_batch_at"] = datetime.utcnow().isoformat()
             payload["review_counts"] = review_counts
+            # Successful chunks reset the consecutive systemic-failure count.
+            # Item-level retries are tracked separately and never inflate this.
+            payload["system_retry_count"] = 0
             job.payload = payload
-            job.processed_items = min(job.total_items, payload["cursor"])
-            job.errors = [*(job.errors or []), *errors][-500:]
-            job.error_count = len(job.errors or [])
-            has_more = payload["cursor"] < len(listing_ids)
+            job.processed_items = min(job.total_items, max(0, payload["cursor"] - len(payload["retry_items"])))
+            errors = terminal_errors
+            job.errors = [*(job.errors or []), *terminal_errors][-500:]
+            # `errors` is deliberately capped for payload size; the durable
+            # counter must remain exact when a large batch has over 500 faults.
+            job.error_count = int(job.error_count or 0) + len(terminal_errors)
+            has_more = payload["cursor"] < len(listing_ids) or bool(payload["retry_items"])
             job.status = "queued" if has_more else ("completed_with_errors" if job.error_count else "completed")
             db.commit()
     except Exception as exc:
@@ -4227,7 +4279,11 @@ def process_marketplace_taxonomy_suggestion_job(job_id: str) -> dict:
         return {"job_id": job_id, "status": retry_status, "error": str(exc)[:300]}
 
     if has_more:
-        process_marketplace_taxonomy_suggestion_job.delay(job_id)
+        # Continue initial pages immediately. Item retries have persisted
+        # backoff timestamps and are resumed by the minute watchdog instead.
+        payload = payload if isinstance(payload, dict) else {}
+        if int(payload.get("cursor") or 0) < len(payload.get("listing_ids") or []):
+            process_marketplace_taxonomy_suggestion_job.delay(job_id)
     return {"job_id": job_id, "processed": processed, "item_errors": errors, "has_more": has_more}
 
 

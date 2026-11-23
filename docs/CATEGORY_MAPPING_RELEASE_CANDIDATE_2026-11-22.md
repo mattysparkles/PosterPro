@@ -73,3 +73,52 @@ runner completes the production build and an authenticated isolated browser
 test validates category confirmation persistence and safe marketplace form
 preparation. Rollback is the existing active immutable release; this candidate
 has not altered production services or schema.
+
+## Release validation follow-up — 2026-11-23
+
+- Verified the original candidate commit `f05ad62bedf95d51757b0fc3bee3ffd9aff9ebd2`
+  was intact and clean before this follow-up.
+- Worker review found that per-listing exceptions were terminal on first
+  failure, system retry counters were not reset after a successful chunk, and
+  the capped 500-error detail list was also being used as the total error
+  counter. Per-listing failures now receive three total attempts with persisted
+  30/60-second backoff; final error count is independent of the capped detail
+  list; successful chunks reset consecutive system retry count; duplicate
+  delivery that cannot obtain the row lock reports `not_claimed` without
+  mutating the job.
+- Production topology review found the generic `posterpro-worker` disabled,
+  while `posterpro-vine-worker` and the dedicated publisher dispatcher are
+  active. Category work now routes to the active bounded `posterpro-vine`
+  consumer, and the dispatcher Beat schedule includes its recovery watchdog.
+  This avoids enqueuing work on the unconsumed generic queue. The worker is
+  shared with Vine enrichment, so category batch throughput must be monitored
+  after any separately approved activation.
+- Focused backend suite after worker changes: **92 passed**, 535 warnings.
+  The suite covers retry/backoff, terminal-error counting, completion
+  idempotency, Celery registration/routing, and existing category, readiness,
+  Facebook, photo and publishing behavior. SQLite tests do not prove concurrent
+  PostgreSQL row-lock behavior.
+- The prior candidate's frontend suite (**48 passed**) and extension harness
+  (**108 passed**) remain applicable to unchanged frontend/extension files;
+  neither was rerun in this backend-only follow-up.
+- Build remains **not run**. The server is at 94% root filesystem use, 90% on
+  the mounted application filesystem, and about 1.4 GiB available RAM. No
+  disposable build runner or authenticated GitHub CLI was available. The only
+  configured Git remote is a local release-candidate checkout; no candidate
+  was pushed. CI can be used after a reviewed, history-preserving integration
+  into the authorized GitHub lineage, but the current CI workflow only runs on
+  push/PR and does not publish a release artifact. Do not build Next.js on this
+  live host.
+- Read-only cache inspection found `/root/.npm` at 2.3 GiB (`_cacache` 1.6 GiB,
+  `_npx` 654 MiB) and `/root/.cache` at 2.3 GiB (`ms-playwright` 1.3 GiB,
+  `pnpm` 227 MiB, `pip` 167 MiB, `puppeteer` 334 MiB, plus smaller caches).
+  The integration checkout's `frontend/node_modules` is 691 MiB. These are
+  possible cleanup candidates only; none were deleted. Browser caches and dirty
+  checkout dependencies remain preserved.
+- Active immutable release symlink resolves to
+  `/opt/apps/posterpro/releases/posterpro-20261114T190836Z-943db7c0c214`.
+  This is the rollback target. No service, database, collector session, photo,
+  listing, or external marketplace was changed during validation.
+- Signed-in browser acceptance and production deployment remain gated. The
+  candidate is still not production eligible until a suitable isolated runner
+  completes the full production build and authenticated browser acceptance.
