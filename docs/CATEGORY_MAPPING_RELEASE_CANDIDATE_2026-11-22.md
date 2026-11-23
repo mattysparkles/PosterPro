@@ -147,7 +147,9 @@ has not altered production services or schema.
   Its initial hosted CI run failed at backend test collection because clean
   installs omitted the existing `qrcode` runtime import. The active release
   reports `qrcode 8.2`; that version is now declared in
-  `backend/requirements.txt`. Hosted CI must rerun on this follow-up commit.
+  `backend/requirements.txt`. The next clean install also exposed the existing
+  `cv2` import; the active release supplies `opencv-python-headless 5.0.0.93`,
+  now declared alongside it. Hosted CI must rerun on this follow-up commit.
 - CI now includes the category/readiness, marketplace taxonomy, photo, Vine,
   worker and extension taxonomy test paths; a disposable PostgreSQL service;
   full frontend unit tests and production build; CSS verification; and a
