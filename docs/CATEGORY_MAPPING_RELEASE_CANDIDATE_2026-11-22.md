@@ -156,6 +156,14 @@ has not altered production services or schema.
   commit-bound frontend artifact manifest/checksum. The PostgreSQL concurrency,
   restart and rollback test is prepared but has not yet passed on the hosted
   service.
+- The first complete hosted backend step ran **406 passed, 4 failed**. Failure
+  analysis found: the health test omitted setup of its explicit read-only probe
+  state; the import-recovery test stubbed `.delay()` although production calls
+  priority-aware `.apply_async()`; the cohort test expected the pre-variant
+  identity while current code intentionally includes `variant-unspecified`;
+  and the Vine PDF test requires `pdftotext`. The three test-fixture/expectation
+  defects are corrected, and CI installs the runner's `poppler-utils` utility.
+  These corrections have not yet been rerun in hosted CI.
 - Local checks on the integration branch: JavaScript extension/category
   harness **154 passed**; additional taxonomy traversal subset **46 passed**;
   Python syntax compilation, CI YAML parse, and `git diff --check` passed.

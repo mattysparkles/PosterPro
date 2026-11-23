@@ -31,6 +31,7 @@ def test_bootstrap_database_reports_applied_legacy_columns(monkeypatch):
 def test_health_reports_startup_schema_compat_summary():
     main_module.app.state.database_ready = True
     main_module.app.state.database_error = None
+    main_module._run_live_intake_probe()
     main_module.app.state.bootstrap_summary = {
         "startup_schema_compat_enabled": True,
         "legacy_schema_columns_applied": ["users.full_name"],

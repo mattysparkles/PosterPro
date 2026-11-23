@@ -31,7 +31,9 @@ def test_retry_import_job_recovers_stale_running_job(db_session, monkeypatch):
     db_session.commit()
     db_session.refresh(job)
 
-    monkeypatch.setattr(tasks.process_marketplace_import_job_task, "delay", lambda *_args, **_kwargs: DummyTask())
+    # The endpoint uses the priority-aware apply_async path. Stub that exact
+    # transport so this recovery unit test does not require a live Redis broker.
+    monkeypatch.setattr(tasks.process_marketplace_import_job_task, "apply_async", lambda *_args, **_kwargs: DummyTask())
     monkeypatch.setattr("app.api.marketplace_jobs.celery_app.control.revoke", lambda *_args, **_kwargs: None)
 
     response = retry_import_job(job.id, db=db_session, current_user=user)

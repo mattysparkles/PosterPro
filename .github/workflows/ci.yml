@@ -54,6 +54,11 @@ jobs:
       - name: Backend compileall
         run: PYTHONPATH=backend python -m compileall -q backend/app
 
+      - name: Install PDF parser utility required by Vine parser tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends poppler-utils
+
       - name: Backend regressions and PostgreSQL worker acceptance
         shell: bash
         run: |
