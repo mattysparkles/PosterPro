@@ -93,7 +93,7 @@ has not altered production services or schema.
   This avoids enqueuing work on the unconsumed generic queue. The worker is
   shared with Vine enrichment, so category batch throughput must be monitored
   after any separately approved activation.
-- Focused backend suite after worker changes: **92 passed**, 535 warnings.
+- Focused backend suite after worker changes: **93 passed**, 546 warnings.
   The suite covers retry/backoff, terminal-error counting, completion
   idempotency, Celery registration/routing, and existing category, readiness,
   Facebook, photo and publishing behavior. SQLite tests do not prove concurrent

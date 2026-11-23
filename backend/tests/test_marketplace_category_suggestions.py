@@ -207,3 +207,57 @@ def test_category_suggestion_worker_and_watchdog_are_registered():
     assert celery_app.conf.task_routes["resume_marketplace_category_suggestion_jobs"]["queue"] == "posterpro-vine"
     assert any(item.get("task") == "resume_marketplace_category_suggestion_jobs"
                for item in dispatcher_app.conf.beat_schedule.values())
+
+
+def test_category_worker_recovers_system_error_without_counting_it_as_terminal(db_session, monkeypatch):
+    from app.workers import tasks
+    from app.workers.tasks import process_marketplace_taxonomy_suggestion_job as task
+
+    user = User(email="category-worker-system-retry@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(user_id=user.id, status=ListingStatus.draft, title="Acme Headphones",
+                      source_metadata={"asin": "B012345678"}, marketplace_data={})
+    db_session.add(listing); db_session.flush()
+    job = BulkJob(id="category-worker-system-retry", user_id=user.id, action="suggest_marketplace_categories",
+                  status="queued", total_items=1, processed_items=0, error_count=0, errors=[],
+                  payload={"listing_ids": [listing.id], "marketplaces": ["facebook"], "cursor": 0, "batch_size": 25})
+    db_session.add(job); db_session.commit()
+
+    original_factory = tasks.SessionLocal
+    fail_once = [True]
+    class BrokenQuerySession:
+        def __init__(self, session): self.session = session
+        def query(self, *args, **kwargs): raise RuntimeError("temporary database interruption")
+        def __getattr__(self, key): return getattr(self.session, key)
+    class SessionContext:
+        def __init__(self): self.session = original_factory()
+        def __enter__(self):
+            if fail_once[0]:
+                fail_once[0] = False
+                return BrokenQuerySession(self.session)
+            return self.session
+        def __exit__(self, exc_type, exc, traceback): self.session.close()
+    monkeypatch.setattr(tasks, "SessionLocal", SessionContext)
+
+    first = task.run(job.id)
+    assert first["status"] == "queued"
+    db_session.expire_all()
+    saved = db_session.get(BulkJob, job.id)
+    assert saved.payload["system_retry_count"] == 1
+    assert saved.processed_items == 0
+    assert saved.error_count == 0
+
+    monkeypatch.setattr(tasks, "SessionLocal", original_factory)
+    monkeypatch.setattr(suggestions, "build_suggestions", lambda *args, **kwargs: {
+        "product_identity": "id:asin:b012345678", "marketplaces": {
+            "facebook": {"state": "review_required", "candidates": []}},
+        "published_or_queued": False,
+    })
+    completed = task.run(job.id)
+    db_session.expire_all()
+    saved = db_session.get(BulkJob, job.id)
+    assert completed["has_more"] is False
+    assert saved.status == "completed"
+    assert saved.payload["system_retry_count"] == 0
+    assert saved.processed_items == 1
+    assert saved.error_count == 0

@@ -4272,8 +4272,13 @@ def process_marketplace_taxonomy_suggestion_job(job_id: str) -> dict:
                 payload["system_retry_count"] = retries
                 job.payload = payload
                 job.errors = [*(job.errors or []), {"error": f"Suggestion worker error: {str(exc)[:300]}"}][-500:]
-                job.error_count = len(job.errors or [])
-                job.status = "failed" if retries >= 5 else "queued"
+                # Retryable worker incidents remain visible in the bounded
+                # diagnostic log, but do not count as terminal item errors.
+                # Only exhaustion becomes a job failure.
+                exhausted = retries >= 5
+                if exhausted:
+                    job.error_count = int(job.error_count or 0) + 1
+                job.status = "failed" if exhausted else "queued"
                 retry_status = job.status
                 db.commit()
         return {"job_id": job_id, "status": retry_status, "error": str(exc)[:300]}
