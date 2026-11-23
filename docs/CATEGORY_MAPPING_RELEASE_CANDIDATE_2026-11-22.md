@@ -136,3 +136,39 @@ has not altered production services or schema.
 - Signed-in browser acceptance and production deployment remain gated. The
   candidate is still not production eligible until a suitable isolated runner
   completes the full production build and authenticated browser acceptance.
+
+## GitHub integration and hosted CI follow-up — 2026-11-23
+
+- Preserved the candidate commits on a local review branch based on the
+  observed GitHub `main` commit `eb62f8e19d743ee20dfcc40a5bd9244978478dbd`:
+  `category-mapping-github-integration-20261123`.
+- The branch was pushed without force-pushing or modifying `main`. Pull request
+  [#26](https://github.com/mattysparkles/PosterPro/pull/26) is open for review.
+  Its initial hosted CI run failed at backend test collection because clean
+  installs omitted the existing `qrcode` runtime import. The active release
+  reports `qrcode 8.2`; that version is now declared in
+  `backend/requirements.txt`. Hosted CI must rerun on this follow-up commit.
+- CI now includes the category/readiness, marketplace taxonomy, photo, Vine,
+  worker and extension taxonomy test paths; a disposable PostgreSQL service;
+  full frontend unit tests and production build; CSS verification; and a
+  commit-bound frontend artifact manifest/checksum. The PostgreSQL concurrency,
+  restart and rollback test is prepared but has not yet passed on the hosted
+  service.
+- Local checks on the integration branch: JavaScript extension/category
+  harness **154 passed**; additional taxonomy traversal subset **46 passed**;
+  Python syntax compilation, CI YAML parse, and `git diff --check` passed.
+  Backend pytest could not run locally because this host has no pytest/runtime
+  dependencies in the integration worktree. No dependency installation or
+  production build was attempted on the host.
+- No real authenticated staging browser acceptance has run. The host has no
+  installed browser/Playwright command or staging login, and the current CI job
+  is a build/test gate rather than an authenticated staging UI test. This is a
+  remaining release blocker; unit/extension harness tests do not substitute.
+- Current host storage is 94% full on `/` (9.4 GiB free) and 90% on the
+  application mount (11 GiB free); available RAM was about 410 MiB at inspection.
+  `/root/.npm` and `/root/.cache` each measure 2.3 GiB, including Playwright and
+  Puppeteer assets. Nothing was removed; cache cleanup requires operator
+  approval and active-use review.
+- Production remains unchanged. The current release symlink remains the
+  rollback target recorded above. No jobs, collector sessions, marketplace
+  listings, or inventory were modified.
