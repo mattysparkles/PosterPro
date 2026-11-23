@@ -105,9 +105,22 @@ has not altered production services or schema.
   the mounted application filesystem, and about 1.4 GiB available RAM. No
   disposable build runner or authenticated GitHub CLI was available. The only
   configured Git remote is a local release-candidate checkout; no candidate
-  was pushed. CI can be used after a reviewed, history-preserving integration
-  into the authorized GitHub lineage, but the current CI workflow only runs on
-  push/PR and does not publish a release artifact. Do not build Next.js on this
+  was pushed. The existing `.github/workflows/ci.yml` uses GitHub-hosted
+  runners (Python 3.13, Node 20, `npm ci`, `npm run build`) on push/PR, but it
+  does not currently run this candidate's category-suggestion test file,
+  provide an authenticated browser acceptance job, or publish a build
+  artifact. Safe off-server procedure: reconcile the candidate patch onto the
+  authorized GitHub `main` lineage through a reviewed PR (no force push); add
+  the category backend tests to that PR gate; run the full frontend build on
+  the hosted runner; then run a separate manual staging job against a disposable
+  database and seeded listing fixtures, capturing browser checks for suggestion,
+  confirmation, reload persistence, exact-identity reuse, and independent
+  Facebook/eBay/Mercari readiness. The staging browser must use isolated test
+  credentials and must not attach to the operator's paired collector or submit
+  external listings. Upload only the tested commit-bound build artifact and
+  manifest. Required prerequisites currently missing here are the approved
+  GitHub lineage write/PR path, an artifact-producing CI job, and isolated
+  authenticated browser-test credentials/runtime. Do not build Next.js on this
   live host.
 - Read-only cache inspection found `/root/.npm` at 2.3 GiB (`_cacache` 1.6 GiB,
   `_npx` 654 MiB) and `/root/.cache` at 2.3 GiB (`ms-playwright` 1.3 GiB,
