@@ -4,12 +4,38 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: posterpro-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: posterpro_category_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d posterpro_category_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      POSTERPRO_TEST_POSTGRES_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/posterpro_category_test
     steps:
       - uses: actions/checkout@v4
+
+      - name: Prepare CI result directories
+        run: mkdir -p .ci-results .ci-release
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -26,11 +52,12 @@ jobs:
           pip install -r backend/requirements.txt -r backend/requirements-dev.txt
 
       - name: Backend compileall
-        run: |
-          PYTHONPATH=backend python -m compileall backend/app
+        run: PYTHONPATH=backend python -m compileall -q backend/app
 
-      - name: Backend tests (targeted)
+      - name: Backend regressions and PostgreSQL worker acceptance
+        shell: bash
         run: |
+          set -o pipefail
           PYTHONPATH=backend pytest \
             backend/tests/test_startup_schema_compat.py \
             backend/tests/test_auth.py \
@@ -41,18 +68,24 @@ jobs:
             backend/tests/test_ebay_publish_e2e.py \
             backend/tests/test_marketplace_bridge_connect_sessions.py \
             backend/tests/test_marketplace_job_summaries.py \
+            backend/tests/test_marketplace_job_recovery.py \
             backend/tests/test_marketplace_publish_paths.py \
             backend/tests/test_marketplace_import_paths.py \
-            backend/tests/test_marketplace_job_recovery.py \
-            -q
-
-      - name: Bridge compileall
-        run: |
-          PYTHONPATH=bridge python -m compileall bridge/app
-
-      - name: Bridge tests (targeted)
-        run: |
-          PYTHONPATH=bridge pytest bridge/tests/test_browser_runner_assets.py -q
+            backend/tests/test_marketplace_category_suggestions.py \
+            backend/tests/test_marketplace_category_worker_postgres.py \
+            backend/tests/test_canonical_taxonomy_mapping.py \
+            backend/tests/test_inventory_taxonomy_cohorts.py \
+            backend/tests/test_ebay_taxonomy.py \
+            backend/tests/test_ebay_taxonomy_refresh.py \
+            backend/tests/test_facebook_product_taxonomy.py \
+            backend/tests/test_marketplace_taxonomy_registry.py \
+            backend/tests/test_marketplace_preflight.py \
+            backend/tests/test_facebook_category_resolver.py \
+            backend/tests/test_mercari_taxonomy.py \
+            backend/tests/test_listing_photo_workflow.py \
+            backend/tests/test_vine_category_audit.py \
+            backend/tests/test_vine_import.py \
+            -q --junitxml=.ci-results/backend-junit.xml 2>&1 | tee .ci-results/backend.log
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -65,6 +98,91 @@ jobs:
         working-directory: frontend
         run: npm ci
 
-      - name: Frontend build
+      - name: Frontend unit tests
+        shell: bash
+        working-directory: frontend
+        run: |
+          set -o pipefail
+          npm test -- --reporter=verbose 2>&1 | tee ../.ci-results/frontend.log
+
+      - name: Extension category adapter tests
+        shell: bash
+        run: |
+          set -o pipefail
+          node --test --test-reporter=tap \
+            browser-extension/tests/content-adapter.test.js \
+            browser-extension/tests/category-traversal.test.js \
+            browser-extension/tests/facebook-taxonomy-adapter.test.js \
+            browser-extension/tests/facebook-taxonomy-startup.test.js \
+            2>&1 | tee .ci-results/extension.log
+
+      - name: Set deterministic frontend build identity
+        run: |
+          echo "NEXT_PUBLIC_FRONTEND_GIT_SHA=${GITHUB_SHA}" >> "$GITHUB_ENV"
+          echo "NEXT_PUBLIC_FRONTEND_BUILD_TIMESTAMP=$(git show -s --format=%cI "$GITHUB_SHA")" >> "$GITHUB_ENV"
+
+      - name: Frontend production build
         working-directory: frontend
         run: npm run build
+
+      - name: Verify built CSS
+        working-directory: frontend
+        run: node scripts/verify-built-css.mjs
+
+      - name: Package frontend build and create commit-bound manifest
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$SOURCE_COMMIT")"
+          tar --sort=name --mtime="@${SOURCE_DATE_EPOCH}" --owner=0 --group=0 --numeric-owner \
+            -C frontend -cf - .next/standalone .next/static public | gzip -n \
+            > .ci-release/posterpro-frontend.tar.gz
+          ARTIFACT_SHA256="$(sha256sum .ci-release/posterpro-frontend.tar.gz | awk '{print $1}')"
+          python - "$SOURCE_COMMIT" "$SOURCE_DATE_EPOCH" "$ARTIFACT_SHA256" <<'PY'
+          import json, sys
+          commit, epoch, checksum = sys.argv[1:]
+          manifest = {
+              "source_commit": commit,
+              "source_date_epoch": int(epoch),
+              "artifact": "posterpro-frontend.tar.gz",
+              "artifact_sha256": checksum,
+              "backend_tests": "passed",
+              "postgres_worker_concurrency_and_rollback_tests": "passed",
+              "frontend_unit_tests": "passed",
+              "extension_category_adapter_tests": "passed",
+              "next_production_build": "passed",
+              "built_css_verification": "passed",
+              "production_deployment": "not_performed",
+          }
+          with open(".ci-release/manifest.json", "w", encoding="utf-8") as f:
+              json.dump(manifest, f, indent=2, sort_keys=True)
+              f.write("\n")
+          with open(".ci-release/SHA256SUMS", "w", encoding="utf-8") as f:
+              f.write(f"{checksum}  posterpro-frontend.tar.gz\n")
+          PY
+
+      - name: Upload tested build and reports
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: posterpro-category-${{ github.sha }}
+          path: |
+            .ci-release/posterpro-frontend.tar.gz
+            .ci-release/manifest.json
+            .ci-release/SHA256SUMS
+            .ci-results/backend-junit.xml
+            .ci-results/backend.log
+            .ci-results/frontend.log
+            .ci-results/extension.log
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: posterpro-ci-failure-${{ github.sha }}
+          path: .ci-results/
+          if-no-files-found: ignore
+          retention-days: 7

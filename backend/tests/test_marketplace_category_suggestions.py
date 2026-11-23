@@ -143,6 +143,9 @@ def test_suggestion_worker_retries_item_failure_with_backoff_and_finishes(db_ses
     assert retry["listing_id"] == listing.id
     assert retry["attempt"] == 1
     assert datetime.fromisoformat(retry["next_attempt_at"]) > datetime.utcnow()
+    waiting = task.run(job.id)
+    assert waiting["retry_wait"] is True
+    assert len(attempts) == 1, "a retry must not recompute before its persisted backoff expires"
 
     # Simulate the watchdog resuming after the durable backoff interval.
     payload = dict(saved.payload)
@@ -203,8 +206,8 @@ def test_category_suggestion_worker_and_watchdog_are_registered():
     assert "resume_marketplace_category_suggestion_jobs" in celery_app.tasks
     assert any(item.get("task") == "resume_marketplace_category_suggestion_jobs"
                for item in celery_app.conf.beat_schedule.values())
-    assert celery_app.conf.task_routes["process_marketplace_taxonomy_suggestion_job"]["queue"] == "posterpro-vine"
-    assert celery_app.conf.task_routes["resume_marketplace_category_suggestion_jobs"]["queue"] == "posterpro-vine"
+    assert celery_app.conf.task_routes["process_marketplace_taxonomy_suggestion_job"]["queue"] == "posterpro-category"
+    assert celery_app.conf.task_routes["resume_marketplace_category_suggestion_jobs"]["queue"] == "posterpro-category"
     assert any(item.get("task") == "resume_marketplace_category_suggestion_jobs"
                for item in dispatcher_app.conf.beat_schedule.values())
 

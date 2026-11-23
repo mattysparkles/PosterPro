@@ -40,11 +40,10 @@ celery_app.conf.update(
         "dispatch_queued_crosspost_jobs": {"queue": "posterpro-publish", "routing_key": "posterpro-publish", "priority": 0},
         "resume_product_research_backlog": {"queue": "posterpro", "routing_key": "posterpro", "priority": 8},
         "resume_image_identification_backlog": {"queue": "posterpro", "routing_key": "posterpro", "priority": 8},
-        # Category suggestion work is durable, review-only enrichment. Route it
-        # to the active bounded enrichment consumer rather than the generic
-        # queue, whose legacy systemd worker is disabled in production.
-        "process_marketplace_taxonomy_suggestion_job": {"queue": "posterpro-vine", "routing_key": "posterpro-vine", "priority": 4},
-        "resume_marketplace_category_suggestion_jobs": {"queue": "posterpro-vine", "routing_key": "posterpro-vine", "priority": 4},
+        # Review-only category work has its own bounded consumer. It must not
+        # compete with Vine imports/image repair or commercial publishing.
+        "process_marketplace_taxonomy_suggestion_job": {"queue": "posterpro-category", "routing_key": "posterpro-category", "priority": 5},
+        "resume_marketplace_category_suggestion_jobs": {"queue": "posterpro-category", "routing_key": "posterpro-category", "priority": 5},
         # Inventory enrichment has a dedicated consumer.  Marketplace sync
         # and publication traffic must not starve the autonomous listing
         # pipeline or make its progress depend on an operator session.

@@ -2,8 +2,8 @@
 
 The main Celery app contains schedules for several unrelated queues. This
 entry point runs only watchdogs whose task queues have active consumers. The
-category watchdog re-enqueues persisted review-only work onto the bounded
-posterpro-vine enrichment queue; it never publishes listings.
+category watchdog re-enqueues persisted review-only work onto its dedicated
+posterpro-category queue; it never publishes listings.
 """
 
 from app.workers.celery_app import celery_app

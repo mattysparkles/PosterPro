@@ -88,11 +88,12 @@ has not altered production services or schema.
   mutating the job.
 - Production topology review found the generic `posterpro-worker` disabled,
   while `posterpro-vine-worker` and the dedicated publisher dispatcher are
-  active. Category work now routes to the active bounded `posterpro-vine`
-  consumer, and the dispatcher Beat schedule includes its recovery watchdog.
-  This avoids enqueuing work on the unconsumed generic queue. The worker is
-  shared with Vine enrichment, so category batch throughput must be monitored
-  after any separately approved activation.
+  active. Category work now routes to an independent `posterpro-category`
+  queue, and the dispatcher Beat schedule includes its recovery watchdog. A
+  matching versioned-runtime unit is prepared at
+  `ops/systemd/posterpro-category-worker.service`; it is not installed or
+  started. The isolated consumer prevents category batches from competing
+  with or starving Vine imports/image-repair work.
 - Focused backend suite after worker changes: **93 passed**, 546 warnings.
   The suite covers retry/backoff, terminal-error counting, completion
   idempotency, Celery registration/routing, and existing category, readiness,
