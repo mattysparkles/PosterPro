@@ -11,7 +11,7 @@ import pytest
 from app.models.enums import ListingStatus, MarketplaceListingStatus, MarketplaceName
 from app.models.models import Listing, MarketplaceAccount, MarketplaceExtensionDevice, MarketplaceExtensionJob, MarketplaceListing, MarketplaceMetadataCache, User
 from app.api.marketplaces import _bulk_preflight_response_to_csv
-from app.api.routes import refresh_listing_readiness, update_listing
+from app.api.routes import _matches_readiness_filter, refresh_listing_readiness, update_listing
 from app.api.schemas import ListingUpdateRequest, MarketplacePreflightResponse
 from fastapi import BackgroundTasks, HTTPException
 from app.services.ebay_service import _cached_category_aspects, build_ebay_publish_plan
@@ -25,6 +25,9 @@ def test_compact_preflight_preserves_qualified_category_identity():
     compact = MarketplacePreflightService()._compact_marketplace_preflight({
         "marketplace": "ebay",
         "status": "blocked",
+        "preparation_status": "ready",
+        "data_ready": True,
+        "authorized_publishing_ready": False,
         "category_summary": {
             "category_id": "26447",
             "taxonomy_marketplace": "EBAY_MOTORS_US",
@@ -38,6 +41,132 @@ def test_compact_preflight_preserves_qualified_category_identity():
         "taxonomy_tree_id": "100",
         "category_path": "Root > eBay Motors > Boat Parts > Covers",
     }
+    assert compact["data_ready"] is True
+    assert compact["authorized_publishing_ready"] is False
+
+
+def test_mercari_payload_uses_only_current_operator_confirmed_category_mapping():
+    listing = Listing(
+        user_id=2,
+        status=ListingStatus.draft,
+        title="Hanging closet organizer",
+        description="New closet organizer.",
+        listing_price=24,
+        quantity=1,
+        condition="New",
+        category_suggestion="Home > Storage",
+        item_specifics={"Brand": "Example"},
+        image_urls=[],
+        marketplace_data={"marketplace_category_mappings": {"mercari": {
+            "category_id": "leaf-17", "category_path": "Home > Closet > Organizers",
+            "verification_status": "operator_confirmed", "terminal_status": "terminal",
+            "publishability_status": "publishable", "staleness_status": "fresh",
+        }}},
+    )
+    payload = build_marketplace_payload(listing, "mercari")
+    assert payload["category_id"] == "leaf-17"
+    assert payload["category_path"] == "Home > Closet > Organizers"
+    assert payload["category_hint"] == "Home > Closet > Organizers"
+
+    listing.marketplace_data["marketplace_category_mappings"]["mercari"]["staleness_status"] = "stale"
+    stale_payload = build_marketplace_payload(listing, "mercari")
+    assert "category_id" not in stale_payload
+    assert "category_path" not in stale_payload
+
+
+def test_mercari_preflight_blocks_missing_seller_photo_and_unverified_category_schema():
+    listing = Listing(
+        user_id=2,
+        status=ListingStatus.draft,
+        source_type="amazon_vine",
+        title="Vine product",
+        description="Product description.",
+        listing_price=24,
+        quantity=1,
+        condition="New",
+        category_suggestion="Home > Storage",
+        item_specifics={},
+        image_urls=["/media/catalog.jpg"],
+        listing_images=[{"storage_path": "/media/catalog.jpg", "source_platform": "amazon_vine",
+                         "operator_state": "approved", "is_reference": True}],
+        marketplace_data={"marketplace_category_mappings": {"mercari": {
+            "category_id": "leaf-17", "category_path": "Home > Closet > Organizers",
+            "verification_status": "operator_confirmed", "terminal_status": "terminal",
+            "publishability_status": "publishable", "staleness_status": "fresh",
+            "required_attributes": None,
+        }}},
+    )
+    result = MarketplacePreflightService()._build_mercari_preflight(listing, {"actual_image_count": 0})
+    codes = {item["code"] for item in result["blockers"]}
+    assert "MERCARI_SELLER_PHOTO_REQUIRED" in codes
+    assert "MERCARI_REQUIRED_ATTRIBUTE_SCHEMA_UNVERIFIED" in codes
+    assert result["policy_summary"]["direct_api_supported"] is False
+    assert result["policy_summary"]["supported_workflow"] == "operator_review_with_manual_or_browser_assisted_handoff"
+    assert result["policy_summary"]["automatic_publication_verified"] is False
+
+
+def test_mercari_preflight_exposes_data_readiness_separately_from_publishing(db_session, monkeypatch):
+    user, listing = _seed_user_and_listing(db_session)
+    listing.source_type = "manual"
+    listing.marketplace_data = {"marketplace_category_mappings": {"mercari": {
+        "category_id": "mercari-leaf-1", "category_path": "Home > Storage",
+        "verification_status": "operator_confirmed", "terminal_status": "terminal",
+        "publishability_status": "publishable", "staleness_status": "fresh",
+        "required_attributes": [],
+    }}}
+    listing.listing_images = [{
+        "storage_path": "/media/item.jpg", "source_platform": "photo_intake",
+        "operator_state": "approved", "is_reference": False,
+        "metadata": {"provenance": "seller_photographed"},
+    }]
+    service = MarketplacePreflightService()
+    monkeypatch.setattr("app.services.marketplace_preflight.compute_listing_quality_summary", lambda *_args, **_kwargs: {"status": "ready"})
+    monkeypatch.setattr("app.services.marketplace_preflight.canonical_listing_readiness", lambda *_args, **_kwargs: {"canonical_product_complete": True, "canonical_blocking_reasons": [], "blocking_reasons": []})
+    monkeypatch.setattr(service, "_base_blockers", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(service, "_base_warnings", lambda *_args, **_kwargs: [])
+    result = service.preflight_listing(db_session, listing, "mercari")
+    assert result["data_ready"] is True
+    assert result["draft_export_ready"] is True
+    assert result["authorized_publishing_ready"] is False
+    assert result["policy_summary"]["direct_api_supported"] is False
+
+
+def test_mercari_readiness_filters_use_cached_destination_specific_results():
+    listing = Listing(
+        user_id=2,
+        status=ListingStatus.draft,
+        marketplace_data={"marketplace_preflight": {"by_marketplace": {
+            "mercari": {
+                "data_ready": True, "preparation_status": "ready",
+                "blocker_codes": [],
+            },
+        }}},
+    )
+    listing.quality_summary = {}
+    assert _matches_readiness_filter(listing, "mercari_ready") is True
+    assert _matches_readiness_filter(listing, "mercari_missing_category") is False
+    listing.marketplace_data["marketplace_preflight"]["by_marketplace"]["mercari"].update({
+        "data_ready": False, "preparation_status": "blocked",
+        "blocker_codes": ["MERCARI_CATEGORY_MISSING", "MERCARI_SELLER_PHOTO_REQUIRED"],
+    })
+    assert _matches_readiness_filter(listing, "mercari_blocked") is True
+    assert _matches_readiness_filter(listing, "mercari_missing_category") is True
+    assert _matches_readiness_filter(listing, "mercari_missing_photos") is True
+
+
+def test_saved_taxonomy_candidate_filters_are_destination_specific_and_require_review_candidates():
+    listing = Listing(user_id=2, status=ListingStatus.draft, marketplace_data={
+        "marketplace_category_suggestions": {"marketplaces": {
+            "facebook": {"state": "review_required", "candidates": [{"category_path": "Home > Storage"}]},
+            "ebay": {"state": "no_verified_taxonomy_candidate", "candidates": []},
+            "mercari": {"state": "confirmed_mapping_preserved"},
+        }},
+    })
+    listing.quality_summary = {}
+    assert _matches_readiness_filter(listing, "facebook_category_review") is True
+    assert _matches_readiness_filter(listing, "any_category_review") is True
+    assert _matches_readiness_filter(listing, "ebay_category_review") is False
+    assert _matches_readiness_filter(listing, "mercari_category_review") is False
 from app.services.ebay_service import summarize_ebay_account_health
 from app.services import marketplace_orchestrator
 from app.services import marketplace_preflight

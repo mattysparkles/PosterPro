@@ -4127,6 +4127,110 @@ def bulk_finalize_job(results: list[dict], job_id: str) -> dict:
         }
 
 
+@celery_app.task(name="resume_marketplace_category_suggestion_jobs")
+def resume_marketplace_category_suggestion_jobs() -> dict:
+    """Re-enqueue durable category jobs left queued by a worker restart."""
+    from datetime import UTC
+    cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=2)
+    with SessionLocal() as db:
+        job_ids = db.execute(select(BulkJob.id).where(
+            BulkJob.action == "suggest_marketplace_categories",
+            BulkJob.status.in_(["queued", "running"]), BulkJob.updated_at < cutoff,
+        ).order_by(BulkJob.created_at).limit(100)).scalars().all()
+    for job_id in job_ids:
+        process_marketplace_taxonomy_suggestion_job.delay(job_id)
+    return {"resumed": len(job_ids)}
+
+
+@celery_app.task(name="process_marketplace_taxonomy_suggestion_job")
+def process_marketplace_taxonomy_suggestion_job(job_id: str) -> dict:
+    """Process one durable page; persisted cursor makes retries/restarts safe."""
+    from app.services.marketplace_category_suggestions import build_suggestions, persist_suggestions
+
+    processed = 0
+    errors: list[dict] = []
+    has_more = False
+    try:
+        retry_status = "queued"
+        with SessionLocal() as db:
+            job = db.query(BulkJob).filter(
+                BulkJob.id == job_id,
+                BulkJob.action == "suggest_marketplace_categories",
+            ).with_for_update(skip_locked=True).first()
+            if not job or job.status in {"completed", "completed_with_errors", "failed", "cancelled"}:
+                return {"job_id": job_id, "status": getattr(job, "status", "missing"), "processed": 0}
+            payload = dict(job.payload) if isinstance(job.payload, dict) else {}
+            review_counts = dict(payload.get("review_counts") or {})
+            for key in ("candidate_count", "review_required_count", "reference_only_count", "no_candidate_count", "confirmed_preserved_count", "ambiguous_identity_count"):
+                review_counts[key] = int(review_counts.get(key) or 0)
+            listing_ids = payload.get("listing_ids") if isinstance(payload.get("listing_ids"), list) else []
+            cursor = max(0, int(payload.get("cursor") or 0))
+            batch_size = max(1, min(int(payload.get("batch_size") or 25), 50))
+            batch = [int(value) for value in listing_ids[cursor:cursor + batch_size]]
+            job.status = "running"
+            job.updated_at = datetime.utcnow()
+            rows = db.query(Listing).filter(Listing.user_id == job.user_id, Listing.id.in_(batch)).with_for_update().all() if batch else []
+            by_id = {int(row.id): row for row in rows}
+            marketplaces = payload.get("marketplaces") if isinstance(payload.get("marketplaces"), list) else ["facebook", "ebay", "mercari"]
+            for listing_id in batch:
+                listing = by_id.get(listing_id)
+                if listing is None:
+                    errors.append({"listing_id": listing_id, "error": "Listing is missing or no longer belongs to this operator"})
+                    continue
+                try:
+                    with db.begin_nested():
+                        suggestion = build_suggestions(db, listing, owner_user_id=job.user_id, marketplaces=marketplaces)
+                        persist_suggestions(listing, suggestion)
+                        db.flush()
+                    processed += 1
+                    identity = str(suggestion.get("product_identity") or "")
+                    if identity.startswith("ambiguous:") or not identity.startswith("id:"):
+                        review_counts["ambiguous_identity_count"] += 1
+                    for market_result in suggestion.get("marketplaces", {}).values():
+                        if market_result.get("state") == "confirmed_mapping_preserved":
+                            review_counts["confirmed_preserved_count"] += 1
+                        candidates = market_result.get("candidates") if isinstance(market_result.get("candidates"), list) else []
+                        if not candidates:
+                            review_counts["no_candidate_count"] += 1
+                        review_counts["candidate_count"] += len(candidates)
+                        if candidates:
+                            review_counts["review_required_count"] += 1
+                        review_counts["reference_only_count"] += sum(1 for item in candidates if item.get("reference_only"))
+                except Exception as exc:
+                    errors.append({"listing_id": listing_id, "error": str(exc)[:400]})
+            payload["cursor"] = min(len(listing_ids), cursor + len(batch))
+            payload["last_batch_at"] = datetime.utcnow().isoformat()
+            payload["review_counts"] = review_counts
+            job.payload = payload
+            job.processed_items = min(job.total_items, payload["cursor"])
+            job.errors = [*(job.errors or []), *errors][-500:]
+            job.error_count = len(job.errors or [])
+            has_more = payload["cursor"] < len(listing_ids)
+            job.status = "queued" if has_more else ("completed_with_errors" if job.error_count else "completed")
+            db.commit()
+    except Exception as exc:
+        # A systemic failure leaves the cursor untouched. Persist a bounded
+        # retry count; the minute recovery task will resume or mark failed.
+        with SessionLocal() as db:
+            job = db.query(BulkJob).filter(BulkJob.id == job_id,
+                                           BulkJob.action == "suggest_marketplace_categories").with_for_update().first()
+            if job and job.status not in {"completed", "completed_with_errors", "failed", "cancelled"}:
+                payload = dict(job.payload) if isinstance(job.payload, dict) else {}
+                retries = int(payload.get("system_retry_count") or 0) + 1
+                payload["system_retry_count"] = retries
+                job.payload = payload
+                job.errors = [*(job.errors or []), {"error": f"Suggestion worker error: {str(exc)[:300]}"}][-500:]
+                job.error_count = len(job.errors or [])
+                job.status = "failed" if retries >= 5 else "queued"
+                retry_status = job.status
+                db.commit()
+        return {"job_id": job_id, "status": retry_status, "error": str(exc)[:300]}
+
+    if has_more:
+        process_marketplace_taxonomy_suggestion_job.delay(job_id)
+    return {"job_id": job_id, "processed": processed, "item_errors": errors, "has_more": has_more}
+
+
 
 
 @celery_app.task(

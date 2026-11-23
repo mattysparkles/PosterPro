@@ -1748,6 +1748,20 @@ function ppFacebookVisiblePickerCount() {
 function ppFacebookCategoryCandidates(canonicalCategory, payload = {}) {
   const canonical = String(canonicalCategory || "").replace(/\s+/g, " ").trim();
   const leaf = canonical.split(">").pop().trim();
+  const confirmed = payload.marketplace_category_mapping && typeof payload.marketplace_category_mapping === "object"
+    ? payload.marketplace_category_mapping : null;
+  if (confirmed
+      && confirmed.verification_status === "operator_confirmed"
+      && confirmed.terminal_status === "terminal"
+      && confirmed.publishability_status === "publishable"
+      && confirmed.staleness_status === "fresh"
+      && String(confirmed.category_path || "").trim()) {
+    // A reviewed destination leaf takes precedence over title heuristics.
+    // Match only its observed UI label; if Facebook's form does not expose a
+    // unique matching option, fail closed and ask the operator to choose.
+    const confirmedLeaf = String(confirmed.category_path).replace(/\s+/g, " ").trim().split(/\s*>\s*/).pop();
+    return { family: "operator_confirmed_path", candidates: [confirmedLeaf] };
+  }
   const semantic = `${canonical} ${payload.title || ""} ${payload.product_type || ""}`.toLowerCase();
   // Facebook has its own vocabulary. These narrow family mappings are only
   // candidates: a candidate must still be present in the live Marketplace UI.

@@ -27,17 +27,41 @@ def _identity(listing: Listing) -> tuple[str, str, str]:
     metadata = listing.source_metadata if isinstance(listing.source_metadata, dict) else {}
     facts = metadata.get("amazon_product_facts") if isinstance(metadata.get("amazon_product_facts"), dict) else {}
     identifiers = {**metadata, **facts}
+    specifics = listing.item_specifics if isinstance(getattr(listing, "item_specifics", None), dict) else {}
+    # Product identifiers distinguish a product family. These dimensions
+    # distinguish variants and bundles within that family; never spread a
+    # confirmed category from one size/color/quantity to another.
+    aliases = {
+        "model": ("model", "model_number", "modelnumber", "mpn"),
+        "size": ("size", "size_name", "apparel_size"),
+        "color": ("color", "colour"),
+        "variation": ("variation", "variant", "item_variant"),
+        "bundle_quantity": ("bundle_quantity", "bundle_count", "pack_quantity", "package_quantity", "number_of_items", "count_per_pack"),
+        "product_type": ("product_type", "product_kind", "type"),
+    }
+    normalized_specifics = {re.sub(r"[^a-z0-9]", "", str(key).casefold()): value for key, value in specifics.items()}
+    dimensions: list[str] = []
+    for dimension, names in aliases.items():
+        value = next((identifiers.get(name) for name in names if identifiers.get(name) not in (None, "")), None)
+        if value in (None, ""):
+            value = next((normalized_specifics.get(re.sub(r"[^a-z0-9]", "", name)) for name in names
+                          if normalized_specifics.get(re.sub(r"[^a-z0-9]", "", name)) not in (None, "")), None)
+        if value not in (None, ""):
+            normalized = re.sub(r"\s+", " ", str(value).strip().casefold())
+            dimensions.append(f"{dimension}={normalized}")
+    variant_signature = "|".join(dimensions) or "variant-unspecified"
     for key in ("asin", "upc", "ean", "gtin", "mpn", "oem_part_number"):
         value = re.sub(r"[^a-z0-9]", "", str(identifiers.get(key) or "").casefold())
         if len(value) >= 5:
-            return (f"id:{key}:{value}", str(listing.title or "").strip()[:200], f"source identifier {key.upper()}")
+            return (f"id:{key}:{value}|{variant_signature}", str(listing.title or "").strip()[:200],
+                    f"source identifier {key.upper()} plus {variant_signature}")
     normalized_title = _normalize_name(listing.title or "")
-    normalized_category = _normalize_name(listing.category_suggestion or "")
     if len(normalized_title.split()) < 2 or normalized_title in {"unknown product", "untitled listing", "product", "component"}:
         return (f"ambiguous:{listing.id}", str(listing.title or "Untitled listing").strip()[:200],
                 "ambiguous title; kept as a single-item cohort")
-    identity = f"title:{normalized_category}:{normalized_title}"
-    return identity, str(listing.title or "Untitled listing").strip()[:200], "exact normalized title and source category"
+    normalized_category = _normalize_name(str(identifiers.get("product_type") or listing.category_suggestion or ""))
+    identity = f"title:{normalized_category}:{normalized_title}|{variant_signature}"
+    return identity, str(listing.title or "Untitled listing").strip()[:200], "exact normalized title, product type, and variant dimensions"
 
 
 def _active(listing: Listing) -> bool:

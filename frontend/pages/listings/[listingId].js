@@ -353,9 +353,21 @@ export default function ListingWorkspacePage() {
     finally { setTaxonomyCandidatesBusy(false); }
   };
   const confirmTaxonomyCandidate = async (candidate) => {
-    if (!taxonomyConceptId || taxonomyMappingRationale.trim().length < 8) return;
+    if (taxonomyMappingRationale.trim().length < 8) return;
     try {
-      const mapping = await confirmCanonicalTaxonomyMapping(taxonomyConceptId, {
+      let conceptId = taxonomyConceptId;
+      if (!conceptId) {
+        const facts = listing?.source_metadata?.amazon_product_facts || listing?.source_metadata?.source_facts || {};
+        const concept = await saveCanonicalTaxonomyConcept({
+          concept_name: taxonomyConceptName.trim() || listing?.title || form.title || candidate.canonical_concept || '',
+          concept_description: listing?.description || '',
+          structured_facts: facts,
+          evidence: [listing?.title, listing?.category_suggestion, `PosterPro listing ${listing?.id}`].filter(Boolean),
+        });
+        conceptId = concept.concept_id;
+        setTaxonomyConceptId(conceptId);
+      }
+      const mapping = await confirmCanonicalTaxonomyMapping(conceptId, {
         marketplace: candidate.marketplace,
         taxonomy_version_id: candidate.registry_version_id,
         category_key: candidate.category_key,
@@ -363,8 +375,76 @@ export default function ListingWorkspacePage() {
         evidence: { posterpro_listing_id: listing?.id, inventory_title: listing?.title },
       });
       setTaxonomyMappings((current) => [mapping, ...current.filter((item) => item.mapping_id !== mapping.mapping_id)]);
-      toast.success(`Operator-confirmed ${candidate.marketplace} category mapping saved.`);
+      const marketplace = String(candidate.marketplace || "").toLowerCase();
+      const savedCategory = {
+        mapping_id: mapping.mapping_id,
+        marketplace,
+        category_id: candidate.category_id || null,
+        category_key: candidate.category_key,
+        category_path: candidate.full_path,
+        taxonomy_version_id: candidate.registry_version_id,
+        taxonomy_version: candidate.taxonomy_version || null,
+        confidence: 1,
+        retrieval_confidence: candidate.mapping_confidence || 0,
+        verification_status: "operator_confirmed",
+        terminal_status: candidate.terminal_status,
+        publishability_status: candidate.publishability_status,
+        staleness_status: candidate.staleness_status,
+        required_attributes: candidate.required_aspects,
+        supports_shipping: false,
+        confirmed_at: new Date().toISOString(),
+      };
+      const marketplaceData = listing?.marketplace_data && typeof listing.marketplace_data === "object" ? listing.marketplace_data : {};
+      const mappings = marketplaceData.marketplace_category_mappings && typeof marketplaceData.marketplace_category_mappings === "object"
+        ? marketplaceData.marketplace_category_mappings : {};
+      const savedSuggestions = marketplaceData.marketplace_category_suggestions && typeof marketplaceData.marketplace_category_suggestions === "object"
+        ? marketplaceData.marketplace_category_suggestions : {};
+      const targetMarketSuggestion = savedSuggestions.marketplaces?.[marketplace];
+      const updatedSuggestion = targetMarketSuggestion && Array.isArray(targetMarketSuggestion.candidates)
+        ? { ...targetMarketSuggestion, candidates: targetMarketSuggestion.candidates.map((item) =>
+          item.category_key === candidate.category_key && item.taxonomy_version_id === (candidate.registry_version_id || candidate.taxonomy_version_id)
+            ? { ...item, operator_decision: 'approved' } : item) }
+        : targetMarketSuggestion;
+      const patch = {
+        expected_updated_at: listing?.updated_at || null,
+        marketplace_data: {
+          ...marketplaceData,
+          marketplace_category_mappings: { ...mappings, [marketplace]: savedCategory },
+          ...(updatedSuggestion ? { marketplace_category_suggestions: {
+            ...savedSuggestions,
+            marketplaces: { ...(savedSuggestions.marketplaces || {}), [marketplace]: updatedSuggestion },
+          } } : {}),
+        },
+      };
+      if (marketplace === "ebay" && /^\d+$/.test(String(candidate.category_id || ""))) {
+        patch.category_id = String(candidate.category_id);
+        patch.category_suggestion = candidate.full_path;
+      }
+      const savedListing = await updateListing(listing.id, patch);
+      setListing(savedListing);
+      setForm(normalizeListingForm(savedListing));
+      toast.success(`Operator-confirmed ${marketplace} category saved to this listing and its reusable concept mapping.`);
     } catch (error) { toast.error(error.message || 'Could not confirm this category mapping.'); }
+  };
+  const rejectTaxonomySuggestion = async (marketplace, candidate) => {
+    const data = listing?.marketplace_data && typeof listing.marketplace_data === 'object' ? listing.marketplace_data : {};
+    const suggestions = data.marketplace_category_suggestions && typeof data.marketplace_category_suggestions === 'object'
+      ? data.marketplace_category_suggestions : {};
+    const target = suggestions.marketplaces?.[marketplace];
+    if (!target || !Array.isArray(target.candidates)) return;
+    try {
+      const nextTarget = { ...target, candidates: target.candidates.map((item) =>
+        item.category_key === candidate.category_key && item.taxonomy_version_id === candidate.taxonomy_version_id
+          ? { ...item, operator_decision: 'rejected' } : item) };
+      const saved = await updateListing(listing.id, {
+        expected_updated_at: listing?.updated_at || null,
+        marketplace_data: { ...data, marketplace_category_suggestions: {
+          ...suggestions, marketplaces: { ...(suggestions.marketplaces || {}), [marketplace]: nextTarget },
+        } },
+      });
+      setListing(saved);
+      toast.success('Category suggestion rejected and recorded.');
+    } catch (error) { toast.error(error.message || 'Could not reject this suggestion.'); }
   };
   const categoryChoices = useMemo(() => {
     const metadata = listing?.source_metadata || {};
@@ -1334,14 +1414,34 @@ export default function ListingWorkspacePage() {
                 <div className="mt-2 flex flex-wrap items-center justify-between gap-2"><span className="text-xs text-[#667085]">{variantMarketplace === 'mercari' ? `${variantDraft.length}/1000 characters` : `${variantDraft.length} characters`} · saved as operator-edited</span><div className="flex gap-2">{variantMarketplace === 'mercari' ? <Button type="button" size="sm" variant="outline" onClick={copyMercariManualPacket}>Copy manual listing packet</Button> : null}<Button type="button" size="sm" onClick={saveMarketplaceVariant} disabled={savingVariant}>{savingVariant ? 'Saving…' : 'Save destination copy'}</Button></div></div>
               </div> : null}
               <div className="space-y-2">
-                <div className="flex flex-wrap items-center justify-between gap-3"><label className="text-sm font-medium text-[#101828]">eBay category</label><div className="flex flex-wrap gap-2"><Button type="button" size="sm" variant="outline" disabled={taxonomyCandidatesBusy} onClick={loadTaxonomyCandidates}>{taxonomyCandidatesBusy ? 'Searching registry…' : 'Compare marketplace candidates'}</Button><Button type="button" size="sm" variant="outline" onClick={async () => { try { const result = await resolveListingCategory(listing.id); if (result?.resolved) { toast.success(`Category resolved: ${result.category_path}`); const saved = await fetchListing(listing.id); setListing(saved); setForm((current) => ({ ...current, category_id: String(saved?.category_id || result.category_id), category_suggestion: saved?.category_suggestion || result.category_path })); } else toast.error(result?.reason || "No confident taxonomy match yet."); } catch (error) { const rateLimited = /429|too many requests|request limit/i.test(error.message || ""); toast.error(rateLimited ? "eBay is temporarily limiting taxonomy requests. PosterPro will reuse saved category data and retry later." : "Could not resolve an eBay category. Try again in a moment."); } }}>Suggest best match</Button></div></div>
+                <div className="flex flex-wrap items-center justify-between gap-3"><label className="text-sm font-medium text-[#101828]">Marketplace category mapping</label><div className="flex flex-wrap gap-2"><Button type="button" size="sm" variant="outline" disabled={taxonomyCandidatesBusy} onClick={loadTaxonomyCandidates}>{taxonomyCandidatesBusy ? 'Searching registry…' : 'Compare marketplace candidates'}</Button><Button type="button" size="sm" variant="outline" onClick={async () => { try { const result = await resolveListingCategory(listing.id); if (result?.resolved) { toast.success(`eBay category resolved: ${result.category_path}`); const saved = await fetchListing(listing.id); setListing(saved); setForm((current) => ({ ...current, category_id: String(saved?.category_id || result.category_id), category_suggestion: saved?.category_suggestion || result.category_path })); } else toast.error(result?.reason || "No confident eBay taxonomy match yet."); } catch (error) { const rateLimited = /429|too many requests|request limit/i.test(error.message || ""); toast.error(rateLimited ? "eBay is temporarily limiting taxonomy requests. PosterPro will reuse saved taxonomy data and retry later." : "Could not resolve an eBay category. Try again in a moment."); } }}>Suggest eBay category</Button></div></div>
                 <div className="mt-3 rounded-xl border border-violet-200 bg-violet-50/50 p-3" data-testid="taxonomy-cross-marketplace-candidates">
                   <label className="block text-xs font-semibold text-violet-950">Canonical product concept</label>
                   <div className="mt-1 flex flex-wrap gap-2"><Input aria-label="Canonical product concept" value={taxonomyConceptName || listing?.title || form.title || ''} onChange={(event) => setTaxonomyConceptName(event.target.value)} placeholder="e.g. hanging closet organizer" /><Button type="button" size="sm" variant="outline" disabled={taxonomyCandidatesBusy} onClick={loadTaxonomyCandidates}>{taxonomyCandidatesBusy ? 'Searching registry…' : 'Save concept & compare'}</Button></div>
                   {taxonomyCandidates ? <><p className="mt-2 text-xs text-violet-900">Candidate retrieval uses product facts as signals. It does not establish category equivalence or select a destination category.</p><label className="mt-2 block text-xs font-medium">Reason for confirming a reusable category mapping</label><Textarea value={taxonomyMappingRationale} onChange={(event) => setTaxonomyMappingRationale(event.target.value)} placeholder="Explain why this verified destination leaf matches the canonical product concept." rows={2} />
                     <div className="mt-2 grid gap-2 xl:grid-cols-3">{taxonomyCandidates.marketplaces?.map((destination) => <section className="rounded-lg border border-violet-100 bg-white p-2" key={destination.marketplace}><h5 className="text-xs font-semibold capitalize">{destination.marketplace}</h5>{destination.candidates?.length ? destination.candidates.slice(0, 3).map((candidate) => { const eligible = candidate.terminal_status === 'terminal' && candidate.publishability_status === 'publishable' && candidate.automated_selection_eligible === true && ['authoritatively_verified', 'live_browser_verified'].includes(candidate.verification_status) && candidate.staleness_status === 'fresh'; const mapped = taxonomyMappings.some((item) => item.marketplace === candidate.marketplace && item.category_key === candidate.category_key && item.verification_status === 'operator_confirmed'); return <article className="mt-2 border-t pt-2 text-xs" key={`${candidate.registry_version_id}:${candidate.category_key}`}><p className="font-medium">{candidate.full_path}</p><p className="text-slate-600">ID {candidate.category_id || 'not supplied'} · {candidate.terminal_status} · {candidate.verification_status} · {candidate.staleness_status}</p><p className="text-slate-600">Taxonomy {candidate.taxonomy_version || 'unversioned'} · retrieval score {Math.round((candidate.mapping_confidence || 0) * 100)}% · operator review required</p>{candidate.required_aspects?.length ? <p className="mt-1 text-slate-700">Required: {candidate.required_aspects.map((aspect) => aspect.localizedAspectName || aspect.name || 'Unnamed').join(', ')}</p> : <p className="mt-1 text-slate-500">Required attributes unavailable</p>}{mapped ? <p className="mt-1 font-semibold text-emerald-700">Operator-confirmed reusable mapping</p> : eligible ? <Button type="button" size="sm" variant="outline" disabled={taxonomyMappingRationale.trim().length < 8} className="mt-2" onClick={() => confirmTaxonomyCandidate(candidate)}>Confirm mapping</Button> : <p className="mt-1 text-amber-800">Cannot save as reusable mapping until a current verified terminal leaf is available.</p>}</article>}) : <p className="mt-2 text-xs text-slate-600">No current registry candidates.</p>}</section>)}</div>
-                    {taxonomyMappings.length ? <p className="mt-2 text-xs text-emerald-800">Saved mappings: {taxonomyMappings.map((mapping) => `${mapping.marketplace}: ${mapping.category_path} (${mapping.verification_status})`).join(' · ')}</p> : null}</> : null}
+                    {taxonomyMappings.length ? <p className="mt-2 text-xs text-emerald-800">Reusable concept mappings: {taxonomyMappings.map((mapping) => `${mapping.marketplace}: ${mapping.category_path} (${mapping.verification_status})`).join(' · ')}</p> : null}
+                    {Object.keys((listing?.marketplace_data?.marketplace_category_mappings || {})).length ? <div className="mt-2 rounded border border-emerald-200 bg-emerald-50 p-2 text-xs text-emerald-950" data-testid="listing-marketplace-category-mappings"><strong>Mappings applied to this listing:</strong>{Object.entries(listing.marketplace_data.marketplace_category_mappings).map(([market, mapping]) => <p key={market} className="mt-1"><span className="font-semibold capitalize">{market}</span>: {mapping.category_path} · confidence {Math.round(Number(mapping.confidence || 0) * 100)}% · {mapping.verification_status} · {mapping.required_attributes ? `${mapping.required_attributes.length} required attributes recorded` : 'required attributes not verified'}</p>)}</div> : <p className="mt-2 text-xs text-slate-600">No marketplace-specific category mapping has been applied to this listing yet. Confirming a current verified category below saves it to both the reusable concept and this listing.</p>}
+                    </> : null}
                 </div>
+                {Object.keys(listing?.marketplace_data?.marketplace_category_suggestions?.marketplaces || {}).length ? <details className="mt-3 rounded-xl border border-indigo-200 bg-indigo-50/40 p-3" data-testid="saved-marketplace-category-suggestions">
+                  <summary className="cursor-pointer text-sm font-semibold text-indigo-950">Bulk category suggestions · review required</summary>
+                  <p className="mt-1 text-xs text-indigo-900">These are saved taxonomy retrieval candidates, not confirmed categories. A retrieval score is not a calibrated confidence. Review category path, native ID, taxonomy freshness, product variant, and missing fields before confirming.</p>
+                  <label className="mt-2 block text-xs font-medium">Confirmation rationale <Textarea value={taxonomyMappingRationale} onChange={(event) => setTaxonomyMappingRationale(event.target.value)} placeholder="Explain why this exact marketplace leaf matches this product and variant." rows={2} /></label>
+                  <div className="mt-2 grid gap-2 xl:grid-cols-3">{Object.entries(listing.marketplace_data.marketplace_category_suggestions.marketplaces).map(([marketplace, result]) => <section key={marketplace} className="rounded-lg border border-indigo-100 bg-white p-2"><h5 className="text-xs font-semibold capitalize">{marketplace} · {result.state?.replaceAll('_', ' ')}</h5>{result.candidates?.length ? result.candidates.map((candidate) => <article key={`${candidate.taxonomy_version_id}:${candidate.category_key}`} className="mt-2 border-t pt-2 text-xs"><p className="font-medium">{candidate.category_path || 'No category path'}</p><p className="text-slate-600">Native ID {candidate.category_id || 'not supplied'} · taxonomy {candidate.taxonomy_version || 'unknown'} · {candidate.verification_status || 'unknown'} / {candidate.staleness_status || 'unknown'}</p><p className="text-slate-600">Retrieval score {candidate.retrieval_score ?? 'unavailable'} · {candidate.reference_only ? 'reference only' : candidate.selectable_for_confirmation ? 'verified candidate' : 'not verified for selection'}</p>{candidate.missing_attributes?.length ? <p className="mt-1 text-amber-800">Missing: {candidate.missing_attributes.join(', ')}</p> : candidate.required_attributes_status === 'unverified' ? <p className="mt-1 text-amber-800">Required attributes have not been verified.</p> : null}{candidate.operator_decision ? <p className="mt-1 font-semibold">Operator decision: {candidate.operator_decision}</p> : <div className="mt-2 flex gap-2">{candidate.selectable_for_confirmation ? <Button type="button" size="sm" variant="outline" disabled={taxonomyMappingRationale.trim().length < 8} onClick={() => confirmTaxonomyCandidate({
+                      marketplace,
+                      registry_version_id: candidate.taxonomy_version_id,
+                      taxonomy_version: candidate.taxonomy_version,
+                      category_key: candidate.category_key,
+                      category_id: candidate.category_id,
+                      full_path: candidate.category_path,
+                      mapping_confidence: candidate.retrieval_score,
+                      required_aspects: candidate.required_attributes,
+                      terminal_status: candidate.terminal_status,
+                      publishability_status: candidate.publishability_status,
+                      staleness_status: candidate.staleness_status,
+                    })}>Confirm mapping</Button> : null}<Button type="button" size="sm" variant="outline" onClick={() => rejectTaxonomySuggestion(marketplace, candidate)}>Reject</Button></div>}</article>) : <p className="mt-2 text-xs text-slate-600">No current taxonomy candidates. Do not substitute an unverified category.</p>}</section>)}</div>
+                </details> : null}
                 <div className="rounded-xl border border-[#d9e2ef] bg-[#f8fbff] px-3 py-2 text-sm text-[#344054]">
                   <p className="font-semibold">{listing?.catalog_category?.full_path || listing?.source_metadata?.category_path || form.category_suggestion || "Category not resolved"}</p>
                   <p className="mt-1 text-xs text-[#667085]">{form.category_id ? `${listing?.catalog_category?.status === "VERIFIED" ? "Verified" : "Revalidation required"} ${listing?.catalog_category?.marketplace || listing?.source_metadata?.taxonomy_marketplace || "EBAY_US"} · tree ${listing?.catalog_category?.taxonomy_tree_id || listing?.source_metadata?.taxonomy_tree_id || "0"} · ID ${form.category_id}` : "eBay category has not been verified yet."}</p>

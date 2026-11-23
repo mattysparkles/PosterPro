@@ -104,7 +104,7 @@ async def test_actual_photo_upload_attaches_as_non_reference_and_can_be_approved
 
     upload = await async_client.post(
         f"/listings/{listing_id}/photos/upload",
-        data={"operator_state": "suggested", "source": "actual_upload"},
+        data={"operator_state": "suggested", "source": "actual_upload", "seller_photographed": "true"},
         files=[("photos", ("tripod.jpg", BytesIO(b"\xff\xd8\xff\xdbjpeg"), "image/jpeg"))],
     )
     assert upload.status_code == 200
@@ -121,6 +121,8 @@ async def test_actual_photo_upload_attaches_as_non_reference_and_can_be_approved
     approved_image = approve.json()["listing"]["listing_images"][0]
     assert approved_image["operator_state"] == "approved"
     assert approved_image["is_reference"] is False
+    assert approved_image["metadata"]["provenance"] == "seller_photographed"
+    assert approved_image["metadata"]["seller_photo_attestation"] is True
 
 
 @pytest.mark.anyio

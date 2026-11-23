@@ -8,6 +8,36 @@ const root = path.resolve(__dirname, "..");
 const TEST_VERSION = JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8")).version;
 const TEST_BUILD_ID = `posterpro-${TEST_VERSION}-facebook-background-queue-focus-safety`;
 
+test("Facebook category selection honors a confirmed marketplace path over title heuristics", () => {
+  const { contentApi } = loadContentFixture();
+  const result = contentApi.ppFacebookCategoryCandidates("Home > Kitchen > Small Appliances", {
+    title: "Collectible gaming console shelf organizer",
+    marketplace_category_mapping: {
+      category_path: "Home > Kitchen > Small Appliances",
+      verification_status: "operator_confirmed",
+      terminal_status: "terminal",
+      publishability_status: "publishable",
+      staleness_status: "fresh",
+    },
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), {
+    family: "operator_confirmed_path",
+    candidates: ["Small Appliances"],
+  });
+
+  const stale = contentApi.ppFacebookCategoryCandidates("Home > Kitchen > Small Appliances", {
+    title: "Gaming console",
+    marketplace_category_mapping: {
+      category_path: "Home > Kitchen > Small Appliances",
+      verification_status: "operator_confirmed",
+      terminal_status: "terminal",
+      publishability_status: "publishable",
+      staleness_status: "stale",
+    },
+  });
+  assert.equal(stale.family, "video_games");
+});
+
 function loadContentFixture(hostname = "www.facebook.com", pathname = "/marketplace/create/item", options = {}) {
   class FakeInput {
     constructor(tagName = "INPUT", attrs = {}) { this.tagName = tagName; this.attrs = attrs; this.type = attrs.type || (tagName === "TEXTAREA" ? "textarea" : "text"); this.disabled = false; this.isContentEditable = false; this.value = ""; this.files = []; this.offsetParent = {}; this.innerText = attrs.text || ""; this.textContent = this.innerText; this.parentElement = attrs.parentElement || null; }
@@ -215,7 +245,7 @@ function loadContentFixture(hostname = "www.facebook.com", pathname = "/marketpl
   const identitySource = fs.readFileSync(path.join(root, "content.js"), "utf8")
     .replace(/content_script_version: "0\.3\.\d+"/, `content_script_version: "${TEST_VERSION}"`)
     .replace(/content_script_build_id: "posterpro-[^"]+"/, `content_script_build_id: "${options.contentBuildId || TEST_BUILD_ID}"`);
-  const contentSource = identitySource + "\nglobalThis.__contentTest = { ppProbeFacebookCreateContextReadOnly, ppWaitForMercariSellFormReady, ppMercariPageEvidence, ppSelectOption, ppOptionAliases, ppMercariInputLabel, ppMercariVerifyCategoryPersistence, ppMercariPhotoPreviewSnapshot, ppWaitForFacebookCreateFormReady, ppFacebookImagePreviewEvidence, ppFacebookMediaSnapshot, ppFacebookCreatePreviewCount, ppFacebookCreateBaselineEvidence, ppInspectFacebookCreateBaseline, ppFacebookLocationStageState, ppSelectFacebookCategory, ppFacebookVisibleCategoryOptionCandidates, ppFacebookVisibleLocationMatch, ppVerifyFacebookLocationAtReview, ppFacebookWeightOptionMatches, ppFacebookStageSnapshot, ppFacebookWorkflowStage, ppFacebookDetailsControl, ppFacebookSetAndVerifyDetailsField, ppFacebookDetailsIntegrityEvidence, ppFacebookPriceEquivalent, ppFacebookObservedPrice, ppWaitForFacebookFinalPublishBoundary, ppFacebookResolveUpdateTarget, ppFacebookUpdateCandidates, ppFacebookUpdateTargetEvidence, ppFacebookShippingValidationSnapshot, ppFacebookValidateUpdateActivationPoint, ppFacebookActivateUpdateOnce, ppFacebookNextControlEvidence, ppFacebookPostShippingReadiness, ppFacebookFormReadinessSnapshot, ppFacebookReadinessFieldEvidence, ppFacebookDeliveryMethodControl, ppFacebookConfiguredDeliveryMethod, ppFacebookSelectConfiguredDeliveryMethod, ppFacebookDiagnosticDeliveryProgression, ppAdvanceFacebookToPublishBoundary, ppFacebookOfferToggles, ppFacebookDisableOffers, ppFacebookResolveMinimumPriceControl, ppFacebookIsInactiveMinimumPriceAlert, ppFacebookObservedTitle, ppMarketplaceListingIdentity, ppFacebookSubmittedListingIdentity, ppFacebookReconcileSellerListing, ppFindField, ppFacebookDescriptionDomProbe, ppFacebookDescriptionControl, ppFacebookLocationControlResolution, ppFacebookValidateMutationOwnership, ppFacebookDescriptionMutationCheckpoint, ppFacebookDescriptionCrossFieldGuard, ppFacebookDescriptionEvidence, ppFacebookSetAndVerifyDescription, ppFacebookDescriptionSubmissionGuard, ppFacebookDescriptionHash, ppFacebookDescriptionOnlyRepair, ppFacebookDescriptionSaveEvidence, ppSubmitOperatorAuthorizedListing };";
+  const contentSource = identitySource + "\nglobalThis.__contentTest = { ppProbeFacebookCreateContextReadOnly, ppWaitForMercariSellFormReady, ppMercariPageEvidence, ppSelectOption, ppOptionAliases, ppFacebookCategoryCandidates, ppMercariInputLabel, ppMercariVerifyCategoryPersistence, ppMercariPhotoPreviewSnapshot, ppWaitForFacebookCreateFormReady, ppFacebookImagePreviewEvidence, ppFacebookMediaSnapshot, ppFacebookCreatePreviewCount, ppFacebookCreateBaselineEvidence, ppInspectFacebookCreateBaseline, ppFacebookLocationStageState, ppSelectFacebookCategory, ppFacebookVisibleCategoryOptionCandidates, ppFacebookVisibleLocationMatch, ppVerifyFacebookLocationAtReview, ppFacebookWeightOptionMatches, ppFacebookStageSnapshot, ppFacebookWorkflowStage, ppFacebookDetailsControl, ppFacebookSetAndVerifyDetailsField, ppFacebookDetailsIntegrityEvidence, ppFacebookPriceEquivalent, ppFacebookObservedPrice, ppWaitForFacebookFinalPublishBoundary, ppFacebookResolveUpdateTarget, ppFacebookUpdateCandidates, ppFacebookUpdateTargetEvidence, ppFacebookShippingValidationSnapshot, ppFacebookValidateUpdateActivationPoint, ppFacebookActivateUpdateOnce, ppFacebookNextControlEvidence, ppFacebookPostShippingReadiness, ppFacebookFormReadinessSnapshot, ppFacebookReadinessFieldEvidence, ppFacebookDeliveryMethodControl, ppFacebookConfiguredDeliveryMethod, ppFacebookSelectConfiguredDeliveryMethod, ppFacebookDiagnosticDeliveryProgression, ppAdvanceFacebookToPublishBoundary, ppFacebookOfferToggles, ppFacebookDisableOffers, ppFacebookResolveMinimumPriceControl, ppFacebookIsInactiveMinimumPriceAlert, ppFacebookObservedTitle, ppMarketplaceListingIdentity, ppFacebookSubmittedListingIdentity, ppFacebookReconcileSellerListing, ppFindField, ppFacebookDescriptionDomProbe, ppFacebookDescriptionControl, ppFacebookLocationControlResolution, ppFacebookValidateMutationOwnership, ppFacebookDescriptionMutationCheckpoint, ppFacebookDescriptionCrossFieldGuard, ppFacebookDescriptionEvidence, ppFacebookSetAndVerifyDescription, ppFacebookDescriptionSubmissionGuard, ppFacebookDescriptionHash, ppFacebookDescriptionOnlyRepair, ppFacebookDescriptionSaveEvidence, ppSubmitOperatorAuthorizedListing };";
   vm.runInNewContext(contentSource, context);
   return { context, document, fields, options, contentApi: context.__contentTest, listener: (...args) => listener(...args) };
 }

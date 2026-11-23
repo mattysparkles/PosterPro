@@ -506,11 +506,15 @@ def _matches_readiness_filter(listing: Listing, filter_value: str | None) -> boo
     condition_data = listing.condition_data if isinstance(listing.condition_data, dict) else {}
     shipping_profile = listing.shipping_profile if isinstance(listing.shipping_profile, dict) else {}
     pricing = (listing.marketplace_data or {}).get("pricing_analysis") if isinstance(listing.marketplace_data, dict) else {}
-    quality = listing.quality_summary if isinstance(listing.quality_summary, dict) else {}
+    raw_quality = getattr(listing, "quality_summary", None)
+    quality = raw_quality if isinstance(raw_quality, dict) else {}
     preflight_root = (listing.marketplace_data or {}).get("marketplace_preflight") if isinstance(listing.marketplace_data, dict) else {}
     by_marketplace = preflight_root.get("by_marketplace") if isinstance(preflight_root, dict) else {}
     ebay_preflight = by_marketplace.get("ebay") if isinstance(by_marketplace, dict) else None
     facebook_preflight = by_marketplace.get("facebook") if isinstance(by_marketplace, dict) else None
+    mercari_preflight = by_marketplace.get("mercari") if isinstance(by_marketplace, dict) else None
+    category_suggestions = (listing.marketplace_data or {}).get("marketplace_category_suggestions") if isinstance(listing.marketplace_data, dict) else {}
+    category_suggestions = category_suggestions.get("marketplaces") if isinstance(category_suggestions, dict) else {}
 
     def _preflight_ready(summary_row: dict | None) -> bool:
         return bool(summary_row and str(summary_row.get("status") or "").lower() in {"ready", "ready_with_warnings", "published"})
@@ -579,6 +583,25 @@ def _matches_readiness_filter(listing: Listing, filter_value: str | None) -> boo
         return bool(facebook_preflight and _preflight_blocked(facebook_preflight, ("PRICE",)))
     if normalized == "facebook_missing_category":
         return bool(facebook_preflight and _preflight_blocked(facebook_preflight, ("CATEGORY",)))
+    if normalized == "mercari_ready":
+        return bool(mercari_preflight and mercari_preflight.get("data_ready") is True)
+    if normalized == "mercari_blocked":
+        return bool(mercari_preflight and (str(mercari_preflight.get("preparation_status") or mercari_preflight.get("status") or "").lower() == "blocked" or (mercari_preflight.get("blocker_count") or 0) > 0))
+    if normalized == "mercari_missing_category":
+        return bool(mercari_preflight and _preflight_blocked(mercari_preflight, ("CATEGORY",)))
+    if normalized == "mercari_missing_photos":
+        return bool(mercari_preflight and _preflight_blocked(mercari_preflight, ("PHOTO", "IMAGE")))
+    if normalized == "mercari_missing_attributes":
+        return bool(mercari_preflight and _preflight_blocked(mercari_preflight, ("ATTRIBUTE", "ASPECT")))
+    if normalized in {"facebook_category_review", "ebay_category_review", "mercari_category_review"}:
+        market = normalized.removesuffix("_category_review")
+        suggestion = category_suggestions.get(market) if isinstance(category_suggestions, dict) else None
+        return bool(isinstance(suggestion, dict) and suggestion.get("state") == "review_required"
+                    and isinstance(suggestion.get("candidates"), list) and suggestion.get("candidates"))
+    if normalized == "any_category_review":
+        return any(isinstance(suggestion, dict) and suggestion.get("state") == "review_required"
+                   and isinstance(suggestion.get("candidates"), list) and suggestion.get("candidates")
+                   for suggestion in (category_suggestions.values() if isinstance(category_suggestions, dict) else []))
     if normalized == "ready_except_shipping":
         return bool((_preflight_ready(ebay_preflight) or _preflight_ready(facebook_preflight)) and (_preflight_blocked(ebay_preflight, ("SHIPPING", "WEIGHT", "DIMENSIONS")) or _preflight_blocked(facebook_preflight, ("SHIPPING", "WEIGHT", "DIMENSIONS"))))
     if normalized == "ready_except_photos":
@@ -4248,6 +4271,7 @@ async def upload_listing_photos(
     note: str | None = Form(default=None),
     source: str = Form(default="actual_upload"),
     operator_state: str = Form(default="suggested"),
+    seller_photographed: bool = Form(default=False),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -4297,6 +4321,8 @@ async def upload_listing_photos(
                     "original_filename": str(photo.filename or "").strip() or None,
                     "content_type": str(photo.content_type or "").strip() or None,
                     "note": str(note or "").strip() or None,
+                    "provenance": "seller_photographed" if seller_photographed else "seller_upload_unverified",
+                    "seller_photo_attestation": bool(seller_photographed),
                 },
             }
         )

@@ -172,6 +172,23 @@ export function confirmCanonicalTaxonomyMapping(conceptId, payload) {
   });
 }
 
+export function applyConfirmedTaxonomyMappingToCohort(payload) {
+  return jsonFetch(`${API_BASE}/taxonomy-mappings/apply-confirmed-cohort`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function createMarketplaceCategorySuggestionJob(payload) {
+  return jsonFetch(`${API_BASE}/taxonomy-category-suggestion-jobs`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+  });
+}
+
+export function fetchMarketplaceCategorySuggestionJob(jobId) {
+  return jsonFetch(`${API_BASE}/taxonomy-category-suggestion-jobs/${encodeURIComponent(jobId)}`);
+}
+
 export function fetchCanonicalTaxonomyConcept(conceptId) {
   return jsonFetch(`${API_BASE}/taxonomy-mappings/concepts/${encodeURIComponent(conceptId)}`);
 }
@@ -1174,13 +1191,14 @@ export async function savePublishListingChanges(id, body) {
   });
 }
 
-export async function uploadListingPhotos(listingId, { files = [], role, note, source = "actual_upload", operatorState = "suggested" } = {}) {
+export async function uploadListingPhotos(listingId, { files = [], role, note, source = "actual_upload", operatorState = "suggested", sellerPhotographed = false } = {}) {
   const form = new FormData();
   (files || []).forEach((file) => form.append("photos", file));
   if (role) form.append("role", role);
   if (note) form.append("note", note);
   if (source) form.append("source", source);
   if (operatorState) form.append("operator_state", operatorState);
+  form.append("seller_photographed", sellerPhotographed ? "true" : "false");
   return jsonFetch(`${API_BASE}/listings/${listingId}/photos/upload`, {
     method: "POST",
     body: form,

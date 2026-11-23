@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import httpx
 import json
+import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import text
@@ -10,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user, is_effective_admin
 from app.core.database import get_db
-from app.models.models import User
+from app.models.models import BulkJob, Listing, User
 from app.services import canonical_taxonomy_mapping as mapping_service
 from app.services import inventory_taxonomy_cohorts
 from app.services import marketplace_taxonomy_registry as registry
@@ -36,6 +37,18 @@ class CandidateRequest(BaseModel):
 
 class InventoryCohortCandidatesRequest(BaseModel):
     cohort_key: str = Field(min_length=8, max_length=64)
+
+
+class ApplyConfirmedMappingRequest(BaseModel):
+    marketplace: str = Field(pattern="^(ebay|facebook|mercari)$")
+    source_listing_id: int = Field(gt=0)
+    listing_ids: list[int] = Field(min_length=1, max_length=100)
+
+
+class CategorySuggestionJobRequest(BaseModel):
+    listing_ids: list[int] = Field(default_factory=list, max_length=10000)
+    all_drafts: bool = False
+    marketplaces: list[str] = Field(default_factory=lambda: ["facebook", "ebay", "mercari"], min_length=1, max_length=3)
 
 
 class CanonicalConceptRequest(BaseModel):
@@ -171,6 +184,189 @@ def inventory_cohort_candidates(payload: InventoryCohortCandidatesRequest,
         db, canonical_concept=cohort["label"], product_evidence=evidence,
         marketplaces=list(registry.MARKETPLACES), limit=3, owner_user_id=current_user.id)
     return {"cohort": cohort, "candidate_state": "suggestions_only_operator_confirmation_required", **result}
+
+
+@router.post("/taxonomy-category-suggestion-jobs")
+def create_category_suggestion_job(payload: CategorySuggestionJobRequest,
+                                   db: Session = Depends(get_db),
+                                   current_user: User = Depends(get_current_user)):
+    """Queue bounded review-only suggestions for selected listings or all drafts."""
+    allowed = {"facebook", "ebay", "mercari"}
+    marketplaces = list(dict.fromkeys(str(value).strip().lower() for value in payload.marketplaces))
+    if not marketplaces or any(value not in allowed for value in marketplaces):
+        raise HTTPException(status_code=422, detail="Marketplaces must be Facebook, eBay, or Mercari")
+    if payload.all_drafts and payload.listing_ids:
+        raise HTTPException(status_code=422, detail="Choose explicit listing IDs or all drafts, not both")
+    if not payload.all_drafts and not payload.listing_ids:
+        raise HTTPException(status_code=422, detail="Select listings or explicitly request all drafts")
+    if payload.all_drafts:
+        listing_ids = [int(row[0]) for row in db.query(Listing.id).filter(
+            Listing.user_id == current_user.id, Listing.status.in_(["draft", "ready"]),
+        ).order_by(Listing.id).limit(10001).yield_per(1000).all()]
+    else:
+        listing_ids = list(dict.fromkeys(int(value) for value in payload.listing_ids))
+        owned = {int(row[0]) for row in db.query(Listing.id).filter(
+            Listing.user_id == current_user.id, Listing.id.in_(listing_ids),
+        ).all()}
+        if owned != set(listing_ids):
+            raise HTTPException(status_code=404, detail="One or more selected listings do not belong to this operator")
+    if len(listing_ids) > 10000:
+        raise HTTPException(status_code=413, detail="One category suggestion job is limited to 10,000 draft listings")
+    job_id = str(uuid.uuid4())
+    job = BulkJob(
+        id=job_id, user_id=current_user.id, action="suggest_marketplace_categories",
+        status="queued", total_items=len(listing_ids), processed_items=0, error_count=0, errors=[],
+        filters={"scope": "all_drafts" if payload.all_drafts else "explicit_selection"},
+        payload={"listing_ids": listing_ids, "marketplaces": marketplaces, "cursor": 0, "batch_size": 25, "format_version": 1},
+    )
+    db.add(job)
+    db.commit()
+    try:
+        from app.workers.tasks import process_marketplace_taxonomy_suggestion_job
+        process_marketplace_taxonomy_suggestion_job.delay(job_id)
+    except Exception as exc:
+        job.status = "queued"  # scheduler recovery will resume it
+        db.add(job)
+        db.commit()
+        raise HTTPException(status_code=503, detail="Suggestion job was saved and will be resumed by the worker scheduler") from exc
+    return {"job_id": job.id, "action": job.action, "status": job.status,
+            "total_items": job.total_items, "processed_items": job.processed_items,
+            "error_count": job.error_count, "marketplaces": marketplaces,
+            "resume_safe": True, "publishing_performed": False}
+
+
+@router.get("/taxonomy-category-suggestion-jobs/{job_id}")
+def get_category_suggestion_job(job_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    job = db.get(BulkJob, job_id)
+    if not job or job.action != "suggest_marketplace_categories":
+        raise HTTPException(status_code=404, detail="Category suggestion job was not found")
+    if int(job.user_id) != int(current_user.id):
+        raise HTTPException(status_code=404, detail="Category suggestion job was not found")
+    payload = job.payload if isinstance(job.payload, dict) else {}
+    return {"job_id": job.id, "status": job.status, "total_items": job.total_items,
+            "processed_items": job.processed_items, "error_count": job.error_count,
+            "errors": job.errors or [], "marketplaces": payload.get("marketplaces") or [],
+            "review_counts": payload.get("review_counts") or {},
+            "resume_safe": True, "publishing_performed": False}
+
+
+@router.post("/taxonomy-mappings/apply-confirmed-cohort")
+def apply_confirmed_mapping_to_cohort(payload: ApplyConfirmedMappingRequest,
+                                      db: Session = Depends(get_db),
+                                      current_user: User = Depends(get_current_user)):
+    """Idempotently reuse one confirmed map for exact-identity, same-owner listings."""
+    from app.services.inventory_taxonomy_cohorts import _identity
+
+    listing_ids = list(dict.fromkeys(int(value) for value in payload.listing_ids))
+    if len(listing_ids) > 100:
+        raise HTTPException(status_code=422, detail="Apply at most 100 explicitly selected listings per request")
+    if payload.source_listing_id not in listing_ids:
+        raise HTTPException(status_code=422, detail="Select the confirmed source listing explicitly; no source listing is added implicitly")
+
+    try:
+        # Lock the source and targets in one transaction. This makes retries
+        # idempotent and prevents concurrent requests from replacing a manual
+        # choice or applying from a source whose confirmation changed in flight.
+        targets = db.query(Listing).filter(
+            Listing.user_id == current_user.id, Listing.id.in_(listing_ids),
+        ).order_by(Listing.id).with_for_update().all()
+        if len(targets) != len(listing_ids):
+            raise HTTPException(status_code=404, detail="One or more selected listings are missing or belong to another operator")
+        by_id = {int(item.id): item for item in targets}
+        source = by_id.get(payload.source_listing_id)
+        if not source:
+            raise HTTPException(status_code=404, detail="Source listing was not found in the explicit selection")
+        source_data = source.marketplace_data if isinstance(source.marketplace_data, dict) else {}
+        mappings = source_data.get("marketplace_category_mappings") if isinstance(source_data.get("marketplace_category_mappings"), dict) else {}
+        confirmed = mappings.get(payload.marketplace) if isinstance(mappings.get(payload.marketplace), dict) else {}
+        if (confirmed.get("verification_status") != "operator_confirmed"
+                or confirmed.get("terminal_status") != "terminal"
+                or confirmed.get("publishability_status") != "publishable"
+                or confirmed.get("staleness_status") != "fresh"
+                or not confirmed.get("mapping_id")):
+            raise HTTPException(status_code=409, detail="Source listing has no current operator-confirmed mapping for this marketplace")
+
+        mapping = mapping_service.get_mapping(
+            db, owner_user_id=current_user.id, mapping_id=str(confirmed["mapping_id"]),
+        )
+        if (mapping.get("marketplace") != payload.marketplace
+                or mapping.get("invalidated_at") is not None
+                or not bool(mapping.get("operator_confirmed"))
+                or mapping.get("verification_status") != "operator_confirmed"):
+            raise HTTPException(status_code=409, detail="Confirmed mapping is stale, revoked, or for a different marketplace")
+        taxonomy = db.execute(text("""SELECT v.is_current,c.terminal_status,c.publishability_status,
+                c.verification_status,c.staleness_status,c.required_attributes_json
+          FROM marketplace_taxonomy_versions v
+          JOIN marketplace_taxonomy_categories c ON c.version_id=v.version_id
+         WHERE v.version_id=:version AND c.category_key=:category"""),
+            {"version": mapping["taxonomy_version_id"], "category": mapping["category_key"]}).mappings().first()
+        if (not taxonomy or not taxonomy["is_current"] or taxonomy["terminal_status"] != "terminal"
+                or taxonomy["publishability_status"] != "publishable"
+                or taxonomy["verification_status"] not in {"authoritatively_verified", "live_browser_verified"}
+                or taxonomy["staleness_status"] != "fresh"):
+            raise HTTPException(status_code=409, detail="The confirmed category is no longer a current verified publishable leaf")
+
+        source_identity = _identity(source)[0]
+        if not source_identity.startswith("id:"):
+            raise HTTPException(status_code=409, detail="This product has no unambiguous ASIN/UPC/EAN/GTIN/MPN identity; review mappings individually")
+        attributes = json.loads(taxonomy["required_attributes_json"]) if taxonomy["required_attributes_json"] else []
+        applied: list[int] = []
+        already_applied: list[int] = []
+        preserved: list[int] = []
+        rejected_identity: list[int] = []
+        for listing in targets:
+            if _identity(listing)[0] != source_identity:
+                rejected_identity.append(int(listing.id))
+                continue
+            data = dict(listing.marketplace_data) if isinstance(listing.marketplace_data, dict) else {}
+            current_maps = data.get("marketplace_category_mappings") if isinstance(data.get("marketplace_category_mappings"), dict) else {}
+            current = current_maps.get(payload.marketplace) if isinstance(current_maps.get(payload.marketplace), dict) else {}
+            if current.get("mapping_id") == mapping["mapping_id"]:
+                already_applied.append(int(listing.id))
+                continue
+            channel = data.get("channels", {}).get(payload.marketplace, {}) if isinstance(data.get("channels"), dict) else {}
+            shipping = listing.shipping_profile if isinstance(listing.shipping_profile, dict) else {}
+            legacy_mercari = shipping.get("mercari", {}) if payload.marketplace == "mercari" and isinstance(shipping.get("mercari"), dict) else {}
+            legacy_category = legacy_mercari.get("category_id") or legacy_mercari.get("category_path") if payload.marketplace == "mercari" else channel.get("category_id") or channel.get("category_path") if isinstance(channel, dict) else None
+            ebay_category = listing.category_id if payload.marketplace == "ebay" else None
+            if current or legacy_category or (ebay_category and str(ebay_category) != str(mapping.get("category_id") or "")):
+                preserved.append(int(listing.id))
+                continue
+            applied_map = {
+                "mapping_id": mapping["mapping_id"], "marketplace": payload.marketplace,
+                "category_id": mapping.get("category_id"), "category_key": mapping["category_key"],
+                "category_path": mapping["category_path"], "taxonomy_version_id": mapping["taxonomy_version_id"],
+                "taxonomy_version": mapping.get("taxonomy_native_version"),
+                "confidence": float(mapping.get("confidence_score") or 0),
+                "verification_status": "operator_confirmed", "terminal_status": "terminal",
+                "publishability_status": "publishable", "staleness_status": "fresh",
+                "required_attributes": attributes, "supports_shipping": False,
+                "applied_from_listing_id": int(source.id), "reuse_basis": source_identity.split(":", 1)[0],
+                "confirmed_at": (mapping.get("confirmed_at").isoformat()
+                    if hasattr(mapping.get("confirmed_at"), "isoformat")
+                    else str(mapping.get("confirmed_at") or "") or None),
+            }
+            data["marketplace_category_mappings"] = {**current_maps, payload.marketplace: applied_map}
+            if payload.marketplace == "ebay":
+                listing.category_id = mapping.get("category_id")
+                listing.category_suggestion = mapping.get("category_path")
+            data.setdefault("taxonomy_mapping_audit", []).append({
+                "mapping_id": mapping["mapping_id"], "marketplace": payload.marketplace,
+                "source_listing_id": int(source.id), "action": "bulk_apply_exact_identity",
+            })
+            listing.marketplace_data = data
+            applied.append(int(listing.id))
+        db.flush()
+        db.commit()
+        return {
+            "marketplace": payload.marketplace, "mapping_id": mapping["mapping_id"],
+            "requested": len(listing_ids), "applied": applied, "already_applied": already_applied,
+            "preserved_existing_selection": preserved, "identity_mismatch": rejected_identity,
+            "retry_safe": True, "published_or_queued": False,
+        }
+    except Exception:
+        db.rollback()
+        raise
 
 
 @router.get("/taxonomy-registry/{marketplace}/categories")

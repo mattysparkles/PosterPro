@@ -69,6 +69,9 @@ import {
   fetchEbayLaunchRepairQueue,
   fetchLaunchCandidates,
   fetchMarketplacePreflightBulk,
+  applyConfirmedTaxonomyMappingToCohort,
+  createMarketplaceCategorySuggestionJob,
+  fetchMarketplaceCategorySuggestionJob,
   approveListingPhotos,
   publishListingsBulk,
   publishMarketplaceReadyBulk,
@@ -169,6 +172,15 @@ const READINESS_FILTER_OPTIONS = [
   { value: 'facebook_missing_photos', label: 'Facebook missing photos' },
   { value: 'facebook_missing_price', label: 'Facebook missing price' },
   { value: 'facebook_missing_category', label: 'Facebook missing category' },
+  { value: 'facebook_category_review', label: 'Facebook category review required' },
+  { value: 'mercari_ready', label: 'Mercari data-ready (manual listing)' },
+  { value: 'mercari_blocked', label: 'Mercari preparation blocked' },
+  { value: 'mercari_missing_category', label: 'Mercari missing category' },
+  { value: 'mercari_missing_photos', label: 'Mercari missing actual photos' },
+  { value: 'mercari_missing_attributes', label: 'Mercari missing required attributes' },
+  { value: 'mercari_category_review', label: 'Mercari category review required' },
+  { value: 'ebay_category_review', label: 'eBay category review required' },
+  { value: 'any_category_review', label: 'Any marketplace category review required' },
   { value: 'high_confidence_ready', label: 'High-confidence ready' },
   { value: 'likely_low_value', label: 'Likely low value' },
   { value: 'oversize_low_margin', label: 'Oversize / margin risk' },
@@ -643,6 +655,10 @@ export default function ListingsPage() {
   const [selectedAggregate, setSelectedAggregate] = useState({ loading: false, data: null });
   const [crosspostDestinations, setCrosspostDestinations] = useState([]);
   const [bulkCrosspostBusy, setBulkCrosspostBusy] = useState(false);
+  const [bulkCategoryApplyBusy, setBulkCategoryApplyBusy] = useState(false);
+  const [bulkCategorySourceByMarketplace, setBulkCategorySourceByMarketplace] = useState({});
+  const [taxonomySuggestionJob, setTaxonomySuggestionJob] = useState(null);
+  const [taxonomySuggestionBusy, setTaxonomySuggestionBusy] = useState(false);
   const [selectingAllMatches, setSelectingAllMatches] = useState(false);
   const [bulkCrosspostReport, setBulkCrosspostReport] = useState(null);
   const [bulkSendTarget, setBulkSendTarget] = useState('drafts');
@@ -977,6 +993,88 @@ export default function ListingsPage() {
     () => selectedIds.map((id) => selectedRecords[id] || listings.find((listing) => listing.id === id)).filter(Boolean),
     [listings, selectedIds, selectedRecords],
   );
+  const applySelectedCategoryCohort = async (marketplace) => {
+    if (!selectedIds.length || selectedIds.length > 100 || bulkCategoryApplyBusy) return;
+    const sources = selectedRows.filter((row) => {
+      const mapping = row?.marketplace_data?.marketplace_category_mappings?.[marketplace];
+      return mapping?.verification_status === 'operator_confirmed'
+        && mapping?.terminal_status === 'terminal'
+        && mapping?.publishability_status === 'publishable'
+        && mapping?.staleness_status === 'fresh'
+        && mapping?.mapping_id;
+    });
+    const source = sources.find((row) => String(row.id) === String(bulkCategorySourceByMarketplace[marketplace]));
+    if (!source) {
+      toast.error(`Choose the exact source listing with a current confirmed ${marketplace} category.`);
+      return;
+    }
+    setBulkCategoryApplyBusy(true);
+    try {
+      if (!selectedIds.includes(source.id)) throw new Error('Select the confirmed source listing explicitly before applying its category.');
+      const targets = selectedIds;
+      const result = await applyConfirmedTaxonomyMappingToCohort({
+        marketplace,
+        source_listing_id: source.id,
+        listing_ids: targets,
+      });
+      const applied = result.applied?.length || 0;
+      const preserved = result.preserved_existing_selection?.length || 0;
+      const mismatched = result.identity_mismatch?.length || 0;
+      toast.success(`${marketplace}: applied to ${applied}; ${preserved} existing selections preserved; ${mismatched} different identities skipped. Retry is safe; nothing was published.`);
+      await reload();
+    } catch (error) {
+      toast.error(error?.message || 'Could not apply the confirmed category mapping.');
+    } finally {
+      setBulkCategoryApplyBusy(false);
+    }
+  };
+  const queueTaxonomySuggestions = async (allDrafts = false) => {
+    if (taxonomySuggestionBusy || (!allDrafts && !selectedIds.length)) return;
+    if (!allDrafts && selectedIds.length > 10000) {
+      toast.error('Select no more than 10,000 listings for one category suggestion job.');
+      return;
+    }
+    setTaxonomySuggestionBusy(true);
+    try {
+      const job = await createMarketplaceCategorySuggestionJob({
+        listing_ids: allDrafts ? [] : selectedIds,
+        all_drafts: allDrafts,
+        marketplaces: ['facebook', 'ebay', 'mercari'],
+      });
+      setTaxonomySuggestionJob(job);
+      if (typeof window !== 'undefined') window.localStorage.setItem('posterpro.categorySuggestionJobId', job.job_id);
+      toast.success(`Category suggestions queued for ${job.total_items} listings. No categories were applied or published.`);
+    } catch (error) {
+      toast.error(error?.message || 'Could not queue category suggestions.');
+    } finally {
+      setTaxonomySuggestionBusy(false);
+    }
+  };
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const remembered = window.localStorage.getItem('posterpro.categorySuggestionJobId');
+    if (!remembered) return undefined;
+    let active = true;
+    fetchMarketplaceCategorySuggestionJob(remembered).then((job) => {
+      if (active) setTaxonomySuggestionJob(job);
+    }).catch(() => {
+      if (active) window.localStorage.removeItem('posterpro.categorySuggestionJobId');
+    });
+    return () => { active = false; };
+  }, []);
+  useEffect(() => {
+    if (!taxonomySuggestionJob?.job_id || ['completed', 'completed_with_errors', 'failed', 'cancelled'].includes(taxonomySuggestionJob.status)) return undefined;
+    let active = true;
+    const timer = window.setInterval(() => {
+      fetchMarketplaceCategorySuggestionJob(taxonomySuggestionJob.job_id).then((job) => {
+        if (active) setTaxonomySuggestionJob(job);
+      }).catch(() => {});
+    }, 3000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [taxonomySuggestionJob?.job_id, taxonomySuggestionJob?.status]);
+  useEffect(() => {
+    if (taxonomySuggestionJob && ['completed', 'completed_with_errors'].includes(taxonomySuggestionJob.status)) reload();
+  }, [taxonomySuggestionJob?.status]);
   useEffect(() => {
     if (!listings.length) return;
     setSelectedRecords((current) => {
@@ -1094,13 +1192,19 @@ export default function ListingsPage() {
   const bulkPreflightSummary = useMemo(() => {
     const ebayReadyCount = bulkScopeRows.filter((listing) => isMarketplaceReady(getMarketplacePreflightSummary(listing, 'ebay'))).length;
     const facebookReadyCount = bulkScopeRows.filter((listing) => isMarketplaceReady(getMarketplacePreflightSummary(listing, 'facebook'))).length;
-    const blockedCount = bulkScopeRows.filter((listing) => isMarketplaceBlocked(getMarketplacePreflightSummary(listing, 'ebay')) || isMarketplaceBlocked(getMarketplacePreflightSummary(listing, 'facebook'))).length;
+    const mercariReadyCount = bulkScopeRows.filter((listing) => {
+      const mercari = getMarketplacePreflightSummary(listing, 'mercari');
+      return Boolean(mercari && (mercari.data_ready === true || ['ready', 'ready_with_warnings'].includes(String(mercari.preparation_status || '').toLowerCase())));
+    }).length;
+    const blockedCount = bulkScopeRows.filter((listing) => ['ebay', 'facebook', 'mercari'].some((market) => isMarketplaceBlocked(getMarketplacePreflightSummary(listing, market)))).length;
     const warningOnlyCount = bulkScopeRows.filter((listing) => {
       const ebay = getMarketplacePreflightSummary(listing, 'ebay');
       const facebook = getMarketplacePreflightSummary(listing, 'facebook');
-      return (isMarketplaceWarningOnly(ebay) || isMarketplaceWarningOnly(facebook)) && !isMarketplaceBlocked(ebay) && !isMarketplaceBlocked(facebook);
+      const mercari = getMarketplacePreflightSummary(listing, 'mercari');
+      return ['ebay', 'facebook', 'mercari'].some((market) => isMarketplaceWarningOnly({ ebay, facebook, mercari }[market]))
+        && !['ebay', 'facebook', 'mercari'].some((market) => isMarketplaceBlocked({ ebay, facebook, mercari }[market]));
     }).length;
-    const checkedCount = bulkScopeRows.filter((listing) => getMarketplacePreflightSummary(listing, 'ebay') || getMarketplacePreflightSummary(listing, 'facebook')).length;
+    const checkedCount = bulkScopeRows.filter((listing) => ['ebay', 'facebook', 'mercari'].some((market) => getMarketplacePreflightSummary(listing, market))).length;
     const readyToQueueCount = bulkScopeRows.filter((listing) => Boolean(listing?.quality_summary?.ready_for_publish_queue)).length;
     const common = summarizeBlockerCodes(bulkScopeRows);
     return {
@@ -1108,6 +1212,7 @@ export default function ListingsPage() {
       checkedCount,
       ebayReadyCount,
       facebookReadyCount,
+      mercariReadyCount,
       blockedCount,
       warningOnlyCount,
       readyToQueueCount,
@@ -2127,11 +2232,15 @@ export default function ListingsPage() {
 
   const uploadActualPhotosToListing = async (listingId, files) => {
     if (!files?.length) return null;
+    const sellerPhotographed = typeof window !== 'undefined' && window.confirm(
+      'Are these photos of this exact physical item, taken by you or otherwise authorized for your listing? Mercari does not accept stock or advertisement photos.'
+    );
     try {
       await uploadListingPhotos(listingId, {
         files,
         source: 'actual_upload',
         operatorState: 'suggested',
+        sellerPhotographed,
       });
       await reload();
       await refreshRepairQueue();
@@ -2142,7 +2251,7 @@ export default function ListingsPage() {
           loadMarketplacePreviewData(listingId),
         ]);
       }
-      toast.success(`Uploaded ${files.length} actual photo${files.length === 1 ? '' : 's'} to listing #${listingId}.`);
+      toast.success(`Uploaded ${files.length} photo${files.length === 1 ? '' : 's'} to listing #${listingId}.${sellerPhotographed ? ' Seller-photo provenance recorded.' : ' Mercari seller-photo verification remains incomplete.'}`);
       return true;
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Photo upload failed.');
@@ -2230,7 +2339,7 @@ export default function ListingsPage() {
       return;
     }
     setSelectedIds(candidateIds);
-    await runBulkMarketplacePreflight(['ebay', 'facebook'], { forceRefresh: true, targetIds: candidateIds });
+    await runBulkMarketplacePreflight(['ebay', 'facebook', 'mercari'], { forceRefresh: true, targetIds: candidateIds });
   };
 
   const openFirstLaunchCandidate = () => {
@@ -2375,6 +2484,34 @@ export default function ListingsPage() {
                 {selectedIds.length > 500 && <p className="mt-2 text-xs font-medium text-amber-800">Select 500 or fewer listings for one request.</p>}
               </div>
               <div className="flex flex-wrap items-center gap-2">
+                {['facebook', 'ebay', 'mercari'].map((marketplace) => (
+                  <div key={marketplace} className="flex flex-wrap items-center gap-2 rounded-md border border-slate-200 bg-white p-2">
+                    <label className="flex items-center gap-2 text-xs font-medium capitalize text-slate-700">
+                      {marketplace} source
+                      <select
+                        value={bulkCategorySourceByMarketplace[marketplace] || ''}
+                        onChange={(event) => setBulkCategorySourceByMarketplace((current) => ({ ...current, [marketplace]: event.target.value }))}
+                        className="max-w-[20rem] rounded-md border border-slate-300 bg-white px-2 py-2 text-xs"
+                      >
+                        <option value="">Choose confirmed source…</option>
+                        {selectedRows.filter((row) => {
+                          const mapping = row?.marketplace_data?.marketplace_category_mappings?.[marketplace];
+                          return mapping?.verification_status === 'operator_confirmed'
+                            && mapping?.terminal_status === 'terminal'
+                            && mapping?.publishability_status === 'publishable'
+                            && mapping?.staleness_status === 'fresh'
+                            && mapping?.mapping_id;
+                        }).map((row) => {
+                          const mapping = row.marketplace_data.marketplace_category_mappings[marketplace];
+                          return <option key={`${marketplace}:${row.id}`} value={row.id}>#{row.id} · {mapping.category_path || row.title}</option>;
+                        })}
+                      </select>
+                    </label>
+                    <Button variant="outline" size="sm" disabled={bulkCategoryApplyBusy || selectedIds.length > 100 || !bulkCategorySourceByMarketplace[marketplace]} onClick={() => applySelectedCategoryCohort(marketplace)}>
+                      {bulkCategoryApplyBusy ? 'Applying…' : 'Reuse for exact product identity'}
+                    </Button>
+                  </div>
+                ))}
                 {workflowPreferences.bulk_approval_enabled && selectedReviewRows.length ? <Button variant="outline" size="sm" onClick={approveSelected}>Approve selected</Button> : null}
                 <Button variant="outline" size="sm" onClick={approveAndPublishSelected}>{selectedReviewRows.length ? 'Approve & queue publish' : 'Queue selected for publishing'}</Button>
                 <Button variant="outline" size="sm" onClick={() => runBulkMarketplacePreflight(['ebay'])} disabled={bulkPreflightLoading}>Run eBay preflight</Button>
@@ -2460,6 +2597,24 @@ export default function ListingsPage() {
               </div>
             </SectionPanel>
           ) : null}
+          <SectionPanel title="Marketplace category preparation" description="Generate owner-scoped, review-only suggestions from current taxonomy for selected listings or all Draft / Ready listings. Suggestions never assign categories or publish items." >
+            <div className="flex flex-wrap gap-2">
+              <Button size="sm" variant="outline" disabled={taxonomySuggestionBusy || !selectedIds.length || selectedIds.length > 10000} onClick={() => queueTaxonomySuggestions(false)}>
+                {taxonomySuggestionBusy ? 'Queueing…' : `Suggest for ${selectedIds.length || 0} selected`}
+              </Button>
+              <Button size="sm" variant="outline" disabled={taxonomySuggestionBusy} onClick={() => queueTaxonomySuggestions(true)}>
+                {taxonomySuggestionBusy ? 'Queueing…' : 'Suggest for all drafts'}
+              </Button>
+            </div>
+            {taxonomySuggestionJob ? <div className="mt-3 rounded-lg border border-violet-200 bg-violet-50 p-3" role="status" data-testid="taxonomy-suggestion-job-progress">
+              <p className="text-sm font-semibold text-violet-950">Category job {taxonomySuggestionJob.status?.replaceAll('_', ' ')}</p>
+              <p className="mt-1 text-xs text-violet-900">{Number(taxonomySuggestionJob.processed_items || 0).toLocaleString()} / {Number(taxonomySuggestionJob.total_items || 0).toLocaleString()} listings · {Number(taxonomySuggestionJob.error_count || 0)} errors · Facebook, eBay, Mercari · no publishing performed</p>
+              {taxonomySuggestionJob.review_counts ? <p className="mt-1 text-xs text-violet-900">Candidates: {Number(taxonomySuggestionJob.review_counts.candidate_count || 0).toLocaleString()} · review required: {Number(taxonomySuggestionJob.review_counts.review_required_count || 0).toLocaleString()} · reference only: {Number(taxonomySuggestionJob.review_counts.reference_only_count || 0).toLocaleString()} · no candidates: {Number(taxonomySuggestionJob.review_counts.no_candidate_count || 0).toLocaleString()} · ambiguous identity: {Number(taxonomySuggestionJob.review_counts.ambiguous_identity_count || 0).toLocaleString()}</p> : null}
+              <div className="mt-2 h-2 overflow-hidden rounded bg-violet-100"><div className="h-full bg-violet-600" style={{ width: `${Math.min(100, Math.round((Number(taxonomySuggestionJob.processed_items || 0) / Math.max(1, Number(taxonomySuggestionJob.total_items || 0))) * 100))}%` }} /></div>
+              {taxonomySuggestionJob.errors?.length ? <ul className="mt-2 max-h-24 overflow-auto text-xs text-rose-800">{taxonomySuggestionJob.errors.slice(-5).map((error, index) => <li key={`${error.listing_id || 'job'}:${index}`}>{error.listing_id ? `#${error.listing_id}: ` : ''}{error.error || error.message || 'Suggestion failed'}</li>)}</ul> : null}
+              <p className="mt-2 text-xs text-violet-900">Suggestions are saved separately from confirmed categories. Open a listing to review its candidate path, evidence, and required fields before approving.</p>
+            </div> : null}
+          </SectionPanel>
           {listingError ? <SectionPanel tone="danger" title="Catalog could not load" action={<Button size="sm" variant="outline" onClick={() => reload()}>Retry catalog</Button>}><p className="text-sm">{listingError}</p></SectionPanel> : null}
           <SectionPanel title={`${activeTabLabel} · page ${listingPagination.page} of ${listingPagination.total_pages}`} description="Select listings for approval or publishing, or open one to review its marketplace preview, photos, details, and readiness.">
             <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-[10px] border border-[#dbeafe] bg-[#f8fbff] px-3 py-2.5">
@@ -2930,8 +3085,11 @@ export default function ListingsPage() {
               <Button variant="outline" size="sm" onClick={() => runBulkMarketplacePreflight(['facebook'], { forceRefresh: true })} disabled={bulkPreflightLoading}>
                 Run Facebook preflight
               </Button>
-              <Button variant="outline" size="sm" onClick={() => runBulkMarketplacePreflight(['ebay', 'facebook'], { forceRefresh: true })} disabled={bulkPreflightLoading}>
-                Run both preflights
+              <Button variant="outline" size="sm" onClick={() => runBulkMarketplacePreflight(['mercari'], { forceRefresh: true })} disabled={bulkPreflightLoading}>
+                Run Mercari preflight
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => runBulkMarketplacePreflight(['ebay', 'facebook', 'mercari'], { forceRefresh: true })} disabled={bulkPreflightLoading}>
+                Run all three preflights
               </Button>
               <Button variant="outline" size="sm" onClick={() => runBulkPublishReady(['ebay', 'facebook'], { dryRun: true, forceRefresh: true })}>
                 Dry-run publish-ready

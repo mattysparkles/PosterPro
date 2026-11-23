@@ -589,6 +589,13 @@ class MarketplacePreflightService:
                     fix_hint="Pair the browser extension, sign in to Facebook Marketplace, and pass the form diagnostic. The operator must submit and confirm the resulting listing in Jobs.",
                     retryable=True,
                 ))
+        elif market == MarketplaceName.mercari.value:
+            mercari_plan = self._build_mercari_preflight(listing, readiness)
+            blockers.extend(mercari_plan["blockers"])
+            warnings.extend(mercari_plan["warnings"])
+            payload_preview = mercari_plan["payload_preview"]
+            category_summary = mercari_plan["category_summary"]
+            policy_summary = mercari_plan["policy_summary"]
         else:
             payload_preview = build_marketplace_payload(listing, market)
 
@@ -629,6 +636,12 @@ class MarketplacePreflightService:
             "listing_id": listing.id,
             "marketplace": market,
             "status": status,
+            "data_ready": preparation_status in {"ready", "ready_with_warnings"},
+            "draft_export_ready": preparation_status in {"ready", "ready_with_warnings"},
+            "authorized_publishing_ready": bool(
+                status in {"ready", "ready_with_warnings", "published"}
+                and market != MarketplaceName.mercari.value
+            ),
             "blockers": execution_blockers,
             "execution_status": status,
             "execution_blockers": execution_blockers,
@@ -842,6 +855,110 @@ class MarketplacePreflightService:
                 "category_source": payload.get("category_source"),
                 "category_confidence": payload.get("category_confidence"),
                 "supports_shipping": payload.get("category_supports_shipping"),
+            },
+        }
+
+    def _build_mercari_preflight(self, listing: Listing, readiness: dict[str, Any]) -> dict[str, Any]:
+        """Keep Mercari readiness destination-specific and truthful about media/API support."""
+        payload = build_marketplace_payload(listing, MarketplaceName.mercari.value)
+        marketplace_data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}
+        category = payload.get("marketplace_category_mapping") if isinstance(payload.get("marketplace_category_mapping"), dict) else {}
+        blockers: list[dict[str, Any]] = []
+        warnings: list[dict[str, Any]] = []
+        if not category:
+            blockers.append(_issue(
+                "MERCARI_CATEGORY_MISSING",
+                "Mercari has no current operator-confirmed category mapping for this listing.",
+                field="marketplace_data.marketplace_category_mappings.mercari",
+                fix_hint="Search the saved Mercari taxonomy, verify the exact current category in the seller form, and confirm the mapping.",
+            ))
+        required = category.get("required_attributes") if isinstance(category.get("required_attributes"), list) else None
+        if category and required is None:
+            blockers.append(_issue(
+                "MERCARI_REQUIRED_ATTRIBUTE_SCHEMA_UNVERIFIED",
+                "The saved Mercari category has no verified required-attribute schema.",
+                field="marketplace_data.marketplace_category_mappings.mercari.required_attributes",
+                fix_hint="Review the category fields in Mercari's current listing form and record a verified category diagnostic before treating this draft as publish-ready.",
+            ))
+        elif required:
+            specifics = listing.item_specifics if isinstance(listing.item_specifics, dict) else {}
+            normalized = {str(key).strip().casefold(): value for key, value in specifics.items()}
+            for attribute in required:
+                if not isinstance(attribute, dict):
+                    continue
+                name = str(attribute.get("name") or attribute.get("localizedAspectName") or "").strip()
+                if name and not str(normalized.get(name.casefold()) or "").strip():
+                    blockers.append(_issue(
+                        "MARKETPLACE_REQUIRED_ATTRIBUTE_MISSING",
+                        f"{name} is required for this Mercari category.",
+                        field=f"item_specifics.{name}",
+                        fix_hint=f"Enter the verified {name} value for the Mercari listing.",
+                    ))
+        # Mercari's US seller rules prohibit stock/advertisement photos. Accept
+        # only approved non-reference photos explicitly captured/uploaded as
+        # seller item photos; Amazon catalog images remain reference media.
+        images = list(getattr(listing, "listing_images", None) or [])
+        seller_photo_count = 0
+        for image in images:
+            if not isinstance(image, dict) or image.get("operator_state") != "approved" or image.get("is_reference"):
+                continue
+            metadata = image.get("metadata") if isinstance(image.get("metadata"), dict) else {}
+            provenance = str(metadata.get("provenance") or "").casefold()
+            source = str(image.get("source_platform") or "").casefold()
+            if provenance == "seller_photographed" or source in {"google_photos_album", "photo_intake", "shelf_census"}:
+                seller_photo_count += 1
+        if not seller_photo_count:
+            blockers.append(_issue(
+                "MERCARI_SELLER_PHOTO_REQUIRED",
+                "Mercari requires seller-owned photographs of this actual item; catalog/reference images do not satisfy this check.",
+                field="listing_images",
+                fix_hint="Upload or capture photos of this exact physical item, approve them, and set the clearest photo as primary.",
+            ))
+        if not payload.get("title"):
+            blockers.append(_issue("MERCARI_TITLE_MISSING", "Mercari title is missing.", field="title", fix_hint="Add a clear item title."))
+        if not payload.get("description"):
+            blockers.append(_issue("MERCARI_DESCRIPTION_MISSING", "Mercari description is missing.", field="description", fix_hint="Add an accurate item description."))
+        if not _positive_listing_amount(payload.get("price")):
+            blockers.append(_issue("MERCARI_PRICE_MISSING", "Mercari price must be positive.", field="listing_price", fix_hint="Enter a valid Mercari price."))
+        shipping_profile = listing.shipping_profile if isinstance(listing.shipping_profile, dict) else {}
+        mercari_shipping = shipping_profile.get("mercari") if isinstance(shipping_profile.get("mercari"), dict) else {}
+        package_weight = mercari_shipping.get("package_weight")
+        if not mercari_shipping.get("local_pickup_only") and not package_weight:
+            warnings.append(_issue(
+                "MERCARI_PACKAGE_WEIGHT_MISSING",
+                "Mercari shipping weight has not been entered; confirm package weight and label option in the seller workflow.",
+                field="shipping_profile.mercari.package_weight",
+                fix_hint="Enter the measured packed weight and review Mercari's current shipping options.",
+                severity="warning",
+            ))
+        if not category.get("category_id"):
+            warnings.append(_issue(
+                "MERCARI_NATIVE_CATEGORY_ID_UNAVAILABLE",
+                "The confirmed Mercari category has no native ID; the saved category path is for review and manual form selection.",
+                field="marketplace_data.marketplace_category_mappings.mercari.category_id",
+                fix_hint="Select the matching category in Mercari's seller form; do not substitute another marketplace's category ID.",
+                severity="warning",
+            ))
+        return {
+            "blockers": blockers,
+            "warnings": warnings,
+            "payload_preview": payload,
+            "category_summary": {
+                "category_id": category.get("category_id"),
+                "category_path": category.get("category_path") or payload.get("category_hint"),
+                "verification_status": category.get("verification_status"),
+                "taxonomy_version": category.get("taxonomy_version"),
+                "mapping_confidence": category.get("confidence"),
+                "required_attribute_schema_status": "verified" if required is not None else "unverified",
+                "seller_photo_count": seller_photo_count,
+            },
+            "policy_summary": {
+                "direct_api_supported": False,
+                "supported_workflow": "operator_review_with_manual_or_browser_assisted_handoff",
+                "automatic_publication_verified": False,
+                "draft_export_available_in_application": True,
+                "category_schema_verified": required is not None,
+                "readiness_semantics": "data_ready_and_manual_draft_export_only; not_authorized_for_automated_publishing",
             },
         }
 
@@ -1197,6 +1314,9 @@ class MarketplacePreflightService:
             "execution_blockers": preflight.get("execution_blockers", blockers),
             "connection_blockers": preflight.get("connection_blockers", []),
             "preparation_status": preflight.get("preparation_status", status),
+            "data_ready": preflight.get("data_ready", str(preflight.get("preparation_status", status)).lower() in {"ready", "ready_with_warnings"}),
+            "draft_export_ready": preflight.get("draft_export_ready", str(preflight.get("preparation_status", status)).lower() in {"ready", "ready_with_warnings"}),
+            "authorized_publishing_ready": preflight.get("authorized_publishing_ready", False),
             "preparation_blockers": preflight.get("preparation_blockers", blockers),
             "preparation_warnings": preflight.get("preparation_warnings", warnings),
             # Preserve the normalized issue objects, not only parallel code

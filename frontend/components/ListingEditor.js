@@ -1025,6 +1025,7 @@ export default function ListingEditor({
                 type="file"
                 accept="image/jpeg,image/png,image/webp"
                 multiple
+                capture="environment"
                 className="hidden"
                 onChange={async (event) => {
                   const files = event.target.files;
