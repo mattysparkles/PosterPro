@@ -24,6 +24,7 @@ from app.api.vine_imports import (
 )
 from app.models.models import Image, IntakeNotification, Listing, MarketplaceAccount, ProductMediaCache, User, VineImportBatch, VineImportItem
 from app.services.amazon_media import AmazonProductMediaProvider, _extract_amazon_product_facts
+from app.services.image_quality import PRIME_LOGO_SHA256, validate_image_bytes
 from app.services.amazon_product_discovery import AmazonProductDiscoveryService
 from app.services.listing_review import normalize_listing_images
 from app.services.listing_review import derive_shipping_profile
@@ -33,6 +34,34 @@ from app.services.vine_import_service import VineImportService, _apply_fact_spec
 from app.services.vine_parser import calculate_vine_eligibility, parse_vine_csv, parse_vine_pdf, parse_vine_xlsx
 from app.services.vine_policy import review_vine_product
 from app.services.category_rules import is_source_noise_category, resolve_taxonomy_leaf, suggest_category_from_text, verified_category_id
+
+
+def test_image_quality_flags_known_prime_asset_before_identity_is_assumed():
+    result = validate_image_bytes(b"placeholder bytes", source_url="https://m.media-amazon.com/images/G/01/marketing/prime/2022PrimeBrand/Logos/Prime_Logo_RGB_Prime_Blue_MASTER.png", expected_asin="B000000001")
+    assert result["verdict"] == "confirmed_placeholder"
+    assert "known_amazon_prime_logo_asset" in result["reasons"]
+
+
+def test_image_quality_requires_exact_page_and_variant_evidence():
+    from io import BytesIO
+    from PIL import Image as PILImage
+    out = BytesIO()
+    PILImage.new("RGB", (400, 400), "white").save(out, format="JPEG")
+    data = out.getvalue()
+    assert validate_image_bytes(data, expected_asin="B000000001")["verdict"] == "identity_unverified"
+    assert validate_image_bytes(data, expected_asin="B000000001", page_asin="B000000002")["verdict"] == "wrong_product"
+    assert validate_image_bytes(data, expected_asin="B000000001", page_asin="B000000001", expected_variant="2-pack", selected_variant="1-pack")["verdict"] == "wrong_product"
+    assert validate_image_bytes(data, expected_asin="B000000001", page_asin="B000000001", expected_variant="2-pack", selected_variant="2-pack")["verdict"] == "valid_exact_product"
+
+
+def test_known_prime_asset_hash_fixture_is_stable():
+    assert len(PRIME_LOGO_SHA256) == 64
+
+
+def test_amazon_product_image_extractor_excludes_prime_brand_graphic():
+    from app.services.amazon_media import _extract_amazon_product_images
+    html = '<meta property="og:image" content="https://m.media-amazon.com/images/G/01/marketing/prime/2022PrimeBrand/Logos/Prime_Logo_RGB_Prime_Blue_MASTER.png">'
+    assert _extract_amazon_product_images(html) == []
 
 
 def test_vine_dimension_merge_respects_operator_locked_item_height():

@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models.models import Image, ProductMediaCache
 from app.services.storage import LocalStorage
+from app.services.image_quality import PRIME_LOGO_URL_PART
 
 
 _AMAZON_HTML_MAX_BYTES = 4 * 1024 * 1024
@@ -116,7 +117,10 @@ def _extract_amazon_product_images(html: str) -> list[str]:
     seen: set[str] = set()
     for value in candidates:
         url = html_lib.unescape(str(value or "")).replace("\\u0026", "&")
-        if _is_amazon_media_url(url) and url not in seen:
+        # Page-wide metadata may be a brand graphic (including Amazon's
+        # Prime logo), not a product gallery image. Never accept this known
+        # promotional asset as product photography.
+        if _is_amazon_media_url(url) and PRIME_LOGO_URL_PART not in url.lower() and url not in seen:
             seen.add(url)
             cleaned.append(url)
     return cleaned
@@ -325,6 +329,12 @@ class AmazonProductMediaProvider:
                 ProductMediaCache.marketplace_region == settings.amazon_marketplace_region.upper(),
             )
         ).scalar_one_or_none()
+        if cached and self._cached_contains_known_placeholder(cached):
+            # Legacy cache rows may have been marked fetched before media
+            # identity checks existed. Never surface the known Prime logo as
+            # a successful product lookup.
+            return {**self._cached_result(cached, status="blocked"), "primary_image_url": None, "gallery_image_urls": [], "local_asset_ids": [], "fetch_error": "confirmed_placeholder", "image_quality": {"verdict": "confirmed_placeholder", "reasons": ["known_amazon_prime_logo_asset"]}}
+
         if cached and cached.fetch_status == "fetched":
             return self._cached_result(cached, status="cached")
 
@@ -347,6 +357,17 @@ class AmazonProductMediaProvider:
             fetch_error="manual_only",
             source_provider="manual",
         )
+
+    def _cached_contains_known_placeholder(self, cache: ProductMediaCache) -> bool:
+        urls = [str(cache.primary_image_url or ""), *(str(value) for value in (cache.gallery_image_urls_json or []))]
+        for asset_id in cache.local_asset_ids_json or []:
+            try:
+                asset = self.db.get(Image, int(asset_id))
+            except (TypeError, ValueError):
+                asset = None
+            if asset:
+                urls.append(str(asset.source_url or ""))
+        return any(PRIME_LOGO_URL_PART in value.lower() for value in urls)
 
     @staticmethod
     def _cached_result(cache: ProductMediaCache, *, status: str | None = None) -> dict:
