@@ -1005,7 +1005,7 @@ class VineImportService:
             # same facts object before copy/category/price generation.
             amazon_facts = self._hydrate_vine_facts(amazon_facts, item=item, listing=listing)
             if fetch_media_first and not (cached_urls or discovered_urls) and (item.asin or resolved_asin):
-                bridge_cache = self._bridge_capture_for_asin(db, item.asin or resolved_asin, item.product_name or listing.title)
+                bridge_cache = self._bridge_capture_for_asin(db, item.asin or resolved_asin, item.product_name or listing.title, user_id=item.user_id, listing_id=listing.id)
                 if bridge_cache is not None:
                     cached_urls = self._lookup_cached_media_urls(db, item.asin)
                     if not cached_urls and bridge_cache.gallery_image_urls_json:
@@ -2924,12 +2924,14 @@ class VineImportService:
         if cache is None:
             return []
 
-        gallery_urls = self._filter_valid_gallery_urls([str(url) for url in (cache.gallery_image_urls_json or []) if url])
+        from app.services.amazon_media import AmazonProductMediaProvider
+        filtered = AmazonProductMediaProvider(db)._filter_cached_gallery(cache)
+        gallery_urls = self._filter_valid_gallery_urls([str(url) for url in (filtered.get("gallery_image_urls") or []) if url])
         if gallery_urls:
             return gallery_urls
 
-        if cache.primary_image_url:
-            return self._filter_valid_gallery_urls([cache.primary_image_url])
+        if filtered.get("primary_image_url"):
+            return self._filter_valid_gallery_urls([filtered["primary_image_url"]])
 
         return []
 
@@ -2962,7 +2964,8 @@ class VineImportService:
                         "image_provenance": "product_catalog",
                         "asin": asin,
                         "product_name": product_name,
-                        "trusted_catalog_match": True,
+                        "identity_state": "unverified",
+                        "rights_state": "unverified",
                     },
                 }
                 for url in cleaned_urls
@@ -2991,6 +2994,9 @@ class VineImportService:
         for url in image_urls or []:
             cleaned = str(url or "").strip()
             if not cleaned:
+                continue
+            from app.services.image_quality import is_known_prime_placeholder
+            if is_known_prime_placeholder(cleaned):
                 continue
             local_file = self._local_media_file_for_url(cleaned)
             if local_file is not None and (not local_file.exists() or local_file.stat().st_size <= 0):
@@ -3068,7 +3074,14 @@ class VineImportService:
                 approved=False,
             )
             unsafe_images = [image for image in normalized_images if _is_unsafe_vine_image(image)]
+            has_operator_approved_media = any(
+                image.get("operator_state") == "approved" or image.get("operator_approved") is True
+                for image in normalized_images if image not in unsafe_images
+            )
             has_approved_actual = any(classify_listing_image(image)["seller_photographed"] for image in normalized_images)
+            if has_operator_approved_media:
+                already_present += 1
+                continue
             if only_missing_images and normalized_images and not unsafe_images and has_approved_actual:
                 already_present += 1
                 continue
@@ -3154,7 +3167,7 @@ class VineImportService:
                         )
 
             if not gallery_urls and use_bridge_session:
-                cache = self._bridge_capture_for_asin(db, asin, product_name)
+                cache = self._bridge_capture_for_asin(db, asin, product_name, user_id=listing.user_id, listing_id=listing.id)
                 if cache is not None:
                     bridge_refetched += 1
                     gallery_urls = self._filter_valid_gallery_urls(
@@ -3407,47 +3420,18 @@ class VineImportService:
             limit=None,
         ))
 
-    def _bridge_capture_for_asin(self, db: Session, asin: str, title_hint: str | None) -> ProductMediaCache | None:
-        try:
-            bridge_submission = submit_bridge_job(
-                job_type="import",
-                execution_mode="browser_assist",
-                payload={
-                    "source_marketplace": "amazon",
-                    "asin": asin,
-                    "asins": [asin],
-                    "payload": {
-                        "asin": asin,
-                        "product_name": title_hint,
-                    },
-                },
+    def _bridge_capture_for_asin(self, db: Session, asin: str, title_hint: str | None, *, user_id: int, listing_id: int | None = None) -> ProductMediaCache | None:
+        # Recovery candidates are durable and review-only; never attach a
+        # browser gallery directly during the draft build/repair transaction.
+        from app.services.vine_image_recovery import enqueue_recovery
+        enqueue_recovery(db, user_id=user_id, asin=asin, title_hint=title_hint, listing_id=listing_id)
+        db.flush()
+        return db.execute(
+            select(ProductMediaCache).where(
+                ProductMediaCache.asin == asin,
+                ProductMediaCache.marketplace_region == settings.amazon_marketplace_region.upper(),
             )
-            bridge_job_id = str((((bridge_submission or {}).get("bridge_response") or {}).get("job_id") or "")).strip()
-            if not bridge_job_id:
-                return None
-            bridge_completion = wait_for_bridge_job(job_id=bridge_job_id, timeout_seconds=45, poll_interval_seconds=1.0)
-            if str(bridge_completion.get("status") or "").lower() != "completed":
-                return None
-            captured = ((bridge_completion.get("result") or {}).get("imported_listings") or [])
-            first = captured[0] if captured and isinstance(captured[0], dict) else {}
-            captured_urls = [str(url).strip() for url in (first.get("image_urls") or []) if str(url).strip()]
-            if not captured_urls:
-                return None
-            provider = AmazonProductMediaProvider(db, owner_user_id=None)
-            provider.cache_gallery_from_remote_urls(
-                asin=asin,
-                image_urls=captured_urls,
-                title_hint=title_hint,
-                source_provider="bridge_browser",
-            )
-            return db.execute(
-                select(ProductMediaCache).where(
-                    ProductMediaCache.asin == asin,
-                    ProductMediaCache.marketplace_region == settings.amazon_marketplace_region.upper(),
-                )
-            ).scalar_one_or_none()
-        except Exception:
-            return None
+        ).scalar_one_or_none()
 
     def _resolve_category(self, item: VineImportItem, *, amazon_facts: dict | None = None) -> tuple[str, str]:
         """Return a category and its evidence source.

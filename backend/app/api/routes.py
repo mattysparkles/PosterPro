@@ -2741,48 +2741,13 @@ def backfill_vine_listing_images(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    def _bridge_capture_for_asin(target_asin: str, target_name: str | None) -> ProductMediaCache | None:
-        nonlocal bridge_refetched, bridge_failed
-        try:
-            bridge_submission = submit_bridge_job(
-                job_type="import",
-                execution_mode="browser_assist",
-                payload={
-                    "source_marketplace": "amazon",
-                    "asin": target_asin,
-                    "asins": [target_asin],
-                    "payload": {
-                        "asin": target_asin,
-                        "product_name": target_name,
-                    },
-                },
-            )
-            bridge_job_id = str((((bridge_submission or {}).get("bridge_response") or {}).get("job_id") or "")).strip()
-            if not bridge_job_id:
-                bridge_failed += 1
-                return None
-            bridge_completion = wait_for_bridge_job(job_id=bridge_job_id, timeout_seconds=45, poll_interval_seconds=1.0)
-            if str(bridge_completion.get("status") or "").lower() != "completed":
-                bridge_failed += 1
-                return None
-            captured = ((bridge_completion.get("result") or {}).get("imported_listings") or [])
-            first = captured[0] if captured and isinstance(captured[0], dict) else {}
-            captured_urls = [str(url).strip() for url in (first.get("image_urls") or []) if str(url).strip()]
-            if not captured_urls:
-                bridge_failed += 1
-                return None
-            provider.cache_gallery_from_remote_urls(
-                asin=target_asin,
-                image_urls=captured_urls,
-                title_hint=target_name,
-                source_provider="bridge_browser",
-            )
-            cache_row = db.execute(select(ProductMediaCache).where(ProductMediaCache.asin == target_asin)).scalar_one_or_none()
-            bridge_refetched += 1
-            return cache_row
-        except (AutomationBridgeError, Exception):
-            bridge_failed += 1
-            return None
+    def _bridge_capture_for_asin(target_asin: str, target_name: str | None, target_listing_id: int | None = None) -> ProductMediaCache | None:
+        # Candidate acquisition is asynchronous and review-only. Never use the
+        # legacy direct browser import path to alter a listing gallery.
+        from app.services.vine_image_recovery import enqueue_recovery
+        enqueue_recovery(db, user_id=current_user.id, asin=target_asin, title_hint=target_name, listing_id=target_listing_id)
+        db.commit()
+        return db.execute(select(ProductMediaCache).where(ProductMediaCache.asin == target_asin, ProductMediaCache.marketplace_region == settings.amazon_marketplace_region.upper())).scalar_one_or_none()
 
     query = select(Listing).where(
         Listing.user_id == current_user.id,
@@ -2829,7 +2794,8 @@ def backfill_vine_listing_images(
                         "image_provenance": "product_catalog",
                         "asin": asin,
                         "product_name": product_name,
-                        "trusted_catalog_match": True,
+                        "identity_state": "unverified",
+                        "rights_state": "unverified",
                     },
                 }
                 for url in cleaned_urls
@@ -2843,6 +2809,20 @@ def backfill_vine_listing_images(
 
     for listing in listings:
         if not include_archived and _is_archived_vine_listing(listing):
+            continue
+        from app.services.image_quality import is_known_prime_placeholder
+        if any(
+            isinstance(image, dict)
+            and (image.get("operator_state") == "approved" or image.get("operator_approved") is True)
+            and not is_known_prime_placeholder(
+                str(image.get("source_url") or image.get("storage_path") or image.get("url") or ""),
+                (image.get("metadata") or {}).get("sha256") if isinstance(image.get("metadata"), dict) else None,
+            )
+            for image in (listing.listing_images or [])
+        ):
+            # Media repair may enrich a draft, but must not replace an
+            # operator-approved gallery without an explicit review action.
+            already_present += 1
             continue
         has_images = bool(listing.image_urls and len(listing.image_urls))
         if only_missing_images and has_images:
@@ -2901,7 +2881,6 @@ def backfill_vine_listing_images(
 
         if not asin:
             if force_refresh:
-                listing.image_urls = []
                 labels = set(listing.custom_labels or [])
                 labels.add("needs_photos")
                 listing.custom_labels = sorted(labels)
@@ -2911,17 +2890,21 @@ def backfill_vine_listing_images(
         cache = db.execute(select(ProductMediaCache).where(ProductMediaCache.asin == asin)).scalar_one_or_none()
         if cache is None:
             if use_bridge_session:
-                cache = _bridge_capture_for_asin(asin, product_name)
+                cache = _bridge_capture_for_asin(asin, product_name, listing.id)
             if cache is None:
                 if force_refresh:
-                    listing.image_urls = []
                     labels = set(listing.custom_labels or [])
                     labels.add("needs_photos")
                     listing.custom_labels = sorted(labels)
                     db.add(listing)
                 no_cache += 1
                 continue
-        gallery_urls = [str(url) for url in (cache.gallery_image_urls_json or []) if str(url).strip()]
+        cache_result = provider._filter_cached_gallery(cache)
+        if not cache_result.get("gallery_image_urls") and cache_result.get("rejected_images"):
+            _bridge_capture_for_asin(asin, product_name, listing.id)
+            no_cache += 1
+            continue
+        gallery_urls = [str(url) for url in (cache_result.get("gallery_image_urls") or []) if str(url).strip()]
         if gallery_urls:
             listing.image_urls = gallery_urls
             listing.listing_images = _trusted_amazon_listing_images(
@@ -2968,7 +2951,7 @@ def backfill_vine_listing_images(
             updated += 1
             continue
         if use_bridge_session:
-            cache = _bridge_capture_for_asin(asin, product_name)
+            cache = _bridge_capture_for_asin(asin, product_name, listing.id)
             if cache is not None:
                 refreshed_gallery = [str(url) for url in (cache.gallery_image_urls_json or []) if str(url).strip()]
                 if refreshed_gallery:
@@ -3002,8 +2985,6 @@ def backfill_vine_listing_images(
                     updated += 1
                     continue
         if force_refresh:
-            listing.image_urls = []
-            listing.listing_images = []
             labels = set(listing.custom_labels or [])
             labels.add("needs_photos")
             listing.custom_labels = sorted(labels)
@@ -4361,7 +4342,9 @@ def approve_listing_photos(
             "operator_state": "approved",
             "operator_approved": True,
             "operator_rejected": False,
-            "is_reference": False,
+            # Catalog/reference provenance is permanent. Operator approval
+            # must not relabel an Amazon image as a seller-taken photograph.
+            "is_reference": bool(image.get("is_reference")) or str(image.get("source_platform") or "").lower() == "amazon",
         }),
     )
     if not changed:

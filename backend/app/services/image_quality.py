@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import httpx
 from urllib.parse import urlparse
 
 from PIL import Image, UnidentifiedImageError
@@ -22,6 +23,33 @@ def image_url_allowed(url: str) -> bool:
     parsed = urlparse(str(url or ""))
     host = (parsed.hostname or "").lower().rstrip(".")
     return parsed.scheme == "https" and any(host == suffix or host.endswith("." + suffix) for suffix in ALLOWED_IMAGE_HOST_SUFFIXES)
+
+
+def is_known_prime_placeholder(url: str, sha256: str | None = None) -> bool:
+    return PRIME_LOGO_URL_PART in str(url or "").lower() or str(sha256 or "").lower() == PRIME_LOGO_SHA256
+
+
+def filter_known_placeholders(urls: list[str], *, hashes: list[str | None] | None = None) -> tuple[list[str], list[dict]]:
+    """Filter only individually confirmed Prime assets; keep uncertain candidates."""
+    kept: list[str] = []
+    rejected: list[dict] = []
+    hashes = hashes or []
+    for index, raw in enumerate(urls or []):
+        url = str(raw or "").strip()
+        digest = hashes[index] if index < len(hashes) else None
+        if not url:
+            rejected.append({"index": index, "verdict": "unreachable", "reason": "empty_url"})
+        elif is_known_prime_placeholder(url, digest):
+            rejected.append({"index": index, "url": url, "sha256": digest, "verdict": "confirmed_placeholder", "reason": "known_amazon_prime_logo_asset"})
+        else:
+            kept.append(url)
+    return kept, rejected
+
+
+def merge_gallery_candidates(prior: list[str], incoming: list[str]) -> tuple[list[str], list[dict]]:
+    """Retry-safe ordered union that removes only known placeholders."""
+    accepted, rejected = filter_known_placeholders([*(prior or []), *(incoming or [])])
+    return list(dict.fromkeys(accepted)), rejected
 
 
 def validate_image_bytes(data: bytes, *, source_url: str = "", expected_asin: str | None = None,
@@ -63,3 +91,33 @@ def validate_image_file(path: str, **kwargs) -> dict:
     result = validate_image_bytes(data, **kwargs)
     result["evidence"]["path"] = path
     return result
+
+
+def fetch_candidate_image(url: str) -> tuple[bytes, dict]:
+    """Fetch one authorized Amazon CDN candidate with host, time and size bounds."""
+    if not image_url_allowed(url):
+        raise ValueError("candidate_host_not_allowlisted")
+    chunks: list[bytes] = []
+    total = 0
+    timeout = httpx.Timeout(connect=4.0, read=6.0, write=4.0, pool=4.0)
+    with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+        with client.stream("GET", url, headers={"Accept": "image/avif,image/webp,image/png,image/jpeg"}) as response:
+            if response.status_code in {301, 302, 303, 307, 308}:
+                location = response.headers.get("location", "")
+                if not image_url_allowed(location):
+                    raise ValueError("candidate_redirect_host_not_allowlisted")
+                raise ValueError("candidate_redirect_requires_retry")
+            response.raise_for_status()
+            content_type = str(response.headers.get("content-type") or "").split(";", 1)[0].lower()
+            if not content_type.startswith("image/"):
+                raise ValueError("candidate_response_not_image")
+            for chunk in response.iter_bytes():
+                total += len(chunk)
+                if total > MAX_IMAGE_BYTES:
+                    raise ValueError("candidate_image_over_limit")
+                chunks.append(chunk)
+    data = b"".join(chunks)
+    verdict = validate_image_bytes(data, source_url=url, content_type=content_type)
+    if verdict["verdict"] in {"decode_failed", "confirmed_placeholder", "suspected_placeholder"}:
+        raise ValueError(verdict["verdict"])
+    return data, verdict

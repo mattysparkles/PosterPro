@@ -1759,6 +1759,22 @@ export async function repairVineImages(batchId, itemIds) {
   });
 }
 
+export async function fetchVineImageRecoveryJobs() {
+  return jsonFetch(`${API_BASE}/imports/vine/image-recovery-jobs`);
+}
+
+export async function attachVineImageRecoveryCandidate(jobId, candidateIndex) {
+  return jsonFetch(`${API_BASE}/imports/vine/image-recovery-jobs/${jobId}/candidates/${candidateIndex}/attach`, { method: 'POST' });
+}
+
+export async function rejectVineImageRecoveryCandidate(jobId, candidateIndex) {
+  return jsonFetch(`${API_BASE}/imports/vine/image-recovery-jobs/${jobId}/candidates/${candidateIndex}/reject`, { method: 'POST' });
+}
+
+export async function retryVineImageRecoveryJob(jobId) {
+  return jsonFetch(`${API_BASE}/imports/vine/image-recovery-jobs/${jobId}/retry`, { method: 'POST' });
+}
+
 export async function refreshVineDraftMetadata(batchId) {
   return jsonFetch(`${API_BASE}/imports/vine/batches/${batchId}/refresh-drafts`, {
     method: "POST",

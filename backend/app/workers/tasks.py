@@ -30,6 +30,7 @@ from app.models.models import (
     MarketplaceImportJob,
     MarketplaceListing,
     VineImportItem,
+    VineImageRecoveryJob,
     StorageUnitBatch,
     IntakeSlate,
     User,
@@ -50,6 +51,7 @@ from app.services.automation_bridge import submit_bridge_job, wait_for_bridge_jo
 from app.services.secondary_marketplace_execution import execute_secondary_marketplace_path
 from app.services.inventory_service import InventorySafetyError, InventoryService
 from app.services.storage import LocalStorage
+from app.services.image_quality import fetch_candidate_image, validate_image_bytes
 from app.services.analytics_service import AnalyticsService
 from app.services.prediction_service import PredictionService
 from app.services.pricing_intelligence_service import PricingIntelligenceService
@@ -633,6 +635,180 @@ def repair_recent_vine_images_task(self, user_id: int | None = None, chunk_size:
         return totals
     finally:
         db.close()
+
+
+@celery_app.task(name="dispatch_vine_image_recovery_jobs")
+def dispatch_vine_image_recovery_jobs(limit: int = 3) -> dict[str, Any]:
+    """Submit bounded exact-ASIN work through an authorized paired Amazon bridge account."""
+    dispatched = 0
+    unavailable = 0
+    now = datetime.utcnow()
+    with SessionLocal() as db:
+        crashed_submissions = db.execute(select(VineImageRecoveryJob).where(
+            VineImageRecoveryJob.status.in_(["submitting", "submitting_remote"]),
+            VineImageRecoveryJob.updated_at <= now - timedelta(minutes=5),
+        ).with_for_update(skip_locked=True).limit(10)).scalars().all()
+        for stale in crashed_submissions:
+            stale.status = "pending_authorization"
+            stale.attempts = max(0, int(stale.attempts or 0) - 1)
+            stale.last_error = "Recovered interrupted submit; retry will reuse the same bridge idempotency key."
+            stale.next_attempt_at = now
+        crashed_reviews = db.execute(select(VineImageRecoveryJob).where(
+            VineImageRecoveryJob.status == "processing_review",
+            VineImageRecoveryJob.updated_at <= now - timedelta(minutes=5),
+            VineImageRecoveryJob.bridge_job_id.is_not(None),
+        ).with_for_update(skip_locked=True).limit(10)).scalars().all()
+        for stale in crashed_reviews:
+            stale.status = "collecting"
+            stale.last_error = "Recovered interrupted candidate processing; bridge result will be re-read idempotently."
+        db.commit()
+        stale_collecting = db.execute(select(VineImageRecoveryJob).where(
+            VineImageRecoveryJob.status == "collecting",
+            VineImageRecoveryJob.bridge_job_id.is_not(None),
+            VineImageRecoveryJob.updated_at <= now - timedelta(minutes=1),
+        ).limit(20)).scalars().all()
+        for stale in stale_collecting:
+            poll_vine_image_recovery_job.apply_async(args=[stale.id], countdown=1)
+        active_count = db.execute(select(func.count(VineImageRecoveryJob.id)).where(VineImageRecoveryJob.status.in_(["submitting", "submitting_remote", "collecting", "processing_review"]))).scalar_one()
+        available_slots = max(0, 3 - int(active_count or 0))
+        if not available_slots:
+            return {"dispatched": 0, "pending_authorization_or_unavailable": 0, "active_limit": 3}
+        jobs = db.execute(
+            select(VineImageRecoveryJob).where(
+                VineImageRecoveryJob.status.in_(["pending", "pending_authorization"]),
+                VineImageRecoveryJob.attempts < 4,
+                or_(VineImageRecoveryJob.next_attempt_at.is_(None), VineImageRecoveryJob.next_attempt_at <= now),
+            ).order_by(VineImageRecoveryJob.created_at.asc()).with_for_update(skip_locked=True).limit(min(available_slots, max(1, min(int(limit or 3), 5))))
+        ).scalars().all()
+        claimed = []
+        for job in jobs:
+            job.status = "submitting"
+            job.attempts = int(job.attempts or 0) + 1
+            claimed.append(job.id)
+        db.commit()
+        for job_id in claimed:
+            submit_vine_image_recovery_request.apply_async(args=[job_id], countdown=0)
+            dispatched += 1
+        return {"dispatched": dispatched, "pending_authorization_or_unavailable": unavailable}
+
+
+@celery_app.task(name="submit_vine_image_recovery_request")
+def submit_vine_image_recovery_request(job_id: int) -> dict[str, Any]:
+    """Submit one atomically claimed request to the existing authorized bridge."""
+    with SessionLocal() as db:
+        job = db.execute(select(VineImageRecoveryJob).where(
+            VineImageRecoveryJob.id == int(job_id)
+        ).with_for_update(skip_locked=True)).scalar_one_or_none()
+        if not job or job.status != "submitting":
+            return {"status": "not_claimed"}
+        job.status = "submitting_remote"
+        job.last_error = None
+        db.commit()
+        try:
+            submitted = submit_bridge_job(
+                job_type="import", execution_mode="browser_assist",
+                payload={
+                    "source_marketplace": "amazon",
+                    "operation": "vine_image_gallery_recovery",
+                    "acquisition_request_key": f"vine-image-recovery:{job.id}:{job.attempts}",
+                    "asin": job.asin,
+                    "asins": [job.asin],
+                    "payload": {"asin": job.asin, "product_name": job.title_hint},
+                },
+            )
+            bridge_job_id = str((((submitted or {}).get("bridge_response") or {}).get("job_id") or "")).strip()
+            if not bridge_job_id:
+                raise AutomationBridgeError("Bridge did not return a durable job ID")
+            job.bridge_job_id = bridge_job_id
+            job.status = "collecting"
+            db.commit()
+            poll_vine_image_recovery_job.apply_async(args=[job.id], countdown=10)
+            return {"status": "collecting", "bridge_job_id": bridge_job_id}
+        except Exception as exc:
+            job.status = "pending_authorization" if job.attempts < 4 else "manual_review_required"
+            job.last_error = str(exc)[:500]
+            job.next_attempt_at = datetime.utcnow() + timedelta(minutes=min(60, 5 * (2 ** max(0, job.attempts - 1))))
+            db.commit()
+            return {"status": job.status, "error": job.last_error}
+
+
+@celery_app.task(name="poll_vine_image_recovery_job")
+def poll_vine_image_recovery_job(job_id: int) -> dict[str, Any]:
+    with SessionLocal() as db:
+        job = db.execute(select(VineImageRecoveryJob).where(VineImageRecoveryJob.id == int(job_id)).with_for_update(skip_locked=True)).scalar_one_or_none()
+        if not job or job.status != "collecting" or not job.bridge_job_id:
+            return {"status": "not_collecting"}
+        try:
+            bridge = get_bridge_job(job.bridge_job_id)
+            bridge_status = str(bridge.get("status") or "").lower()
+            if bridge_status not in {"completed", "failed", "canceled"}:
+                poll_vine_image_recovery_job.apply_async(args=[job.id], countdown=15)
+                return {"status": "collecting"}
+            if bridge_status != "completed":
+                raise RuntimeError(str(bridge.get("error") or "authorized browser collection did not complete"))
+            job.status = "processing_review"
+            db.commit()
+            result = bridge.get("result") if isinstance(bridge.get("result"), dict) else {}
+            records = result.get("imported_listings") if isinstance(result.get("imported_listings"), list) else []
+            record = next((row for row in records if isinstance(row, dict) and str(row.get("asin") or "").upper() == job.asin), {})
+            page_asin = str(record.get("page_asin") or "").upper()
+            if page_asin != job.asin:
+                raise RuntimeError("exact product page ASIN was absent or mismatched")
+            evidence = {
+                "requested_asin": job.asin, "page_asin": page_asin,
+                "source_url": record.get("source_url"), "title": record.get("title"),
+                "selected_variant": record.get("selected_variant"),
+                "variant_identity": "unverified" if not record.get("selected_variant") else "operator_review_required",
+                "collector": "authorized_paired_amazon_bridge", "rights": "unverified",
+            }
+            candidates = []
+            storage = LocalStorage()
+            for source_url in list(record.get("image_urls") or [])[:12]:
+                try:
+                    gallery_source_evidence = next((
+                        evidence for evidence in (record.get("gallery_evidence") or [])
+                        if isinstance(evidence, dict) and str(evidence.get("source_url") or "") == str(source_url)
+                    ), {})
+                    data, quality = fetch_candidate_image(str(source_url))
+                    checked = validate_image_bytes(data, source_url=str(source_url), expected_asin=job.asin, page_asin=page_asin)
+                    if checked["verdict"] not in {"valid_exact_product", "identity_unverified"}:
+                        continue
+                    fmt = str(quality.get("evidence", {}).get("format") or "JPEG").lower()
+                    extension = ".png" if fmt == "png" else ".webp" if fmt == "webp" else ".jpg"
+                    local_path = storage.save_bytes(data, extension=extension, prefix=f"vine-recovery/{job.user_id}/{job.asin}")
+                    image = Image(
+                        user_id=job.user_id, source_url=str(source_url), local_path=local_path,
+                        width=(quality.get("evidence", {}).get("dimensions") or [None, None])[0],
+                        height=(quality.get("evidence", {}).get("dimensions") or [None, None])[1],
+                        image_metadata={
+                            "source": "amazon_vine_browser_gallery_candidate", "asin": job.asin,
+                            "source_page_url": record.get("source_url"), "page_asin": page_asin,
+                            "selected_variant": record.get("selected_variant"),
+                            "identity_state": "asin_verified_variant_unverified",
+                            "rights_state": "unverified", "operator_state": "pending_review",
+                            "gallery_source_evidence": gallery_source_evidence,
+                            "quality_evidence": quality.get("evidence"),
+                        },
+                    )
+                    db.add(image)
+                    db.flush()
+                    rel = Path(local_path).resolve().relative_to(storage.root.resolve()).as_posix()
+                    candidates.append({"image_id": image.id, "storage_path": f"/media/{rel}", "source_url": str(source_url), "verdict": "identity_unverified", "rights_status": "unverified", "operator_state": "pending_review"})
+                except Exception as exc:
+                    logger.info("vine_image_candidate_rejected", extra={"recovery_job_id": job.id, "reason": str(exc)[:160]})
+            job.page_evidence_json = evidence
+            job.candidates_json = candidates
+            job.status = "review_required" if candidates else "manual_review_required"
+            job.last_error = None if candidates else "no usable product gallery candidates; manual acquisition required"
+            job.completed_at = datetime.utcnow()
+            db.commit()
+            return {"status": job.status, "candidate_count": len(candidates)}
+        except Exception as exc:
+            job.last_error = str(exc)[:500]
+            job.status = "pending_authorization" if job.attempts < 4 else "manual_review_required"
+            job.next_attempt_at = datetime.utcnow() + timedelta(minutes=min(60, 5 * (2 ** max(0, job.attempts - 1))))
+            db.commit()
+            return {"status": job.status, "error": job.last_error}
 
 
 @celery_app.task(name="repair_vine_listing_quality")

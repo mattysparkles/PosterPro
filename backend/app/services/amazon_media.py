@@ -5,6 +5,7 @@ import json
 import re
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
@@ -14,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models.models import Image, ProductMediaCache
 from app.services.storage import LocalStorage
-from app.services.image_quality import PRIME_LOGO_URL_PART
+from app.services.image_quality import PRIME_LOGO_SHA256, PRIME_LOGO_URL_PART, fetch_candidate_image, filter_known_placeholders, merge_gallery_candidates, validate_image_file
 
 
 _AMAZON_HTML_MAX_BYTES = 4 * 1024 * 1024
@@ -329,11 +330,12 @@ class AmazonProductMediaProvider:
                 ProductMediaCache.marketplace_region == settings.amazon_marketplace_region.upper(),
             )
         ).scalar_one_or_none()
-        if cached and self._cached_contains_known_placeholder(cached):
-            # Legacy cache rows may have been marked fetched before media
-            # identity checks existed. Never surface the known Prime logo as
-            # a successful product lookup.
-            return {**self._cached_result(cached, status="blocked"), "primary_image_url": None, "gallery_image_urls": [], "local_asset_ids": [], "fetch_error": "confirmed_placeholder", "image_quality": {"verdict": "confirmed_placeholder", "reasons": ["known_amazon_prime_logo_asset"]}}
+        if cached:
+            cached_result = self._filter_cached_gallery(cached)
+            if cached_result["gallery_image_urls"] or cached_result.get("rejected_images"):
+                if not cached_result["gallery_image_urls"] or cached_result.get("image_quality", {}).get("verdict") == "identity_unverified":
+                    self._queue_browser_recovery(asin, title_hint)
+                return cached_result
 
         if cached and cached.fetch_status == "fetched":
             return self._cached_result(cached, status="cached")
@@ -347,7 +349,7 @@ class AmazonProductMediaProvider:
         if cached:
             return self._cached_result(cached)
 
-        return self._cache_result(
+        result = self._cache_result(
             asin,
             product_url=self.get_product_url(asin),
             gallery_image_urls=[],
@@ -357,17 +359,93 @@ class AmazonProductMediaProvider:
             fetch_error="manual_only",
             source_provider="manual",
         )
+        self._queue_browser_recovery(asin, title_hint)
+        return result
 
-    def _cached_contains_known_placeholder(self, cache: ProductMediaCache) -> bool:
-        urls = [str(cache.primary_image_url or ""), *(str(value) for value in (cache.gallery_image_urls_json or []))]
-        for asset_id in cache.local_asset_ids_json or []:
-            try:
-                asset = self.db.get(Image, int(asset_id))
-            except (TypeError, ValueError):
-                asset = None
+    def _queue_browser_recovery(self, asin: str, title_hint: str | None) -> None:
+        if not self.owner_user_id:
+            return
+        from app.services.vine_image_recovery import enqueue_recovery
+        enqueue_recovery(self.db, user_id=self.owner_user_id, asin=asin, title_hint=title_hint)
+        self.db.commit()
+
+    def _filter_cached_gallery(self, cache: ProductMediaCache) -> dict:
+        urls = [str(value or "").strip() for value in (cache.gallery_image_urls_json or [])]
+        if not urls and cache.primary_image_url:
+            urls = [str(cache.primary_image_url).strip()]
+        ids = list(cache.local_asset_ids_json or [])
+        hash_inputs: list[str | None] = []
+        for index, url in enumerate(urls):
+            source_url = url
+            asset = None
+            if index < len(ids):
+                try:
+                    asset = self.db.get(Image, int(ids[index]))
+                except (TypeError, ValueError):
+                    asset = None
+            if asset is None and str(url).startswith(("/media/", "/api/media/")):
+                relative = str(url).split("/media/", 1)[1].lstrip("/")
+                candidate_path = (self.storage.root / relative).resolve()
+                try:
+                    candidate_path.relative_to(self.storage.root.resolve())
+                    asset = self.db.execute(select(Image).where(Image.local_path == str(candidate_path)).order_by(Image.id.desc()).limit(1)).scalar_one_or_none()
+                except ValueError:
+                    asset = None
             if asset:
-                urls.append(str(asset.source_url or ""))
-        return any(PRIME_LOGO_URL_PART in value.lower() for value in urls)
+                source_url = str(asset.source_url or url)
+            digest = PRIME_LOGO_SHA256 if PRIME_LOGO_URL_PART in source_url.lower() else None
+            if digest is None and str(url).startswith(("/media/", "/api/media/")):
+                relative = str(url).split("/media/", 1)[1].lstrip("/")
+                candidate_path = (self.storage.root / relative).resolve()
+                try:
+                    candidate_path.relative_to(self.storage.root.resolve())
+                    file_quality = validate_image_file(str(candidate_path))
+                    if file_quality.get("evidence", {}).get("sha256") == PRIME_LOGO_SHA256:
+                        digest = PRIME_LOGO_SHA256
+                except (ValueError, OSError):
+                    pass
+            hash_inputs.append(digest)
+        kept, rejected = filter_known_placeholders(urls, hashes=hash_inputs)
+        technically_usable: list[str] = []
+        technical_rejected: list[dict] = []
+        for index, url in enumerate(urls):
+            if url not in kept:
+                continue
+            if url.startswith(("/media/", "/api/media/")):
+                relative = url.split("/media/", 1)[1].lstrip("/")
+                local_path = (self.storage.root / relative).resolve()
+                try:
+                    local_path.relative_to(self.storage.root.resolve())
+                    quality = validate_image_file(str(local_path))
+                except ValueError:
+                    quality = {"verdict": "unreachable", "reasons": ["local_media_path_outside_storage_root"]}
+                if quality.get("verdict") in {"unreachable", "decode_failed"}:
+                    technical_rejected.append({"index": index, "url": url, "verdict": quality["verdict"], "reasons": quality.get("reasons")})
+                    continue
+            technically_usable.append(url)
+        rejected.extend(technical_rejected)
+        kept = technically_usable
+        if rejected:
+            keep_indexes = [i for i, url in enumerate(urls) if url in kept]
+            cache.gallery_image_urls_json = kept
+            cache.local_asset_ids_json = [ids[i] for i in keep_indexes if i < len(ids)]
+            cache.primary_image_url = kept[0] if kept else None
+            if not kept:
+                cache.fetch_status = "blocked"
+                cache.fetch_error = "confirmed_placeholder;no_usable_product_candidates"
+            else:
+                cache.fetch_error = "confirmed_placeholder_filtered;remaining_candidates_pending_identity_review"
+                cache.fetch_status = "fetched"
+            self.db.add(cache)
+            self.db.commit()
+            self.db.refresh(cache)
+        result = self._cached_result(cache, status="cached" if cache.fetch_status == "fetched" else cache.fetch_status)
+        result["rejected_images"] = rejected
+        result["image_quality"] = {
+            "verdict": "identity_unverified" if kept else ("confirmed_placeholder" if rejected else "unreachable"),
+            "reasons": ["remaining_candidates_pending_operator_review"] if kept else (["known_placeholder_filtered"] if rejected else ["no_usable_candidates"]),
+        }
+        return result
 
     @staticmethod
     def _cached_result(cache: ProductMediaCache, *, status: str | None = None) -> dict:
@@ -404,29 +482,42 @@ class AmazonProductMediaProvider:
         return self.lookup_by_asin(asin).get("gallery_image_urls") or []
 
     def cache_gallery_from_remote_urls(self, *, asin: str, image_urls: list[str], title_hint: str | None = None, source_provider: str = "bridge_browser") -> dict:
-        cleaned = [str(url).strip() for url in image_urls if str(url).strip() and _is_amazon_media_url(url)]
+        cleaned, rejected = filter_known_placeholders([str(url).strip() for url in image_urls if str(url).strip() and _is_amazon_media_url(url)])
+        existing = self.db.execute(select(ProductMediaCache).where(ProductMediaCache.asin == asin, ProductMediaCache.marketplace_region == settings.amazon_marketplace_region.upper())).scalar_one_or_none()
+        prior_urls, prior_ids = [], []
+        if existing:
+            prior_result = self._filter_cached_gallery(existing)
+            prior_urls = list(prior_result.get("gallery_image_urls") or [])
+            rejected.extend(prior_result.get("rejected_images") or [])
+            prior_ids = list(existing.local_asset_ids_json or [])[:len(prior_urls)]
+            cleaned = [url for url in cleaned if url not in prior_urls]
         if not cleaned:
-            return self._cache_result(
+            if prior_urls and existing:
+                result = self._filter_cached_gallery(existing)
+                result["rejected_images"] = [*result.get("rejected_images", []), *rejected]
+                return result
+            result = self._cache_result(
                 asin,
                 product_url=self.get_product_url(asin),
                 gallery_image_urls=[],
                 local_asset_ids=[],
                 primary_image_url=None,
                 fetch_status="blocked",
-                fetch_error="no_images_found",
+                fetch_error="confirmed_placeholder_only" if rejected else "no_images_found",
                 source_provider=source_provider,
-        )
+            )
+            self._queue_browser_recovery(asin, title_hint)
+            return result
         basenames = _build_filename_variants(title_hint or asin, asin, limit=12)
         images: list[Image] = []
         public_urls: list[str] = []
         for index, url in enumerate(cleaned[:12]):
             basename = basenames[index] if index < len(basenames) else f"{(basenames[0] if basenames else 'vine-product')}-{index + 1}"
             try:
-                local_path = self.storage.save_from_url(
-                    url,
-                    prefix="amazon-vine",
-                    suggested_basename=basename,
-                )
+                image_bytes, quality = fetch_candidate_image(url)
+                fmt = str(quality.get("evidence", {}).get("format") or "JPEG").lower()
+                extension = ".png" if fmt == "png" else ".webp" if fmt == "webp" else ".jpg"
+                local_path = self.storage.save_bytes(image_bytes, extension=extension, prefix="amazon-vine")
             except Exception:
                 continue
             if self.owner_user_id is not None:
@@ -440,14 +531,17 @@ class AmazonProductMediaProvider:
                         "title_hint": title_hint,
                         "sequence": len(images) + 1,
                         "provider": source_provider,
+                        "identity_state": "unverified",
+                        "rights_state": "unverified",
+                        "quality_evidence": quality.get("evidence"),
                     },
                 )
                 self.db.add(image)
                 self.db.flush()
                 images.append(image)
             public_urls.append(_to_public_media_path(local_path))
-        if not public_urls:
-            return self._cache_result(
+        if not public_urls and not prior_urls:
+            result = self._cache_result(
                 asin,
                 product_url=self.get_product_url(asin),
                 gallery_image_urls=[],
@@ -457,7 +551,17 @@ class AmazonProductMediaProvider:
                 fetch_error="no_images_saved",
                 source_provider=source_provider,
             )
-        return self._cache_result(
+            self._queue_browser_recovery(asin, title_hint)
+            return result
+        public_urls, merge_rejected = merge_gallery_candidates(prior_urls, public_urls)
+        rejected.extend(merge_rejected)
+        prior_images = []
+        for asset_id in prior_ids:
+            asset = self.db.get(Image, int(asset_id))
+            if asset:
+                prior_images.append(asset)
+        images = [*prior_images, *images]
+        result = self._cache_result(
             asin,
             product_url=self.get_product_url(asin),
             gallery_image_urls=public_urls,
@@ -467,6 +571,9 @@ class AmazonProductMediaProvider:
             fetch_error=None,
             source_provider=source_provider,
         )
+        result["rejected_images"] = rejected
+        result["image_quality"] = {"verdict": "identity_unverified", "reasons": ["page_identity_evidence_pending_review"]}
+        return result
 
     def _lookup_from_product_page(self, asin: str, *, title_hint: str | None = None) -> dict:
         product_url = self.get_product_url(asin)
@@ -510,6 +617,7 @@ class AmazonProductMediaProvider:
                     source_provider="page_metadata",
                 )
                 result["description"] = description
+                self._queue_browser_recovery(asin, title_hint)
                 return result
 
             gallery = gallery[:12]
@@ -519,11 +627,10 @@ class AmazonProductMediaProvider:
             for index, url in enumerate(gallery):
                 basename = basenames[index] if index < len(basenames) else f"{(basenames[0] if basenames else 'vine-product')}-{index + 1}"
                 try:
-                    local_path = self.storage.save_from_url(
-                        url,
-                        prefix="amazon-vine",
-                        suggested_basename=basename,
-                    )
+                    image_bytes, quality = fetch_candidate_image(url)
+                    fmt = str(quality.get("evidence", {}).get("format") or "JPEG").lower()
+                    extension = ".png" if fmt == "png" else ".webp" if fmt == "webp" else ".jpg"
+                    local_path = self.storage.save_bytes(image_bytes, extension=extension, prefix="amazon-vine")
                 except Exception:
                     continue
                 if self.owner_user_id is not None:
@@ -536,6 +643,9 @@ class AmazonProductMediaProvider:
                             "asin": asin,
                             "title_hint": title_hint,
                             "sequence": len(images) + 1,
+                            "identity_state": "unverified",
+                            "rights_state": "unverified",
+                            "quality_evidence": quality.get("evidence"),
                         },
                     )
                     self.db.add(image)
@@ -554,6 +664,7 @@ class AmazonProductMediaProvider:
                     source_provider="page_metadata",
                 )
                 result["description"] = description
+                self._queue_browser_recovery(asin, title_hint)
                 return result
 
             result = self._cache_result(
@@ -567,6 +678,10 @@ class AmazonProductMediaProvider:
                 source_provider="page_metadata",
             )
             result["description"] = description
+            # Downloadability does not prove the page/image identity or
+            # rights. Queue the exact-ASIN browser gallery for evidence while
+            # retaining these candidates as unverified draft references.
+            self._queue_browser_recovery(asin, title_hint)
             return result
         except Exception as exc:  # noqa: BLE001
             result = self._cache_result(

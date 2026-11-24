@@ -22,9 +22,9 @@ from app.api.vine_imports import (
     repair_vine_images,
     upload_vine_report,
 )
-from app.models.models import Image, IntakeNotification, Listing, MarketplaceAccount, ProductMediaCache, User, VineImportBatch, VineImportItem
+from app.models.models import Image, IntakeNotification, Listing, MarketplaceAccount, ProductMediaCache, User, VineImageRecoveryJob, VineImportBatch, VineImportItem
 from app.services.amazon_media import AmazonProductMediaProvider, _extract_amazon_product_facts
-from app.services.image_quality import PRIME_LOGO_SHA256, validate_image_bytes
+from app.services.image_quality import PRIME_LOGO_SHA256, filter_known_placeholders, merge_gallery_candidates, validate_image_bytes
 from app.services.amazon_product_discovery import AmazonProductDiscoveryService
 from app.services.listing_review import normalize_listing_images
 from app.services.listing_review import derive_shipping_profile
@@ -62,6 +62,109 @@ def test_amazon_product_image_extractor_excludes_prime_brand_graphic():
     from app.services.amazon_media import _extract_amazon_product_images
     html = '<meta property="og:image" content="https://m.media-amazon.com/images/G/01/marketing/prime/2022PrimeBrand/Logos/Prime_Logo_RGB_Prime_Blue_MASTER.png">'
     assert _extract_amazon_product_images(html) == []
+
+
+PRIME_TEST_URL = "https://m.media-amazon.com/images/G/01/marketing/prime/2022PrimeBrand/Logos/Prime_Logo_RGB_Prime_Blue_MASTER.png"
+GOOD_TEST_URLS = [f"https://m.media-amazon.com/images/I/product-{index}.jpg" for index in range(5)]
+
+
+def test_gallery_filter_prime_logo_as_only_image():
+    kept, rejected = filter_known_placeholders([PRIME_TEST_URL])
+    assert kept == []
+    assert rejected[0]["verdict"] == "confirmed_placeholder"
+
+
+def test_gallery_filter_prime_logo_plus_five_valid_candidates():
+    kept, rejected = filter_known_placeholders([PRIME_TEST_URL, *GOOD_TEST_URLS])
+    assert kept == GOOD_TEST_URLS
+    assert len(rejected) == 1
+
+
+def test_gallery_filter_valid_candidate_first_keeps_order_and_filters_prime():
+    kept, _ = filter_known_placeholders([GOOD_TEST_URLS[0], PRIME_TEST_URL, *GOOD_TEST_URLS[1:]])
+    assert kept == GOOD_TEST_URLS
+    assert kept[0] == GOOD_TEST_URLS[0]
+
+
+def test_gallery_filter_prime_primary_reselects_first_valid_alternate():
+    kept, rejected = filter_known_placeholders([PRIME_TEST_URL, GOOD_TEST_URLS[0]])
+    recalculated_primary = kept[0] if kept else None
+    assert recalculated_primary == GOOD_TEST_URLS[0]
+    assert len(rejected) == 1
+
+
+def test_gallery_filter_all_invalid_assets_leaves_no_usable_candidate():
+    kept, rejected = filter_known_placeholders([PRIME_TEST_URL, ""])
+    assert kept == []
+    assert len(rejected) == 2
+    assert validate_image_bytes(b"corrupt image")["verdict"] == "decode_failed"
+
+
+def test_gallery_retry_merge_preserves_good_candidates_and_deduplicates():
+    merged, rejected = merge_gallery_candidates([GOOD_TEST_URLS[0], PRIME_TEST_URL, GOOD_TEST_URLS[1]], [GOOD_TEST_URLS[1], GOOD_TEST_URLS[2]])
+    assert merged == GOOD_TEST_URLS[:3]
+    assert len(rejected) == 1
+
+
+def test_cached_gallery_filters_prime_per_image_and_recalculates_primary_without_deleting_source_records(db_session, monkeypatch, tmp_path):
+    from PIL import Image as PILImage
+    monkeypatch.setattr(settings, "storage_root", str(tmp_path))
+    PILImage.new("RGB", (400, 400), "white").save(tmp_path / "good.jpg", format="JPEG")
+    user = User(email=f"vine-gallery-{uuid4()}@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.flush()
+    prime = Image(user_id=user.id, source_url=PRIME_TEST_URL, local_path=str(tmp_path / "prime.png"))
+    good = Image(user_id=user.id, source_url=GOOD_TEST_URLS[0], local_path=str(tmp_path / "good.jpg"))
+    db_session.add_all([prime, good])
+    db_session.flush()
+    cache = ProductMediaCache(asin="B000000001", marketplace_region="US", primary_image_url="/media/prime.png", gallery_image_urls_json=["/media/prime.png", "/media/good.jpg"], local_asset_ids_json=[prime.id, good.id], fetch_status="fetched")
+    db_session.add(cache)
+    db_session.flush()
+    result = AmazonProductMediaProvider(db_session)._filter_cached_gallery(cache)
+    assert result["gallery_image_urls"] == ["/media/good.jpg"]
+    assert result["primary_image_url"] == "/media/good.jpg"
+    assert result["image_quality"]["verdict"] == "identity_unverified"
+    assert db_session.get(Image, prime.id) is not None
+    assert db_session.get(Image, good.id) is not None
+
+
+def test_vine_image_recovery_enqueue_is_per_user_asin_idempotent(db_session):
+    from app.services.vine_image_recovery import enqueue_recovery
+    user = User(email=f"vine-recovery-{uuid4()}@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.flush()
+    first = enqueue_recovery(db_session, user_id=user.id, asin="b000000001", title_hint="Sealed item")
+    db_session.commit()
+    second = enqueue_recovery(db_session, user_id=user.id, asin="B000000001", title_hint="Updated title")
+    db_session.commit()
+    assert first.id == second.id
+    assert second.title_hint == "Sealed item"
+    assert db_session.query(VineImageRecoveryJob).filter_by(user_id=user.id, asin="B000000001").count() == 1
+
+
+def test_image_recovery_candidate_requires_operator_attach_and_remains_pending_reference(db_session):
+    from app.api.vine_imports import attach_vine_image_recovery_candidate
+    user = User(email=f"vine-review-candidate-{uuid4()}@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.flush()
+    listing = Listing(user_id=user.id, source_type="amazon_vine", title="New sealed item", image_urls=[], listing_images=[])
+    db_session.add(listing)
+    db_session.flush()
+    asset = Image(user_id=user.id, source_url=GOOD_TEST_URLS[0], local_path="/tmp/candidate.jpg", image_metadata={"asin": "B000000001", "rights_state": "unverified"})
+    db_session.add(asset)
+    db_session.flush()
+    job = VineImageRecoveryJob(user_id=user.id, listing_id=listing.id, asin="B000000001", status="review_required", candidates_json=[{"image_id": asset.id, "storage_path": "/media/recovered/candidate.jpg", "operator_state": "pending_review", "rights_status": "unverified"}], page_evidence_json={"source_url": "https://www.amazon.com/dp/B000000001"})
+    db_session.add(job)
+    db_session.commit()
+    result = attach_vine_image_recovery_candidate(job.id, 0, db_session, user)
+    db_session.refresh(listing)
+    candidate = listing.listing_images[0]
+    assert result["image_review_state"] == "suggested"
+    assert candidate["is_reference"] is True
+    assert candidate["operator_state"] == "suggested"
+    assert candidate["metadata"]["rights_state"] == "unverified"
+    assert candidate["metadata"]["identity_state"] == "asin_verified_variant_unverified"
+    assert listing.image_urls == ["/media/recovered/candidate.jpg"]
 
 
 def test_vine_dimension_merge_respects_operator_locked_item_height():
@@ -793,7 +896,8 @@ def build_sample_csv():
 def _write_cached_media_file(tmp_path, relative_path: str) -> str:
     target = tmp_path / relative_path
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(b"posterpro-test-image")
+    from PIL import Image as PILImage
+    PILImage.new("RGB", (320, 320), "white").save(target, format="JPEG")
     return f"/media/{relative_path}"
 
 
@@ -999,10 +1103,15 @@ def test_amazon_media_provider_uses_owner_user_and_region(monkeypatch, db_sessio
             return FakeResponse()
 
     monkeypatch.setattr("app.services.amazon_media.httpx.Client", FakeClient)
+    from io import BytesIO
+    from PIL import Image as PILImage
+    fake_image = BytesIO()
+    PILImage.new("RGB", (400, 400), "white").save(fake_image, format="JPEG")
+    monkeypatch.setattr("app.services.amazon_media.fetch_candidate_image", lambda url: (fake_image.getvalue(), {"evidence": {"format": "JPEG", "dimensions": [400, 400]}}))
     monkeypatch.setattr(
         provider.storage,
-        "save_from_url",
-        lambda url, prefix="amazon-vine", suggested_basename=None: f"/tmp/storage/{prefix}/cached.jpg",
+        "save_bytes",
+        lambda data, extension=".jpg", prefix="amazon-vine": f"/tmp/storage/{prefix}/cached.jpg",
     )
 
     result = provider._lookup_from_product_page("B000TEST01")
@@ -1314,9 +1423,12 @@ def test_amazon_media_permanent_metadata_miss_requires_explicit_retry(db_session
     assert calls == ["B0PERMNT01"]
 
 
-def test_create_listing_drafts_attaches_cached_amazon_images_and_is_idempotent(db_session):
+def test_create_listing_drafts_attaches_cached_amazon_images_and_is_idempotent(db_session, monkeypatch, tmp_path):
     settings.amazon_media_lookup_enabled = True
     settings.amazon_media_page_fallback_enabled = True
+    monkeypatch.setattr(settings, "storage_root", str(tmp_path))
+    _write_cached_media_file(tmp_path, "amazon-vine/primary.jpg")
+    _write_cached_media_file(tmp_path, "amazon-vine/alt.jpg")
 
     user = User(email=f"vine-cached-{uuid4()}@example.com", role="owner", is_admin=True)
     db_session.add(user)
@@ -1946,7 +2058,7 @@ def test_create_listing_drafts_fetch_media_first_uses_bridge_fallback_when_image
     def _discover(self, *, asin=None, product_name=None, manual_url=None):  # noqa: ANN001
         return {"asin": asin or "B000FETCH1", "status": "ok", "images": [], "product_facts": {}}
 
-    def _bridge_capture(self, db, asin, title_hint):  # noqa: ANN001
+    def _bridge_capture(self, db, asin, title_hint, **kwargs):  # noqa: ANN001
         primary = _write_cached_media_file(tmp_path, f"amazon-vine/{asin.lower()}-primary.jpg")
         secondary = _write_cached_media_file(tmp_path, f"amazon-vine/{asin.lower()}-secondary.jpg")
         cache = ProductMediaCache(

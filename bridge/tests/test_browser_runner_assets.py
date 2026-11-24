@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from app.browser_runner import BrowserRunnerConfig, BrowserRunnerError, MARKETPLACE_BROWSER_SPECS, MarketplaceBrowserRunner
+from app.browser_runner import AmazonMarketplaceBrowserRunner, BrowserRunnerConfig, BrowserRunnerError, MARKETPLACE_BROWSER_SPECS, MarketplaceBrowserRunner
 
 
 def test_generated_screenshot_is_persisted_as_asset(tmp_path: Path):
@@ -34,6 +34,36 @@ def test_generated_screenshot_is_persisted_as_asset(tmp_path: Path):
     assert captured["content_type"] == "image/png"
     assert captured["file_name"] == "example.png"
     assert captured["source_url"] is None
+
+
+def test_amazon_asin_capture_records_exact_page_and_gallery_evidence(tmp_path: Path):
+    class Locator:
+        first = None
+        def __init__(self): self.first = self
+        def inner_text(self, timeout=None): raise RuntimeError("variation not present")
+
+    class Title:
+        def inner_text(self): return "Exact Product Title"
+
+    class Page:
+        url = "https://www.amazon.com/dp/B000000001"
+        def goto(self, url, wait_until=None): self.url = url
+        def wait_for_timeout(self, _milliseconds): pass
+        def evaluate(self, _script): return ["https://m.media-amazon.com/images/I/exact.jpg"]
+        def content(self): return ""
+        def query_selector(self, _selector): return Title()
+        def locator(self, _selector): return Locator()
+        def close(self): pass
+
+    class Context:
+        def new_page(self): return Page()
+
+    runner = AmazonMarketplaceBrowserRunner(BrowserRunnerConfig(screenshots_dir=tmp_path))
+    capture = runner._capture_amazon_product_by_asin(Context(), asin="B000000001")
+    assert capture["page_asin"] == "B000000001"
+    assert capture["title"] == "Exact Product Title"
+    assert capture["image_urls"] == ["https://m.media-amazon.com/images/I/exact.jpg"]
+    assert capture["gallery_evidence"][0]["page_asin"] == "B000000001"
 
 
 class _CountLocator:

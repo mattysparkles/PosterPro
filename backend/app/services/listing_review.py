@@ -82,6 +82,10 @@ def classify_listing_image(image: dict | None) -> dict:
         kind = "internal_reference"
     elif provenance in {"seller_photographed", "seller_photo", "operator_photographed"}:
         kind = "seller_photographed"
+    elif source == "actual_upload":
+        # The explicit upload source label is recorded only by the seller-photo
+        # upload workflow; Amazon/catalog sources never use this marker.
+        kind = "seller_photographed"
     elif source in {"google_photos_album", "photo_intake", "shelf_census", "upload"} and image.get("seller_captured") is True:
         kind = "seller_photographed"
     elif not (image.get("storage_path") or image.get("url") or image.get("local_path")):

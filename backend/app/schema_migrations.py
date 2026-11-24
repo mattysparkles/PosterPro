@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_ALLOWLIST = (
     "20261109_shelf_census.sql",
     "20261110_amazon_media_retry_state.sql",
+    "20261123_vine_image_recovery_jobs.sql",
 )
 LEDGER = "posterpro_schema_migrations"
 BASELINE_VERSION = "baseline-existing-schema"
@@ -99,7 +100,7 @@ def apply_managed_migrations(database_url: str | URL, *, migration_dir: Path | N
                         connection.exec_driver_sql(sql)
                         connection.execute(text(f"INSERT INTO {LEDGER}(version, checksum, description) VALUES (:version, :checksum, :description)"), {
                             "version": filename, "checksum": checksum,
-                            "description": "Additive Shelf Census locations, identity, and print queue support",
+                            "description": "Durable Vine exact-ASIN image recovery and operator review queue",
                         })
                         applied.append({"version": filename, "checksum": checksum})
             finally:

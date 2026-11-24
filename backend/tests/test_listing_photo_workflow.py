@@ -125,6 +125,30 @@ async def test_actual_photo_upload_attaches_as_non_reference_and_can_be_approved
     assert approved_image["metadata"]["seller_photo_attestation"] is True
 
 
+def test_approving_catalog_reference_never_relabels_it_as_seller_photo(db_session):
+    from app.api.routes import ListingPhotoActionRequest, approve_listing_photos
+    user = User(email=f"catalog-photo-{uuid4()}@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.flush()
+    listing = Listing(
+        user_id=user.id, source_type="amazon_vine", title="Sealed catalog product",
+        image_urls=["/media/vine-recovery/candidate.jpg"],
+        listing_images=[{
+            "storage_path": "/media/vine-recovery/candidate.jpg", "source_platform": "amazon",
+            "operator_state": "suggested", "is_reference": True,
+            "metadata": {"image_provenance": "product_catalog", "rights_state": "unverified"},
+        }],
+    )
+    db_session.add(listing)
+    db_session.commit()
+    result = approve_listing_photos(listing.id, ListingPhotoActionRequest(storage_paths=["/media/vine-recovery/candidate.jpg"]), db_session, user)
+    approved = result["listing"]["listing_images"][0]
+    assert approved["operator_state"] == "approved"
+    assert approved["is_reference"] is True
+    assert approved["metadata"]["image_provenance"] == "product_catalog"
+    assert approved["metadata"]["rights_state"] == "unverified"
+
+
 @pytest.mark.anyio
 async def test_actual_photo_upload_prevents_path_traversal(async_client, monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "storage_root", str(tmp_path))
