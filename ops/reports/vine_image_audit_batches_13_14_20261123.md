@@ -37,17 +37,19 @@ The 86 missing primary files are a shared cohort. A missing primary does not mea
 
 No remote URL probes were necessary for the identified bad image: the source resolved to the local saved file. Other saved gallery paths are local. This audit did not make network requests to Amazon or marketplace services.
 
-## Code correction included in this revision
+## Follow-up implementation (2026-11-24)
 
-- Added reusable `image_quality` validation with known Prime asset URL/hash detection, bounded byte handling, decoder/dimension checks, optional exact-ASIN/variation evidence, and conservative verdicts. Hash similarity/reuse is not treated as proof.
-- The fast Amazon HTML extractor now drops the known Prime logo asset before it can be saved as product media.
-- Added deterministic unit coverage for known logo detection and exact page/variation matching. This is a narrow first integrity layer; it does not yet provide a durable per-ASIN browser-gallery job queue or candidate review/approval API.
+The audit findings above remain a read-only snapshot. The following code and test changes were committed as `ce31ed76cab54cc1701be8fa0303783a8b173fb6`:
 
-## Remaining work and safe repair sequence
+- Image filtering is per asset. The confirmed Prime logo is removed from gallery candidates, valid unrelated entries retain their order, uncertain entries remain reviewable, and the first surviving candidate becomes the recalculated primary. Repeated recovery merges deduplicate without dropping previously usable media. Original `Image` records are retained.
+- The Amazon fast lookup uses bounded decoding and allowlisted image requests, preserves identity/rights as separate states, and creates an idempotent per-user/ASIN recovery request when it has no suitable candidates or identity remains uncertain.
+- Recovery jobs are durable, rate-limited to three active requests, capped at four attempts, and recover interrupted submission/polling work. Submission requires the existing paired bridge, one eligible authorized Amazon account, and the configured headless browser runner. No arbitrary profile, foreground focus, search-result thumbnail, or access-control bypass is used.
+- The browser collector opens the exact ASIN product page and stores page-ASIN, selected-variant, gallery URL, and source evidence. Retrieved media is saved as a separate pending candidate with rights unverified. A page/ASIN mismatch, blocked collector, missing authorization, or unusable gallery remains pending/manual review.
+- The Vine import workspace now shows recovery status and previews. An operator can explicitly add a candidate to its linked draft as a suggested reference or reject it. Neither action promotes it to seller photography, marks rights verified, changes primary order, or publishes externally. Existing operator-approved non-placeholder media is protected from repair replacement.
+- Sealed Vine draft preparation remains independent of seller-taken photos. Candidate acquisition and final destination image eligibility remain separate.
 
-1. Review the 73 confirmed Prime-primary listings and 86 missing-primary paths against alternate gallery assets. Do not automatically replace any approved image.
-2. Add a durable, idempotent acquisition queue that stores exact-ASIN page/variation evidence and candidate URLs separately from listing galleries.
-3. Gate browser collection on an existing paired, authorized Amazon bridge account. The currently inspected bridge import path permits Amazon without an account; invoking it for this task would violate the no-arbitrary-session requirement. Until the bridge exposes that authorization gate, affected rows need pending/manual review rather than automated browser access.
-4. Candidate media should remain pending operator review with source and rights unverified. Explicit approval is required before attaching or promoting it. No external submission is implied.
+The 73 Prime-primary records, 86 missing-primary paths, and 15 rows without primary metadata were not modified by this implementation. They still require a controlled repair review after the code and additive schema migration are deployed. Existing candidate alternates may be usable, but identity and rights were not established by this database snapshot. Operator approval remains required before any recovered media is attached or promoted; marketplace submission remains a separate destination-specific decision.
+
+Local verification: backend Vine/listing/preflight regressions passed (188 tests); the post-guard Vine suite passed (128 tests); bridge authorization/gallery tests passed (16); frontend unit tests passed (53); extension tests passed (212); frontend production build passed. Both GitHub CI checks for PR #26 passed on this commit. This change is not deployed and no production migration, listing, media, or marketplace state was changed.
 
 Draft preparation remains independent from seller-taken photos per the existing Vine readiness correction. This report does not claim that the affected listings are image-ready for final marketplace submission.
