@@ -1,4 +1,5 @@
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import HTTPException
 
@@ -193,3 +194,66 @@ def test_vine_gallery_recovery_refuses_non_headless_runner(tmp_path: Path, monke
             raise AssertionError("Vine recovery must refuse a foreground browser")
     finally:
         store.executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_vine_recovery_uses_ready_account_state_in_new_headless_context_not_extension_pairing(tmp_path: Path, monkeypatch):
+    store = bridge_main.JobStore(tmp_path, default_delay_seconds=0, max_workers=1)
+    monkeypatch.setattr(bridge_main.settings, "browser_headless", True)
+    monkeypatch.setattr(bridge_main.settings, "runner_mode", "playwright")
+    configured = {
+        "account_key": "amazon-disposable-test",
+        "browser_enabled": True,
+        "credential_configured": True,
+        "session_state": "ready",
+        "session_payload": {"cookies": [{"name": "test-only", "value": "redacted"}]},
+    }
+    monkeypatch.setattr(bridge_main.account_store, "list_accounts", lambda _marketplace=None: [configured])
+    monkeypatch.setattr(bridge_main.account_store, "resolve_account", lambda *_args: configured)
+    captured = {}
+
+    class FakeRunner:
+        def run_import(self, *, job_id, bridge_account, payload):
+            captured.update(job_id=job_id, bridge_account=bridge_account, payload=payload)
+            return {"imported_listings": []}
+
+    def create_runner(marketplace, config):
+        captured["marketplace"] = marketplace
+        captured["headless"] = config.headless
+        return FakeRunner()
+
+    monkeypatch.setattr(bridge_main, "create_marketplace_browser_runner", create_runner)
+    monkeypatch.setattr(bridge_main.connect_session_store, "get_session", lambda *_args: (_ for _ in ()).throw(AssertionError("browser-extension pairing is not this headless route")))
+    job = {
+        "job_id": "vine-recovery-headless-context",
+        "job_type": "import",
+        "execution_mode": "browser_assist",
+        "payload": {"source_marketplace": "amazon", "operation": "vine_image_gallery_recovery", "asin": "B000000046"},
+    }
+    try:
+        store._run_import_job(job)
+        assert captured["marketplace"] == "amazon"
+        assert captured["headless"] is True
+        assert captured["bridge_account"]["account_key"] == "amazon-disposable-test"
+        assert captured["bridge_account"]["session_payload"]["cookies"]
+    finally:
+        store.executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_vine_recovery_bridge_idempotency_key_is_atomic_under_concurrent_delivery(tmp_path: Path):
+    store = bridge_main.JobStore(tmp_path, default_delay_seconds=0, max_workers=1)
+    submitted = []
+    store.executor.submit = lambda _fn, job_id: submitted.append(job_id)
+    request = {
+        "source_marketplace": "amazon",
+        "operation": "vine_image_gallery_recovery",
+        "acquisition_request_key": "vine-image-recovery:job-42",
+        "asin": "B000000042",
+    }
+    try:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(lambda _: store.create_job("import", "browser_assist", request), range(16)))
+        assert len({row["job_id"] for row in results}) == 1
+        assert len(store.jobs) == 1
+        assert len(submitted) == 1
+    finally:
+        store.executor.shutdown(wait=True)

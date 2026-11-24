@@ -196,28 +196,27 @@ class JobStore:
 
     def create_job(self, job_type: str, execution_mode: str, payload: dict[str, Any]) -> dict[str, Any]:
         recovery_key = str(payload.get("acquisition_request_key") or "").strip()
-        if recovery_key:
-            with self.lock:
+        with self.lock:
+            if recovery_key:
                 prior = next((job for job in self.jobs.values() if str((job.get("payload") or {}).get("acquisition_request_key") or "") == recovery_key), None)
                 if prior:
                     return deepcopy(prior)
-        job_id = self._next_job_id()
-        now = self._now()
-        job = {
-            "job_id": job_id,
-            "job_type": job_type,
-            "execution_mode": execution_mode,
-            "status": "queued",
-            "created_at": now,
-            "updated_at": now,
-            "started_at": None,
-            "completed_at": None,
-            "payload": payload,
-            "result": None,
-            "error": None,
-            "cancel_requested": False,
-        }
-        with self.lock:
+            job_id = self._next_job_id()
+            now = self._now()
+            job = {
+                "job_id": job_id,
+                "job_type": job_type,
+                "execution_mode": execution_mode,
+                "status": "queued",
+                "created_at": now,
+                "updated_at": now,
+                "started_at": None,
+                "completed_at": None,
+                "payload": payload,
+                "result": None,
+                "error": None,
+                "cancel_requested": False,
+            }
             self.jobs[job_id] = job
             self._save()
         self.executor.submit(self._process_job, job_id)

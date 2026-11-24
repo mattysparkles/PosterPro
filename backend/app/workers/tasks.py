@@ -669,6 +669,11 @@ def dispatch_vine_image_recovery_jobs(limit: int = 3) -> dict[str, Any]:
         ).limit(20)).scalars().all()
         for stale in stale_collecting:
             poll_vine_image_recovery_job.apply_async(args=[stale.id], countdown=1)
+        # Serialize the global active-count + claim window. Row locks alone
+        # protect individual pending rows but allow two dispatchers to count
+        # the same free slots and claim different rows concurrently.
+        if db.bind and db.bind.dialect.name == "postgresql":
+            db.execute(text("SELECT pg_advisory_xact_lock(hashtext('posterpro-vine-image-recovery-dispatch'))"))
         active_count = db.execute(select(func.count(VineImageRecoveryJob.id)).where(VineImageRecoveryJob.status.in_(["submitting", "submitting_remote", "collecting", "processing_review"]))).scalar_one()
         available_slots = max(0, 3 - int(active_count or 0))
         if not available_slots:
@@ -710,7 +715,9 @@ def submit_vine_image_recovery_request(job_id: int) -> dict[str, Any]:
                 payload={
                     "source_marketplace": "amazon",
                     "operation": "vine_image_gallery_recovery",
-                    "acquisition_request_key": f"vine-image-recovery:{job.id}:{job.attempts}",
+                    # Keep the key stable across retries: the bridge may have
+                    # accepted the job even when its response was lost.
+                    "acquisition_request_key": f"vine-image-recovery:{job.id}",
                     "asin": job.asin,
                     "asins": [job.asin],
                     "payload": {"asin": job.asin, "product_name": job.title_hint},

@@ -4419,6 +4419,9 @@ def set_listing_photo_primary(
         raise HTTPException(status_code=404, detail="No matching listing photo found")
     reordered = [image for image in images if str(image.get("storage_path") or "").strip() == target]
     reordered.extend(image for image in images if str(image.get("storage_path") or "").strip() != target)
+    for index, image in enumerate(reordered):
+        image["display_order"] = index
+        image["role"] = "primary" if index == 0 else "alternate_angle"
     listing.listing_images = normalize_listing_images(listing_images=reordered)
     listing.image_urls = [item["storage_path"] for item in (listing.listing_images or []) if item.get("operator_state") != "rejected"]
     db.add(listing)

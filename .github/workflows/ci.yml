@@ -90,7 +90,17 @@ jobs:
             backend/tests/test_listing_photo_workflow.py \
             backend/tests/test_vine_category_audit.py \
             backend/tests/test_vine_import.py \
+            backend/tests/test_vine_image_recovery_workers.py \
             -q --junitxml=.ci-results/backend-junit.xml 2>&1 | tee .ci-results/backend.log
+
+      - name: Bridge account authorization and gallery collection tests
+        shell: bash
+        run: |
+          set -o pipefail
+          PYTHONPATH=bridge pytest \
+            bridge/tests/test_connect_sessions.py \
+            bridge/tests/test_browser_runner_assets.py \
+            -q --junitxml=.ci-results/bridge-junit.xml 2>&1 | tee .ci-results/bridge.log
 
       - name: Set up Node
         uses: actions/setup-node@v4
