@@ -99,7 +99,7 @@ schema_version="${POSTERPRO_DATABASE_SCHEMA_VERSION:-baseline-existing-schema}"
 feature_manifest_sha="$(sha256sum "$source_root/ops/FEATURE_MANIFEST.csv" | awk '{print $1}')"
 python_lock_sha="$(sha256sum "$source_root/backend/runtime-requirements.lock" | awk '{print $1}')"
 node_lock_sha="$(sha256sum "$source_root/frontend/package-lock.json" | awk '{print $1}')"
-migration_plan="20261109_shelf_census.sql,20261110_amazon_media_retry_state.sql"
+migration_plan="20261109_shelf_census.sql,20261110_amazon_media_retry_state.sql,20261123_vine_image_recovery_jobs.sql"
 cat > "$release_dir/release.json" <<EOF
 {
   "release_id": "$release_id",

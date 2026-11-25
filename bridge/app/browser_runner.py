@@ -2548,6 +2548,7 @@ class AmazonMarketplaceBrowserRunner(MarketplaceBrowserRunner):
                     or ""
                 ).strip()
                 for asin in normalized_asins:
+                    capture: dict[str, Any] = {}
                     try:
                         # A Vine row with an ASIN must be captured from that
                         # exact product page.  A title search can select a
@@ -2556,6 +2557,8 @@ class AmazonMarketplaceBrowserRunner(MarketplaceBrowserRunner):
                         capture = self._capture_amazon_product_by_asin(context, asin=asin)
                         if recovery_operation and str(capture.get("page_asin") or "").upper() != asin:
                             raise BrowserRunnerError("Amazon product page ASIN did not match the requested ASIN")
+                        if recovery_operation and not capture.get("image_urls"):
+                            raise BrowserRunnerError("Exact-ASIN product page returned no product-gallery images")
                         product_url = capture["source_url"]
                         image_urls = capture["image_urls"]
                         title = capture.get("title")
@@ -2563,6 +2566,7 @@ class AmazonMarketplaceBrowserRunner(MarketplaceBrowserRunner):
                         product_url = f"https://www.amazon.com/dp/{asin}"
                         image_urls = []
                         title = None
+                        capture = {}
                     imported_listings.append(
                         {
                             "source_listing_reference": asin,
@@ -2601,6 +2605,17 @@ class AmazonMarketplaceBrowserRunner(MarketplaceBrowserRunner):
         try:
             item_page.goto(product_url, wait_until="domcontentloaded")
             item_page.wait_for_timeout(1500)
+            try:
+                page_title = str(item_page.title() or "")
+            except Exception:
+                page_title = ""
+            try:
+                body_text = str(item_page.locator("body").inner_text(timeout=3000) or "")
+            except Exception:
+                body_text = ""
+            page_text = (page_title + " " + body_text).lower()
+            if any(marker in page_text for marker in ("enter the characters you see below", "robot check", "automated access", "captcha", "sorry, we just need to make sure you're not a robot")):
+                raise BrowserRunnerError("Amazon access challenge detected; recovery remains pending for manual review")
             image_urls = self._extract_amazon_product_images(item_page)
             title = self._extract_amazon_title(item_page)
             final_url = str(item_page.url or "")

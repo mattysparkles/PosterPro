@@ -3074,6 +3074,27 @@ class VineImportService:
                 approved=False,
             )
             unsafe_images = [image for image in normalized_images if _is_unsafe_vine_image(image)]
+            # Historical Amazon catalog assets were sometimes marked approved
+            # by the importer. A confirmed placeholder is unsafe regardless
+            # of that stale state; preserve it as provenance but don't let it
+            # suppress recovery. Genuine approved/seller photos remain locked.
+            from app.services.image_quality import is_known_prime_placeholder, validate_image_file
+            def confirmed_placeholder(image: dict) -> bool:
+                image_meta = image.get("metadata") if isinstance(image.get("metadata"), dict) else {}
+                candidate_urls = (image.get("storage_path"), image.get("source_url"))
+                if any(is_known_prime_placeholder(url) for url in candidate_urls):
+                    return True
+                for candidate_url in candidate_urls:
+                    local_path = self._local_media_file_for_url(candidate_url)
+                    if local_path is not None and local_path.is_file():
+                        try:
+                            if validate_image_file(str(local_path)).get("evidence", {}).get("sha256") == "0d319bf7425072bad431fd891c02ec8c9f954aa1a9a2e0a230a9049c3ed38105":
+                                return True
+                        except OSError:
+                            pass
+                return image_meta.get("quality_verdict") == "confirmed_placeholder"
+            placeholder_images = [image for image in normalized_images if confirmed_placeholder(image)]
+            unsafe_images.extend(image for image in placeholder_images if image not in unsafe_images)
             has_operator_approved_media = any(
                 image.get("operator_state") == "approved" or image.get("operator_approved") is True
                 for image in normalized_images if image not in unsafe_images
@@ -3145,9 +3166,8 @@ class VineImportService:
                 )
             ).scalar_one_or_none()
             if cache is not None and cache.fetch_status == "fetched" and cache.source_provider not in {"manual"}:
-                gallery_urls = self._filter_valid_gallery_urls(
-                    [str(url) for url in (cache.gallery_image_urls_json or []) if str(url).strip()]
-                )
+                cache_result = provider._filter_cached_gallery(cache)
+                gallery_urls = self._filter_valid_gallery_urls(cache_result.get("gallery_image_urls") or [])
             else:
                 gallery_urls = []
                 if result and result.get("image_status") in {"cached", "fetched"}:
@@ -3162,9 +3182,8 @@ class VineImportService:
                         )
                     ).scalar_one_or_none()
                     if cache is not None and cache.fetch_status == "fetched" and cache.source_provider not in {"manual"}:
-                        gallery_urls = self._filter_valid_gallery_urls(
-                            [str(url) for url in (cache.gallery_image_urls_json or []) if str(url).strip()]
-                        )
+                        cache_result = provider._filter_cached_gallery(cache)
+                        gallery_urls = self._filter_valid_gallery_urls(cache_result.get("gallery_image_urls") or [])
 
             if not gallery_urls and use_bridge_session:
                 cache = self._bridge_capture_for_asin(db, asin, product_name, user_id=listing.user_id, listing_id=listing.id)
@@ -3209,10 +3228,13 @@ class VineImportService:
                 listing.image_urls = [image["storage_path"] for image in (listing.listing_images or []) if image.get("operator_state") != "rejected"]
 
             if (discovered_description or amazon_facts) and not is_human_owned_field(source_metadata, "description"):
-                listing.description = self._generate_description(
-                    item,
-                    amazon_description=discovered_description,
-                    amazon_facts=amazon_facts,
+                hydrated_facts = self._hydrate_vine_facts(
+                    {**(amazon_facts or {}), "product_description": discovered_description or (amazon_facts or {}).get("product_description")},
+                    item=item,
+                    listing=listing,
+                )
+                listing.description = self._generate_vine_original_description(
+                    db, listing=listing, item=item, facts=hydrated_facts,
                 )
             elif not is_human_owned_field(source_metadata, "description"):
                 listing.description = _sanitize_vine_text(listing.description) or listing.description
