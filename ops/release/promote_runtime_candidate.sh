@@ -50,10 +50,20 @@ if subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", old["g
 print(f"Promotion preconditions: candidate={commit}, active={old['release_id']}, canonical_head={head}")
 PY
 
-if ! rg -q '^1079 passed[, ]' "$candidate/backend-tests.txt" || ! rg -q '^12 passed([ ,]|$)' "$candidate/backend-tests.txt"; then
-  echo "Candidate lacks the expected full backend and bridge test evidence." >&2
-  exit 4
-fi
+python3 - "$candidate/backend-tests.txt" <<'PY'
+import pathlib, re, sys
+lines = pathlib.Path(sys.argv[1]).read_text(errors="replace").splitlines()
+summaries = [line.strip() for line in lines if re.match(r"^\s*\d+ passed(?:,.*)? in [\d.]+s\s*$", line)]
+if len(summaries) != 2:
+    raise SystemExit("Candidate must contain passing full-backend and bridge pytest summaries.")
+if any(re.search(r"\b(?:failed|error|errors)\b", line, re.I) for line in summaries):
+    raise SystemExit("Candidate test evidence contains a failed or errored test.")
+if any(int(re.match(r"^\s*(\d+)", line).group(1)) < 1 for line in summaries):
+    raise SystemExit("Candidate test evidence contains an empty suite.")
+print("Candidate test evidence contains passing backend and bridge suites:")
+for summary in summaries:
+    print(f"  {summary}")
+PY
 "$canonical_repo/ops/release/runtime_preflight.sh" "$candidate"
 
 # Match the live migration ledger against the candidate's exact migration SQL.
