@@ -128,6 +128,45 @@ def test_cached_gallery_filters_prime_per_image_and_recalculates_primary_without
     assert db_session.get(Image, good.id) is not None
 
 
+def test_cached_gallery_rejects_known_prime_hash_when_local_url_hides_amazon_asset(db_session, monkeypatch, tmp_path):
+    from app.services import amazon_media
+
+    monkeypatch.setattr(settings, "storage_root", str(tmp_path))
+    prime_path = tmp_path / "amazon-vine" / "catalog-front.png"
+    good_path = tmp_path / "amazon-vine" / "catalog-alternate.jpg"
+    prime_path.parent.mkdir(parents=True)
+    prime_path.write_bytes(b"stored prime placeholder fixture")
+    good_path.write_bytes(b"valid product image fixture")
+    user = User(email=f"vine-hash-gallery-{uuid4()}@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.flush()
+    prime = Image(user_id=user.id, source_url="https://m.media-amazon.com/images/I/not-obviously-prime.png", local_path=str(prime_path))
+    good = Image(user_id=user.id, source_url=GOOD_TEST_URLS[0], local_path=str(good_path))
+    db_session.add_all([prime, good])
+    db_session.flush()
+
+    def validate(path, **kwargs):
+        digest = PRIME_LOGO_SHA256 if str(path) == str(prime_path) else "b" * 64
+        return {"verdict": "identity_unverified", "evidence": {"sha256": digest, "dimensions": [400, 400]}}
+
+    monkeypatch.setattr(amazon_media, "validate_image_file", validate)
+    cache = ProductMediaCache(
+        asin="B000000001", marketplace_region="US",
+        primary_image_url="/media/amazon-vine/catalog-front.png",
+        gallery_image_urls_json=["/media/amazon-vine/catalog-front.png", "/media/amazon-vine/catalog-alternate.jpg"],
+        local_asset_ids_json=[prime.id, good.id], fetch_status="fetched",
+    )
+    db_session.add(cache)
+    db_session.flush()
+
+    result = AmazonProductMediaProvider(db_session)._filter_cached_gallery(cache)
+
+    assert result["gallery_image_urls"] == ["/media/amazon-vine/catalog-alternate.jpg"]
+    assert result["primary_image_url"] == "/media/amazon-vine/catalog-alternate.jpg"
+    assert result["rejected_images"][0]["verdict"] == "confirmed_placeholder"
+    assert db_session.get(Image, prime.id) is not None
+
+
 def test_vine_image_recovery_enqueue_is_per_user_asin_idempotent(db_session):
     from app.services.vine_image_recovery import enqueue_recovery
     user = User(email=f"vine-recovery-{uuid4()}@example.com", role="owner", is_admin=True)
