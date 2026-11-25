@@ -2,10 +2,42 @@ from types import SimpleNamespace
 from datetime import UTC, datetime
 
 from app.models.models import Listing, User
+from app.models.enums import ListingStatus
 from app.api.routes import _compute_listing_bucket, _matches_marketplace_filter
 from app.services.canonical_readiness import canonical_listing_readiness, has_authorized_vine_import_listing_price, resolve_authoritative_listing_price
 from app.services.listing_ai import assess_description_quality
 from app.workers.tasks import _apply_vine_quality_lifecycle
+from app.services.pricing_research_service import validate_marketplace_readiness
+from app.services.pricing_research_service import compute_listing_quality_summary
+
+
+def test_legacy_photo_blocker_does_not_poison_canonical_seo_or_bulk_readiness():
+    listing = Listing(
+        user_id=2,
+        status=ListingStatus.draft,
+        source_type="amazon_vine",
+        title="New sealed outdoor storage organizer model ZX-410",
+        description="New factory sealed outdoor storage organizer with model ZX-410 and steel construction.",
+        listing_price=29.99,
+        suggested_price=29.99,
+        quantity=1,
+        condition="New",
+        category_suggestion="Home > Outdoor Storage",
+        item_specifics={"Brand": "Example", "Model": "ZX-410"},
+        listing_images=[],
+        image_urls=[],
+        condition_data={"condition_bucket": "new_in_box", "operator_review_required": False},
+        marketplace_data={"pricing_analysis": {"current_price": 29.99, "price_confidence": 0.8}},
+        source_metadata={"source_type": "amazon_vine", "asin": "B000ZX410", "batch_id": 7, "eligibility_status": "eligible"},
+    )
+    listing.readiness_summary = {"blockers": ["No approved actual item photos are attached."], "warnings": []}
+    canonical = canonical_listing_readiness(listing)
+    quality = compute_listing_quality_summary(listing, pricing_analysis={"current_price": 29.99, "price_confidence": 0.8})
+    seo_blockers = validate_marketplace_readiness(listing=listing, marketplace="facebook", pricing_analysis={"current_price": 29.99})
+
+    assert not any("photo" in reason.lower() or "image" in reason.lower() for reason in canonical["canonical_blocking_reasons"])
+    assert not any("photo" in reason.lower() or "image" in reason.lower() for reason in quality["blockers"])
+    assert "Photos missing" not in seo_blockers
 
 
 def _preflight(status="ready", blockers=None, *, category_id="123", **extra):

@@ -195,23 +195,28 @@ class JobStore:
         return uuid4().hex
 
     def create_job(self, job_type: str, execution_mode: str, payload: dict[str, Any]) -> dict[str, Any]:
-        job_id = self._next_job_id()
-        now = self._now()
-        job = {
-            "job_id": job_id,
-            "job_type": job_type,
-            "execution_mode": execution_mode,
-            "status": "queued",
-            "created_at": now,
-            "updated_at": now,
-            "started_at": None,
-            "completed_at": None,
-            "payload": payload,
-            "result": None,
-            "error": None,
-            "cancel_requested": False,
-        }
+        recovery_key = str(payload.get("acquisition_request_key") or "").strip()
         with self.lock:
+            if recovery_key:
+                prior = next((job for job in self.jobs.values() if str((job.get("payload") or {}).get("acquisition_request_key") or "") == recovery_key), None)
+                if prior:
+                    return deepcopy(prior)
+            job_id = self._next_job_id()
+            now = self._now()
+            job = {
+                "job_id": job_id,
+                "job_type": job_type,
+                "execution_mode": execution_mode,
+                "status": "queued",
+                "created_at": now,
+                "updated_at": now,
+                "started_at": None,
+                "completed_at": None,
+                "payload": payload,
+                "result": None,
+                "error": None,
+                "cancel_requested": False,
+            }
             self.jobs[job_id] = job
             self._save()
         self.executor.submit(self._process_job, job_id)
@@ -307,7 +312,19 @@ class JobStore:
         source_marketplace = str(payload.get("source_marketplace") or "unknown").lower()
         execution_mode = job["execution_mode"]
         bridge_account = None
-        requires_account = execution_mode in {"provider_assist", "browser_assist", "hosted_browser_assist"} and source_marketplace != "amazon"
+        recovery_operation = str(payload.get("operation") or "").strip().lower() == "vine_image_gallery_recovery"
+        requires_account = recovery_operation or (execution_mode in {"provider_assist", "browser_assist", "hosted_browser_assist"} and source_marketplace != "amazon")
+        if recovery_operation and (execution_mode != "browser_assist" or not settings.browser_headless):
+            raise RuntimeError("Vine image recovery requires an authorized headless browser session")
+        if recovery_operation:
+            eligible_accounts = [
+                account for account in account_store.list_accounts("amazon")
+                if account.get("browser_enabled") and account.get("credential_configured")
+                and str(account.get("session_state") or "").lower() in {"ready", "active", "valid"}
+            ]
+            if len(eligible_accounts) != 1:
+                raise RuntimeError("Vine recovery requires exactly one ready paired Amazon browser account; select or pair an account first")
+            payload = {**payload, "account_key": eligible_accounts[0]["account_key"]}
         if requires_account:
             bridge_account = account_store.resolve_account(source_marketplace, execution_mode, payload)
         if execution_mode in {"browser_assist", "hosted_browser_assist"} and settings.runner_mode in {"playwright", "browser"}:

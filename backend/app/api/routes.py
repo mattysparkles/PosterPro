@@ -506,11 +506,15 @@ def _matches_readiness_filter(listing: Listing, filter_value: str | None) -> boo
     condition_data = listing.condition_data if isinstance(listing.condition_data, dict) else {}
     shipping_profile = listing.shipping_profile if isinstance(listing.shipping_profile, dict) else {}
     pricing = (listing.marketplace_data or {}).get("pricing_analysis") if isinstance(listing.marketplace_data, dict) else {}
-    quality = listing.quality_summary if isinstance(listing.quality_summary, dict) else {}
+    raw_quality = getattr(listing, "quality_summary", None)
+    quality = raw_quality if isinstance(raw_quality, dict) else {}
     preflight_root = (listing.marketplace_data or {}).get("marketplace_preflight") if isinstance(listing.marketplace_data, dict) else {}
     by_marketplace = preflight_root.get("by_marketplace") if isinstance(preflight_root, dict) else {}
     ebay_preflight = by_marketplace.get("ebay") if isinstance(by_marketplace, dict) else None
     facebook_preflight = by_marketplace.get("facebook") if isinstance(by_marketplace, dict) else None
+    mercari_preflight = by_marketplace.get("mercari") if isinstance(by_marketplace, dict) else None
+    category_suggestions = (listing.marketplace_data or {}).get("marketplace_category_suggestions") if isinstance(listing.marketplace_data, dict) else {}
+    category_suggestions = category_suggestions.get("marketplaces") if isinstance(category_suggestions, dict) else {}
 
     def _preflight_ready(summary_row: dict | None) -> bool:
         return bool(summary_row and str(summary_row.get("status") or "").lower() in {"ready", "ready_with_warnings", "published"})
@@ -579,6 +583,25 @@ def _matches_readiness_filter(listing: Listing, filter_value: str | None) -> boo
         return bool(facebook_preflight and _preflight_blocked(facebook_preflight, ("PRICE",)))
     if normalized == "facebook_missing_category":
         return bool(facebook_preflight and _preflight_blocked(facebook_preflight, ("CATEGORY",)))
+    if normalized == "mercari_ready":
+        return bool(mercari_preflight and mercari_preflight.get("data_ready") is True)
+    if normalized == "mercari_blocked":
+        return bool(mercari_preflight and (str(mercari_preflight.get("preparation_status") or mercari_preflight.get("status") or "").lower() == "blocked" or (mercari_preflight.get("blocker_count") or 0) > 0))
+    if normalized == "mercari_missing_category":
+        return bool(mercari_preflight and _preflight_blocked(mercari_preflight, ("CATEGORY",)))
+    if normalized == "mercari_missing_photos":
+        return bool(mercari_preflight and _preflight_blocked(mercari_preflight, ("PHOTO", "IMAGE")))
+    if normalized == "mercari_missing_attributes":
+        return bool(mercari_preflight and _preflight_blocked(mercari_preflight, ("ATTRIBUTE", "ASPECT")))
+    if normalized in {"facebook_category_review", "ebay_category_review", "mercari_category_review"}:
+        market = normalized.removesuffix("_category_review")
+        suggestion = category_suggestions.get(market) if isinstance(category_suggestions, dict) else None
+        return bool(isinstance(suggestion, dict) and suggestion.get("state") == "review_required"
+                    and isinstance(suggestion.get("candidates"), list) and suggestion.get("candidates"))
+    if normalized == "any_category_review":
+        return any(isinstance(suggestion, dict) and suggestion.get("state") == "review_required"
+                   and isinstance(suggestion.get("candidates"), list) and suggestion.get("candidates")
+                   for suggestion in (category_suggestions.values() if isinstance(category_suggestions, dict) else []))
     if normalized == "ready_except_shipping":
         return bool((_preflight_ready(ebay_preflight) or _preflight_ready(facebook_preflight)) and (_preflight_blocked(ebay_preflight, ("SHIPPING", "WEIGHT", "DIMENSIONS")) or _preflight_blocked(facebook_preflight, ("SHIPPING", "WEIGHT", "DIMENSIONS"))))
     if normalized == "ready_except_photos":
@@ -1296,7 +1319,7 @@ def _apply_listing_review_defaults(listing: Listing) -> None:
             listing.source_type in {"amazon_vine", "google_photos_album"}
             or str((listing.source_metadata or {}).get("source_marketplace") or "").strip()
         ),
-        approved=listing.source_type in {"upload", "storage_batch", "google_photos_album"},
+        approved=False,
     )
     listing.image_urls = [item["storage_path"] for item in (listing.listing_images or []) if item.get("operator_state") != "rejected"]
     listing.condition_data = derive_condition_data(
@@ -1700,10 +1723,11 @@ def _create_storage_batch(
                     "source_platform": "upload",
                     "role": "primary",
                     "confidence": 1.0,
-                    "operator_state": "approved",
+                    "operator_state": "suggested",
                     "display_order": 0,
-                    "is_reference": False,
                     "label": "Batch intake photo",
+                    "metadata": {"provenance": "seller_photographed", "seller_photo_attestation": True},
+                    "is_reference": False,
                 }
             ],
             raw_photo_path=raw_path,
@@ -2717,48 +2741,13 @@ def backfill_vine_listing_images(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    def _bridge_capture_for_asin(target_asin: str, target_name: str | None) -> ProductMediaCache | None:
-        nonlocal bridge_refetched, bridge_failed
-        try:
-            bridge_submission = submit_bridge_job(
-                job_type="import",
-                execution_mode="browser_assist",
-                payload={
-                    "source_marketplace": "amazon",
-                    "asin": target_asin,
-                    "asins": [target_asin],
-                    "payload": {
-                        "asin": target_asin,
-                        "product_name": target_name,
-                    },
-                },
-            )
-            bridge_job_id = str((((bridge_submission or {}).get("bridge_response") or {}).get("job_id") or "")).strip()
-            if not bridge_job_id:
-                bridge_failed += 1
-                return None
-            bridge_completion = wait_for_bridge_job(job_id=bridge_job_id, timeout_seconds=45, poll_interval_seconds=1.0)
-            if str(bridge_completion.get("status") or "").lower() != "completed":
-                bridge_failed += 1
-                return None
-            captured = ((bridge_completion.get("result") or {}).get("imported_listings") or [])
-            first = captured[0] if captured and isinstance(captured[0], dict) else {}
-            captured_urls = [str(url).strip() for url in (first.get("image_urls") or []) if str(url).strip()]
-            if not captured_urls:
-                bridge_failed += 1
-                return None
-            provider.cache_gallery_from_remote_urls(
-                asin=target_asin,
-                image_urls=captured_urls,
-                title_hint=target_name,
-                source_provider="bridge_browser",
-            )
-            cache_row = db.execute(select(ProductMediaCache).where(ProductMediaCache.asin == target_asin)).scalar_one_or_none()
-            bridge_refetched += 1
-            return cache_row
-        except (AutomationBridgeError, Exception):
-            bridge_failed += 1
-            return None
+    def _bridge_capture_for_asin(target_asin: str, target_name: str | None, target_listing_id: int | None = None) -> ProductMediaCache | None:
+        # Candidate acquisition is asynchronous and review-only. Never use the
+        # legacy direct browser import path to alter a listing gallery.
+        from app.services.vine_image_recovery import enqueue_recovery
+        enqueue_recovery(db, user_id=current_user.id, asin=target_asin, title_hint=target_name, listing_id=target_listing_id)
+        db.commit()
+        return db.execute(select(ProductMediaCache).where(ProductMediaCache.asin == target_asin, ProductMediaCache.marketplace_region == settings.amazon_marketplace_region.upper())).scalar_one_or_none()
 
     query = select(Listing).where(
         Listing.user_id == current_user.id,
@@ -2798,13 +2787,15 @@ def backfill_vine_listing_images(
                     "storage_path": url,
                     "source_page_url": source_page_url,
                     "source_platform": "amazon",
-                    "operator_state": "approved",
-                    "is_reference": False,
+                    "operator_state": "suggested",
+                    "is_reference": True,
                     "metadata": {
                         "source": "amazon_vine",
+                        "image_provenance": "product_catalog",
                         "asin": asin,
                         "product_name": product_name,
-                        "trusted_catalog_match": True,
+                        "identity_state": "unverified",
+                        "rights_state": "unverified",
                     },
                 }
                 for url in cleaned_urls
@@ -2812,12 +2803,26 @@ def backfill_vine_listing_images(
             source_page_url=source_page_url,
             source_platform="amazon",
             default_is_reference=False,
-            approved=True,
+            approved=False,
         )
     processed = 0
 
     for listing in listings:
         if not include_archived and _is_archived_vine_listing(listing):
+            continue
+        from app.services.image_quality import is_known_prime_placeholder
+        if any(
+            isinstance(image, dict)
+            and (image.get("operator_state") == "approved" or image.get("operator_approved") is True)
+            and not is_known_prime_placeholder(
+                str(image.get("source_url") or image.get("storage_path") or image.get("url") or ""),
+                (image.get("metadata") or {}).get("sha256") if isinstance(image.get("metadata"), dict) else None,
+            )
+            for image in (listing.listing_images or [])
+        ):
+            # Media repair may enrich a draft, but must not replace an
+            # operator-approved gallery without an explicit review action.
+            already_present += 1
             continue
         has_images = bool(listing.image_urls and len(listing.image_urls))
         if only_missing_images and has_images:
@@ -2876,7 +2881,6 @@ def backfill_vine_listing_images(
 
         if not asin:
             if force_refresh:
-                listing.image_urls = []
                 labels = set(listing.custom_labels or [])
                 labels.add("needs_photos")
                 listing.custom_labels = sorted(labels)
@@ -2886,17 +2890,21 @@ def backfill_vine_listing_images(
         cache = db.execute(select(ProductMediaCache).where(ProductMediaCache.asin == asin)).scalar_one_or_none()
         if cache is None:
             if use_bridge_session:
-                cache = _bridge_capture_for_asin(asin, product_name)
+                cache = _bridge_capture_for_asin(asin, product_name, listing.id)
             if cache is None:
                 if force_refresh:
-                    listing.image_urls = []
                     labels = set(listing.custom_labels or [])
                     labels.add("needs_photos")
                     listing.custom_labels = sorted(labels)
                     db.add(listing)
                 no_cache += 1
                 continue
-        gallery_urls = [str(url) for url in (cache.gallery_image_urls_json or []) if str(url).strip()]
+        cache_result = provider._filter_cached_gallery(cache)
+        if not cache_result.get("gallery_image_urls") and cache_result.get("rejected_images"):
+            _bridge_capture_for_asin(asin, product_name, listing.id)
+            no_cache += 1
+            continue
+        gallery_urls = [str(url) for url in (cache_result.get("gallery_image_urls") or []) if str(url).strip()]
         if gallery_urls:
             listing.image_urls = gallery_urls
             listing.listing_images = _trusted_amazon_listing_images(
@@ -2943,7 +2951,7 @@ def backfill_vine_listing_images(
             updated += 1
             continue
         if use_bridge_session:
-            cache = _bridge_capture_for_asin(asin, product_name)
+            cache = _bridge_capture_for_asin(asin, product_name, listing.id)
             if cache is not None:
                 refreshed_gallery = [str(url) for url in (cache.gallery_image_urls_json or []) if str(url).strip()]
                 if refreshed_gallery:
@@ -2977,8 +2985,6 @@ def backfill_vine_listing_images(
                     updated += 1
                     continue
         if force_refresh:
-            listing.image_urls = []
-            listing.listing_images = []
             labels = set(listing.custom_labels or [])
             labels.add("needs_photos")
             listing.custom_labels = sorted(labels)
@@ -4248,6 +4254,7 @@ async def upload_listing_photos(
     note: str | None = Form(default=None),
     source: str = Form(default="actual_upload"),
     operator_state: str = Form(default="suggested"),
+    seller_photographed: bool = Form(default=False),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -4297,6 +4304,8 @@ async def upload_listing_photos(
                     "original_filename": str(photo.filename or "").strip() or None,
                     "content_type": str(photo.content_type or "").strip() or None,
                     "note": str(note or "").strip() or None,
+                    "provenance": "seller_photographed" if seller_photographed else "seller_upload_unverified",
+                    "seller_photo_attestation": bool(seller_photographed),
                 },
             }
         )
@@ -4333,7 +4342,9 @@ def approve_listing_photos(
             "operator_state": "approved",
             "operator_approved": True,
             "operator_rejected": False,
-            "is_reference": False,
+            # Catalog/reference provenance is permanent. Operator approval
+            # must not relabel an Amazon image as a seller-taken photograph.
+            "is_reference": bool(image.get("is_reference")) or str(image.get("source_platform") or "").lower() == "amazon",
         }),
     )
     if not changed:
@@ -4408,6 +4419,9 @@ def set_listing_photo_primary(
         raise HTTPException(status_code=404, detail="No matching listing photo found")
     reordered = [image for image in images if str(image.get("storage_path") or "").strip() == target]
     reordered.extend(image for image in images if str(image.get("storage_path") or "").strip() != target)
+    for index, image in enumerate(reordered):
+        image["display_order"] = index
+        image["role"] = "primary" if index == 0 else "alternate_angle"
     listing.listing_images = normalize_listing_images(listing_images=reordered)
     listing.image_urls = [item["storage_path"] for item in (listing.listing_images or []) if item.get("operator_state") != "rejected"]
     db.add(listing)

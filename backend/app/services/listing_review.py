@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import Any
 import math
 import re
 
@@ -46,6 +47,82 @@ def _slug_tokens(*values: str | None) -> list[str]:
         cleaned = "".join(char.lower() if char.isalnum() else " " for char in str(value))
         tokens.extend(part for part in cleaned.split() if part)
     return tokens
+
+
+def is_verified_amazon_vine_source(listing: Any = None, *, source_type: str | None = None, source_metadata: dict | None = None, labels=None) -> bool:
+    """Recognize explicit Vine source markers without guessing from product facts."""
+    metadata = source_metadata if isinstance(source_metadata, dict) else {}
+    if str(source_type or getattr(listing, "source_type", "") or "").strip().lower() == "amazon_vine":
+        return True
+    label_values = labels if labels is not None else getattr(listing, "custom_labels", None)
+    if any(str(value).strip().lower() == "amazon_vine" for value in (label_values or [])):
+        return True
+    for key in ("source_type", "source", "source_system", "import_source"):
+        if str(metadata.get(key) or "").strip().lower() in {"amazon_vine", "vine_import", "amazon_vine_import"}:
+            return True
+    return bool(
+        metadata.get("vine_import_item_id")
+        or metadata.get("vine_batch_id")
+        or (metadata.get("batch_id") and metadata.get("asin") and metadata.get("eligibility_status"))
+    )
+
+
+def classify_listing_image(image: dict | None) -> dict:
+    """Return conservative image provenance and destination-use evidence."""
+    image = image if isinstance(image, dict) else {}
+    metadata = image.get("metadata") if isinstance(image.get("metadata"), dict) else {}
+    source = str(image.get("source_platform") or metadata.get("source_platform") or "").strip().lower()
+    provenance = str(metadata.get("provenance") or metadata.get("image_provenance") or "").strip().lower()
+    exact_product = metadata.get("trusted_catalog_match") is True or metadata.get("exact_product_match_verified") is True
+    if provenance in {"manufacturer_catalog", "manufacturer_image"} or source == "manufacturer":
+        kind = "manufacturer"
+    elif provenance in {"product_catalog", "catalog_image"} or source in {"amazon", "product_catalog"} or metadata.get("trusted_catalog_match") is True:
+        kind = "catalog"
+    elif image.get("is_reference") or str(image.get("role") or "").lower() in {"reference", "slate", "internal_reference"}:
+        kind = "internal_reference"
+    elif provenance in {"seller_photographed", "seller_photo", "operator_photographed"}:
+        kind = "seller_photographed"
+    elif source == "actual_upload":
+        # The explicit upload source label is recorded only by the seller-photo
+        # upload workflow; Amazon/catalog sources never use this marker.
+        kind = "seller_photographed"
+    elif source in {"google_photos_album", "photo_intake", "shelf_census", "upload"} and image.get("seller_captured") is True:
+        kind = "seller_photographed"
+    elif not (image.get("storage_path") or image.get("url") or image.get("local_path")):
+        kind = "missing"
+    else:
+        kind = "unverified"
+    rights = str(metadata.get("rights_status") or metadata.get("license_status") or "").strip().lower()
+    authorized = (
+        metadata.get("redistribution_authorized") is True
+        or metadata.get("image_rights_verified") is True
+        or rights in {"authorized", "licensed", "redistribution_authorized", "verified"}
+    )
+    approved = image.get("operator_state") == "approved" and image.get("operator_approved") is not False
+    return {
+        "kind": kind,
+        "approved": approved,
+        "authorized": authorized,
+        "seller_photographed": kind == "seller_photographed" and approved,
+        "ebay_eligible": approved and (kind == "seller_photographed" or (kind in {"catalog", "manufacturer"} and authorized)),
+        "facebook_draft_eligible": bool(image.get("storage_path") or image.get("url") or image.get("local_path")) and (kind == "seller_photographed" or (kind in {"catalog", "manufacturer"} and exact_product)),
+    }
+
+
+def is_legacy_global_photo_blocker(value: Any) -> bool:
+    text = str(value or "").strip().lower().replace("_", " ")
+    return any(marker in text for marker in (
+        "no approved actual item photos",
+        "no approved seller photographed item images",
+        "no images attached",
+        "only source/reference images attached",
+        "only source/reference images are available",
+        "actual photos missing",
+        "product image missing",
+        "needs photo",
+        "photos missing",
+        "photo required",
+    ))
 
 
 def normalize_listing_images(
@@ -134,7 +211,11 @@ def derive_condition_data(
     source_metadata = source_metadata if isinstance(source_metadata, dict) else {}
     existing = existing if isinstance(existing, dict) else {}
     raw_condition = str(listing.get("condition") or existing.get("condition") or "").strip()
-    source_type_value = str(source_type or listing.get("source_type") or "").strip().lower()
+    source_type_value = "amazon_vine" if is_verified_amazon_vine_source(
+        source_type=source_type or listing.get("source_type"),
+        source_metadata=listing.get("source_metadata"),
+        labels=listing.get("custom_labels"),
+    ) else str(source_type or listing.get("source_type") or "").strip().lower()
     default_state = "needs_review"
     confidence = existing.get("condition_confidence")
     if confidence is None:
@@ -291,21 +372,21 @@ def summarize_listing_readiness(
     images = [item for item in _safe_list(listing_images) if isinstance(item, dict)]
     condition_data = condition_data if isinstance(condition_data, dict) else {}
     shipping_profile = shipping_profile if isinstance(shipping_profile, dict) else {}
-    approved_images = [item for item in images if item.get("operator_state") != "rejected"]
-    actual_item_images = [item for item in approved_images if not item.get("is_reference") and item.get("operator_state") == "approved"]
+    approved_images = [item for item in images if item.get("operator_state") != "rejected" and item.get("operator_state") == "approved"]
+    image_classifications = [(item, classify_listing_image(item)) for item in images]
+    actual_item_images = [item for item, classification in image_classifications if classification["seller_photographed"]]
+    ebay_eligible_images = [item for item, classification in image_classifications if classification["ebay_eligible"]]
+    facebook_draft_images = [item for item, classification in image_classifications if classification["facebook_draft_eligible"]]
     primary_image = next((item for item in approved_images if item.get("role") == "primary"), approved_images[0] if approved_images else None)
     blockers: list[str] = []
     warnings: list[str] = []
 
-    if not approved_images:
-        blockers.append("No images attached")
+    if not images:
+        warnings.append("No images attached; destination image acquisition remains outstanding")
     elif not actual_item_images:
-        if source_type_value == "amazon_vine":
-            warnings.append("Only source/reference images attached")
-        else:
-            blockers.append("Only source/reference images attached")
+        warnings.append("No approved seller-photographed item images are attached")
     if not primary_image:
-        blockers.append("Primary image not set")
+        warnings.append("Primary image not set")
     if condition_data.get("operator_review_required", True):
         warnings.append("Condition needs operator review")
     package_dimensions = shipping_profile.get("package_dimensions") if isinstance(shipping_profile.get("package_dimensions"), dict) else {}
@@ -332,8 +413,11 @@ def summarize_listing_readiness(
         warnings.append("No box, label, or barcode image attached")
 
     return {
-        "images_missing": not approved_images,
+        "images_missing": not images,
         "manual_photo_needed": not actual_item_images,
+        "ebay_eligible_image_count": len(ebay_eligible_images),
+        "facebook_draft_image_count": len(facebook_draft_images),
+        "image_provenance": {"seller_photographed": len(actual_item_images), "ebay_eligible": len(ebay_eligible_images), "facebook_draft_eligible": len(facebook_draft_images), "approved_catalog_or_manufacturer": len([item for item, cls in image_classifications if cls["approved"] and cls["authorized"] and cls["kind"] in {"catalog", "manufacturer"}])},
         "primary_image_present": bool(primary_image),
         "approved_image_count": len(approved_images),
         "actual_image_count": len(actual_item_images),
@@ -341,7 +425,11 @@ def summarize_listing_readiness(
         "blocked_for_publish": bool(blockers),
         "blockers": blockers,
         "warnings": warnings,
-        "ready_for_publish": not blockers,
+        "draft_preparation_ready": not blockers,
+        # This shared summary has no selected destination. Keep its legacy
+        # publish signal conservative: destination media must be verified
+        # before it can claim final publication readiness.
+        "ready_for_publish": not blockers and bool(ebay_eligible_images),
         "shipping_checklist": {
             "weight_present": usable_weight,
             "package_dimensions_present": usable_dimensions,
@@ -357,12 +445,14 @@ def summarize_listing_readiness(
             "ebay": {
                 "condition_ready": bool(condition_data.get("condition")),
                 "category_ready": bool(listing.get("category_id") or listing.get("category_suggestion")),
-                "photos_ready": bool(actual_item_images),
+                "photos_ready": bool(ebay_eligible_images),
+                "submission_photos_ready": bool(ebay_eligible_images),
                 "shipping_ready": not shipping_profile.get("manual_measurement_needed", True),
             },
             "facebook": {
                 "condition_ready": bool(condition_data.get("condition")),
-                "photos_ready": bool(actual_item_images or approved_images),
+                "photos_ready": bool(facebook_draft_images),
+                "submission_photos_ready": bool(actual_item_images),
                 "price_ready": bool(listing.get("listing_price") or listing.get("suggested_price")),
             },
         },
@@ -371,7 +461,7 @@ def summarize_listing_readiness(
 
 def sync_listing_review_state(*, listing) -> None:
     source_metadata = listing.source_metadata if isinstance(listing.source_metadata, dict) else {}
-    source_type_value = str(listing.source_type or "").strip().lower()
+    source_type_value = "amazon_vine" if is_verified_amazon_vine_source(listing=listing) else str(listing.source_type or "").strip().lower()
     listing.listing_images = normalize_listing_images(
         listing_images=listing.listing_images,
         image_urls=listing.image_urls,
@@ -383,7 +473,10 @@ def sync_listing_review_state(*, listing) -> None:
         # not marketplace reference imagery.  They enter the same reviewable
         # draft flow as uploaded/Vine media; explicit ``is_reference`` or a
         # rejected operator state still wins per image.
-        approved=source_type_value in {"upload", "storage_batch", "amazon_vine", "google_photos_album", "photo_intake"},
+        # Imports and provider albums are evidence sources, not operator
+        # approval. Preserve an existing per-image decision; new media stays
+        # suggested until an operator reviews it.
+        approved=False,
     )
     listing.image_urls = [item["storage_path"] for item in (listing.listing_images or []) if item.get("operator_state") != "rejected"]
     listing.condition_data = derive_condition_data(

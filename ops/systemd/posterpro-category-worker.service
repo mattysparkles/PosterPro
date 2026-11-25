@@ -1,0 +1,18 @@
+[Unit]
+Description=PosterPro Review-Only Category Suggestion Worker
+After=network.target postgresql.service redis-server.service opt-apps-posterpro.mount
+BindsTo=opt-apps-posterpro.mount
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/apps/posterpro/current/source/backend
+Environment=PYTHONPATH=/opt/apps/posterpro/current/source/backend
+EnvironmentFile=/opt/apps/posterpro/current/release.env
+ExecStartPre=/mnt/posterprodata/migration-reports/controllers/posterpro-volume-guard
+ExecStart=/opt/apps/posterpro/current/backend-venv/bin/celery -A app.workers.celery_app.celery_app worker -n posterpro-category@%%h -Q posterpro-category --loglevel=info --concurrency=1 --prefetch-multiplier=1 --max-tasks-per-child=50
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

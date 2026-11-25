@@ -1013,7 +1013,7 @@ export default function ListingEditor({
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <p className="pp-editor-section-title">Image review</p>
-            <p className="pp-editor-section-copy">Approve the actual item photos, keep source/reference images clearly labeled, and set the primary image before publish.</p>
+            <p className="pp-editor-section-copy">Review each image&apos;s source and rights. Seller photos, catalog images, and internal references keep separate provenance; destination preflight applies final submission rules.</p>
           </div>
           <div className="flex flex-wrap gap-2">
             <span className="pp-chip">{listingImages.length} attached</span>
@@ -1025,6 +1025,7 @@ export default function ListingEditor({
                 type="file"
                 accept="image/jpeg,image/png,image/webp"
                 multiple
+                capture="environment"
                 className="hidden"
                 onChange={async (event) => {
                   const files = event.target.files;
@@ -1037,7 +1038,7 @@ export default function ListingEditor({
         </div>
         {readinessSummary.manual_photo_needed ? (
           <div className="mt-3 rounded-[12px] border border-[#fecdca] bg-[#fff6ed] px-3 py-2 text-sm text-[#b54708]">
-            Only source/reference photos are attached right now. Add or approve actual item photos before publishing.
+            No seller-photographed item images are approved. Draft preparation can continue; each destination checks its own final image requirements.
           </div>
         ) : null}
         <div className="mt-4 space-y-4">
@@ -1069,7 +1070,7 @@ export default function ListingEditor({
           ) : null}
           {!listingImages.length ? (
             <div className="rounded-[12px] border border-dashed border-[#d0d5dd] bg-[#fcfcfd] p-4 text-sm text-[#667085]">
-              No images attached yet. Upload item photos or import source/reference images before publishing.
+              No images attached yet. Continue non-image draft preparation; acquire destination-eligible images before final submission where required.
             </div>
           ) : null}
         </div>
@@ -1366,7 +1367,7 @@ export default function ListingEditor({
           </div>
           <div className="rounded-[12px] border border-[#e5e7eb] bg-[#fcfcfd] p-3">
             <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#667085]">Readiness</p>
-            <p className="mt-2 text-lg font-semibold text-[#101828]">{readiness.ready_for_publish ? 'Publishable' : 'Review required'}</p>
+            <p className="mt-2 text-lg font-semibold text-[#101828]">{readiness.draft_preparation_ready ? 'Draft preparation ready' : 'Review required'}</p>
           </div>
         </div>
 

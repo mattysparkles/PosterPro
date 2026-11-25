@@ -1595,3 +1595,23 @@ class ProductMediaCache(Base, TimestampMixin):
     fetch_attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     next_retry_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     fetched_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class VineImageRecoveryJob(Base, TimestampMixin):
+    """Durable per-user/ASIN browser gallery request and review candidates."""
+    __tablename__ = "vine_image_recovery_jobs"
+    __table_args__ = (UniqueConstraint("user_id", "asin", name="uq_vine_image_recovery_user_asin"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    listing_id: Mapped[int | None] = mapped_column(ForeignKey("listings.id"), index=True, nullable=True)
+    asin: Mapped[str] = mapped_column(String(16), index=True)
+    title_hint: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    bridge_job_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    page_evidence_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    candidates_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

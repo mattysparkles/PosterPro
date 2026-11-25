@@ -506,6 +506,9 @@ class MarketplacePreflightResponse(BaseModel):
     execution_blockers: list[MarketplacePreflightIssue] = Field(default_factory=list)
     connection_blockers: list[MarketplacePreflightIssue] = Field(default_factory=list)
     preparation_status: str | None = None
+    data_ready: bool = False
+    draft_export_ready: bool = False
+    authorized_publishing_ready: bool = False
     preparation_blockers: list[MarketplacePreflightIssue] = Field(default_factory=list)
     preparation_warnings: list[MarketplacePreflightIssue] = Field(default_factory=list)
     warnings: list[MarketplacePreflightIssue] = Field(default_factory=list)

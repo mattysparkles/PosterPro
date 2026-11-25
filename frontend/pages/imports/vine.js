@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import { useRouter } from 'next/router';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
 
 import AppShell from '../../components/layout/AppShell';
@@ -31,6 +31,11 @@ import {
   updateVineItem,
   uploadVineReport,
   retryVineItemDiscovery,
+  fetchVineImageRecoveryJobs,
+  attachVineImageRecoveryCandidate,
+  rejectVineImageRecoveryCandidate,
+  retryVineImageRecoveryJob,
+  toThumbnailImageUrl,
 } from '../../lib/api';
 
 function formatDate(value) {
@@ -92,6 +97,7 @@ export default function VineImportPage() {
   const [draftProgress, setDraftProgress] = useState(null);
   const [workflowStage, setWorkflowStage] = useState('');
   const [filterMode, setFilterMode] = useState('all');
+  const [imageRecoveryJobs, setImageRecoveryJobs] = useState([]);
 
   const runAutoBuild = async (batchId, options = {}) => {
     setBusyAction('auto-build');
@@ -170,6 +176,28 @@ export default function VineImportPage() {
     const requestedBatchId = Number.parseInt(String(router.query.batch || ''), 10);
     loadBatches(Number.isFinite(requestedBatchId) ? requestedBatchId : null).catch(() => undefined);
   }, [canAccess, router.isReady, router.query.batch]);
+
+  const loadImageRecoveryJobs = useCallback(async () => {
+    if (!canAccess) return;
+    try { setImageRecoveryJobs(await fetchVineImageRecoveryJobs() || []); } catch { /* keep the import workflow available if recovery status is offline */ }
+  }, [canAccess]);
+  useEffect(() => {
+    if (!canAccess) return undefined;
+    loadImageRecoveryJobs();
+    const timer = setInterval(loadImageRecoveryJobs, 30000);
+    return () => clearInterval(timer);
+  }, [canAccess, loadImageRecoveryJobs]);
+
+  const reviewRecoveryCandidate = async (job, index, action) => {
+    setBusyAction(`image-recovery-${job.id}-${index}`);
+    try {
+      if (action === 'attach') await attachVineImageRecoveryCandidate(job.id, index);
+      else await rejectVineImageRecoveryCandidate(job.id, index);
+      await Promise.all([loadImageRecoveryJobs(), loadBatches(activeBatch?.id)]);
+      toast.success(action === 'attach' ? 'Candidate added to the draft as a pending reference image.' : 'Candidate rejected; source media retained for audit.');
+    } catch (error) { toast.error(error.message || 'Image review action failed.'); }
+    finally { setBusyAction(''); }
+  };
 
   const items = activeBatch?.items || [];
   const hasSelection = selectedIds.length > 0;
@@ -253,6 +281,20 @@ export default function VineImportPage() {
       <PageFrame>
       <PageSplit columnsClassName="xl:grid-cols-[minmax(0,1fr)_340px]">
       <PageMain>
+      <CollapsiblePanel title="Vine image recovery review" description="Exact-ASIN gallery candidates remain separate from listing media until you choose to add one for review. Rights remain unverified." badge={`${imageRecoveryJobs.filter((job) => job.status === 'review_required').length} to review`}>
+        {!imageRecoveryJobs.length ? <p className="text-sm text-[#667085]">No image recovery requests are queued.</p> : <div className="space-y-4">
+          {imageRecoveryJobs.map((job) => <div key={job.id} className="rounded-xl border border-[#e4e7ec] p-4">
+            <div className="mb-3 flex flex-wrap items-start justify-between gap-2"><div><p className="font-semibold text-[#101828]">{job.title_hint || job.asin} <span className="text-xs font-normal text-[#667085]">({job.asin})</span></p><p className="mt-1 text-xs text-[#667085]">Status: {job.status} · Attempts: {job.attempts} · Rights: unverified</p></div>{job.listing_id ? <Link className="text-xs text-blue-700 underline" href={`/listings/${job.listing_id}`}>Open draft</Link> : null}</div>
+            {job.last_error ? <p className="mb-3 text-xs text-amber-800">{job.last_error}</p> : null}
+            {['pending_authorization', 'manual_review_required', 'unavailable'].includes(job.status) && job.attempts < 4 ? <Button size="sm" variant="outline" onClick={async () => { try { await retryVineImageRecoveryJob(job.id); await loadImageRecoveryJobs(); toast.success('Recovery request queued for its bounded retry.'); } catch (error) { toast.error(error.message || 'Could not queue retry.'); } }}>Retry when collector is available</Button> : null}
+            {job.candidates?.length ? <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{job.candidates.map((candidate, index) => <div key={`${candidate.image_id}-${index}`} className="rounded-lg border border-[#eaecf0] p-2">
+              <img src={toThumbnailImageUrl(candidate.storage_path, 240, 240)} alt={`Amazon gallery candidate ${index + 1} for ${job.asin}`} className="h-40 w-full rounded-md bg-slate-50 object-contain" />
+              <p className="mt-2 text-xs text-[#475467]">ASIN page verified · variation and rights need review</p>
+              {candidate.attached_to_listing ? <p className="mt-2 text-xs font-medium text-emerald-700">Added to draft as a pending reference</p> : candidate.operator_state === 'rejected' ? <p className="mt-2 text-xs font-medium text-slate-500">Rejected; candidate file retained</p> : <div className="mt-2 flex gap-2">{job.listing_id ? <Button size="sm" variant="outline" disabled={busyAction !== ''} onClick={() => reviewRecoveryCandidate(job, index, 'attach')}>Add to draft for review</Button> : <span className="text-xs text-amber-800">No linked listing; candidate remains safely queued.</span>}<Button size="sm" variant="ghost" disabled={busyAction !== ''} onClick={() => reviewRecoveryCandidate(job, index, 'reject')}>Reject</Button></div>}
+            </div>)}</div> : null}
+          </div>)}
+        </div>}
+      </CollapsiblePanel>
       <CollapsiblePanel
         title="Upload"
         description="Accepted formats: .xlsx and .csv preferred, .pdf supported with required preflight review."

@@ -199,6 +199,20 @@ def _marketplace_override(listing: Listing, marketplace: str, field: str, fallba
     return fallback if value in (None, "") else value
 
 
+def _confirmed_category_mapping(listing: Listing, marketplace: str) -> dict[str, Any]:
+    data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}
+    mappings = data.get("marketplace_category_mappings") if isinstance(data.get("marketplace_category_mappings"), dict) else {}
+    mapping = mappings.get(str(marketplace).lower())
+    if not isinstance(mapping, dict):
+        return {}
+    if (mapping.get("verification_status") != "operator_confirmed"
+            or mapping.get("terminal_status") != "terminal"
+            or mapping.get("publishability_status") != "publishable"
+            or mapping.get("staleness_status") != "fresh"):
+        return {}
+    return mapping
+
+
 def _marketplace_item_specifics(listing: Listing, marketplace: str, fallback: dict[str, Any]) -> dict[str, Any]:
     """Apply destination-specific item-specific overrides without mutating canonical facts."""
     override = _marketplace_override(listing, marketplace, "item_specifics")
@@ -238,14 +252,17 @@ def _specific(item_specifics: dict[str, Any], *names: str) -> Any:
     return None
 
 
-def _canonical_marketplace_images(listing: Listing) -> list[str]:
+def _canonical_marketplace_images(listing: Listing, marketplace: str | None = None) -> list[str]:
     """Resolve normalized canonical media in its persisted order, then legacy URLs.
 
     The Timeline primary-photo selection is materialized as display_order zero.
-    Rejected, reference-only, deleted, and Slate assets are never sent to a
-    marketplace adapter.
+    Rejected, internal reference, deleted, and Slate assets are excluded.
+    Verified exact-product catalog images may be included in draft previews for
+    assisted marketplaces; eBay additionally requires approval and verified
+    redistribution authorization.
     """
     from app.services.ebay_service import _to_public_image_url
+    from app.services.listing_review import classify_listing_image
 
     result: list[str] = []
     rows = list(getattr(listing, "listing_images", None) or [])
@@ -256,8 +273,7 @@ def _canonical_marketplace_images(listing: Listing) -> list[str]:
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
         role = str(row.get("timeline_role") or metadata.get("timeline_role") or "").upper()
         if (
-            row.get("is_reference")
-            or row.get("timeline_deleted")
+            row.get("timeline_deleted")
             or row.get("is_slate")
             or metadata.get("timeline_deleted")
             or metadata.get("is_slate")
@@ -265,19 +281,27 @@ def _canonical_marketplace_images(listing: Listing) -> list[str]:
             or str(row.get("operator_state") or "").lower() == "rejected"
         ):
             continue
+        image_class = classify_listing_image(row)
+        if marketplace == "ebay":
+            eligible = image_class["ebay_eligible"]
+        else:
+            exact_product = metadata.get("trusted_catalog_match") is True or metadata.get("exact_product_match_verified") is True
+            eligible = image_class["seller_photographed"] or (image_class["kind"] in {"catalog", "manufacturer"} and exact_product)
+        if not eligible:
+            continue
         candidate = str(row.get("storage_path") or row.get("url") or row.get("local_path") or "").strip()
         resolved = _to_public_image_url(candidate) if candidate else ""
         if resolved and resolved not in result:
             result.append(resolved)
     if not result:
-        for candidate in listing.image_urls or []:
+        for candidate in (listing.image_urls or []) if not getattr(listing, "listing_images", None) and str(getattr(listing, "source_type", "") or "").lower() != "amazon_vine" else []:
             resolved = _to_public_image_url(str(candidate or "").strip())
             if resolved and resolved not in result:
                 result.append(resolved)
     return result
 
 
-def _shared_payload(listing: Listing) -> dict[str, Any]:
+def _shared_payload(listing: Listing, marketplace: str | None = None) -> dict[str, Any]:
     marketplace_shipping = ((listing.marketplace_data or {}).get("shipping") or {}) if isinstance(listing.marketplace_data, dict) else {}
     shipping_profile = listing.shipping_profile if isinstance(listing.shipping_profile, dict) else {}
     shipping = {
@@ -319,7 +343,7 @@ def _shared_payload(listing: Listing) -> dict[str, Any]:
         "inventory_id": source_metadata.get("inventory_id") or str(listing.id),
         # Workflow/source labels are operational metadata, never buyer tags.
         "tags": _customer_facing_tags(listing.tags),
-        "image_urls": _canonical_marketplace_images(listing),
+        "image_urls": _canonical_marketplace_images(listing, marketplace),
         "shipping": {
             "mode": shipping.get("mode"),
             "domestic_service": shipping.get("domestic_service"),
@@ -349,13 +373,14 @@ def _facebook_image_urls(image_urls: list[str]) -> list[str]:
 
 def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, Any]:
     market = marketplace.lower()
-    shared = _shared_payload(listing)
+    shared = _shared_payload(listing, market)
     shipping = shared["shipping"]
 
     if market == "ebay":
         marketplace_data = listing.marketplace_data if isinstance(listing.marketplace_data, dict) else {}
         destination_specifics = _marketplace_item_specifics(listing, market, shared["item_specifics"])
         destination_shipping = _destination_shipping(listing, market, shipping)
+        confirmed_category = _confirmed_category_mapping(listing, market)
         return {
             "marketplace": market,
             "title": _marketplace_override(listing, market, "title", shared["title"]),
@@ -370,7 +395,10 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
                 listing,
                 market,
                 "category_id",
-                _marketplace_override(listing, market, "category", listing.category_id),
+                _marketplace_override(
+                    listing, market, "category",
+                    confirmed_category.get("category_id") or listing.category_id,
+                ),
             ),
             "item_specifics": destination_specifics,
             "brand": shared["brand"],
@@ -406,6 +434,7 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
         # the User record is available.  The mapper remains conservative by
         # default, and the preflight repeats this decision with preferences.
         category_decision = resolve_facebook_category(listing)
+        confirmed_mapping = _confirmed_category_mapping(listing, market)
         # Facebook CREATE must receive the sanitized canonical description.
         # The stored `marketplace_descriptions.facebook` value may be an old
         # generated/condensed variant; it is not the authoritative source of
@@ -443,6 +472,8 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
                 listing, market, "category", category_decision.category or shared["category"]
             ),
             "facebook_category": category_decision.category,
+            "facebook_category_id": confirmed_mapping.get("category_id"),
+            "marketplace_category_mapping": confirmed_mapping or None,
             "category_source": category_decision.source,
             "category_confidence": category_decision.confidence,
             "category_supports_shipping": category_decision.supports_shipping,
@@ -488,13 +519,20 @@ def build_marketplace_payload(listing: Listing, marketplace: str) -> dict[str, A
     if market == "mercari":
         destination_specifics = _marketplace_item_specifics(listing, market, shared["item_specifics"])
         destination_shipping = _destination_shipping(listing, market, shipping)
+        category_mapping = _confirmed_category_mapping(listing, market)
+        category_hint = category_mapping.get("category_path") or _marketplace_override(listing, market, "category", shared["category"])
         return {
             "marketplace": market,
             "title": _marketplace_override(listing, market, "title", shared["title"]),
             "description": _marketplace_override(listing, market, "description", shared["description_variants"]["mercari"]),
             "price": _marketplace_override(listing, market, "price", shared["price"]),
             "condition": _marketplace_override(listing, market, "condition", shared["condition"]),
-            "category_hint": _marketplace_override(listing, market, "category", shared["category"]),
+            "category_hint": category_hint,
+            **({
+                "category_id": category_mapping.get("category_id"),
+                "category_path": category_mapping.get("category_path"),
+            } if category_mapping else {}),
+            "marketplace_category_mapping": category_mapping or None,
             "brand": _specific(destination_specifics, "Brand") or shared["brand"],
             "size": _specific(destination_specifics, "Size", "Apparel Size") or shared["size"],
             "color": _specific(destination_specifics, "Color", "Colour") or shared["color"],

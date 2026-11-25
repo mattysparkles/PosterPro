@@ -2,9 +2,14 @@ import json
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import text
 
 from app.services import canonical_taxonomy_mapping as mappings
+from app.api.taxonomy_registry import ApplyConfirmedMappingRequest, apply_confirmed_mapping_to_cohort
+from app.models.models import Listing, User
+from app.models.enums import ListingStatus
+from app.services.inventory_taxonomy_cohorts import _identity
 
 
 def _mapping_schema(db_session):
@@ -76,3 +81,98 @@ def test_inferred_or_unknown_leaf_cannot_be_operator_confirmed_as_verified_mappi
             marketplace="ebay", version_id="ebay:EBAY_US:0:134", category_key="EBAY_US:0:169291",
             rationale="A category is a good textual match for this concept.")
     assert db_session.execute(text("SELECT COUNT(*) FROM marketplace_taxonomy_mappings")).scalar_one() == 0
+
+
+def test_confirmed_category_cohort_apply_is_owner_scoped_idempotent_and_preserves_overrides(db_session):
+    _mapping_schema(db_session)
+    user = User(email="taxonomy-cohort-owner@example.com")
+    db_session.add(user)
+    db_session.flush()
+    source = Listing(user_id=user.id, status=ListingStatus.draft, title="Example tote bag",
+                     category_suggestion="Bags", source_metadata={"asin": "B012345678"},
+                     marketplace_data={})
+    same_item = Listing(user_id=user.id, status=ListingStatus.draft, title="Example tote bag",
+                        category_suggestion="Bags", source_metadata={"asin": "B012345678"},
+                        marketplace_data={})
+    different_item = Listing(user_id=user.id, status=ListingStatus.draft, title="Example backpack",
+                             category_suggestion="Bags", source_metadata={"asin": "B087654321"},
+                             marketplace_data={})
+    override = Listing(user_id=user.id, status=ListingStatus.draft, title="Example tote bag",
+                       category_suggestion="Bags", source_metadata={"asin": "B012345678"},
+                       marketplace_data={"marketplace_category_mappings": {"ebay": {"mapping_id": "manual-other", "verification_status": "operator_confirmed"}}})
+    db_session.add_all([source, same_item, different_item, override])
+    db_session.commit()
+    concept = mappings.create_or_update_concept(db_session, owner_user_id=user.id, concept_name="Example tote bag")
+    mapping = mappings.confirm_category_mapping(db_session, owner_user_id=user.id, concept_id=concept["concept_id"],
+        marketplace="ebay", version_id="ebay:EBAY_US:0:134", category_key="EBAY_US:0:169291",
+        rationale="The current verified leaf accurately describes this exact ASIN product.",
+        evidence={"posterpro_listing_id": source.id})
+    source.marketplace_data = {"marketplace_category_mappings": {"ebay": {
+        "mapping_id": mapping["mapping_id"], "verification_status": "operator_confirmed",
+        "terminal_status": "terminal", "publishability_status": "publishable", "staleness_status": "fresh",
+    }}}
+    db_session.commit()
+
+    request = ApplyConfirmedMappingRequest(marketplace="ebay", source_listing_id=source.id,
+        listing_ids=[source.id, same_item.id, different_item.id, override.id])
+    result = apply_confirmed_mapping_to_cohort(request, db_session, user)
+    assert result["applied"] == [same_item.id]
+    assert result["already_applied"] == [source.id]
+    assert result["identity_mismatch"] == [different_item.id]
+    assert result["preserved_existing_selection"] == [override.id]
+    db_session.refresh(same_item)
+    assert same_item.category_id == "169291"
+    assert same_item.marketplace_data["marketplace_category_mappings"]["ebay"]["mapping_id"] == mapping["mapping_id"]
+
+    retried = apply_confirmed_mapping_to_cohort(request, db_session, user)
+    assert retried["applied"] == []
+    assert retried["already_applied"] == [source.id, same_item.id]
+    assert retried["published_or_queued"] is False
+
+
+def test_bulk_category_identity_separates_variants_and_bundle_quantities():
+    product_a = Listing(user_id=2, title="Bluetooth headphones", category_suggestion="Electronics",
+                        source_metadata={"asin": "B012345678"}, item_specifics={"Color": "Black", "Package Quantity": "1"})
+    product_b = Listing(user_id=2, title="Bluetooth headphones", category_suggestion="Electronics",
+                        source_metadata={"asin": "B012345678"}, item_specifics={"Color": "White", "Package Quantity": "1"})
+    bundle = Listing(user_id=2, title="Bluetooth headphones", category_suggestion="Electronics",
+                     source_metadata={"asin": "B012345678"}, item_specifics={"Color": "Black", "Package Quantity": "2"})
+    assert _identity(product_a)[0] != _identity(product_b)[0]
+    assert _identity(product_a)[0] != _identity(bundle)[0]
+
+
+def test_confirmed_cohort_apply_requires_explicit_source_and_rolls_back(db_session, monkeypatch):
+    _mapping_schema(db_session)
+    user = User(email="taxonomy-transaction-owner@example.com")
+    db_session.add(user)
+    db_session.flush()
+    source = Listing(user_id=user.id, status=ListingStatus.draft, title="Example headphones",
+                     category_suggestion="Electronics", source_metadata={"asin": "B012345678"}, marketplace_data={})
+    target = Listing(user_id=user.id, status=ListingStatus.draft, title="Example headphones",
+                     category_suggestion="Electronics", source_metadata={"asin": "B012345678"}, marketplace_data={})
+    db_session.add_all([source, target]); db_session.commit()
+    concept = mappings.create_or_update_concept(db_session, owner_user_id=user.id, concept_name="Example headphones")
+    mapping = mappings.confirm_category_mapping(db_session, owner_user_id=user.id, concept_id=concept["concept_id"],
+        marketplace="ebay", version_id="ebay:EBAY_US:0:134", category_key="EBAY_US:0:169291",
+        rationale="Verified exact headphone product category.", evidence={"posterpro_listing_id": source.id})
+    source.marketplace_data = {"marketplace_category_mappings": {"ebay": {
+        "mapping_id": mapping["mapping_id"], "verification_status": "operator_confirmed",
+        "terminal_status": "terminal", "publishability_status": "publishable", "staleness_status": "fresh",
+    }}}
+    db_session.commit()
+    with pytest.raises(HTTPException) as source_error:
+        apply_confirmed_mapping_to_cohort(ApplyConfirmedMappingRequest(
+            marketplace="ebay", source_listing_id=source.id, listing_ids=[target.id]), db_session, user)
+    assert "explicitly" in source_error.value.detail
+
+    original_flush = db_session.flush
+    def fail_final_flush(*args, **kwargs):
+        raise RuntimeError("simulated transaction failure")
+    monkeypatch.setattr(db_session, "flush", fail_final_flush)
+    with pytest.raises(RuntimeError, match="simulated transaction failure"):
+        apply_confirmed_mapping_to_cohort(ApplyConfirmedMappingRequest(
+            marketplace="ebay", source_listing_id=source.id, listing_ids=[source.id, target.id]), db_session, user)
+    monkeypatch.setattr(db_session, "flush", original_flush)
+    db_session.expire_all()
+    assert db_session.get(Listing, target.id).category_id is None
+    assert db_session.get(Listing, target.id).marketplace_data == {}

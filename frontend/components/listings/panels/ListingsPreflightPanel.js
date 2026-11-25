@@ -12,6 +12,7 @@ export default function ListingsPreflightPanel({ bulkPreflightSummary, selectedR
         <MetricCard label="Checked" value={bulkPreflightSummary.checkedCount} detail="Rows with cached or freshly generated marketplace preflight summaries." />
         <MetricCard label="eBay ready" value={bulkPreflightSummary.ebayReadyCount} detail="Rows that can move to the eBay queue." />
         <MetricCard label="Facebook ready" value={bulkPreflightSummary.facebookReadyCount} detail="Rows that can be handed off to the Facebook assisted workflow." />
+        <MetricCard label="Mercari data-ready" value={bulkPreflightSummary.mercariReadyCount} detail="Rows passing Mercari data checks; this is not proof of an authorized direct API publish." />
         <MetricCard label="Blocked" value={bulkPreflightSummary.blockedCount} detail="Rows with at least one marketplace blocker." />
         <MetricCard label="Warning only" value={bulkPreflightSummary.warningOnlyCount} detail="Rows that are ready but still need operator confirmation or review." />
         <MetricCard label="Ready to queue" value={bulkPreflightSummary.readyToQueueCount} detail="Rows with sufficient quality/readiness to queue once you choose live mode." />

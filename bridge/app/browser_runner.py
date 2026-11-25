@@ -2515,6 +2515,7 @@ class AmazonMarketplaceBrowserRunner(MarketplaceBrowserRunner):
         overview_path = screenshot_dir / f"{job_id}-amazon-media-capture.png"
 
         raw_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+        recovery_operation = str(payload.get("operation") or "").strip().lower() == "vine_image_gallery_recovery"
         requested_asins = payload.get("asins") or raw_payload.get("asins") or []
         single_asin = payload.get("asin") or raw_payload.get("asin")
         if single_asin:
@@ -2526,15 +2527,18 @@ class AmazonMarketplaceBrowserRunner(MarketplaceBrowserRunner):
                 normalized_asins.append(asin)
         if not normalized_asins:
             raise BrowserRunnerError("Amazon import requires at least one valid ASIN")
+        if recovery_operation and len(normalized_asins) != 1:
+            raise BrowserRunnerError("Vine gallery recovery accepts exactly one ASIN per job")
 
         with playwright as playwright_instance:
             browser = playwright_instance.chromium.launch(headless=self.config.headless)
             try:
                 context = self._new_context(browser, bridge_account)
-                page = context.new_page()
-                page.goto("https://www.amazon.com/", wait_until="domcontentloaded")
-                page.screenshot(path=str(overview_path), full_page=True)
-                page.close()
+                if not recovery_operation:
+                    page = context.new_page()
+                    page.goto("https://www.amazon.com/", wait_until="domcontentloaded")
+                    page.screenshot(path=str(overview_path), full_page=True)
+                    page.close()
                 imported_listings: list[dict[str, Any]] = []
                 title_hint = str(
                     raw_payload.get("product_name")
@@ -2550,6 +2554,8 @@ class AmazonMarketplaceBrowserRunner(MarketplaceBrowserRunner):
                         # similarly named but different variation, so it is
                         # only a fallback for imports that have no ASIN.
                         capture = self._capture_amazon_product_by_asin(context, asin=asin)
+                        if recovery_operation and str(capture.get("page_asin") or "").upper() != asin:
+                            raise BrowserRunnerError("Amazon product page ASIN did not match the requested ASIN")
                         product_url = capture["source_url"]
                         image_urls = capture["image_urls"]
                         title = capture.get("title")
@@ -2564,6 +2570,9 @@ class AmazonMarketplaceBrowserRunner(MarketplaceBrowserRunner):
                             "asin": asin,
                             "image_urls": image_urls,
                             "title": title,
+                            "page_asin": capture.get("page_asin"),
+                            "selected_variant": capture.get("selected_variant"),
+                            "gallery_evidence": capture.get("gallery_evidence", []),
                         }
                     )
 
@@ -2575,9 +2584,7 @@ class AmazonMarketplaceBrowserRunner(MarketplaceBrowserRunner):
                     "bridge_account": self._bridge_account_summary(bridge_account),
                     "imported_listing_count": len(imported_listings),
                     "imported_listings": imported_listings,
-                    "screenshots": {
-                        "capture_overview": self._persist_generated_asset(overview_path),
-                    },
+                    "screenshots": {} if recovery_operation else {"capture_overview": self._persist_generated_asset(overview_path)},
                     "session_state": {
                         "session_state": "active",
                         "session_payload": final_storage_state,
@@ -2596,10 +2603,25 @@ class AmazonMarketplaceBrowserRunner(MarketplaceBrowserRunner):
             item_page.wait_for_timeout(1500)
             image_urls = self._extract_amazon_product_images(item_page)
             title = self._extract_amazon_title(item_page)
+            final_url = str(item_page.url or "")
+            page_asin_match = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})(?:[/?]|$)", final_url, re.I)
+            page_asin = page_asin_match.group(1).upper() if page_asin_match else None
+            selected_variant = None
+            for selector in ("#variation_color_name .selection", "#variation_size_name .selection", "#variation_style_name .selection", "#variation_pattern_name .selection"):
+                try:
+                    selected_variant = item_page.locator(selector).first.inner_text(timeout=500)
+                    if selected_variant:
+                        selected_variant = selected_variant.strip()[:256]
+                        break
+                except Exception:
+                    continue
             return {
                 "source_url": product_url,
                 "image_urls": image_urls,
                 "title": title,
+                "page_asin": page_asin,
+                "selected_variant": selected_variant,
+                "gallery_evidence": [{"source_url": url, "gallery_region": "product_detail_gallery", "page_asin": page_asin, "selected_variant": selected_variant} for url in image_urls],
             }
         finally:
             item_page.close()

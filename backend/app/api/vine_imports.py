@@ -16,14 +16,121 @@ from app.api.schemas import (
 from app.core.auth import ensure_user_owns_resource, ensure_vine_access, get_current_user
 from app.core.config import settings
 from app.core.database import get_db
-from app.models.models import VineImportBatch, VineImportItem, User
+from app.models.models import Image, Listing, VineImageRecoveryJob, VineImportBatch, VineImportItem, User
 from app.services.process_notifications import create_process_notification
 from app.services.vine_import_service import VineImportService
+from app.services.vine_image_recovery import serialize_job
 from app.workers.tasks import build_vine_batch_drafts_task, repair_recent_vine_images_task
 
 router = APIRouter(prefix="/imports/vine", tags=["vine-imports"])
 service = VineImportService()
 logger = logging.getLogger(__name__)
+
+
+@router.get("/image-recovery-jobs")
+def list_vine_image_recovery_jobs(
+    status: str | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ensure_vine_access(current_user)
+    query = select(VineImageRecoveryJob).where(VineImageRecoveryJob.user_id == current_user.id)
+    if status:
+        query = query.where(VineImageRecoveryJob.status == status)
+    jobs = db.execute(query.order_by(VineImageRecoveryJob.updated_at.desc()).limit(250)).scalars().all()
+    return [serialize_job(job) for job in jobs]
+
+
+@router.post("/image-recovery-jobs/{job_id}/retry")
+def retry_vine_image_recovery_job(
+    job_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ensure_vine_access(current_user)
+    job = db.execute(select(VineImageRecoveryJob).where(VineImageRecoveryJob.id == job_id, VineImageRecoveryJob.user_id == current_user.id)).scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Image recovery request not found")
+    if job.status in {"collecting", "submitting", "review_required"}:
+        raise HTTPException(status_code=409, detail=f"Recovery request is {job.status}")
+    if job.attempts >= 4:
+        raise HTTPException(status_code=409, detail="Automatic retry limit reached; request needs manual handling")
+    job.status = "pending_authorization"
+    job.next_attempt_at = datetime.utcnow()
+    job.last_error = None
+    db.add(job)
+    db.commit()
+    return serialize_job(job)
+
+
+@router.post("/image-recovery-jobs/{job_id}/candidates/{candidate_index}/attach")
+def attach_vine_image_recovery_candidate(
+    job_id: int,
+    candidate_index: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Explicitly add a recovered candidate to a listing as a pending reference."""
+    ensure_vine_access(current_user)
+    job = db.execute(select(VineImageRecoveryJob).where(VineImageRecoveryJob.id == job_id, VineImageRecoveryJob.user_id == current_user.id)).scalar_one_or_none()
+    if not job or candidate_index < 0 or candidate_index >= len(job.candidates_json or []):
+        raise HTTPException(status_code=404, detail="Recovery candidate not found")
+    if not job.listing_id:
+        raise HTTPException(status_code=409, detail="Recovery job is not linked to a listing")
+    listing = db.execute(select(Listing).where(Listing.id == job.listing_id, Listing.user_id == current_user.id, Listing.source_type == "amazon_vine")).scalar_one_or_none()
+    if not listing:
+        raise HTTPException(status_code=404, detail="Vine listing not found")
+    candidate = dict(job.candidates_json[candidate_index])
+    image = db.execute(select(Image).where(Image.id == candidate.get("image_id"), Image.user_id == current_user.id)).scalar_one_or_none()
+    if not image or str((image.image_metadata or {}).get("asin") or "").upper() != job.asin:
+        raise HTTPException(status_code=409, detail="Candidate media identity did not match this recovery job")
+    images = [dict(row) for row in (listing.listing_images or []) if isinstance(row, dict)]
+    public_path = candidate.get("storage_path") or image.local_path
+    if not any(row.get("storage_path") == public_path for row in images):
+        images.append({
+            "storage_path": public_path, "source_url": image.source_url,
+            "source_page_url": job.page_evidence_json.get("source_url") if isinstance(job.page_evidence_json, dict) else None,
+            "source_platform": "amazon", "role": "gallery", "operator_state": "suggested",
+            "is_reference": True, "display_order": len(images),
+            "metadata": {
+                "source": "amazon_vine_browser_gallery_candidate", "asin": job.asin,
+                "identity_state": "asin_verified_variant_unverified", "rights_state": "unverified",
+                "operator_review_required": True,
+            },
+        })
+        listing.listing_images = images
+        urls = list(listing.image_urls or [])
+        if public_path not in urls:
+            urls.append(public_path)
+        listing.image_urls = urls
+    candidate["attached_to_listing"] = True
+    candidate["attached_at"] = datetime.utcnow().isoformat()
+    candidates = list(job.candidates_json or [])
+    candidates[candidate_index] = candidate
+    job.candidates_json = candidates
+    db.add(listing)
+    db.add(job)
+    db.commit()
+    return {"listing_id": listing.id, "candidate": candidate, "image_review_state": "suggested", "rights_state": "unverified"}
+
+
+@router.post("/image-recovery-jobs/{job_id}/candidates/{candidate_index}/reject")
+def reject_vine_image_recovery_candidate(
+    job_id: int,
+    candidate_index: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ensure_vine_access(current_user)
+    job = db.execute(select(VineImageRecoveryJob).where(VineImageRecoveryJob.id == job_id, VineImageRecoveryJob.user_id == current_user.id)).scalar_one_or_none()
+    if not job or candidate_index < 0 or candidate_index >= len(job.candidates_json or []):
+        raise HTTPException(status_code=404, detail="Recovery candidate not found")
+    candidates = list(job.candidates_json or [])
+    candidates[candidate_index] = {**dict(candidates[candidate_index]), "operator_state": "rejected", "rejected_at": datetime.utcnow().isoformat()}
+    job.candidates_json = candidates
+    db.add(job)
+    db.commit()
+    return {"job_id": job.id, "candidate_index": candidate_index, "operator_state": "rejected"}
 
 
 @router.post("/upload", response_model=VineImportBatchResponse)

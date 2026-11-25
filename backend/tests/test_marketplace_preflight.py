@@ -11,20 +11,24 @@ import pytest
 from app.models.enums import ListingStatus, MarketplaceListingStatus, MarketplaceName
 from app.models.models import Listing, MarketplaceAccount, MarketplaceExtensionDevice, MarketplaceExtensionJob, MarketplaceListing, MarketplaceMetadataCache, User
 from app.api.marketplaces import _bulk_preflight_response_to_csv
-from app.api.routes import refresh_listing_readiness, update_listing
+from app.api.routes import _matches_readiness_filter, refresh_listing_readiness, update_listing
 from app.api.schemas import ListingUpdateRequest, MarketplacePreflightResponse
 from fastapi import BackgroundTasks, HTTPException
-from app.services.ebay_service import _cached_category_aspects, build_ebay_publish_plan
+from app.services.ebay_service import _build_ebay_image_urls, _cached_category_aspects, build_ebay_publish_plan
 from app.services.ebay_service import _sync_ebay_marketplace_listing
 from app.services.marketplace_error_translation import translate_marketplace_error
 from app.services.marketplace_preflight import MarketplacePreflightService, compute_payload_hash
 from app.services.marketplace_field_mapper import build_marketplace_payload
+from app.services.listing_review import classify_listing_image, summarize_listing_readiness
 
 
 def test_compact_preflight_preserves_qualified_category_identity():
     compact = MarketplacePreflightService()._compact_marketplace_preflight({
         "marketplace": "ebay",
         "status": "blocked",
+        "preparation_status": "ready",
+        "data_ready": True,
+        "authorized_publishing_ready": False,
         "category_summary": {
             "category_id": "26447",
             "taxonomy_marketplace": "EBAY_MOTORS_US",
@@ -38,6 +42,132 @@ def test_compact_preflight_preserves_qualified_category_identity():
         "taxonomy_tree_id": "100",
         "category_path": "Root > eBay Motors > Boat Parts > Covers",
     }
+    assert compact["data_ready"] is True
+    assert compact["authorized_publishing_ready"] is False
+
+
+def test_mercari_payload_uses_only_current_operator_confirmed_category_mapping():
+    listing = Listing(
+        user_id=2,
+        status=ListingStatus.draft,
+        title="Hanging closet organizer",
+        description="New closet organizer.",
+        listing_price=24,
+        quantity=1,
+        condition="New",
+        category_suggestion="Home > Storage",
+        item_specifics={"Brand": "Example"},
+        image_urls=[],
+        marketplace_data={"marketplace_category_mappings": {"mercari": {
+            "category_id": "leaf-17", "category_path": "Home > Closet > Organizers",
+            "verification_status": "operator_confirmed", "terminal_status": "terminal",
+            "publishability_status": "publishable", "staleness_status": "fresh",
+        }}},
+    )
+    payload = build_marketplace_payload(listing, "mercari")
+    assert payload["category_id"] == "leaf-17"
+    assert payload["category_path"] == "Home > Closet > Organizers"
+    assert payload["category_hint"] == "Home > Closet > Organizers"
+
+    listing.marketplace_data["marketplace_category_mappings"]["mercari"]["staleness_status"] = "stale"
+    stale_payload = build_marketplace_payload(listing, "mercari")
+    assert "category_id" not in stale_payload
+    assert "category_path" not in stale_payload
+
+
+def test_mercari_preflight_blocks_missing_seller_photo_and_unverified_category_schema():
+    listing = Listing(
+        user_id=2,
+        status=ListingStatus.draft,
+        source_type="amazon_vine",
+        title="Vine product",
+        description="Product description.",
+        listing_price=24,
+        quantity=1,
+        condition="New",
+        category_suggestion="Home > Storage",
+        item_specifics={},
+        image_urls=["/media/catalog.jpg"],
+        listing_images=[{"storage_path": "/media/catalog.jpg", "source_platform": "amazon_vine",
+                         "operator_state": "approved", "is_reference": True}],
+        marketplace_data={"marketplace_category_mappings": {"mercari": {
+            "category_id": "leaf-17", "category_path": "Home > Closet > Organizers",
+            "verification_status": "operator_confirmed", "terminal_status": "terminal",
+            "publishability_status": "publishable", "staleness_status": "fresh",
+            "required_attributes": None,
+        }}},
+    )
+    result = MarketplacePreflightService()._build_mercari_preflight(listing, {"actual_image_count": 0})
+    codes = {item["code"] for item in result["blockers"]}
+    assert "MERCARI_SELLER_PHOTO_REQUIRED" in codes
+    assert "MERCARI_REQUIRED_ATTRIBUTE_SCHEMA_UNVERIFIED" in codes
+    assert result["policy_summary"]["direct_api_supported"] is False
+    assert result["policy_summary"]["supported_workflow"] == "operator_review_with_manual_or_browser_assisted_handoff"
+    assert result["policy_summary"]["automatic_publication_verified"] is False
+
+
+def test_mercari_preflight_exposes_data_readiness_separately_from_publishing(db_session, monkeypatch):
+    user, listing = _seed_user_and_listing(db_session)
+    listing.source_type = "manual"
+    listing.marketplace_data = {"marketplace_category_mappings": {"mercari": {
+        "category_id": "mercari-leaf-1", "category_path": "Home > Storage",
+        "verification_status": "operator_confirmed", "terminal_status": "terminal",
+        "publishability_status": "publishable", "staleness_status": "fresh",
+        "required_attributes": [],
+    }}}
+    listing.listing_images = [{
+        "storage_path": "/media/item.jpg", "source_platform": "photo_intake",
+        "operator_state": "approved", "is_reference": False,
+        "metadata": {"provenance": "seller_photographed"},
+    }]
+    service = MarketplacePreflightService()
+    monkeypatch.setattr("app.services.marketplace_preflight.compute_listing_quality_summary", lambda *_args, **_kwargs: {"status": "ready"})
+    monkeypatch.setattr("app.services.marketplace_preflight.canonical_listing_readiness", lambda *_args, **_kwargs: {"canonical_product_complete": True, "canonical_blocking_reasons": [], "blocking_reasons": []})
+    monkeypatch.setattr(service, "_base_blockers", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(service, "_base_warnings", lambda *_args, **_kwargs: [])
+    result = service.preflight_listing(db_session, listing, "mercari")
+    assert result["data_ready"] is True
+    assert result["draft_export_ready"] is True
+    assert result["authorized_publishing_ready"] is False
+    assert result["policy_summary"]["direct_api_supported"] is False
+
+
+def test_mercari_readiness_filters_use_cached_destination_specific_results():
+    listing = Listing(
+        user_id=2,
+        status=ListingStatus.draft,
+        marketplace_data={"marketplace_preflight": {"by_marketplace": {
+            "mercari": {
+                "data_ready": True, "preparation_status": "ready",
+                "blocker_codes": [],
+            },
+        }}},
+    )
+    listing.quality_summary = {}
+    assert _matches_readiness_filter(listing, "mercari_ready") is True
+    assert _matches_readiness_filter(listing, "mercari_missing_category") is False
+    listing.marketplace_data["marketplace_preflight"]["by_marketplace"]["mercari"].update({
+        "data_ready": False, "preparation_status": "blocked",
+        "blocker_codes": ["MERCARI_CATEGORY_MISSING", "MERCARI_SELLER_PHOTO_REQUIRED"],
+    })
+    assert _matches_readiness_filter(listing, "mercari_blocked") is True
+    assert _matches_readiness_filter(listing, "mercari_missing_category") is True
+    assert _matches_readiness_filter(listing, "mercari_missing_photos") is True
+
+
+def test_saved_taxonomy_candidate_filters_are_destination_specific_and_require_review_candidates():
+    listing = Listing(user_id=2, status=ListingStatus.draft, marketplace_data={
+        "marketplace_category_suggestions": {"marketplaces": {
+            "facebook": {"state": "review_required", "candidates": [{"category_path": "Home > Storage"}]},
+            "ebay": {"state": "no_verified_taxonomy_candidate", "candidates": []},
+            "mercari": {"state": "confirmed_mapping_preserved"},
+        }},
+    })
+    listing.quality_summary = {}
+    assert _matches_readiness_filter(listing, "facebook_category_review") is True
+    assert _matches_readiness_filter(listing, "any_category_review") is True
+    assert _matches_readiness_filter(listing, "ebay_category_review") is False
+    assert _matches_readiness_filter(listing, "mercari_category_review") is False
 from app.services.ebay_service import summarize_ebay_account_health
 from app.services import marketplace_orchestrator
 from app.services import marketplace_preflight
@@ -273,6 +403,7 @@ def _seed_user_and_listing(db_session, *, title="Canon EOS Camera", condition="U
                 "operator_state": "approved",
                 "display_order": 0,
                 "is_reference": False,
+                "metadata": {"provenance": "seller_photographed", "seller_photo_attestation": True},
                 "confidence": 1.0,
             }
         ],
@@ -298,6 +429,119 @@ def _seed_user_and_listing(db_session, *, title="Canon EOS Camera", condition="U
     db_session.add(listing)
     db_session.flush()
     return user, listing
+
+
+def _vine_catalog_image(*, authorized=False, state="approved"):
+    return {
+        "storage_path": "https://images.example.test/exact-vine-product.jpg",
+        "source_platform": "amazon",
+        "role": "primary",
+        "operator_state": state,
+        "is_reference": True,
+        "metadata": {
+            "source": "amazon_vine",
+            "image_provenance": "product_catalog",
+            "trusted_catalog_match": True,
+            **({"redistribution_authorized": True, "rights_source": "documented_license"} if authorized else {}),
+        },
+    }
+
+
+def test_sealed_vine_authorized_catalog_image_is_not_misclassified_as_seller_photo(db_session, monkeypatch):
+    _, listing = _seed_user_and_listing(db_session, title="Sealed Vine Organizer", condition="New")
+    listing.source_type = "amazon_vine"
+    listing.condition = "New"
+    listing.listing_images = [_vine_catalog_image(authorized=True)]
+    listing.image_urls = [listing.listing_images[0]["storage_path"]]
+
+    readiness = summarize_listing_readiness(
+        listing_images=listing.listing_images,
+        condition_data={"condition": "New", "operator_review_required": False},
+        shipping_profile={},
+        listing={"category_suggestion": "Home > Storage", "listing_price": 25},
+        source_type="amazon_vine",
+    )
+    classification = classify_listing_image(listing.listing_images[0])
+    assert readiness["blockers"] == []
+    assert readiness["actual_image_count"] == 0
+    assert readiness["ebay_eligible_image_count"] == 1
+    assert readiness["marketplace_readiness"]["facebook"]["photos_ready"] is True
+    assert classification["kind"] == "catalog"
+    assert classification["seller_photographed"] is False
+    monkeypatch.setattr("app.services.ebay_service._image_meets_ebay_policy", lambda _path: True)
+    assert _build_ebay_image_urls(listing) == [listing.listing_images[0]["storage_path"]]
+
+
+def test_vine_without_images_keeps_global_readiness_clear_and_image_work_destination_scoped():
+    readiness = summarize_listing_readiness(
+        listing_images=[], condition_data={"condition": "New"}, shipping_profile={},
+        listing={"category_suggestion": "Home > Storage", "listing_price": 25},
+        source_type="amazon_vine",
+    )
+    assert readiness["blockers"] == []
+    assert readiness["images_missing"] is True
+    assert readiness["manual_photo_needed"] is True
+    assert readiness["marketplace_readiness"]["ebay"]["submission_photos_ready"] is False
+    assert readiness["marketplace_readiness"]["facebook"]["submission_photos_ready"] is False
+
+
+def test_seller_photo_requires_explicit_capture_provenance_and_approval():
+    seller_photo = {
+        "storage_path": "/media/item/front.jpg", "source_platform": "actual_upload",
+        "operator_state": "approved", "is_reference": False,
+        "metadata": {"provenance": "seller_photographed", "seller_photo_attestation": True},
+    }
+    readiness = summarize_listing_readiness(
+        listing_images=[seller_photo], condition_data={}, shipping_profile={},
+        listing={"category_suggestion": "Home > Storage", "listing_price": 25},
+        source_type="amazon_vine",
+    )
+    assert readiness["actual_image_count"] == 1
+    assert classify_listing_image(seller_photo)["seller_photographed"] is True
+    pending = {**seller_photo, "operator_state": "suggested"}
+    assert classify_listing_image(pending)["seller_photographed"] is False
+
+
+def test_used_item_actual_photo_is_separate_from_catalog_rights():
+    photo = {
+        "storage_path": "/media/used/item.jpg", "source_platform": "actual_upload",
+        "operator_state": "approved", "is_reference": False,
+        "metadata": {"provenance": "seller_photographed"},
+    }
+    readiness = summarize_listing_readiness(
+        listing_images=[photo], condition_data={}, shipping_profile={},
+        listing={"category_suggestion": "Electronics > Cameras", "listing_price": 50},
+        source_type="manual",
+    )
+    assert readiness["actual_image_count"] == 1
+    assert classify_listing_image(photo)["ebay_eligible"] is True
+
+
+def test_unlicensed_exact_catalog_image_is_draft_only_for_facebook_and_mercari(db_session):
+    _, listing = _seed_user_and_listing(db_session, title="Unlicensed Vine Catalog Item", condition="New")
+    listing.source_type = "amazon_vine"
+    listing.condition = "New"
+    listing.listing_images = [_vine_catalog_image(authorized=False)]
+    listing.image_urls = [listing.listing_images[0]["storage_path"]]
+    listing.marketplace_data = {"marketplace_category_mappings": {"mercari": {
+        "category_id": "leaf-17", "category_path": "Home > Storage",
+        "verification_status": "operator_confirmed", "terminal_status": "terminal",
+        "publishability_status": "publishable", "staleness_status": "fresh",
+        "required_attributes": [],
+    }}}
+
+    assert _build_ebay_image_urls(listing) == []
+    facebook = build_marketplace_payload(listing, "facebook")
+    mercari = build_marketplace_payload(listing, "mercari")
+    assert facebook["image_urls"] == [listing.listing_images[0]["storage_path"]]
+    assert mercari["image_urls"] == [listing.listing_images[0]["storage_path"]]
+    mercari_preflight = MarketplacePreflightService().preflight_listing(db_session, listing, "mercari")
+    assert mercari_preflight["draft_export_ready"] is True
+    assert mercari_preflight["manual_handoff_required"] is True
+    assert mercari_preflight["image_compliance_status"] == "unresolved"
+    assert mercari_preflight["final_submission_blocked"] is True
+    assert "MERCARI_SELLER_PHOTO_REQUIRED" in {issue["code"] for issue in mercari_preflight["submission_blockers"]}
+    assert "MERCARI_SELLER_PHOTO_REQUIRED" not in {issue["code"] for issue in mercari_preflight["preparation_blockers"]}
 
 
 def test_needs_review_implies_publishability_for_same_eBay_evaluator(db_session, monkeypatch):
@@ -1217,7 +1461,9 @@ def test_ebay_image_requirement_is_destination_specific(db_session, monkeypatch)
     assert "EBAY_IMAGES_MISSING" in codes
     assert "ACTUAL_PHOTOS_MISSING" not in codes
     assert not any(issue.get("message") == "No images attached" for issue in result["blockers"])
-    assert any(issue["code"] == "IMAGE_ENRICHMENT_PENDING" for issue in result["warnings"])
+    assert result["final_submission_blocked"] is True
+    assert {issue["code"] for issue in result["submission_blockers"]} == {"EBAY_IMAGES_MISSING"}
+    assert "EBAY_IMAGES_MISSING" not in {issue["code"] for issue in result["preparation_blockers"]}
 
 
 def test_marketplace_error_translation_normalizes_common_failures():

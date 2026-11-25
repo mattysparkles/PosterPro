@@ -32,6 +32,38 @@ def test_destination_drafts_prepare_categories_without_marketplace_connections(d
     assert categories["mercari"]["status"] == "prepared"
 
 
+def test_confirmed_marketplace_categories_remain_independent_in_publish_payloads(db_session):
+    user = User(email="independent-marketplace-category-maps@example.com")
+    db_session.add(user)
+    db_session.flush()
+    mapping = lambda market, category_id, path: {
+        "marketplace": market, "category_id": category_id, "category_path": path,
+        "verification_status": "operator_confirmed", "terminal_status": "terminal",
+        "publishability_status": "publishable", "staleness_status": "fresh",
+        "required_attributes": [], "supports_shipping": False,
+    }
+    listing = Listing(
+        user_id=user.id, status=ListingStatus.draft,
+        title="Cordless shop vacuum", description="Boxed cordless shop vacuum.",
+        listing_price=89, quantity=1, condition="New",
+        category_id="11700", category_suggestion="Tools > Vacuums",
+        marketplace_data={"marketplace_category_mappings": {
+            "facebook": mapping("facebook", None, "Home Improvement > Tools"),
+            "ebay": mapping("ebay", "183458", "Business & Industrial > Cleaning Equipment"),
+            "mercari": mapping("mercari", "mercari-leaf-42", "Home > Cleaning Supplies > Vacuums"),
+        }},
+    )
+    facebook = build_marketplace_payload(listing, "facebook")
+    ebay = build_marketplace_payload(listing, "ebay")
+    mercari = build_marketplace_payload(listing, "mercari")
+    assert facebook["facebook_category"] == "Home Improvement > Tools"
+    assert facebook["facebook_category_id"] is None
+    assert facebook["category_supports_shipping"] is False
+    assert ebay["category_id"] == "183458"
+    assert mercari["category_id"] == "mercari-leaf-42"
+    assert mercari["category_path"] == "Home > Cleaning Supplies > Vacuums"
+
+
 def test_legacy_non_ebay_publish_task_uses_assisted_handoff(db_session):
     user = User(
         email="assisted-publish@example.com",

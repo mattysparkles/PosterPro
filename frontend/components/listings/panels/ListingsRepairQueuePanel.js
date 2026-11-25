@@ -96,6 +96,7 @@ export default function ListingsRepairQueuePanel({
                   type="file"
                   accept="image/jpeg,image/png,image/webp"
                   multiple
+                  capture="environment"
                   className="hidden"
                   onChange={async (event) => {
                     const files = Array.from(event.target.files || []);

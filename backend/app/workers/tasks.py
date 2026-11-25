@@ -30,6 +30,7 @@ from app.models.models import (
     MarketplaceImportJob,
     MarketplaceListing,
     VineImportItem,
+    VineImageRecoveryJob,
     StorageUnitBatch,
     IntakeSlate,
     User,
@@ -50,6 +51,7 @@ from app.services.automation_bridge import submit_bridge_job, wait_for_bridge_jo
 from app.services.secondary_marketplace_execution import execute_secondary_marketplace_path
 from app.services.inventory_service import InventorySafetyError, InventoryService
 from app.services.storage import LocalStorage
+from app.services.image_quality import fetch_candidate_image, validate_image_bytes
 from app.services.analytics_service import AnalyticsService
 from app.services.prediction_service import PredictionService
 from app.services.pricing_intelligence_service import PricingIntelligenceService
@@ -633,6 +635,187 @@ def repair_recent_vine_images_task(self, user_id: int | None = None, chunk_size:
         return totals
     finally:
         db.close()
+
+
+@celery_app.task(name="dispatch_vine_image_recovery_jobs")
+def dispatch_vine_image_recovery_jobs(limit: int = 3) -> dict[str, Any]:
+    """Submit bounded exact-ASIN work through an authorized paired Amazon bridge account."""
+    dispatched = 0
+    unavailable = 0
+    now = datetime.utcnow()
+    with SessionLocal() as db:
+        crashed_submissions = db.execute(select(VineImageRecoveryJob).where(
+            VineImageRecoveryJob.status.in_(["submitting", "submitting_remote"]),
+            VineImageRecoveryJob.updated_at <= now - timedelta(minutes=5),
+        ).with_for_update(skip_locked=True).limit(10)).scalars().all()
+        for stale in crashed_submissions:
+            stale.status = "pending_authorization"
+            stale.attempts = max(0, int(stale.attempts or 0) - 1)
+            stale.last_error = "Recovered interrupted submit; retry will reuse the same bridge idempotency key."
+            stale.next_attempt_at = now
+        crashed_reviews = db.execute(select(VineImageRecoveryJob).where(
+            VineImageRecoveryJob.status == "processing_review",
+            VineImageRecoveryJob.updated_at <= now - timedelta(minutes=5),
+            VineImageRecoveryJob.bridge_job_id.is_not(None),
+        ).with_for_update(skip_locked=True).limit(10)).scalars().all()
+        for stale in crashed_reviews:
+            stale.status = "collecting"
+            stale.last_error = "Recovered interrupted candidate processing; bridge result will be re-read idempotently."
+        db.commit()
+        stale_collecting = db.execute(select(VineImageRecoveryJob).where(
+            VineImageRecoveryJob.status == "collecting",
+            VineImageRecoveryJob.bridge_job_id.is_not(None),
+            VineImageRecoveryJob.updated_at <= now - timedelta(minutes=1),
+        ).limit(20)).scalars().all()
+        for stale in stale_collecting:
+            poll_vine_image_recovery_job.apply_async(args=[stale.id], countdown=1)
+        # Serialize the global active-count + claim window. Row locks alone
+        # protect individual pending rows but allow two dispatchers to count
+        # the same free slots and claim different rows concurrently.
+        if db.bind and db.bind.dialect.name == "postgresql":
+            db.execute(text("SELECT pg_advisory_xact_lock(hashtext('posterpro-vine-image-recovery-dispatch'))"))
+        active_count = db.execute(select(func.count(VineImageRecoveryJob.id)).where(VineImageRecoveryJob.status.in_(["submitting", "submitting_remote", "collecting", "processing_review"]))).scalar_one()
+        available_slots = max(0, 3 - int(active_count or 0))
+        if not available_slots:
+            return {"dispatched": 0, "pending_authorization_or_unavailable": 0, "active_limit": 3}
+        jobs = db.execute(
+            select(VineImageRecoveryJob).where(
+                VineImageRecoveryJob.status.in_(["pending", "pending_authorization"]),
+                VineImageRecoveryJob.attempts < 4,
+                or_(VineImageRecoveryJob.next_attempt_at.is_(None), VineImageRecoveryJob.next_attempt_at <= now),
+            ).order_by(VineImageRecoveryJob.created_at.asc()).with_for_update(skip_locked=True).limit(min(available_slots, max(1, min(int(limit or 3), 5))))
+        ).scalars().all()
+        claimed = []
+        for job in jobs:
+            job.status = "submitting"
+            job.attempts = int(job.attempts or 0) + 1
+            claimed.append(job.id)
+        db.commit()
+        for job_id in claimed:
+            submit_vine_image_recovery_request.apply_async(args=[job_id], countdown=0)
+            dispatched += 1
+        return {"dispatched": dispatched, "pending_authorization_or_unavailable": unavailable}
+
+
+@celery_app.task(name="submit_vine_image_recovery_request")
+def submit_vine_image_recovery_request(job_id: int) -> dict[str, Any]:
+    """Submit one atomically claimed request to the existing authorized bridge."""
+    with SessionLocal() as db:
+        job = db.execute(select(VineImageRecoveryJob).where(
+            VineImageRecoveryJob.id == int(job_id)
+        ).with_for_update(skip_locked=True)).scalar_one_or_none()
+        if not job or job.status != "submitting":
+            return {"status": "not_claimed"}
+        job.status = "submitting_remote"
+        job.last_error = None
+        db.commit()
+        try:
+            submitted = submit_bridge_job(
+                job_type="import", execution_mode="browser_assist",
+                payload={
+                    "source_marketplace": "amazon",
+                    "operation": "vine_image_gallery_recovery",
+                    # Keep the key stable across retries: the bridge may have
+                    # accepted the job even when its response was lost.
+                    "acquisition_request_key": f"vine-image-recovery:{job.id}",
+                    "asin": job.asin,
+                    "asins": [job.asin],
+                    "payload": {"asin": job.asin, "product_name": job.title_hint},
+                },
+            )
+            bridge_job_id = str((((submitted or {}).get("bridge_response") or {}).get("job_id") or "")).strip()
+            if not bridge_job_id:
+                raise AutomationBridgeError("Bridge did not return a durable job ID")
+            job.bridge_job_id = bridge_job_id
+            job.status = "collecting"
+            db.commit()
+            poll_vine_image_recovery_job.apply_async(args=[job.id], countdown=10)
+            return {"status": "collecting", "bridge_job_id": bridge_job_id}
+        except Exception as exc:
+            job.status = "pending_authorization" if job.attempts < 4 else "manual_review_required"
+            job.last_error = str(exc)[:500]
+            job.next_attempt_at = datetime.utcnow() + timedelta(minutes=min(60, 5 * (2 ** max(0, job.attempts - 1))))
+            db.commit()
+            return {"status": job.status, "error": job.last_error}
+
+
+@celery_app.task(name="poll_vine_image_recovery_job")
+def poll_vine_image_recovery_job(job_id: int) -> dict[str, Any]:
+    with SessionLocal() as db:
+        job = db.execute(select(VineImageRecoveryJob).where(VineImageRecoveryJob.id == int(job_id)).with_for_update(skip_locked=True)).scalar_one_or_none()
+        if not job or job.status != "collecting" or not job.bridge_job_id:
+            return {"status": "not_collecting"}
+        try:
+            bridge = get_bridge_job(job.bridge_job_id)
+            bridge_status = str(bridge.get("status") or "").lower()
+            if bridge_status not in {"completed", "failed", "canceled"}:
+                poll_vine_image_recovery_job.apply_async(args=[job.id], countdown=15)
+                return {"status": "collecting"}
+            if bridge_status != "completed":
+                raise RuntimeError(str(bridge.get("error") or "authorized browser collection did not complete"))
+            job.status = "processing_review"
+            db.commit()
+            result = bridge.get("result") if isinstance(bridge.get("result"), dict) else {}
+            records = result.get("imported_listings") if isinstance(result.get("imported_listings"), list) else []
+            record = next((row for row in records if isinstance(row, dict) and str(row.get("asin") or "").upper() == job.asin), {})
+            page_asin = str(record.get("page_asin") or "").upper()
+            if page_asin != job.asin:
+                raise RuntimeError("exact product page ASIN was absent or mismatched")
+            evidence = {
+                "requested_asin": job.asin, "page_asin": page_asin,
+                "source_url": record.get("source_url"), "title": record.get("title"),
+                "selected_variant": record.get("selected_variant"),
+                "variant_identity": "unverified" if not record.get("selected_variant") else "operator_review_required",
+                "collector": "authorized_paired_amazon_bridge", "rights": "unverified",
+            }
+            candidates = []
+            storage = LocalStorage()
+            for source_url in list(record.get("image_urls") or [])[:12]:
+                try:
+                    gallery_source_evidence = next((
+                        evidence for evidence in (record.get("gallery_evidence") or [])
+                        if isinstance(evidence, dict) and str(evidence.get("source_url") or "") == str(source_url)
+                    ), {})
+                    data, quality = fetch_candidate_image(str(source_url))
+                    checked = validate_image_bytes(data, source_url=str(source_url), expected_asin=job.asin, page_asin=page_asin)
+                    if checked["verdict"] not in {"valid_exact_product", "identity_unverified"}:
+                        continue
+                    fmt = str(quality.get("evidence", {}).get("format") or "JPEG").lower()
+                    extension = ".png" if fmt == "png" else ".webp" if fmt == "webp" else ".jpg"
+                    local_path = storage.save_bytes(data, extension=extension, prefix=f"vine-recovery/{job.user_id}/{job.asin}")
+                    image = Image(
+                        user_id=job.user_id, source_url=str(source_url), local_path=local_path,
+                        width=(quality.get("evidence", {}).get("dimensions") or [None, None])[0],
+                        height=(quality.get("evidence", {}).get("dimensions") or [None, None])[1],
+                        image_metadata={
+                            "source": "amazon_vine_browser_gallery_candidate", "asin": job.asin,
+                            "source_page_url": record.get("source_url"), "page_asin": page_asin,
+                            "selected_variant": record.get("selected_variant"),
+                            "identity_state": "asin_verified_variant_unverified",
+                            "rights_state": "unverified", "operator_state": "pending_review",
+                            "gallery_source_evidence": gallery_source_evidence,
+                            "quality_evidence": quality.get("evidence"),
+                        },
+                    )
+                    db.add(image)
+                    db.flush()
+                    rel = Path(local_path).resolve().relative_to(storage.root.resolve()).as_posix()
+                    candidates.append({"image_id": image.id, "storage_path": f"/media/{rel}", "source_url": str(source_url), "verdict": "identity_unverified", "rights_status": "unverified", "operator_state": "pending_review"})
+                except Exception as exc:
+                    logger.info("vine_image_candidate_rejected", extra={"recovery_job_id": job.id, "reason": str(exc)[:160]})
+            job.page_evidence_json = evidence
+            job.candidates_json = candidates
+            job.status = "review_required" if candidates else "manual_review_required"
+            job.last_error = None if candidates else "no usable product gallery candidates; manual acquisition required"
+            job.completed_at = datetime.utcnow()
+            db.commit()
+            return {"status": job.status, "candidate_count": len(candidates)}
+        except Exception as exc:
+            job.last_error = str(exc)[:500]
+            job.status = "pending_authorization" if job.attempts < 4 else "manual_review_required"
+            job.next_attempt_at = datetime.utcnow() + timedelta(minutes=min(60, 5 * (2 ** max(0, job.attempts - 1))))
+            db.commit()
+            return {"status": job.status, "error": job.last_error}
 
 
 @celery_app.task(name="repair_vine_listing_quality")
@@ -4125,6 +4308,171 @@ def bulk_finalize_job(results: list[dict], job_id: str) -> dict:
             "total_items": job.total_items,
             "errors": total_errors,
         }
+
+
+@celery_app.task(name="resume_marketplace_category_suggestion_jobs")
+def resume_marketplace_category_suggestion_jobs() -> dict:
+    """Re-enqueue durable category jobs left queued by a worker restart."""
+    from datetime import UTC
+    cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=2)
+    with SessionLocal() as db:
+        job_ids = db.execute(select(BulkJob.id).where(
+            BulkJob.action == "suggest_marketplace_categories",
+            BulkJob.status.in_(["queued", "running"]), BulkJob.updated_at < cutoff,
+        ).order_by(BulkJob.created_at).limit(100)).scalars().all()
+    for job_id in job_ids:
+        process_marketplace_taxonomy_suggestion_job.delay(job_id)
+    return {"resumed": len(job_ids)}
+
+
+@celery_app.task(name="process_marketplace_taxonomy_suggestion_job")
+def process_marketplace_taxonomy_suggestion_job(job_id: str) -> dict:
+    """Process one durable page; persisted cursor makes retries/restarts safe."""
+    from app.services.marketplace_category_suggestions import build_suggestions, persist_suggestions
+
+    max_item_attempts = 3
+    processed = 0
+    errors: list[dict] = []
+    has_more = False
+    try:
+        retry_status = "queued"
+        with SessionLocal() as db:
+            job = db.query(BulkJob).filter(
+                BulkJob.id == job_id,
+                BulkJob.action == "suggest_marketplace_categories",
+            ).with_for_update(skip_locked=True).first()
+            if not job:
+                # A concurrent delivery may have the row lock, or the job may
+                # have been removed. Do not misreport a lock miss as a missing
+                # job and, critically, do not claim or mutate it.
+                return {"job_id": job_id, "status": "not_claimed", "processed": 0}
+            if job.status in {"completed", "completed_with_errors", "failed", "cancelled"}:
+                return {"job_id": job_id, "status": job.status, "processed": 0}
+            payload = dict(job.payload) if isinstance(job.payload, dict) else {}
+            review_counts = dict(payload.get("review_counts") or {})
+            for key in ("candidate_count", "review_required_count", "reference_only_count", "no_candidate_count", "confirmed_preserved_count", "ambiguous_identity_count"):
+                review_counts[key] = int(review_counts.get(key) or 0)
+            listing_ids = payload.get("listing_ids") if isinstance(payload.get("listing_ids"), list) else []
+            cursor = max(0, int(payload.get("cursor") or 0))
+            batch_size = max(1, min(int(payload.get("batch_size") or 25), 50))
+            retry_items = payload.get("retry_items") if isinstance(payload.get("retry_items"), list) else []
+            if cursor < len(listing_ids):
+                batch = [{"listing_id": int(value), "attempt": 0} for value in listing_ids[cursor:cursor + batch_size]]
+                cursor_advance = len(batch)
+                retry_items_to_process: list[dict] = []
+            else:
+                now = datetime.utcnow()
+                eligible = []
+                for item in retry_items:
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        due = datetime.fromisoformat(str(item.get("next_attempt_at") or ""))
+                    except ValueError:
+                        due = now
+                    if due <= now:
+                        eligible.append(item)
+                if not eligible:
+                    job.status = "queued"
+                    job.updated_at = datetime.utcnow()
+                    db.commit()
+                    return {"job_id": job_id, "status": "queued", "processed": 0, "retry_wait": True}
+                batch = [{"listing_id": int(item["listing_id"]), "attempt": int(item.get("attempt") or 1)}
+                         for item in eligible[:batch_size]]
+                retry_items_to_process = eligible[:batch_size]
+                cursor_advance = 0
+            job.status = "running"
+            job.updated_at = datetime.utcnow()
+            batch_ids = [item["listing_id"] for item in batch]
+            rows = db.query(Listing).filter(Listing.user_id == job.user_id, Listing.id.in_(batch_ids)).with_for_update().all() if batch_ids else []
+            by_id = {int(row.id): row for row in rows}
+            marketplaces = payload.get("marketplaces") if isinstance(payload.get("marketplaces"), list) else ["facebook", "ebay", "mercari"]
+            terminal_errors: list[dict] = []
+            new_retry_items: list[dict] = []
+            for batch_item in batch:
+                listing_id = batch_item["listing_id"]
+                listing = by_id.get(listing_id)
+                if listing is None:
+                    terminal_errors.append({"listing_id": listing_id, "error": "Listing is missing or no longer belongs to this operator"})
+                    continue
+                try:
+                    with db.begin_nested():
+                        suggestion = build_suggestions(db, listing, owner_user_id=job.user_id, marketplaces=marketplaces)
+                        persist_suggestions(listing, suggestion)
+                        db.flush()
+                    processed += 1
+                    identity = str(suggestion.get("product_identity") or "")
+                    if identity.startswith("ambiguous:") or not identity.startswith("id:"):
+                        review_counts["ambiguous_identity_count"] += 1
+                    for market_result in suggestion.get("marketplaces", {}).values():
+                        if market_result.get("state") == "confirmed_mapping_preserved":
+                            review_counts["confirmed_preserved_count"] += 1
+                        candidates = market_result.get("candidates") if isinstance(market_result.get("candidates"), list) else []
+                        if not candidates:
+                            review_counts["no_candidate_count"] += 1
+                        review_counts["candidate_count"] += len(candidates)
+                        if candidates:
+                            review_counts["review_required_count"] += 1
+                        review_counts["reference_only_count"] += sum(1 for item in candidates if item.get("reference_only"))
+                except Exception as exc:
+                    attempt = int(batch_item.get("attempt") or 0) + 1
+                    failure = {"listing_id": listing_id, "error": str(exc)[:400], "attempt": attempt}
+                    if attempt < max_item_attempts:
+                        delay_seconds = min(300, 30 * (2 ** (attempt - 1)))
+                        failure["next_attempt_at"] = (datetime.utcnow() + timedelta(seconds=delay_seconds)).isoformat()
+                        new_retry_items.append(failure)
+                    else:
+                        terminal_errors.append({"listing_id": listing_id, "error": str(exc)[:400], "attempts": attempt})
+            if retry_items_to_process:
+                processed_retry_ids = {int(item["listing_id"]) for item in retry_items_to_process}
+                retry_items = [item for item in retry_items if not isinstance(item, dict) or int(item.get("listing_id") or 0) not in processed_retry_ids]
+            payload["retry_items"] = [*retry_items, *new_retry_items]
+            payload["cursor"] = min(len(listing_ids), cursor + cursor_advance)
+            payload["last_batch_at"] = datetime.utcnow().isoformat()
+            payload["review_counts"] = review_counts
+            # Successful chunks reset the consecutive systemic-failure count.
+            # Item-level retries are tracked separately and never inflate this.
+            payload["system_retry_count"] = 0
+            job.payload = payload
+            job.processed_items = min(job.total_items, max(0, payload["cursor"] - len(payload["retry_items"])))
+            errors = terminal_errors
+            job.errors = [*(job.errors or []), *terminal_errors][-500:]
+            # `errors` is deliberately capped for payload size; the durable
+            # counter must remain exact when a large batch has over 500 faults.
+            job.error_count = int(job.error_count or 0) + len(terminal_errors)
+            has_more = payload["cursor"] < len(listing_ids) or bool(payload["retry_items"])
+            job.status = "queued" if has_more else ("completed_with_errors" if job.error_count else "completed")
+            db.commit()
+    except Exception as exc:
+        # A systemic failure leaves the cursor untouched. Persist a bounded
+        # retry count; the minute recovery task will resume or mark failed.
+        with SessionLocal() as db:
+            job = db.query(BulkJob).filter(BulkJob.id == job_id,
+                                           BulkJob.action == "suggest_marketplace_categories").with_for_update().first()
+            if job and job.status not in {"completed", "completed_with_errors", "failed", "cancelled"}:
+                payload = dict(job.payload) if isinstance(job.payload, dict) else {}
+                retries = int(payload.get("system_retry_count") or 0) + 1
+                payload["system_retry_count"] = retries
+                job.payload = payload
+                job.errors = [*(job.errors or []), {"error": f"Suggestion worker error: {str(exc)[:300]}"}][-500:]
+                # Retryable worker incidents remain visible in the bounded
+                # diagnostic log, but do not count as terminal item errors.
+                # Only exhaustion becomes a job failure.
+                exhausted = retries >= 5
+                if exhausted:
+                    job.error_count = int(job.error_count or 0) + 1
+                job.status = "failed" if exhausted else "queued"
+                retry_status = job.status
+                db.commit()
+        return {"job_id": job_id, "status": retry_status, "error": str(exc)[:300]}
+
+    if has_more:
+        # Continue initial pages immediately. Item retries have persisted
+        # backoff timestamps and are resumed by the minute watchdog instead.
+        payload = payload if isinstance(payload, dict) else {}
+        if int(payload.get("cursor") or 0) < len(payload.get("listing_ids") or []):
+            process_marketplace_taxonomy_suggestion_job.delay(job_id)
+    return {"job_id": job_id, "processed": processed, "item_errors": errors, "has_more": has_more}
 
 
 

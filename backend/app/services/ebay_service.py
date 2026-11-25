@@ -965,16 +965,27 @@ def _image_meets_ebay_policy(path: str) -> bool:
 
 def _build_ebay_image_urls(listing: Listing) -> list[str]:
     image_urls: list[str] = []
-    candidates: list[str] = [str(value) for value in (listing.image_urls or []) if str(value or '').strip()]
+    from app.services.listing_review import classify_listing_image
+
+    source_type = str(getattr(listing, "source_type", "") or "").strip().lower()
+    candidates: list[str] = []
     # Modern listing_images is the canonical source for imported/recovered
     # media. Older rows may have an empty image_urls compatibility column even
     # though their normalized image records contain usable storage paths.
     for image in (getattr(listing, "listing_images", None) or []):
         if not isinstance(image, dict) or str(image.get("operator_state") or "").lower() == "rejected":
             continue
+        if not classify_listing_image(image)["ebay_eligible"]:
+            continue
         candidate = image.get("storage_path") or image.get("url") or image.get("local_path")
         if candidate:
             candidates.append(str(candidate))
+    # Legacy non-Vine rows have no per-image provenance record. Preserve their
+    # existing compatibility path, but fail closed for Vine imports, where an
+    # Amazon source URL alone proves neither seller photography nor image
+    # redistribution rights.
+    if not candidates and source_type != "amazon_vine" and not (getattr(listing, "listing_images", None) or []):
+        candidates.extend(str(value) for value in (listing.image_urls or []) if str(value or '').strip())
     for candidate in candidates:
         if not _image_meets_ebay_policy(candidate):
             continue
@@ -3955,6 +3966,7 @@ async def build_ebay_publish_plan(
         listing,
         aspect_payload,
     )
+    from app.services.listing_review import classify_listing_image
     image_urls = _build_ebay_image_urls(listing)
     if not image_urls:
         raise EbayIntegrationError(f"Listing {listing.id} has no images to send to eBay")
@@ -4101,7 +4113,7 @@ async def build_ebay_publish_plan(
         },
         "image_summary": {
             "image_count": len(image_urls),
-            "actual_image_count": len([image for image in (listing.listing_images or []) if isinstance(image, dict) and not image.get("is_reference") and image.get("operator_state") != "rejected"]),
+            "actual_image_count": len([image for image in (listing.listing_images or []) if isinstance(image, dict) and classify_listing_image(image)["seller_photographed"]]),
             "reference_only": bool(listing.listing_images) and not any(
                 isinstance(image, dict) and not image.get("is_reference") and image.get("operator_state") != "rejected"
                 for image in (listing.listing_images or [])

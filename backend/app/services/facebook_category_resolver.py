@@ -60,6 +60,24 @@ def listing_is_shippable(listing: Any) -> bool:
 
 
 def resolve_facebook_category(listing: Any, *, prefer_shipping_capable: bool = True, allow_local_pickup_only: bool = False) -> FacebookCategoryDecision:
+    marketplace_data = getattr(listing, "marketplace_data", None)
+    marketplace_data = marketplace_data if isinstance(marketplace_data, dict) else {}
+    mappings = marketplace_data.get("marketplace_category_mappings") if isinstance(marketplace_data.get("marketplace_category_mappings"), dict) else {}
+    mapping = mappings.get("facebook") if isinstance(mappings.get("facebook"), dict) else {}
+    if (mapping.get("verification_status") == "operator_confirmed"
+            and mapping.get("terminal_status") == "terminal"
+            and mapping.get("publishability_status") == "publishable"
+            and mapping.get("staleness_status") == "fresh"
+            and str(mapping.get("category_path") or "").strip()):
+        supports_shipping = mapping.get("supports_shipping") is True
+        return FacebookCategoryDecision(
+            str(mapping["category_path"]).strip(),
+            "high",
+            "operator_confirmed_taxonomy_mapping",
+            supports_shipping,
+            "current operator-confirmed Facebook taxonomy mapping",
+        )
+
     text = _text(listing)
     title = str(getattr(listing, "title", "") or "").casefold()
     # Strong product evidence precedes title-overlap/category carry-over.

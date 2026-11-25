@@ -29,6 +29,9 @@ celery_app.conf.update(
         # and so it cannot share a queue with commercial publication jobs.
         "build_vine_batch_drafts": {"queue": "posterpro-vine", "routing_key": "posterpro-vine", "priority": 7},
         "repair_recent_vine_images": {"queue": "posterpro-vine", "routing_key": "posterpro-vine", "priority": 6},
+        "dispatch_vine_image_recovery_jobs": {"queue": "posterpro-vine", "routing_key": "posterpro-vine", "priority": 6},
+        "submit_vine_image_recovery_request": {"queue": "posterpro-vine", "routing_key": "posterpro-vine", "priority": 6},
+        "poll_vine_image_recovery_job": {"queue": "posterpro-vine", "routing_key": "posterpro-vine", "priority": 6},
         # Commercial writes use a dedicated, single-consumer queue. The
         # worker for this queue is separate from generic enrichment, polling,
         # and recovery tasks. Jobs reach it only after PosterPro's authenticated
@@ -40,6 +43,10 @@ celery_app.conf.update(
         "dispatch_queued_crosspost_jobs": {"queue": "posterpro-publish", "routing_key": "posterpro-publish", "priority": 0},
         "resume_product_research_backlog": {"queue": "posterpro", "routing_key": "posterpro", "priority": 8},
         "resume_image_identification_backlog": {"queue": "posterpro", "routing_key": "posterpro", "priority": 8},
+        # Review-only category work has its own bounded consumer. It must not
+        # compete with Vine imports/image repair or commercial publishing.
+        "process_marketplace_taxonomy_suggestion_job": {"queue": "posterpro-category", "routing_key": "posterpro-category", "priority": 5},
+        "resume_marketplace_category_suggestion_jobs": {"queue": "posterpro-category", "routing_key": "posterpro-category", "priority": 5},
         # Inventory enrichment has a dedicated consumer.  Marketplace sync
         # and publication traffic must not starve the autonomous listing
         # pipeline or make its progress depend on an operator session.
@@ -93,6 +100,10 @@ celery_app.conf.update(
             "task": "flag_stale_listings",
             "schedule": crontab(minute=5, hour=0),
         },
+        "resume-marketplace-category-suggestion-jobs": {
+            "task": "resume_marketplace_category_suggestion_jobs",
+            "schedule": crontab(minute="*/1"),
+        },
         "recover-intake-reconciliation-jobs-every-minute": {
             "task": "process_intake_reconciliation_jobs",
             "schedule": crontab(minute="*"),
@@ -125,6 +136,11 @@ celery_app.conf.update(
         "repair-recent-vine-images-every-5m": {
             "task": "repair_recent_vine_images",
             "schedule": crontab(minute="*/5"),
+        },
+        "dispatch-vine-image-recovery-every-minute": {
+            "task": "dispatch_vine_image_recovery_jobs",
+            "schedule": crontab(minute="*"),
+            "args": [3],
         },
         "repair-vine-listing-quality-every-15m": {
             "task": "repair_vine_listing_quality",
