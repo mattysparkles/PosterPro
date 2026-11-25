@@ -139,6 +139,31 @@ def test_vine_recovery_lost_bridge_response_retries_with_same_idempotency_key(db
     assert keys == [f"vine-image-recovery:{job.id}", f"vine-image-recovery:{job.id}"]
 
 
+def test_vine_recovery_keeps_remote_job_when_poll_queue_is_temporarily_unavailable(db_session, monkeypatch):
+    user = User(email=f"vine-poll-queue-{uuid4()}@example.test", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.flush()
+    job = VineImageRecoveryJob(user_id=user.id, asin="B000000046", status="submitting", attempts=1)
+    db_session.add(job)
+    db_session.commit()
+    monkeypatch.setattr(tasks, "submit_bridge_job", lambda **_kwargs: {
+        "bridge_response": {"job_id": "bridge-vine-46"}
+    })
+
+    def broker_unavailable(**_kwargs):
+        raise RuntimeError("temporary Redis outage")
+
+    monkeypatch.setattr(tasks.poll_vine_image_recovery_job, "apply_async", broker_unavailable)
+    result = tasks.submit_vine_image_recovery_request.run(job.id)
+
+    db_session.expire_all()
+    persisted = db_session.get(VineImageRecoveryJob, job.id)
+    assert result == {"status": "collecting", "bridge_job_id": "bridge-vine-46"}
+    assert persisted.status == "collecting"
+    assert persisted.bridge_job_id == "bridge-vine-46"
+    assert persisted.last_error is None
+
+
 def test_vine_dispatch_recovers_worker_crash_and_stops_at_attempt_cap(db_session, monkeypatch):
     user = User(email=f"vine-crash-recovery-{uuid4()}@example.test", role="owner", is_admin=True)
     db_session.add(user)

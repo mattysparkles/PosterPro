@@ -729,7 +729,18 @@ def submit_vine_image_recovery_request(job_id: int) -> dict[str, Any]:
             job.bridge_job_id = bridge_job_id
             job.status = "collecting"
             db.commit()
-            poll_vine_image_recovery_job.apply_async(args=[job.id], countdown=10)
+            # The remote bridge has accepted the idempotent request and that
+            # durable ID is committed. A temporary broker outage must not turn
+            # this into a retryable authorization failure: doing so can submit
+            # duplicate remote work. The dispatcher also re-enqueues stale
+            # collecting jobs, so polling remains recoverable after restart.
+            try:
+                poll_vine_image_recovery_job.apply_async(args=[job.id], countdown=10)
+            except Exception as poll_error:
+                logger.warning(
+                    "Vine recovery poll scheduling deferred for job %s: %s",
+                    job.id, str(poll_error)[:300],
+                )
             return {"status": "collecting", "bridge_job_id": bridge_job_id}
         except Exception as exc:
             job.status = "pending_authorization" if job.attempts < 4 else "manual_review_required"
