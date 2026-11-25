@@ -3227,15 +3227,21 @@ class VineImportService:
                 listing.listing_images = refreshed_images
                 listing.image_urls = [image["storage_path"] for image in (listing.listing_images or []) if image.get("operator_state") != "rejected"]
 
-            if (discovered_description or amazon_facts) and not is_human_owned_field(source_metadata, "description"):
+            if not is_human_owned_field(source_metadata, "description"):
                 hydrated_facts = self._hydrate_vine_facts(
                     {**(amazon_facts or {}), "product_description": discovered_description or (amazon_facts or {}).get("product_description")},
                     item=item,
                     listing=listing,
                 )
-                listing.description = self._generate_vine_original_description(
-                    db, listing=listing, item=item, facts=hydrated_facts,
+                prior_generation = source_metadata.get("vine_description_generation") if isinstance(source_metadata.get("vine_description_generation"), dict) else {}
+                prior_openai_copy_is_usable = (
+                    prior_generation.get("source") == "openai"
+                    and self._vine_description_is_usable(listing.description, listing.title, hydrated_facts)
                 )
+                if not prior_openai_copy_is_usable:
+                    listing.description = self._generate_vine_original_description(
+                        db, listing=listing, item=item, facts=hydrated_facts,
+                    )
             elif not is_human_owned_field(source_metadata, "description"):
                 listing.description = _sanitize_vine_text(listing.description) or listing.description
             if not is_human_owned_field(source_metadata, "title"):
