@@ -502,6 +502,16 @@ def test_seller_photo_requires_explicit_capture_provenance_and_approval():
     assert classify_listing_image(pending)["seller_photographed"] is False
 
 
+def test_google_photos_are_seller_photographs_only_with_explicit_capture_evidence():
+    source_only = {
+        "storage_path": "/media/timeline/item.jpg", "source_platform": "google_photos",
+        "operator_state": "approved", "is_reference": False,
+    }
+    assert classify_listing_image(source_only)["seller_photographed"] is False
+    captured = {**source_only, "seller_captured": True}
+    assert classify_listing_image(captured)["seller_photographed"] is True
+
+
 def test_used_item_actual_photo_is_separate_from_catalog_rights():
     photo = {
         "storage_path": "/media/used/item.jpg", "source_platform": "actual_upload",

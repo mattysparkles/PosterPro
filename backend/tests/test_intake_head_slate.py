@@ -899,8 +899,8 @@ def test_timeline_primary_is_scoped_by_canonical_item_and_clears_to_auto(db_sess
     start = datetime.now(UTC)
     rows = [
         IntakePhoto(user_id=user.id, source_provider="google_photos", source_photo_id="head-A", local_path=_make_detail_image("primary-head-a"), item_id="A", batch_id=batch.id, is_slate=True, is_internal_only=True, is_public_listing_candidate=False, metadata_json={"timeline_role": "HEAD", "classification": "HEAD", "classification_source": "MANUAL_OPERATOR"}, captured_at=start),
-        IntakePhoto(user_id=user.id, source_provider="google_photos", source_photo_id="a1", local_path=_make_detail_image("primary-a1"), item_id="A", batch_id=batch.id, is_public_listing_candidate=True, captured_at=start + timedelta(seconds=1)),
-        IntakePhoto(user_id=user.id, source_provider="google_photos", source_photo_id="a2", local_path=_make_detail_image("primary-a2"), item_id="A", batch_id=batch.id, is_public_listing_candidate=True, captured_at=start + timedelta(seconds=2)),
+        IntakePhoto(user_id=user.id, source_provider="google_photos", source_photo_id="a1", local_path=_make_detail_image("primary-a1"), item_id="A", batch_id=batch.id, is_public_listing_candidate=True, metadata_json={"seller_captured": True}, captured_at=start + timedelta(seconds=1)),
+        IntakePhoto(user_id=user.id, source_provider="google_photos", source_photo_id="a2", local_path=_make_detail_image("primary-a2"), item_id="A", batch_id=batch.id, is_public_listing_candidate=True, metadata_json={"seller_captured": True}, captured_at=start + timedelta(seconds=2)),
         IntakePhoto(user_id=user.id, source_provider="google_photos", source_photo_id="head-B", local_path=_make_detail_image("primary-head-b"), item_id="B", batch_id=batch.id, is_slate=True, is_internal_only=True, is_public_listing_candidate=False, metadata_json={"timeline_role": "HEAD", "classification": "HEAD", "classification_source": "MANUAL_OPERATOR"}, captured_at=start + timedelta(seconds=3)),
         IntakePhoto(user_id=user.id, source_provider="google_photos", source_photo_id="b1", local_path=_make_detail_image("primary-b1"), item_id="B", batch_id=batch.id, is_public_listing_candidate=True, captured_at=start + timedelta(seconds=4)),
         IntakePhoto(user_id=user.id, source_provider="google_photos", source_photo_id="b2", local_path=_make_detail_image("primary-b2"), item_id="B", batch_id=batch.id, is_public_listing_candidate=True, captured_at=start + timedelta(seconds=5)),
@@ -924,6 +924,7 @@ def test_timeline_primary_is_scoped_by_canonical_item_and_clears_to_auto(db_sess
     _urls, listing_images = service._materialize_listing_images(item_id="A", title="Group A", photos=[by_source["a1"], by_source["a2"]])
     assert listing_images[0]["metadata"]["intake_photo_id"] == by_source["a2"].id
     assert listing_images[1]["metadata"]["intake_photo_id"] == by_source["a1"].id
+    assert listing_images[0]["seller_captured"] is True
     listing = Listing(
         title="Group A",
         image_urls=_urls,

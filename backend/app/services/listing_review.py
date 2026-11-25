@@ -86,7 +86,7 @@ def classify_listing_image(image: dict | None) -> dict:
         # The explicit upload source label is recorded only by the seller-photo
         # upload workflow; Amazon/catalog sources never use this marker.
         kind = "seller_photographed"
-    elif source in {"google_photos_album", "photo_intake", "shelf_census", "upload"} and image.get("seller_captured") is True:
+    elif source in {"google_photos", "google_photos_album", "google_photos_timeline", "timeline_upload", "photo_intake", "shelf_census", "upload"} and image.get("seller_captured") is True:
         kind = "seller_photographed"
     elif not (image.get("storage_path") or image.get("url") or image.get("local_path")):
         kind = "missing"

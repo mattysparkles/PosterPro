@@ -4501,6 +4501,7 @@ class IntakeSlateService:
         total = len(photos)
         for index, photo in enumerate(photos, start=1):
             source = Path(photo.local_path)
+            source_metadata = photo.metadata_json if isinstance(photo.metadata_json, dict) else {}
             extension = source.suffix.lower() or ".jpg"
             purpose = self._listing_photo_purpose(photo=photo, index=index, total=total)
             filename = f"{self._slug_token(f'{seo_title} {purpose} {item_id}', max_length=140) or 'item'}-{index:02d}{extension}"
@@ -4509,8 +4510,7 @@ class IntakeSlateService:
                 self._prepare_listing_image(source=source, target=target)
             public_path = self._to_public_media_path(str(target))
             public_urls.append(public_path)
-            listing_images.append(
-                {
+            listing_image = {
                     "storage_path": public_path,
                     "source_url": photo.downloaded_url,
                     "source_platform": photo.source_provider,
@@ -4531,7 +4531,13 @@ class IntakeSlateService:
                         "image_processing": "posterpro_intake_enhance_v1",
                     },
                 }
-            )
+            # Preserve an explicit capture assertion from the intake source.
+            # A Google Photos provider alone is not proof that the seller took
+            # the photo, so absent evidence remains unverified downstream.
+            if source_metadata.get("seller_captured") is True:
+                listing_image["seller_captured"] = True
+                listing_image["metadata"]["seller_captured"] = True
+            listing_images.append(listing_image)
         return public_urls, listing_images
 
     def refresh_drafts_until_stable(self, db: Session, *, user: User, max_passes: int = 2) -> dict[str, Any]:
