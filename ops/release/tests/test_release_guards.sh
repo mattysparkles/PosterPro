@@ -43,6 +43,24 @@ if [[ "$status" -ne 2 ]]; then
 fi
 echo "release guard tests passed (ineligible candidate and tampered payload rejected)"
 
+# Current pytest appends a parenthesized elapsed-time summary when the run is
+# long enough. Promotion must accept that normal format while still requiring
+# one non-empty backend suite and one bridge suite.
+cat > "$tmp_root/backend-tests-valid.txt" <<'TXT'
+1129 passed, 3 skipped, 21029 warnings in 378.23s (0:06:18)
+18 passed in 1.06s
+TXT
+python3 "$repo_root/ops/release/verify_backend_test_evidence.py" "$tmp_root/backend-tests-valid.txt" >/dev/null
+cat > "$tmp_root/backend-tests-invalid.txt" <<'TXT'
+1129 passed, 3 skipped in 378.23s (0:06:18)
+1 failed in 1.06s
+TXT
+if python3 "$repo_root/ops/release/verify_backend_test_evidence.py" "$tmp_root/backend-tests-invalid.txt" >/dev/null 2>&1; then
+  echo "Expected failed bridge test evidence to be rejected." >&2
+  exit 1
+fi
+echo "pytest evidence guard accepts timed summaries and rejects failures"
+
 # Exercise the positive eligibility/ancestry/activation path without touching
 # system services or production routing. The fake commands only report success.
 mkdir -p "$release_root/known-good" "$release_root/eligible" "$tmp_root/fake-bin"
