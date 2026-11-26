@@ -24,7 +24,7 @@ from app.api.vine_imports import (
 )
 from app.models.models import Image, IntakeNotification, Listing, MarketplaceAccount, ProductMediaCache, User, VineImageRecoveryJob, VineImportBatch, VineImportItem
 from app.services.amazon_media import AmazonProductMediaProvider, _extract_amazon_product_facts
-from app.services.image_quality import PRIME_LOGO_SHA256, filter_known_placeholders, merge_gallery_candidates, validate_image_bytes
+from app.services.image_quality import PRIME_LOGO_SHA256, filter_known_placeholders, merge_gallery_candidates, title_identity_tokens_match, validate_image_bytes
 from app.services.amazon_product_discovery import AmazonProductDiscoveryService
 from app.services.listing_review import normalize_listing_images
 from app.services.listing_review import derive_shipping_profile
@@ -52,6 +52,17 @@ def test_image_quality_requires_exact_page_and_variant_evidence():
     assert validate_image_bytes(data, expected_asin="B000000001", page_asin="B000000002")["verdict"] == "wrong_product"
     assert validate_image_bytes(data, expected_asin="B000000001", page_asin="B000000001", expected_variant="2-pack", selected_variant="1-pack")["verdict"] == "wrong_product"
     assert validate_image_bytes(data, expected_asin="B000000001", page_asin="B000000001", expected_variant="2-pack", selected_variant="2-pack")["verdict"] == "valid_exact_product"
+
+
+def test_title_identity_match_requires_variant_tokens():
+    assert title_identity_tokens_match(
+        "Siftary 100 Pack 16.9 oz Clear PET Cups",
+        "Siftary 100 Pack 16.9 oz Clear PET Cups with Lids",
+    )
+    assert not title_identity_tokens_match(
+        "Siftary 100 Pack 16.9 oz Clear PET Cups",
+        "Siftary 100 Pack 12 oz Clear PET Cups with Lids",
+    )
 
 
 def test_known_prime_asset_hash_fixture_is_stable():
@@ -2380,8 +2391,11 @@ def test_discover_for_vine_item_allows_title_search(db_session, monkeypatch):
     monkeypatch.setattr("app.services.amazon_media.AmazonProductMediaProvider.lookup_by_asin", _fake_lookup_by_asin)
     monkeypatch.setattr("app.services.amazon_media.AmazonProductMediaProvider.fetch_product_page_description", lambda self, asin, title_hint=None: "Title search description")
 
-    result = service.discover_for_vine_item(asin=None, product_name="Desk Lamp", manual_url=None)
+    result = service.discover_for_vine_item(asin="B000GOOD02", product_name="Desk Lamp", manual_url=None)
     assert result["asin"] == "B000GOOD01"
+    assert result["requested_asin"] == "B000GOOD02"
+    assert result["asin_cross_check"] == "not_matched_title_identity_used"
+    assert result["identity_method"] == "product_title_search"
     assert lookup_calls["asin"] == "B000GOOD01"
     assert result["description"] == "Title search description"
     assert result["images"] == ["/media/amazon-vine/good.jpg"]

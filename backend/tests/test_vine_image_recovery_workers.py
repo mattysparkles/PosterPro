@@ -108,6 +108,44 @@ def test_vine_recovery_worker_submission_poll_review_and_duplicate_delivery(db_s
     assert db_session.query(MarketplaceListing).filter(MarketplaceListing.listing_id == listing.id).count() == 0
 
 
+def test_title_verified_recovery_accepts_public_result_asin_mismatch(db_session, monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "storage_root", str(tmp_path))
+    user = User(email=f"vine-title-identity-{uuid4()}@example.test", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.flush()
+    title = "Siftary 100 Pack 16.9 oz Clear PET Cups with Aluminum Lids"
+    listing = Listing(user_id=user.id, source_type="amazon_vine", title=title, image_urls=[], listing_images=[])
+    db_session.add(listing)
+    db_session.flush()
+    job = VineImageRecoveryJob(user_id=user.id, listing_id=listing.id, asin="B000000042", title_hint="Siftary 100 Pack 16.9 oz Clear PET Cups", status="collecting", bridge_job_id="bridge-title-match")
+    db_session.add(job)
+    db_session.commit()
+    candidate_url = "https://m.media-amazon.com/images/I/title-matched-product.jpg"
+    monkeypatch.setattr(tasks, "get_bridge_job", lambda _id: {
+        "status": "completed",
+        "result": {"imported_listings": [{
+            "asin": "B000000042", "page_asin": "B000000099",
+            "identity_status": "title_tokens_verified",
+            "source_url": "https://www.amazon.com/dp/B000000099",
+            "title": title, "image_urls": [candidate_url],
+            "gallery_evidence": [{"source_url": candidate_url, "gallery_region": "product_detail_gallery"}],
+        }]},
+    })
+    monkeypatch.setattr(tasks, "fetch_candidate_image", lambda _url: (_jpeg_bytes(), {
+        "evidence": {"format": "JPEG", "dimensions": [320, 320], "content_type": "image/jpeg"},
+    }))
+
+    result = tasks.poll_vine_image_recovery_job.run(job.id)
+    db_session.expire_all()
+    refreshed = db_session.get(VineImageRecoveryJob, job.id)
+    media = db_session.query(Image).filter(Image.image_metadata["asin"].as_string() == "B000000042").one()
+    assert result == {"status": "review_required", "candidate_count": 1}
+    assert refreshed.page_evidence_json["identity_method"] == "product_title_token_match"
+    assert refreshed.page_evidence_json["page_asin"] == "B000000099"
+    assert media.image_metadata["identity_state"] == "title_verified_review_required"
+    assert media.image_metadata["rights_state"] == "unverified"
+
+
 def test_vine_recovery_lost_bridge_response_retries_with_same_idempotency_key(db_session, monkeypatch):
     user = User(email=f"vine-lost-bridge-{uuid4()}@example.test", role="owner", is_admin=True)
     db_session.add(user)

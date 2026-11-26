@@ -94,7 +94,13 @@ def attach_vine_image_recovery_candidate(
             "is_reference": True, "display_order": len(images),
             "metadata": {
                 "source": "amazon_vine_browser_gallery_candidate", "asin": job.asin,
-                "identity_state": "asin_verified_variant_unverified", "rights_state": "unverified",
+                "identity_state": (image.image_metadata or {}).get(
+                    "identity_state",
+                    "asin_verified_variant_unverified" if str((image.image_metadata or {}).get("asin") or "").upper() == job.asin.upper() else "identity_unverified",
+                ),
+                "identity_method": (image.image_metadata or {}).get("identity_method", "unknown"),
+                "source_page_asin": (image.image_metadata or {}).get("source_page_asin"),
+                "rights_state": "unverified",
                 "operator_review_required": True,
             },
         })

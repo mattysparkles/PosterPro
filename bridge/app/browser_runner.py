@@ -2550,35 +2550,32 @@ class AmazonMarketplaceBrowserRunner(MarketplaceBrowserRunner):
                 for asin in normalized_asins:
                     capture: dict[str, Any] = {}
                     acquisition_error = None
-                    try:
-                        # A Vine row with an ASIN must be captured from that
-                        # exact product page; title search is only a bounded
-                        # recovery fallback and must resolve to the same ASIN.
-                        capture = self._capture_amazon_product_by_asin(context, asin=asin)
-                        if recovery_operation and str(capture.get("page_asin") or "").upper() != asin:
-                            raise BrowserRunnerError("Amazon product page ASIN did not match the requested ASIN")
-                        if recovery_operation and not capture.get("image_urls"):
-                            raise BrowserRunnerError("Exact-ASIN product page returned no product-gallery images")
-                    except Exception as exact_error:
-                        acquisition_error = str(exact_error)[:300]
-                        capture = {}
-                        # An exact identifier failure permits one bounded
-                        # public title-search fallback. It is accepted only
-                        # if the selected result resolves back to the same
-                        # ASIN; title similarity alone never changes identity.
-                        if recovery_operation and title_hint:
+                    if recovery_operation:
+                        # Product-name-first is deliberate: ASIN is retained
+                        # as corroborating evidence, not used to choose the
+                        # product page. A title search result must preserve all
+                        # identifying title tokens (including model/size/count)
+                        # on both the result and opened product page.
+                        if not title_hint:
+                            acquisition_error = "public product-name search requires the source product title"
+                        else:
                             try:
-                                fallback = self._capture_amazon_product_by_title(context, title_hint=title_hint)
-                                if not fallback:
-                                    raise BrowserRunnerError("public title search returned no verified product gallery")
-                                if str(fallback.get("page_asin") or "").upper() != asin:
-                                    raise BrowserRunnerError("public title search selected a different ASIN; candidate was discarded")
-                                if not fallback.get("image_urls"):
-                                    raise BrowserRunnerError("public title search result had no product gallery")
-                                capture = fallback
+                                capture = self._capture_amazon_product_by_title(context, title_hint=title_hint)
+                                if not capture:
+                                    raise BrowserRunnerError("public title search found no product page with matching identity evidence")
+                                if not capture.get("image_urls"):
+                                    raise BrowserRunnerError("title-matched public product page returned no product-gallery images")
+                                capture["requested_asin"] = asin
+                                capture["asin_cross_check"] = "matched" if str(capture.get("page_asin") or "").upper() == asin else "not_matched_title_identity_used"
                                 acquisition_error = None
-                            except Exception as fallback_error:
-                                acquisition_error = f"exact_asin: {acquisition_error}; title_fallback: {str(fallback_error)[:220]}"[:500]
+                            except Exception as search_error:
+                                acquisition_error = str(search_error)[:500]
+                    else:
+                        try:
+                            capture = self._capture_amazon_product_by_asin(context, asin=asin)
+                        except Exception as exact_error:
+                            acquisition_error = str(exact_error)[:300]
+                            capture = {}
                     if capture:
                         product_url = capture["source_url"]
                         image_urls = capture["image_urls"]
@@ -2592,9 +2589,12 @@ class AmazonMarketplaceBrowserRunner(MarketplaceBrowserRunner):
                             "source_listing_reference": asin,
                             "source_url": product_url,
                             "asin": asin,
+                            "requested_asin": capture.get("requested_asin", asin),
                             "image_urls": image_urls,
                             "title": title,
                             "page_asin": capture.get("page_asin"),
+                            "identity_status": capture.get("identity_status"),
+                            "asin_cross_check": capture.get("asin_cross_check"),
                             "selected_variant": capture.get("selected_variant"),
                             "gallery_evidence": capture.get("gallery_evidence", []),
                             "acquisition_error": acquisition_error,
@@ -2687,25 +2687,41 @@ class AmazonMarketplaceBrowserRunner(MarketplaceBrowserRunner):
                 candidates = self._collect_amazon_search_candidates(search_page.content())
                 if not candidates:
                     continue
-                scored = sorted(
-                    ((self._score_text_match(title_hint, candidate["title"]), candidate) for candidate in candidates),
-                    key=lambda item: item[0],
-                    reverse=True,
-                )
-                best_score, best_candidate = scored[0]
-                if best_score < 0.52:
+                # A similarity score is useful for ordering search hits, but
+                # never sufficient product-identity evidence. Keep only
+                # result titles containing every non-generic source-title
+                # token, which preserves model, size, color, and pack count.
+                matches = [candidate for candidate in candidates if self._title_identity_tokens_match(title_hint, candidate["title"])]
+                if not matches:
                     continue
+                best_candidate = max(matches, key=lambda candidate: self._score_text_match(title_hint, candidate["title"]))
                 asin = best_candidate["asin"]
                 capture = self._capture_amazon_product_by_asin(context, asin=asin)
+                if not self._title_identity_tokens_match(title_hint, capture.get("title")):
+                    continue
                 if not capture["image_urls"]:
                     continue
                 if not capture.get("title"):
                     capture["title"] = best_candidate["title"]
                 capture["source_url"] = f"https://www.amazon.com/dp/{asin}"
+                capture["identity_status"] = "title_tokens_verified"
                 return capture
             finally:
                 search_page.close()
         return None
+
+    def _title_identity_tokens_match(self, expected_title: str | None, observed_title: str | None) -> bool:
+        """Require title evidence for every identifying token; similarity alone is not proof."""
+        expected = self._normalize_text(expected_title)
+        observed = self._normalize_text(observed_title)
+        if not expected or not observed:
+            return False
+        generic = {"a", "an", "and", "for", "from", "in", "of", "on", "the", "to", "with", "by", "new", "best"}
+        expected_tokens = {token for token in expected.split() if token not in generic}
+        observed_tokens = set(observed.split())
+        # A page title may add marketing text, but it may not omit or alter
+        # any source-title token that identifies the product or its variant.
+        return bool(expected_tokens) and expected_tokens.issubset(observed_tokens)
 
     def _amazon_title_search_variants(self, title_hint: str) -> list[str]:
         normalized = self._normalize_text(title_hint)

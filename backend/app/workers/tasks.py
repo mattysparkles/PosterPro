@@ -51,7 +51,7 @@ from app.services.automation_bridge import submit_bridge_job, wait_for_bridge_jo
 from app.services.secondary_marketplace_execution import execute_secondary_marketplace_path
 from app.services.inventory_service import InventorySafetyError, InventoryService
 from app.services.storage import LocalStorage
-from app.services.image_quality import fetch_candidate_image, validate_image_bytes
+from app.services.image_quality import fetch_candidate_image, title_identity_tokens_match, validate_image_bytes
 from app.services.analytics_service import AnalyticsService
 from app.services.prediction_service import PredictionService
 from app.services.pricing_intelligence_service import PricingIntelligenceService
@@ -770,12 +770,19 @@ def poll_vine_image_recovery_job(job_id: int) -> dict[str, Any]:
             records = result.get("imported_listings") if isinstance(result.get("imported_listings"), list) else []
             record = next((row for row in records if isinstance(row, dict) and str(row.get("asin") or "").upper() == job.asin), {})
             page_asin = str(record.get("page_asin") or "").upper()
-            if page_asin != job.asin:
-                raise RuntimeError(str(record.get("acquisition_error") or "exact product page ASIN was absent or mismatched"))
+            title_match = (
+                str(record.get("identity_status") or "") == "title_tokens_verified"
+                and title_identity_tokens_match(job.title_hint, record.get("title"))
+            )
+            asin_match = bool(page_asin) and page_asin == job.asin
+            if not asin_match and not title_match:
+                raise RuntimeError(str(record.get("acquisition_error") or "product page had neither matching ASIN nor complete product-title identity evidence"))
             evidence = {
                 "requested_asin": job.asin, "page_asin": page_asin,
                 "source_url": record.get("source_url"), "title": record.get("title"),
                 "selected_variant": record.get("selected_variant"),
+                "identity_method": "asin_cross_check" if asin_match else "product_title_token_match",
+                "identity_state": "asin_verified" if asin_match else "title_verified_review_required",
                 "variant_identity": "unverified" if not record.get("selected_variant") else "operator_review_required",
                 "collector": "public_amazon_product_page", "access_mode": "public_catalog", "rights": "unverified",
             }
@@ -788,7 +795,11 @@ def poll_vine_image_recovery_job(job_id: int) -> dict[str, Any]:
                         if isinstance(evidence, dict) and str(evidence.get("source_url") or "") == str(source_url)
                     ), {})
                     data, quality = fetch_candidate_image(str(source_url))
-                    checked = validate_image_bytes(data, source_url=str(source_url), expected_asin=job.asin, page_asin=page_asin)
+                    checked = validate_image_bytes(
+                        data, source_url=str(source_url),
+                        expected_asin=job.asin if asin_match else None,
+                        page_asin=page_asin,
+                    )
                     if checked["verdict"] not in {"valid_exact_product", "identity_unverified"}:
                         continue
                     fmt = str(quality.get("evidence", {}).get("format") or "JPEG").lower()
@@ -800,9 +811,11 @@ def poll_vine_image_recovery_job(job_id: int) -> dict[str, Any]:
                         height=(quality.get("evidence", {}).get("dimensions") or [None, None])[1],
                         image_metadata={
                             "source": "amazon_vine_browser_gallery_candidate", "asin": job.asin,
+                            "source_page_asin": page_asin,
                             "source_page_url": record.get("source_url"), "page_asin": page_asin,
                             "selected_variant": record.get("selected_variant"),
-                            "identity_state": "asin_verified_variant_unverified",
+                            "identity_state": "asin_verified_variant_unverified" if asin_match else "title_verified_review_required",
+                            "identity_method": "asin_cross_check" if asin_match else "product_title_token_match",
                             "rights_state": "unverified", "operator_state": "pending_review",
                             "gallery_source_evidence": gallery_source_evidence,
                             "quality_evidence": quality.get("evidence"),
@@ -811,7 +824,7 @@ def poll_vine_image_recovery_job(job_id: int) -> dict[str, Any]:
                     db.add(image)
                     db.flush()
                     rel = Path(local_path).resolve().relative_to(storage.root.resolve()).as_posix()
-                    candidates.append({"image_id": image.id, "storage_path": f"/media/{rel}", "source_url": str(source_url), "verdict": checked["verdict"], "rights_status": "unverified", "operator_state": "pending_review"})
+                    candidates.append({"image_id": image.id, "storage_path": f"/media/{rel}", "source_url": str(source_url), "verdict": checked["verdict"], "identity_state": "asin_verified_variant_unverified" if asin_match else "title_verified_review_required", "rights_status": "unverified", "operator_state": "pending_review"})
                 except Exception as exc:
                     logger.info("vine_image_candidate_rejected", extra={"recovery_job_id": job.id, "reason": str(exc)[:160]})
             job.page_evidence_json = evidence

@@ -6,6 +6,7 @@ from urllib.parse import quote_plus
 
 import httpx
 from app.services.amazon_media import AmazonProductMediaProvider
+from app.services.image_quality import title_identity_tokens_match
 
 
 class AmazonProductDiscoveryService:
@@ -62,6 +63,33 @@ class AmazonProductDiscoveryService:
         }
 
     def discover_for_vine_item(self, *, asin: str | None, product_name: str | None, manual_url: str | None = None, force_media_refresh: bool = False) -> dict:
+        normalized_asin = self._normalize_asin(asin)
+        if manual_url:
+            return self._discover_from_url(manual_url, confidence="manual", force_media_refresh=force_media_refresh)
+        if product_name:
+            # Use the actual source product name as the first discovery key.
+            # ASIN lookup remains a fallback only after the public title path
+            # has recorded that it could not provide a usable gallery.
+            searched = self._discover_from_title(product_name, force_media_refresh=force_media_refresh)
+            if searched.get("status") == "matched" and searched.get("images"):
+                searched["requested_asin"] = normalized_asin
+                searched["asin_cross_check"] = "matched" if searched.get("asin") == normalized_asin else "not_matched_title_identity_used"
+                searched["identity_method"] = "product_title_search"
+                searched["identity_state"] = "title_tokens_verified_review_required"
+                return searched
+        else:
+            searched = {"image_status": "title_missing"}
+        if normalized_asin:
+            fallback = self.discover_for_item(
+                asin=normalized_asin, product_name=product_name,
+                allow_title_search=False, force_media_refresh=force_media_refresh,
+            )
+            fallback["identity_method"] = "asin_fallback_after_title_search"
+            fallback["identity_state"] = "asin_verified" if fallback.get("images") else "identity_unverified"
+            fallback["title_search_status"] = searched.get("image_status")
+            return fallback
+        if product_name:
+            return searched
         return self.discover_for_item(
             asin=asin,
             product_name=product_name,
@@ -82,20 +110,15 @@ class AmazonProductDiscoveryService:
 
             candidates = self._extract_search_candidates(response.text)
             scored_candidates = sorted(
-                (
-                    (self._score_title_match(title, candidate["title"]), candidate)
-                    for candidate in candidates
-                ),
-                key=lambda pair: pair[0],
-                reverse=True,
+                ((self._score_title_match(title, candidate["title"]), candidate)
+                 for candidate in candidates
+                 if title_identity_tokens_match(title, candidate.get("title"))),
+                key=lambda pair: pair[0], reverse=True,
             )
             if not scored_candidates:
                 return self._manual_needed(search_url, "no_search_match")
 
             best_score, best_candidate = scored_candidates[0]
-            if best_score < 0.55:
-                return self._manual_needed(search_url, "no_search_match")
-
             asin = best_candidate["asin"]
             resolved_title = best_candidate["title"] or title
             media = self.provider.lookup_by_asin(asin, title_hint=resolved_title, force_refresh=force_media_refresh)
@@ -113,6 +136,7 @@ class AmazonProductDiscoveryService:
                 "description": description,
                 "product_facts": product_facts,
                 "search_score": round(best_score, 3),
+                "identity_evidence": "all_source_title_tokens_present_in_search_result",
             }
         except Exception:
             return self._manual_needed(search_url, "search_failed")

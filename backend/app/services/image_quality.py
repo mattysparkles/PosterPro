@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import io
 import httpx
+import re
 from urllib.parse import urlparse
 
 from PIL import Image, UnidentifiedImageError
@@ -17,6 +18,20 @@ PRIME_LOGO_URL_PART = "/marketing/prime/2022primebrand/logos/prime_logo_rgb_prim
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 MIN_PRODUCT_EDGE = 96
 ALLOWED_IMAGE_HOST_SUFFIXES = ("amazon.com", "media-amazon.com", "images-amazon.com", "amazonaws.com")
+_TITLE_CONNECTIVES = {"a", "an", "and", "by", "for", "from", "in", "of", "on", "the", "to", "with", "new", "best"}
+
+
+def title_identity_tokens_match(expected_title: str | None, observed_title: str | None) -> bool:
+    """Return true only when observed title retains all identifying source tokens.
+
+    This is an identity cross-check for a product-name-first search, not a
+    fuzzy similarity score. Any missing model, size, color, or pack-count token
+    keeps the candidate out of automatic acceptance.
+    """
+    normalize = lambda value: re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", str(value or "").lower())).strip()
+    expected = {token for token in normalize(expected_title).split() if token not in _TITLE_CONNECTIVES}
+    observed = set(normalize(observed_title).split())
+    return bool(expected) and expected.issubset(observed)
 
 
 def image_url_allowed(url: str) -> bool:

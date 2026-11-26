@@ -85,6 +85,64 @@ def test_amazon_public_asin_capture_records_http_error_without_auth_fallback(tmp
         runner._capture_amazon_product_by_asin(Context(), asin="B000000001")
 
 
+def test_vine_recovery_uses_product_title_before_source_asin(tmp_path: Path, monkeypatch):
+    calls = []
+
+    class Browser:
+        def close(self): pass
+
+    class Chromium:
+        def launch(self, headless=True): return Browser()
+
+    class Playwright:
+        chromium = Chromium()
+        def __enter__(self): return self
+        def __exit__(self, *_args): pass
+
+    runner = AmazonMarketplaceBrowserRunner(BrowserRunnerConfig(screenshots_dir=tmp_path))
+    monkeypatch.setattr(runner, "_load_playwright", lambda: Playwright())
+    monkeypatch.setattr(runner, "_new_context", lambda *_args: object())
+
+    def title_search(_context, *, title_hint):
+        calls.append(("title", title_hint))
+        return {
+            "source_url": "https://www.amazon.com/dp/B000000002",
+            "image_urls": ["https://m.media-amazon.com/images/I/product.jpg"],
+            "title": title_hint,
+            "page_asin": "B000000002",
+            "identity_status": "title_tokens_verified",
+            "gallery_evidence": [],
+        }
+
+    def asin_lookup(*_args, **_kwargs):
+        calls.append(("asin", None))
+        raise AssertionError("recovery must not navigate to the source ASIN first")
+
+    monkeypatch.setattr(runner, "_capture_amazon_product_by_title", title_search)
+    monkeypatch.setattr(runner, "_capture_amazon_product_by_asin", asin_lookup)
+    result = runner.run_import(
+        job_id="test-job", bridge_account=None,
+        payload={"operation": "vine_image_gallery_recovery", "asin": "B000000001", "payload": {"product_name": "Exact Brand Model 16.9 oz Product"}},
+    )
+    record = result["imported_listings"][0]
+    assert calls == [("title", "Exact Brand Model 16.9 oz Product")]
+    assert record["page_asin"] == "B000000002"
+    assert record["asin_cross_check"] == "not_matched_title_identity_used"
+    assert record["identity_status"] == "title_tokens_verified"
+
+
+def test_title_identity_match_requires_variant_tokens():
+    runner = AmazonMarketplaceBrowserRunner(BrowserRunnerConfig())
+    assert runner._title_identity_tokens_match(
+        "Siftary 100 Pack 16.9 oz Clear PET Cups",
+        "Siftary 100 Pack 16.9 oz Clear PET Cups with Lids",
+    )
+    assert not runner._title_identity_tokens_match(
+        "Siftary 100 Pack 16.9 oz Clear PET Cups",
+        "Siftary 100 Pack 12 oz Clear PET Cups with Lids",
+    )
+
+
 class _CountLocator:
     def __init__(self, count: int):
         self._count = count
