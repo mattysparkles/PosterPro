@@ -52,9 +52,11 @@ def find_58x40_form(printer_name: str) -> str:
     return matches[0]
 
 
-def print_raster(printer_name: str, png: bytes, document_name: str, *, dry_run: bool = False) -> str | None:
+def print_raster(printer_name: str, png: bytes, document_name: str, *, dry_run: bool = False, copies: int = 1) -> str | None:
     if dry_run:
         return "DRY-RUN"
+    if isinstance(copies, bool) or not isinstance(copies, int) or not 1 <= copies <= 10:
+        raise ValueError("Print copies must be an integer from 1 to 10.")
     win32con, win32gui, win32print, win32ui, Image, ImageWin = _win32()
     if printer_name != PRINTER_NAME:
         raise RuntimeError("Refusing to print to a printer outside the allowlist.")
@@ -76,9 +78,10 @@ def print_raster(printer_name: str, png: bytes, document_name: str, *, dry_run: 
             raise RuntimeError("Native label raster has unexpected dimensions.")
         spooler_id = dc.StartDoc(document_name)
         try:
-            dc.StartPage()
-            ImageWin.Dib(image).draw(dc.GetHandleOutput(), (0, 0, 464, 320))
-            dc.EndPage()
+            for _ in range(copies):
+                dc.StartPage()
+                ImageWin.Dib(image).draw(dc.GetHandleOutput(), (0, 0, 464, 320))
+                dc.EndPage()
         finally:
             # EndDoc returning means only that GDI accepted the document.
             dc.EndDoc()

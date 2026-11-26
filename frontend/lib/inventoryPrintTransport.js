@@ -2,15 +2,22 @@
  * Structured PosterPro label transport boundary. Printer protocols and drivers
  * remain local to the Windows bridge and are intentionally absent here.
  */
-export function dispatchBrowserLabel(imageDataUrl, { onReturn, scalePercent = 100 } = {}) {
+export function dispatchBrowserLabel(imageDataUrl, { onReturn, scalePercent = 100, copies = 2 } = {}) {
+  const safeCopies = Math.max(1, Math.min(10, Math.trunc(Number(copies) || 2)));
   const frame = document.createElement('iframe');
   frame.style.position = 'fixed'; frame.style.width = '1px'; frame.style.height = '1px'; frame.style.opacity = '0';
   document.body.appendChild(frame);
   const doc = frame.contentWindow.document;
   doc.open();
   const scale = Math.max(70, Math.min(130, Number(scalePercent) || 100)) / 100;
-  doc.write(`<!doctype html><html><head><title>PosterPro Inventory Label</title><style>@page{size:58mm 40mm;margin:0}html,body{margin:0;width:58mm;height:40mm}img{width:58mm;height:40mm;display:block;transform:scale(${scale});transform-origin:top left}</style></head><body><img src="${imageDataUrl}" onload="setTimeout(()=>{window.focus();window.print()},100)"></body></html>`);
+  const pages = Array.from({ length: safeCopies }, (_, index) => `<img src="${imageDataUrl}"${index ? ' class="copy"' : ''}>`).join('');
+  doc.write(`<!doctype html><html><head><title>PosterPro Inventory Label</title><style>@page{size:58mm 40mm;margin:0}html,body{margin:0;padding:0;width:58mm}img{width:58mm;height:40mm;display:block;transform:scale(${scale});transform-origin:top left}.copy{break-before:page;page-break-before:always}</style></head><body>${pages}</body></html>`);
   doc.close();
+  const images = [...doc.images];
+  Promise.all(images.map((img) => img.complete ? Promise.resolve() : new Promise((resolve) => { img.onload = resolve; img.onerror = resolve; }))).then(() => {
+    frame.contentWindow.focus();
+    frame.contentWindow.print();
+  });
   frame.contentWindow.addEventListener('afterprint', () => {
     setTimeout(() => frame.remove(), 1200);
     window.focus();
@@ -20,7 +27,7 @@ export function dispatchBrowserLabel(imageDataUrl, { onReturn, scalePercent = 10
 }
 
 /**
- * Future local bridge adapter contract. The bridge accepts only structured
+ * Local bridge adapter contract. The bridge accepts only structured
  * label payloads, never raw printer-language commands. CORS, token provisioning
  * and actual spooler result fields must be agreed with the local bridge report.
  */

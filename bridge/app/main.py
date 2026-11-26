@@ -313,18 +313,18 @@ class JobStore:
         execution_mode = job["execution_mode"]
         bridge_account = None
         recovery_operation = str(payload.get("operation") or "").strip().lower() == "vine_image_gallery_recovery"
-        requires_account = recovery_operation or (execution_mode in {"provider_assist", "browser_assist", "hosted_browser_assist"} and source_marketplace != "amazon")
+        # Public catalog recovery is intentionally anonymous: an ASIN product
+        # page and its public gallery do not require the seller's private
+        # Amazon account. Keep private account operations on their existing
+        # authenticated path, but never make that session a recovery blocker.
+        requires_account = not recovery_operation and (
+            execution_mode in {"provider_assist", "browser_assist", "hosted_browser_assist"}
+            and source_marketplace != "amazon"
+        )
         if recovery_operation and (execution_mode != "browser_assist" or not settings.browser_headless):
-            raise RuntimeError("Vine image recovery requires an authorized headless browser session")
+            raise RuntimeError("Vine public catalog recovery requires the configured headless browser runner")
         if recovery_operation:
-            eligible_accounts = [
-                account for account in account_store.list_accounts("amazon")
-                if account.get("browser_enabled") and account.get("credential_configured")
-                and str(account.get("session_state") or "").lower() in {"ready", "active", "valid"}
-            ]
-            if len(eligible_accounts) != 1:
-                raise RuntimeError("Vine recovery requires exactly one ready paired Amazon browser account; select or pair an account first")
-            payload = {**payload, "account_key": eligible_accounts[0]["account_key"]}
+            payload = {**payload, "access_mode": "public_catalog"}
         if requires_account:
             bridge_account = account_store.resolve_account(source_marketplace, execution_mode, payload)
         if execution_mode in {"browser_assist", "hosted_browser_assist"} and settings.runner_mode in {"playwright", "browser"}:
@@ -345,7 +345,7 @@ class JobStore:
                 payload=payload,
             )
             session_state = result.get("session_state")
-            if session_state and bridge_account:
+            if session_state and bridge_account and not recovery_operation:
                 account_store.update_session(
                     source_marketplace,
                     bridge_account["account_key"],

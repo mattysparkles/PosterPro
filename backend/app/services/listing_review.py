@@ -310,6 +310,8 @@ def derive_shipping_profile(
     over_mode = policy["shipping_at_or_above_threshold_mode"]
     under_threshold = bool(price is not None and price > 0 and price < threshold)
     valid_price = bool(price is not None and math.isfinite(price) and price > 0)
+    account_policy_settings = listing.get("ebay_shipping_policy_settings")
+    account_policy_settings = account_policy_settings if isinstance(account_policy_settings, dict) else None
     selected_mode = under_mode if policy["shipping_policy_enabled"] and under_threshold else over_mode
     existing_buyer_pays = bool(existing.get("buyer_pays_shipping"))
     existing_free_shipping = bool(existing.get("free_shipping"))
@@ -345,7 +347,7 @@ def derive_shipping_profile(
         "free_shipping": free_shipping,
         "shipping_setup_required": not valid_price,
         "shipping_measurements_required": False,
-        "fulfillment_policy_id": ebay_fulfillment_policy_for_price(price),
+        "fulfillment_policy_id": ebay_fulfillment_policy_for_price(price, account_policy_settings),
         "source_confidence": existing.get("source_confidence") or {},
         "estimated": estimated,
         "estimated_fields": list(dict.fromkeys(estimated_fields)),
@@ -496,6 +498,10 @@ def sync_listing_review_state(*, listing) -> None:
             "listing_price": listing.listing_price,
             "suggested_price": listing.suggested_price,
             "buy_it_now_price": listing.buy_it_now_price,
+            "ebay_shipping_policy_settings": (
+                (listing.user.settings_json or {}).get("ebay_marketplace_policy_settings")
+                if isinstance(getattr(listing.user, "settings_json", None), dict) else None
+            ),
         },
         item_specifics=listing.item_specifics,
         existing=listing.shipping_profile,

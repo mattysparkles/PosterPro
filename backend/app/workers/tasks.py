@@ -743,7 +743,7 @@ def submit_vine_image_recovery_request(job_id: int) -> dict[str, Any]:
                 )
             return {"status": "collecting", "bridge_job_id": bridge_job_id}
         except Exception as exc:
-            job.status = "pending_authorization" if job.attempts < 4 else "manual_review_required"
+            job.status = "pending" if job.attempts < 4 else "manual_review_required"
             job.last_error = str(exc)[:500]
             job.next_attempt_at = datetime.utcnow() + timedelta(minutes=min(60, 5 * (2 ** max(0, job.attempts - 1))))
             db.commit()
@@ -771,13 +771,13 @@ def poll_vine_image_recovery_job(job_id: int) -> dict[str, Any]:
             record = next((row for row in records if isinstance(row, dict) and str(row.get("asin") or "").upper() == job.asin), {})
             page_asin = str(record.get("page_asin") or "").upper()
             if page_asin != job.asin:
-                raise RuntimeError("exact product page ASIN was absent or mismatched")
+                raise RuntimeError(str(record.get("acquisition_error") or "exact product page ASIN was absent or mismatched"))
             evidence = {
                 "requested_asin": job.asin, "page_asin": page_asin,
                 "source_url": record.get("source_url"), "title": record.get("title"),
                 "selected_variant": record.get("selected_variant"),
                 "variant_identity": "unverified" if not record.get("selected_variant") else "operator_review_required",
-                "collector": "authorized_paired_amazon_bridge", "rights": "unverified",
+                "collector": "public_amazon_product_page", "access_mode": "public_catalog", "rights": "unverified",
             }
             candidates = []
             storage = LocalStorage()
@@ -811,7 +811,7 @@ def poll_vine_image_recovery_job(job_id: int) -> dict[str, Any]:
                     db.add(image)
                     db.flush()
                     rel = Path(local_path).resolve().relative_to(storage.root.resolve()).as_posix()
-                    candidates.append({"image_id": image.id, "storage_path": f"/media/{rel}", "source_url": str(source_url), "verdict": "identity_unverified", "rights_status": "unverified", "operator_state": "pending_review"})
+                    candidates.append({"image_id": image.id, "storage_path": f"/media/{rel}", "source_url": str(source_url), "verdict": checked["verdict"], "rights_status": "unverified", "operator_state": "pending_review"})
                 except Exception as exc:
                     logger.info("vine_image_candidate_rejected", extra={"recovery_job_id": job.id, "reason": str(exc)[:160]})
             job.page_evidence_json = evidence
@@ -823,7 +823,7 @@ def poll_vine_image_recovery_job(job_id: int) -> dict[str, Any]:
             return {"status": job.status, "candidate_count": len(candidates)}
         except Exception as exc:
             job.last_error = str(exc)[:500]
-            job.status = "pending_authorization" if job.attempts < 4 else "manual_review_required"
+            job.status = "pending" if job.attempts < 4 else "manual_review_required"
             job.next_attempt_at = datetime.utcnow() + timedelta(minutes=min(60, 5 * (2 ** max(0, job.attempts - 1))))
             db.commit()
             return {"status": job.status, "error": job.last_error}

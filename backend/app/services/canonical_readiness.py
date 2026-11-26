@@ -190,7 +190,7 @@ def _fresh_preflight_pass(row: Any, listing: Any, marketplace: str | None = None
                 cost_type = str(service.get("cost_type") or "").upper()
                 if cost_type in {"FLAT_RATE", "FIXED_RATE"}:
                     try:
-                        valid_service = abs(float(service.get("charge") or 0) - 8.49) < 0.001
+                        valid_service = abs(float(service.get("charge") or 0) - 8.0) < 0.001
                     except (TypeError, ValueError):
                         valid_service = False
                 if valid_service:
@@ -198,12 +198,7 @@ def _fresh_preflight_pass(row: Any, listing: Any, marketplace: str | None = None
             if not valid_service:
                 return False
         elif sale_price >= 25:
-            from app.services.shipping_profitability_policy import ebay_fulfillment_policy_for_price
-            if (
-                policy_validation.get("policy_id") != ebay_fulfillment_policy_for_price(sale_price)
-                or policy_validation.get("free_shipping") is not True
-                or policy_validation.get("buyer_pays_shipping") is True
-            ):
+            if policy_validation.get("free_shipping") is not True or policy_validation.get("buyer_pays_shipping") is True:
                 return False
     return True
 
@@ -558,7 +553,7 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
                 shipping_price = float(ebay_override.get("price") if ebay_override.get("price") not in (None, "") else resolve_authoritative_listing_price(listing))
             except (TypeError, ValueError, OverflowError):
                 shipping_price = 0.0
-            expected_policy = ebay_fulfillment_policy_for_price(shipping_price)
+            expected_policy = ebay_fulfillment_policy_for_price(shipping_price, policy_settings)
             tier_settings = {**policy_settings, "fulfillment_policy_id": expected_policy or ""}
             tier_validation = validate_cached_ebay_fulfillment_policy(
                 tier_settings,
@@ -577,7 +572,7 @@ def canonical_listing_readiness(listing: Any, *, marketplace: str | None = None)
                             isinstance(service, dict)
                             and str(service.get("cost_type") or "").upper() in {"FLAT_RATE", "FIXED_RATE"}
                             and service.get("free_shipping") is False
-                            and abs(float(service.get("charge") or 0) - 8.49) < 0.001
+                            and abs(float(service.get("charge") or 0) - float(policy_settings.get("buyer_paid_flat_amount") or 8.0)) < 0.001
                             for service in services
                         )
                     )

@@ -59,7 +59,7 @@ def process_one(config: dict[str, Any], journal_path: Path, *, dry_run: bool = F
     lease_thread = threading.Thread(target=_renew_until_stopped, args=(config, job, stop_lease), daemon=True)
     lease_thread.start()
     try:
-        spooler_id = printer_adapter(PRINTER_NAME, png, f"PosterPro {job_id}", dry_run=False)
+        spooler_id = printer_adapter(PRINTER_NAME, png, f"PosterPro {job_id}", dry_run=False, copies=job.get("copies", 2))
     except Exception as exc:
         journal[job_id]["state"] = "UNKNOWN"; journal[job_id]["error"] = str(exc)[:1000]; save_journal(journal_path, journal)
         try: _state(config, job, job["lease_token"], "UNKNOWN", error=str(exc)[:1000], note="Printer call failed; physical output may be uncertain. Do not auto-retry.")

@@ -48,6 +48,7 @@ function buildNavGroups(user) {
         { href: '/inventory', label: 'Inventory', icon: Package },
         { href: '/inventory/census', label: 'Shelf Census', icon: ScanLine },
         { href: '/inventory/find', label: 'Find my item', icon: Search },
+        { href: '/inventory/picking', label: 'Find sold items', icon: ShoppingCart },
         { href: '/packing', label: 'Packing workstation', icon: ScanLine },
       ],
     },

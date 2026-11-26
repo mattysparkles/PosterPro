@@ -3,11 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.models.models import Listing
-from app.services.shipping_profitability_policy import (
-    EBAY_FREE_SHIPPING_FULFILLMENT_POLICY_ID,
-    EBAY_UNDER_25_FULFILLMENT_POLICY_ID,
-    ebay_fulfillment_policy_for_price,
-)
+from app.services.shipping_profitability_policy import ebay_fulfillment_policy_for_price
 from app.services.customer_description import sanitize_customer_description
 
 
@@ -232,11 +228,15 @@ def _destination_shipping(listing: Listing, marketplace: str, fallback: dict[str
         amount = float(destination_price) if destination_price not in (None, "") else None
     except (TypeError, ValueError, OverflowError):
         amount = None
-    selected_policy = ebay_fulfillment_policy_for_price(amount)
-    if selected_policy == EBAY_UNDER_25_FULFILLMENT_POLICY_ID:
-        result.update({"mode": "flat", "shipping_charge_mode": "flat", "rate_type": "flat", "shipping_payer": "buyer", "buyer_pays_shipping": True, "free_shipping": False, "shipping_cost": 8.49, "domestic_service": "USPSParcel", "shipping_service": "USPSParcel", "fulfillment_policy_id": selected_policy, "shipping_policy_enforced": True})
-    elif selected_policy == EBAY_FREE_SHIPPING_FULFILLMENT_POLICY_ID:
-        result.update({"mode": "included", "shipping_charge_mode": "included", "rate_type": "policy", "shipping_payer": "seller", "buyer_pays_shipping": False, "free_shipping": True, "fulfillment_policy_id": selected_policy, "domestic_service": "USPSParcel", "shipping_service": "USPSParcel", "shipping_policy_enforced": True})
+    tier_settings = listing.marketplace_data.get("ebay_shipping_policy_settings") if isinstance(listing.marketplace_data, dict) else None
+    if not isinstance(tier_settings, dict):
+        user_settings = getattr(getattr(listing, "user", None), "settings_json", None)
+        tier_settings = user_settings.get("ebay_marketplace_policy_settings") if isinstance(user_settings, dict) else None
+    selected_policy = ebay_fulfillment_policy_for_price(amount, tier_settings if isinstance(tier_settings, dict) else None)
+    if amount is not None and 0 < amount < 25:
+        result.update({"mode": "flat", "shipping_charge_mode": "flat", "rate_type": "flat", "shipping_payer": "buyer", "buyer_pays_shipping": True, "free_shipping": False, "shipping_cost": float((tier_settings or {}).get("buyer_paid_flat_amount") or 8.0), "domestic_service": str((tier_settings or {}).get("shipping_service_code") or "USPSParcel"), "shipping_service": str((tier_settings or {}).get("shipping_service_code") or "USPSParcel"), "fulfillment_policy_id": selected_policy, "shipping_policy_enforced": bool(selected_policy)})
+    elif amount is not None and amount >= 25:
+        result.update({"mode": "included", "shipping_charge_mode": "included", "rate_type": "policy", "shipping_payer": "seller", "buyer_pays_shipping": False, "free_shipping": True, "fulfillment_policy_id": selected_policy, "domestic_service": str((tier_settings or {}).get("shipping_service_code") or "USPSParcel"), "shipping_service": str((tier_settings or {}).get("shipping_service_code") or "USPSParcel"), "shipping_policy_enforced": bool(selected_policy)})
     elif amount is None or amount <= 0:
         result.update({"mode": "setup_required", "shipping_charge_mode": "setup_required", "free_shipping": None, "buyer_pays_shipping": None, "shipping_cost": None, "fulfillment_policy_id": None, "shipping_policy_blocker": "A valid positive price is required before selecting a shipping policy."})
     return result

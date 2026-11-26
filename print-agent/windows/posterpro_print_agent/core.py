@@ -27,6 +27,9 @@ def validate_job(job: dict[str, Any]) -> bytes:
         raise ValueError("Unsupported paper profile; expected native 58x40 mm portrait at 203 DPI and 100%.")
     if tuple((job.get("pixel_width"), job.get("pixel_height"))) != PIXEL_SIZE:
         raise ValueError("Label raster must be exactly 464x320 dots.")
+    copies = job.get("copies", 2)
+    if isinstance(copies, bool) or not isinstance(copies, int) or not 1 <= copies <= 10:
+        raise ValueError("Label copies must be an integer from 1 to 10.")
     payload = job.get("payload") or {}
     if not isinstance(payload.get("item_uuid"), str) or not isinstance(payload.get("barcode_token"), str):
         raise ValueError("Physical item identity is incomplete.")
@@ -71,4 +74,3 @@ def may_submit(job_id: str, journal: dict[str, dict[str, Any]]) -> bool:
     """Only never-submitted jobs may reach the printer after agent restart."""
     entry = journal.get(job_id) or {}
     return entry.get("state") not in {"SUBMITTING", "SPOOLER_ACCEPTED", "UNKNOWN", "CANCELLED"}
-

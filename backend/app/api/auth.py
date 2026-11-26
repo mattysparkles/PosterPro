@@ -127,9 +127,10 @@ _DEFAULT_WORKFLOW_PREFERENCES = {
     "shipping_under_threshold_mode": "buyer_pays_shipping",
     "shipping_at_or_above_threshold_mode": "free_shipping",
     "buyer_paid_rate_type": "flat",
+    "buyer_paid_flat_amount": 8.0,
     "shipping_currency": "USD",
     "preferred_shipping_carrier": "USPS",
-    "preferred_shipping_service": "USPSGroundAdvantage",
+    "preferred_shipping_service": "USPSParcel",
     "minimum_estimated_net_proceeds": None,
     "minimum_gross_margin": None,
     "promotion_treatment": "include_known_costs",
@@ -162,8 +163,9 @@ _DEFAULT_EBAY_POLICY_SETTINGS = {
     "merchant_location_city": "Farmingdale",
     "merchant_location_state_or_province": "NY",
     "merchant_location_phone": "",
-    "shipping_service_code": "USPSGroundAdvantage",
-    "handling_time_days": 1,
+    "shipping_service_code": "USPSParcel",
+    "handling_time_days": 4,
+    "buyer_paid_flat_amount": 8.0,
     "local_pickup_allowed": False,
     "calculated_shipping": False,
     "package_weight_required": True,
@@ -219,8 +221,9 @@ def _workflow_preferences(user: User | None) -> dict:
         "shipping_at_or_above_threshold_mode": str(stored.get("shipping_at_or_above_threshold_mode") or _DEFAULT_WORKFLOW_PREFERENCES["shipping_at_or_above_threshold_mode"]),
         "shipping_currency": str(stored.get("shipping_currency") or "USD").upper()[:8],
         "preferred_shipping_carrier": str(stored.get("preferred_shipping_carrier") or "USPS").strip(),
-        "preferred_shipping_service": str(stored.get("preferred_shipping_service") or "USPSGroundAdvantage").strip(),
+        "preferred_shipping_service": str(stored.get("preferred_shipping_service") or "USPSParcel").strip(),
         "buyer_paid_rate_type": str(stored.get("buyer_paid_rate_type") or "calculated").strip().lower(),
+        "buyer_paid_flat_amount": float(stored.get("buyer_paid_flat_amount", 8.0)),
         "minimum_estimated_net_proceeds": stored.get("minimum_estimated_net_proceeds"),
         "minimum_gross_margin": stored.get("minimum_gross_margin"),
         "promotion_treatment": str(stored.get("promotion_treatment") or "include_known_costs").strip(),
@@ -349,7 +352,7 @@ def _persist_ebay_marketplace_policy_settings(user: User, updates: dict) -> None
     settings_json = dict(user.settings_json or {})
     current = _ebay_marketplace_policy_settings(user)
     current.update({key: value for key, value in updates.items() if value is not None})
-    current["handling_time_days"] = max(0, int(current.get("handling_time_days") if current.get("handling_time_days") is not None else 1))
+    current["handling_time_days"] = max(0, int(current.get("handling_time_days") if current.get("handling_time_days") is not None else 4))
     address = str(current.get("merchant_location_address_line1") or "").strip()
     current["merchant_location_address_line1"] = encrypt_secret(address, secret_key=settings.session_secret) if address else ""
     settings_json["ebay_marketplace_policy_settings"] = current

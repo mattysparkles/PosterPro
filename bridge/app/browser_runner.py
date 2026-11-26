@@ -1296,7 +1296,7 @@ class MarketplaceBrowserRunner:
                     break
         return inspected
 
-    def run_import(self, *, job_id: str, bridge_account: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    def run_import(self, *, job_id: str, bridge_account: dict[str, Any] | None, payload: dict[str, Any]) -> dict[str, Any]:
         if not self.spec.supports_import or not self.spec.import_overview_url:
             raise BrowserRunnerError(f"{self.spec.label} import is not implemented in the bridge runner")
         playwright = self._load_playwright()
@@ -2508,7 +2508,7 @@ class AmazonMarketplaceBrowserRunner(MarketplaceBrowserRunner):
     def __init__(self, config: BrowserRunnerConfig) -> None:
         super().__init__(config, MARKETPLACE_BROWSER_SPECS["amazon"])
 
-    def run_import(self, *, job_id: str, bridge_account: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    def run_import(self, *, job_id: str, bridge_account: dict[str, Any] | None, payload: dict[str, Any]) -> dict[str, Any]:
         playwright = self._load_playwright()
         screenshot_dir = self.config.screenshots_dir
         screenshot_dir.mkdir(parents=True, exist_ok=True)
@@ -2549,24 +2549,44 @@ class AmazonMarketplaceBrowserRunner(MarketplaceBrowserRunner):
                 ).strip()
                 for asin in normalized_asins:
                     capture: dict[str, Any] = {}
+                    acquisition_error = None
                     try:
                         # A Vine row with an ASIN must be captured from that
-                        # exact product page.  A title search can select a
-                        # similarly named but different variation, so it is
-                        # only a fallback for imports that have no ASIN.
+                        # exact product page; title search is only a bounded
+                        # recovery fallback and must resolve to the same ASIN.
                         capture = self._capture_amazon_product_by_asin(context, asin=asin)
                         if recovery_operation and str(capture.get("page_asin") or "").upper() != asin:
                             raise BrowserRunnerError("Amazon product page ASIN did not match the requested ASIN")
                         if recovery_operation and not capture.get("image_urls"):
                             raise BrowserRunnerError("Exact-ASIN product page returned no product-gallery images")
+                    except Exception as exact_error:
+                        acquisition_error = str(exact_error)[:300]
+                        capture = {}
+                        # An exact identifier failure permits one bounded
+                        # public title-search fallback. It is accepted only
+                        # if the selected result resolves back to the same
+                        # ASIN; title similarity alone never changes identity.
+                        if recovery_operation and title_hint:
+                            try:
+                                fallback = self._capture_amazon_product_by_title(context, title_hint=title_hint)
+                                if not fallback:
+                                    raise BrowserRunnerError("public title search returned no verified product gallery")
+                                if str(fallback.get("page_asin") or "").upper() != asin:
+                                    raise BrowserRunnerError("public title search selected a different ASIN; candidate was discarded")
+                                if not fallback.get("image_urls"):
+                                    raise BrowserRunnerError("public title search result had no product gallery")
+                                capture = fallback
+                                acquisition_error = None
+                            except Exception as fallback_error:
+                                acquisition_error = f"exact_asin: {acquisition_error}; title_fallback: {str(fallback_error)[:220]}"[:500]
+                    if capture:
                         product_url = capture["source_url"]
                         image_urls = capture["image_urls"]
                         title = capture.get("title")
-                    except Exception:
+                    else:
                         product_url = f"https://www.amazon.com/dp/{asin}"
                         image_urls = []
                         title = None
-                        capture = {}
                     imported_listings.append(
                         {
                             "source_listing_reference": asin,
@@ -2577,11 +2597,11 @@ class AmazonMarketplaceBrowserRunner(MarketplaceBrowserRunner):
                             "page_asin": capture.get("page_asin"),
                             "selected_variant": capture.get("selected_variant"),
                             "gallery_evidence": capture.get("gallery_evidence", []),
+                            "acquisition_error": acquisition_error,
                         }
                     )
 
-                final_storage_state = context.storage_state()
-                return {
+                result = {
                     "job_id": job_id,
                     "marketplace": self.spec.marketplace,
                     "status": "import_completed",
@@ -2589,11 +2609,15 @@ class AmazonMarketplaceBrowserRunner(MarketplaceBrowserRunner):
                     "imported_listing_count": len(imported_listings),
                     "imported_listings": imported_listings,
                     "screenshots": {} if recovery_operation else {"capture_overview": self._persist_generated_asset(overview_path)},
-                    "session_state": {
-                        "session_state": "active",
-                        "session_payload": final_storage_state,
-                    },
                 }
+                # Public catalog retrieval must not create or refresh private
+                # account-session state as a side effect.
+                if not recovery_operation and bridge_account:
+                    result["session_state"] = {
+                        "session_state": "active",
+                        "session_payload": context.storage_state(),
+                    }
+                return result
             except playwright._timeout_error as exc:
                 raise BrowserRunnerError(f"Amazon media capture timed out: {exc}") from exc
             finally:
@@ -2603,7 +2627,9 @@ class AmazonMarketplaceBrowserRunner(MarketplaceBrowserRunner):
         product_url = f"https://www.amazon.com/dp/{asin}"
         item_page = context.new_page()
         try:
-            item_page.goto(product_url, wait_until="domcontentloaded")
+            response = item_page.goto(product_url, wait_until="domcontentloaded")
+            if response is not None and response.status >= 400:
+                raise BrowserRunnerError(f"Amazon public product page returned HTTP {response.status}")
             item_page.wait_for_timeout(1500)
             try:
                 page_title = str(item_page.title() or "")
@@ -2619,6 +2645,8 @@ class AmazonMarketplaceBrowserRunner(MarketplaceBrowserRunner):
             image_urls = self._extract_amazon_product_images(item_page)
             title = self._extract_amazon_title(item_page)
             final_url = str(item_page.url or "")
+            if "/error/" in final_url.lower():
+                raise BrowserRunnerError(f"Amazon public product page redirected to an error page: {final_url.split('?', 1)[0]}")
             page_asin_match = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})(?:[/?]|$)", final_url, re.I)
             page_asin = page_asin_match.group(1).upper() if page_asin_match else None
             selected_variant = None
@@ -2646,8 +2674,16 @@ class AmazonMarketplaceBrowserRunner(MarketplaceBrowserRunner):
             search_url = f"https://www.amazon.com/s?k={quote_plus(query)}"
             search_page = context.new_page()
             try:
-                search_page.goto(search_url, wait_until="domcontentloaded")
+                response = search_page.goto(search_url, wait_until="domcontentloaded")
+                if response is not None and response.status >= 400:
+                    raise BrowserRunnerError(f"Amazon public title search returned HTTP {response.status}")
                 search_page.wait_for_timeout(1500)
+                try:
+                    page_text = (str(search_page.title() or "") + " " + str(search_page.locator("body").inner_text(timeout=1500) or "")).lower()
+                except Exception:
+                    page_text = str(search_page.title() or "").lower()
+                if any(marker in page_text for marker in ("robot check", "captcha", "automated access", "sorry! something went wrong")):
+                    raise BrowserRunnerError("Amazon public title search returned an access challenge or service error")
                 candidates = self._collect_amazon_search_candidates(search_page.content())
                 if not candidates:
                     continue

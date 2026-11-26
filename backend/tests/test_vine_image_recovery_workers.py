@@ -126,7 +126,7 @@ def test_vine_recovery_lost_bridge_response_retries_with_same_idempotency_key(db
         return {"bridge_response": remote_created}
 
     monkeypatch.setattr(tasks, "submit_bridge_job", submit)
-    assert tasks.submit_vine_image_recovery_request.run(job.id)["status"] == "pending_authorization"
+    assert tasks.submit_vine_image_recovery_request.run(job.id)["status"] == "pending"
     db_session.expire_all()
     refreshed = db_session.get(VineImageRecoveryJob, job.id)
     refreshed.next_attempt_at = datetime.utcnow()

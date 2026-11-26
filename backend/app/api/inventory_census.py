@@ -7,7 +7,7 @@ from app.api.schemas import BulkJobResponse, InventoryBulkEditRequest, Inventory
 from app.core.auth import ensure_user_owns_resource, get_current_user
 from app.core.database import get_db
 from app.core.config import settings
-from app.models.models import BulkJob, Listing, User, InventoryBin, InventoryBinAssignment, InventoryEvent, InventoryProduct, InventoryStock, InventoryPackage, InventoryPrintJob, InventoryPrintAgent, InventoryManifestImport, InventoryManifestEntry, InventoryReconciliationDecision, InventoryLocation, InventoryCensusSession, InventoryCensusRecord, ListingVariant, MarketplaceVariant
+from app.models.models import BulkJob, Listing, User, Sale, InventoryBin, InventoryBinAssignment, InventoryEvent, InventoryProduct, InventoryStock, InventoryPackage, InventoryPrintJob, InventoryPrintAgent, InventoryManifestImport, InventoryManifestEntry, InventoryReconciliationDecision, InventoryLocation, InventoryCensusSession, InventoryCensusRecord, ListingVariant, MarketplaceVariant
 from secrets import token_urlsafe, token_bytes
 import base64
 import hmac
@@ -102,7 +102,9 @@ def get_census_print_settings(db: Session = Depends(get_db), current_user: User 
     agents = db.execute(select(InventoryPrintAgent).where(InventoryPrintAgent.user_id == current_user.id, InventoryPrintAgent.revoked_at.is_(None))).scalars().all()
     layout = settings_json.get("inventory_label_layout", "qr")
     active_agents = [a for a in agents if a.enabled and a.hardware_tested and a.paired_at and a.last_status == "online" and a.last_seen_at and a.last_seen_at >= datetime.utcnow() - timedelta(seconds=90)]
-    return {"mode": mode if mode in PRINT_MODES else "browser", "layout": layout if layout in {"qr", "code128", "qr_code128"} else "qr", "agents": [_print_agent_public(agent) for agent in agents], "automatic_ready": bool(active_agents)}
+    copies = settings_json.get("inventory_label_copies", 2)
+    copies = copies if isinstance(copies, int) and not isinstance(copies, bool) and 1 <= copies <= 10 else 2
+    return {"mode": mode if mode in PRINT_MODES else "browser", "layout": layout if layout in {"qr", "code128", "qr_code128"} else "qr", "copies": copies, "agents": [_print_agent_public(agent) for agent in agents], "automatic_ready": bool(active_agents)}
 
 
 @router.put("/census/print-settings")
@@ -115,12 +117,16 @@ def update_census_print_settings(payload: dict = Body(...), db: Session = Depend
         raise HTTPException(409, "Automatic printing requires an enabled, paired, online agent marked physically tested by the operator.")
     layout = str(payload.get("layout") or (current_user.settings_json or {}).get("inventory_label_layout", "qr"))
     if layout not in {"qr", "code128", "qr_code128"}: raise HTTPException(422, "Choose QR, Code 128, or combined label layout.")
+    copies = payload.get("copies", (current_user.settings_json or {}).get("inventory_label_copies", 2))
+    if isinstance(copies, bool) or not isinstance(copies, int) or not 1 <= copies <= 10:
+        raise HTTPException(422, "Label copies must be a whole number from 1 to 10.")
     if mode == "automatic_agent" and layout != "qr" and not any(a.enabled and a.hardware_tested for a in agents):
         raise HTTPException(409, "Keep QR as the automatic layout until physical barcode verification is completed.")
     previous_mode = (current_user.settings_json or {}).get("inventory_print_mode", "browser")
     settings_json = dict(current_user.settings_json or {})
     settings_json["inventory_print_mode"] = mode
     settings_json["inventory_label_layout"] = layout
+    settings_json["inventory_label_copies"] = copies
     current_user.settings_json = settings_json
     if previous_mode == "automatic_agent" and mode != "automatic_agent":
         outstanding = db.execute(select(InventoryPrintJob).where(InventoryPrintJob.user_id == current_user.id, InventoryPrintJob.job_type == "census_item_label", InventoryPrintJob.status.in_(["CLAIMED", "RENDERED", "SUBMITTING"])).with_for_update()).scalars().all()
@@ -131,7 +137,7 @@ def update_census_print_settings(payload: dict = Body(...), db: Session = Depend
                 job.status = "UNKNOWN"; job.outcome_note = "Automatic mode was disabled while submitting; inspect physical output before reprinting."
             job.lease_token = None; job.lease_expires_at = None
     db.commit()
-    return {"mode": mode, "layout": layout}
+    return {"mode": mode, "layout": layout, "copies": copies}
 
 
 @router.post("/census/print-agents/pairing-codes")
@@ -257,7 +263,7 @@ def claim_print_agent_job(authorization: str | None = Header(default=None), db: 
     location = db.execute(select(InventoryLocation).where(InventoryLocation.user_id == agent.user_id, InventoryLocation.location_key == record.location_key)).scalar_one_or_none()
     base_url = (settings.app_base_url or "https://posterpro.sparkleserver.site").rstrip("/")
     payload.update({"item_uuid": record.item_uuid, "barcode_token": record.barcode_token, "title": record.title_snapshot,
-        "sku": record.sku_snapshot or "", "lookup_url": f"{base_url}/inventory/census?item={record.item_uuid}",
+        "sku": record.sku_snapshot or "", "lookup_url": f"{base_url}/i/{record.barcode_token}",
         "location_key": record.location_key, "unit_id": location.unit_id if location else "",
         "shelf_code": location.section_code + location.shelf_level if location else record.location_key,
         "location_is_snapshot": True})
@@ -276,6 +282,7 @@ def claim_print_agent_job(authorization: str | None = Header(default=None), db: 
     db.commit()
     return {"job": {"job_id": job.job_uuid, "job_type": "census_item_label", "idempotency_key": job.idempotency_key,
         "lease_token": lease, "lease_expires_at": job.lease_expires_at.isoformat(), "printer_name": agent.printer_name,
+        "copies": max(1, min(int(job.copies or 2), 10)),
         "paper": {"width_mm":58, "height_mm":40, "dpi_x":203, "dpi_y":203, "orientation":"portrait", "scaling_percent":100},
         "template_version": job.label_template_version, "layout": layout, "payload": payload,
         "image_png_base64": base64.b64encode(png).decode("ascii"), "pixel_width":464, "pixel_height":320}, "server_time": now.isoformat()}
@@ -536,15 +543,16 @@ def census_confirm(payload: dict = Body(...), db: Session = Depends(get_db), cur
     operation_id = str(payload.get("operation_id") or "").strip()
     session_key = str(payload.get("session_key") or "").strip()
     location_key = str(payload.get("location_key") or "").strip()
-    if not operation_id or not session_key or not location_key: raise HTTPException(422, "Session, location, and operation ID are required.")
+    if not operation_id or not session_key or not location_key: raise HTTPException(422, "Session, location choice, and operation ID are required.")
     fingerprint = hashlib.sha256(json.dumps({"session_key":session_key, "location_key":location_key, "listing_id":payload.get("listing_id"), "provisional_title":payload.get("provisional_title"), "description":payload.get("description"), "allow_duplicate":bool(payload.get("allow_duplicate"))}, sort_keys=True).encode()).hexdigest()
     replay = db.execute(select(InventoryCensusRecord).where(InventoryCensusRecord.user_id == current_user.id, InventoryCensusRecord.operation_id == operation_id)).scalar_one_or_none()
     if replay:
         if replay.request_fingerprint != fingerprint: raise HTTPException(409, "Idempotency key was already used for a different census item.")
         print_job = db.execute(select(InventoryPrintJob).where(InventoryPrintJob.user_id == current_user.id, InventoryPrintJob.idempotency_key == f"census:{current_user.id}:{operation_id}:label")).scalar_one_or_none()
-        return {"status": "replayed", "replayed": True, "item_uuid": replay.item_uuid, "barcode_token": replay.barcode_token, "title": replay.title_snapshot, "sku":replay.sku_snapshot, "location_key":replay.location_key, "print_job_id": print_job.id if print_job else None, "print_mode": (current_user.settings_json or {}).get("inventory_print_mode", "browser")}
+        return {"status": "replayed", "replayed": True, "item_uuid": replay.item_uuid, "barcode_token": replay.barcode_token, "title": replay.title_snapshot, "sku":replay.sku_snapshot, "location_key":replay.location_key, "print_job_id": print_job.id if print_job else None, "print_mode": (current_user.settings_json or {}).get("inventory_print_mode", "browser"), "copies": int(print_job.copies or 2) if print_job else 0}
     loc = db.execute(select(InventoryLocation).where(InventoryLocation.user_id == current_user.id, InventoryLocation.location_key == location_key)).scalar_one_or_none()
-    if loc is None: raise HTTPException(422, "Save/select a census location before confirming items.")
+    unassigned_location = location_key == "UNASSIGNED"
+    if loc is None and not unassigned_location: raise HTTPException(422, "Save/select a census location before confirming items, or choose Skip Location Assignment.")
     listing_id = payload.get("listing_id")
     listing = db.get(Listing, int(listing_id)) if listing_id else None
     if listing and listing.user_id != current_user.id: raise HTTPException(404, "Product not found.")
@@ -552,7 +560,7 @@ def census_confirm(payload: dict = Body(...), db: Session = Depends(get_db), cur
     title = str((listing.title if listing else payload.get("provisional_title")) or "").strip()[:255]
     if not title: raise HTTPException(422, "Confirm a catalog product or enter a provisional description.")
     if listing:
-        duplicate = db.execute(select(InventoryCensusRecord).where(InventoryCensusRecord.user_id == current_user.id, InventoryCensusRecord.listing_id == listing.id, InventoryCensusRecord.location_key == location_key, InventoryCensusRecord.status == "present")).scalar_one_or_none()
+        duplicate = db.execute(select(InventoryCensusRecord).where(InventoryCensusRecord.user_id == current_user.id, InventoryCensusRecord.listing_id == listing.id, InventoryCensusRecord.location_key == location_key, InventoryCensusRecord.status == "present")).scalar_one_or_none() if not unassigned_location else None
         if duplicate and not payload.get("allow_duplicate"):
             db.add(InventoryEvent(user_id=current_user.id, operation_id=str(uuid4()), event_type="census_duplicate_warning", entity_type="listing", entity_key=str(listing.id), session_id=session_key, payload_json={"location_key":location_key, "existing_item_uuid":duplicate.item_uuid}))
             db.commit()
@@ -581,19 +589,22 @@ def census_confirm(payload: dict = Body(...), db: Session = Depends(get_db), cur
     base_url = (settings.app_base_url or "https://posterpro.sparkleserver.site").rstrip("/")
     label_layout = (current_user.settings_json or {}).get("inventory_label_layout", "qr")
     if label_layout not in {"qr", "code128", "qr_code128"}: label_layout = "qr"
-    label_payload={"title": title, "sku": str(sku), "item_uuid": item_uuid, "barcode_token": barcode_token, "lookup_url": f"{base_url}/inventory/census?item={item_uuid}", "location_key": location_key, "unit_id": loc.unit_id, "shelf_code": loc.section_code + loc.shelf_level, "listing_id": listing.id if listing else None, "location_is_snapshot": True, "layout": label_layout}
+    label_payload={"title": title, "sku": str(sku), "item_uuid": item_uuid, "barcode_token": barcode_token, "lookup_url": f"{base_url}/i/{barcode_token}", "location_key": location_key, "unit_id": loc.unit_id if loc else "", "shelf_code": (loc.section_code + loc.shelf_level) if loc else "UNASSIGNED", "listing_id": listing.id if listing else None, "location_is_snapshot": True, "layout": label_layout}
     print_mode = (current_user.settings_json or {}).get("inventory_print_mode", "browser")
     if print_mode not in PRINT_MODES: print_mode = "browser"
     if print_mode != "disabled":
-        job=InventoryPrintJob(user_id=current_user.id, listing_id=listing.id if listing else None, job_type="census_item_label", copies=1, paper_profile="thermal_58x40mm", status="queued", payload_json=label_payload, job_uuid=str(uuid4()), idempotency_key=f"census:{current_user.id}:{operation_id}:label", label_template_version=INVENTORY_LABEL_TEMPLATE_VERSION); db.add(job)
+        copies = (current_user.settings_json or {}).get("inventory_label_copies", 2)
+        copies = copies if isinstance(copies, int) and not isinstance(copies, bool) and 1 <= copies <= 10 else 2
+        job=InventoryPrintJob(user_id=current_user.id, listing_id=listing.id if listing else None, job_type="census_item_label", copies=copies, paper_profile="thermal_58x40mm", status="queued", payload_json=label_payload, job_uuid=str(uuid4()), idempotency_key=f"census:{current_user.id}:{operation_id}:label", label_template_version=INVENTORY_LABEL_TEMPLATE_VERSION); db.add(job)
     else:
         job = None
     db.add(InventoryEvent(user_id=current_user.id, operation_id=operation_id, event_type="census_item_confirmed", entity_type="census_item", entity_key=item_uuid, session_id=session_key, payload_json={"listing_id": listing.id if listing else None, "location_key": location_key, "provisional": provisional, "stock_id": stock.id}))
     session = db.execute(select(InventoryCensusSession).where(InventoryCensusSession.user_id == current_user.id, InventoryCensusSession.session_key == session_key)).scalar_one_or_none()
     if session is None: session=InventoryCensusSession(user_id=current_user.id, session_key=session_key); db.add(session)
-    session.active_location_key=location_key
+    if not unassigned_location:
+        session.active_location_key=location_key
     db.commit()
-    return {"status":"created", "replayed":False, "item_uuid":item_uuid, "barcode_token":barcode_token, "title":title, "provisional":provisional, "sku":str(sku), "location_key":location_key, "print_job_id":job.id if job else None, "print_mode":print_mode, "label_payload":label_payload}
+    return {"status":"created", "replayed":False, "item_uuid":item_uuid, "barcode_token":barcode_token, "title":title, "provisional":provisional, "sku":str(sku), "location_key":location_key, "print_job_id":job.id if job else None, "print_mode":print_mode, "copies":job.copies if job else 0, "label_payload":label_payload}
 
 
 @router.get("/census/items/{item_uuid}")
@@ -609,9 +620,28 @@ def census_item_label(item_uuid: str, layout: str = Query("qr", pattern="^(qr_co
     if not row: raise HTTPException(404, "Inventory item not found.")
     location=db.execute(select(InventoryLocation).where(InventoryLocation.user_id == current_user.id, InventoryLocation.location_key == row.location_key)).scalar_one_or_none()
     base_url = (settings.app_base_url or "https://posterpro.sparkleserver.site").rstrip("/")
-    payload={"title":row.title_snapshot, "sku":row.sku_snapshot or row.item_uuid[:12].upper(), "item_uuid":row.item_uuid, "barcode_token":row.barcode_token, "lookup_url":f"{base_url}/inventory/census?item={row.item_uuid}", "location_key":row.location_key, "unit_id":location.unit_id if location else "", "shelf_code":(location.section_code + location.shelf_level) if location else row.location_key, "location_is_snapshot":True}
+    payload={"title":row.title_snapshot, "sku":row.sku_snapshot or row.item_uuid[:12].upper(), "item_uuid":row.item_uuid, "barcode_token":row.barcode_token, "lookup_url":f"{base_url}/i/{row.barcode_token}", "location_key":row.location_key, "unit_id":location.unit_id if location else "", "shelf_code":(location.section_code + location.shelf_level) if location else row.location_key, "location_is_snapshot":True}
     template = _inventory_label_template(current_user)
-    return {"image_data_url":data_url(render_inventory_label(payload, "thermal_58x40mm", layout=layout, template=template)), "payload":payload, "width_mm":58, "height_mm":40, "dpi":INVENTORY_LABEL_DPI, "pixel_width":464, "pixel_height":320, "template_version":INVENTORY_LABEL_TEMPLATE_VERSION, "print_scale_percent":template["print_scale_percent"], "physical_print_verified":False}
+    copies = (current_user.settings_json or {}).get("inventory_label_copies", 2)
+    copies = copies if isinstance(copies, int) and not isinstance(copies, bool) and 1 <= copies <= 10 else 2
+    return {"image_data_url":data_url(render_inventory_label(payload, "thermal_58x40mm", layout=layout, template=template)), "payload":payload, "width_mm":58, "height_mm":40, "dpi":INVENTORY_LABEL_DPI, "pixel_width":464, "pixel_height":320, "template_version":INVENTORY_LABEL_TEMPLATE_VERSION, "print_scale_percent":template["print_scale_percent"], "copies":copies, "physical_print_verified":False}
+
+
+@router.get("/census/items/{item_uuid}/label.png", response_class=Response)
+def download_census_item_label(item_uuid: str, layout: str = Query("qr", pattern="^(qr_code128|qr|code128)$"), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Serve the same approved raster as a downloadable native-size artifact."""
+    row = db.execute(select(InventoryCensusRecord).where(InventoryCensusRecord.user_id == current_user.id, InventoryCensusRecord.item_uuid == item_uuid)).scalar_one_or_none()
+    if not row:
+        raise HTTPException(404, "Inventory item not found.")
+    location = db.execute(select(InventoryLocation).where(InventoryLocation.user_id == current_user.id, InventoryLocation.location_key == row.location_key)).scalar_one_or_none()
+    base_url = (settings.app_base_url or "https://posterpro.sparkleserver.site").rstrip("/")
+    payload = {"title": row.title_snapshot, "sku": row.sku_snapshot or row.item_uuid[:12].upper(), "item_uuid": row.item_uuid,
+        "barcode_token": row.barcode_token, "lookup_url": f"{base_url}/i/{row.barcode_token}", "location_key": row.location_key,
+        "unit_id": location.unit_id if location else "", "shelf_code": (location.section_code + location.shelf_level) if location else row.location_key,
+        "location_is_snapshot": True}
+    png = render_inventory_label(payload, "thermal_58x40mm", layout=layout, template=_inventory_label_template(current_user))
+    safe_sku = re.sub(r"[^A-Za-z0-9_-]", "_", row.sku_snapshot or row.item_uuid[:12])[:64]
+    return Response(content=png, media_type="image/png", headers={"Content-Disposition": f'attachment; filename="posterpro-{safe_sku}.png"', "X-PosterPro-Width-MM": "58", "X-PosterPro-Height-MM": "40", "X-PosterPro-DPI": "203"})
 
 
 @router.post("/census/items/{item_uuid}/reprint")
@@ -622,10 +652,12 @@ def reprint_census_item(item_uuid: str, payload: dict = Body(default={}), db: Se
     idem = f"census:{current_user.id}:reprint:{operation_id}"
     old = db.execute(select(InventoryPrintJob).where(InventoryPrintJob.user_id == current_user.id, InventoryPrintJob.idempotency_key == idem)).scalar_one_or_none()
     if old: return {"job_id":old.id, "job_uuid":old.job_uuid, "status":old.status, "item_uuid":row.item_uuid, "replayed":True}
-    job=InventoryPrintJob(user_id=current_user.id, listing_id=row.listing_id, job_type="census_item_label", copies=1, paper_profile="thermal_58x40mm", status="queued", payload_json={"item_uuid":row.item_uuid, "reprint":True}, job_uuid=str(uuid4()), idempotency_key=idem, label_template_version=INVENTORY_LABEL_TEMPLATE_VERSION, reprint_of_job_id=db.execute(select(InventoryPrintJob.id).where(InventoryPrintJob.user_id == current_user.id, InventoryPrintJob.job_type == "census_item_label", InventoryPrintJob.payload_json["item_uuid"].as_string() == row.item_uuid).order_by(InventoryPrintJob.created_at).limit(1)).scalar_one_or_none())
+    copies = (current_user.settings_json or {}).get("inventory_label_copies", 2)
+    copies = copies if isinstance(copies, int) and not isinstance(copies, bool) and 1 <= copies <= 10 else 2
+    job=InventoryPrintJob(user_id=current_user.id, listing_id=row.listing_id, job_type="census_item_label", copies=copies, paper_profile="thermal_58x40mm", status="queued", payload_json={"item_uuid":row.item_uuid, "reprint":True}, job_uuid=str(uuid4()), idempotency_key=idem, label_template_version=INVENTORY_LABEL_TEMPLATE_VERSION, reprint_of_job_id=db.execute(select(InventoryPrintJob.id).where(InventoryPrintJob.user_id == current_user.id, InventoryPrintJob.job_type == "census_item_label", InventoryPrintJob.payload_json["item_uuid"].as_string() == row.item_uuid).order_by(InventoryPrintJob.created_at).limit(1)).scalar_one_or_none())
     db.add(job); db.add(InventoryEvent(user_id=current_user.id, operation_id=str(uuid4()), event_type="census_label_reprint_queued", entity_type="census_item", entity_key=row.item_uuid, session_id=row.session_key, payload_json={"item_uuid":row.item_uuid}))
     db.commit(); db.refresh(job)
-    return {"job_id":job.id, "job_uuid":job.job_uuid, "status":job.status, "item_uuid":row.item_uuid, "replayed":False}
+    return {"job_id":job.id, "job_uuid":job.job_uuid, "status":job.status, "item_uuid":row.item_uuid, "copies":job.copies, "replayed":False}
 
 
 @router.post("/census/items/{item_uuid}/undo")
@@ -661,6 +693,11 @@ def move_census_item(item_uuid: str, payload: dict = Body(...), db: Session = De
     row=db.execute(select(InventoryCensusRecord).where(InventoryCensusRecord.user_id == current_user.id, InventoryCensusRecord.item_uuid == item_uuid).with_for_update()).scalar_one_or_none()
     destination=db.execute(select(InventoryLocation).where(InventoryLocation.user_id == current_user.id, InventoryLocation.location_key == destination_key)).scalar_one_or_none()
     if not row or row.status != "present": raise HTTPException(404, "Present inventory item not found.")
+    pick_assignment = db.execute(select(InventoryEvent).where(InventoryEvent.user_id == current_user.id,
+        InventoryEvent.entity_type == "census_item", InventoryEvent.entity_key == item_uuid,
+        InventoryEvent.event_type == "inventory_pick_item_state").order_by(InventoryEvent.id.desc()).limit(1)).scalar_one_or_none()
+    if pick_assignment and (pick_assignment.payload_json or {}).get("state") in {"PICKED", "PACKED", "LABEL_READY"}:
+        raise HTTPException(409, "This item is assigned to an unshipped order. Complete or reconcile that pick before moving it.")
     if not destination or destination.accessibility in {"missing_unresolved", "shipped_removed"}: raise HTTPException(422, "Choose an active owned destination location.")
     if row.location_key == destination_key: raise HTTPException(409, "Item is already at this location.")
     duplicate=db.execute(select(InventoryCensusRecord).where(InventoryCensusRecord.user_id == current_user.id, InventoryCensusRecord.listing_id == row.listing_id, InventoryCensusRecord.location_key == destination_key, InventoryCensusRecord.status == "present")).scalar_one_or_none() if row.listing_id else None
@@ -683,6 +720,185 @@ def mark_browser_label_dispatched(job_id: int, db: Session = Depends(get_db), cu
     job=db.get(InventoryPrintJob, job_id)
     if not job or job.user_id != current_user.id or job.job_type != "census_item_label": raise HTTPException(404, "Census print job not found.")
     if (current_user.settings_json or {}).get("inventory_print_mode", "browser") != "browser": raise HTTPException(409, "Browser dispatch is disabled by the selected Census print mode.")
-    if job.status not in {"queued", "created", "failed", "unknown"}: return {"job_id":job.id, "status":job.status}
+    if job.status not in {"queued", "created"}:
+        raise HTTPException(409, "This print job is no longer pending browser dispatch. Create a separate reprint job to avoid duplicate output.")
     job.status="dispatched"; job.claimed_at=datetime.utcnow(); db.commit()
     return {"job_id":job.id, "status":"dispatched", "physical_print_verified":False}
+
+
+def _latest_pick_event(db: Session, user_id: int, sale_id: int) -> InventoryEvent | None:
+    return db.execute(select(InventoryEvent).where(
+        InventoryEvent.user_id == user_id, InventoryEvent.event_type == "inventory_pick_state",
+        InventoryEvent.entity_type == "sale", InventoryEvent.entity_key == str(sale_id),
+    ).order_by(InventoryEvent.id.desc()).limit(1)).scalar_one_or_none()
+
+
+def _ship_deadline(value: object) -> str | None:
+    """Extract a known ship-by value without inventing an order deadline."""
+    if isinstance(value, dict):
+        for key in ("shipByDate", "ship_by", "ship_by_date"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        for child in value.values():
+            result = _ship_deadline(child)
+            if result:
+                return result
+    elif isinstance(value, list):
+        for child in value[:50]:
+            result = _ship_deadline(child)
+            if result:
+                return result
+    return None
+
+
+def _pick_location_label(db: Session, user_id: int, location_key: str, seen: set[str] | None = None) -> str:
+    # Containers may be nested; corrupted legacy parent links must not recurse forever.
+    seen = set() if seen is None else seen
+    if not location_key or location_key in seen or len(seen) >= 16:
+        return "Location unavailable"
+    seen.add(location_key)
+    shelf = db.execute(select(InventoryLocation).where(InventoryLocation.user_id == user_id, InventoryLocation.location_key == location_key)).scalar_one_or_none()
+    if shelf:
+        return "/".join(part for part in (shelf.unit_id, shelf.section_code + shelf.shelf_level, shelf.position_code) if part)
+    tote = db.execute(select(InventoryBin).where(InventoryBin.user_id == user_id, InventoryBin.container_uuid == location_key)).scalar_one_or_none()
+    if tote:
+        parent = _pick_location_label(db, user_id, tote.parent_location_key, seen) if tote.parent_location_key else ""
+        return f"{parent} / Tote {tote.code}" if parent else f"Tote {tote.code}"
+    package = db.execute(select(InventoryPackage).where(InventoryPackage.user_id == user_id, InventoryPackage.package_uuid == location_key)).scalar_one_or_none()
+    if package:
+        parent = _pick_location_label(db, user_id, package.parent_location_key, seen) if package.parent_location_key else ""
+        return f"{parent} / Carton {package.package_code}" if parent else f"Carton {package.package_code}"
+    return "Location unavailable"
+
+
+def _pick_sale_payload(db: Session, sale: Sale) -> dict:
+    listing = db.get(Listing, sale.listing_id) if sale.listing_id else None
+    pick_event = _latest_pick_event(db, sale.user_id, sale.id)
+    pick_state = (pick_event.payload_json or {}).get("state") if pick_event else "AWAITING_PICK"
+    records = db.execute(select(InventoryCensusRecord).where(
+        InventoryCensusRecord.user_id == sale.user_id, InventoryCensusRecord.listing_id == sale.listing_id,
+        InventoryCensusRecord.status == "present",
+    ).order_by(InventoryCensusRecord.created_at, InventoryCensusRecord.id)).scalars().all() if sale.listing_id else []
+    quantities = []
+    for item in records:
+        location = db.execute(select(InventoryLocation).where(InventoryLocation.user_id == sale.user_id, InventoryLocation.location_key == item.location_key)).scalar_one_or_none()
+        quantities.append({"item_uuid": item.item_uuid, "barcode_token": item.barcode_token, "sku": item.sku_snapshot,
+            "location_key": item.location_key, "location": _pick_location_label(db, sale.user_id, item.location_key),
+            "unit_id": location.unit_id if location else None, "section_code": location.section_code if location else None,
+            "shelf_level": location.shelf_level if location else None, "position_code": location.position_code if location else None})
+    picked = (pick_event.payload_json or {}).get("picked_item_uuids", []) if pick_event else []
+    return {"sale_id": sale.id, "marketplace": getattr(sale.platform, "value", sale.platform),
+        "order_id": sale.marketplace_order_id, "marketplace_listing_id": sale.marketplace_listing_id,
+        "listing_id": sale.listing_id, "product": listing.title if listing else None,
+        "sku": getattr(listing, "inventory_sku", None) if listing else None,
+        "quantity": max(1, int(sale.quantity or 1)), "sold_at": sale.sold_at.isoformat() if sale.sold_at else None,
+        "deadline": _ship_deadline(sale.details), "pick_state": pick_state,
+        "locations": quantities, "picked_item_uuids": picked,
+        "location_unknown": len(quantities) < max(1, int(sale.quantity or 1)) or any(item["location_key"] == "UNASSIGNED" for item in quantities),
+        "tracking_reference": (pick_event.payload_json or {}).get("tracking_reference") if pick_event else None,
+        "marketplace_fulfillment_updated": False}
+
+
+@router.get("/picking/queue")
+def inventory_picking_queue(limit: int = Query(100, ge=1, le=250), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """List this account's sold listing units with physical census locations."""
+    sales = db.execute(select(Sale).where(Sale.user_id == current_user.id, Sale.listing_id.is_not(None),
+        Sale.status.in_(["SYNCED", "DETECTED"])).order_by(Sale.sold_at.desc(), Sale.id.desc()).limit(limit)).scalars().all()
+    orders = []
+    for sale in sales:
+        details = sale.details if isinstance(sale.details, dict) else {}
+        remote_state = str(details.get("orderFulfillmentStatus") or details.get("fulfillment_status") or "").upper()
+        if remote_state in {"FULFILLED", "SHIPPED", "CANCELLED"}:
+            continue
+        payload = _pick_sale_payload(db, sale)
+        if payload["pick_state"] != "SHIPPED":
+            orders.append(payload)
+    return {"items": orders, "count": len(orders), "unknown_location_count": sum(item["location_unknown"] for item in orders)}
+
+
+@router.post("/picking/sales/{sale_id}/state")
+def update_inventory_pick_state(sale_id: int, payload: dict = Body(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Record audited local pick progress; does not call a marketplace API."""
+    sale = db.execute(select(Sale).where(Sale.id == sale_id, Sale.user_id == current_user.id).with_for_update()).scalar_one_or_none()
+    if not sale or not sale.listing_id or sale.status not in {"SYNCED", "DETECTED"}:
+        raise HTTPException(404, "A matched, active sale for this account was not found.")
+    requested = str(payload.get("state") or "").upper()
+    operation_id = str(payload.get("operation_id") or "").strip()
+    if not operation_id or len(operation_id) > 64:
+        raise HTTPException(422, "An operation ID is required for each pick update.")
+    if requested not in {"PICKED", "PACKED", "LABEL_READY", "SHIPPED"}:
+        raise HTTPException(422, "Choose Picked, Packed, Label Ready, or Shipped.")
+    scanned = payload.get("scanned_item_tokens") or []
+    if isinstance(scanned, str):
+        scanned = [scanned]
+    if not isinstance(scanned, list) or len(scanned) > 100:
+        raise HTTPException(422, "Scanned item identifiers must be a list of at most 100 values.")
+    tracking = str(payload.get("tracking_reference") or "").strip()[:255] or None
+    fingerprint = hashlib.sha256(json.dumps({"sale_id": sale_id, "state": requested, "scanned": scanned, "tracking": tracking, "confirmed": payload.get("operator_confirmed_shipped") is True}, sort_keys=True).encode()).hexdigest()
+    replay = db.execute(select(InventoryEvent).where(InventoryEvent.user_id == current_user.id, InventoryEvent.operation_id == operation_id)).scalar_one_or_none()
+    if replay:
+        if (replay.payload_json or {}).get("request_fingerprint") != fingerprint:
+            raise HTTPException(409, "This operation ID was already used for a different pick action.")
+        return {"status": (replay.payload_json or {}).get("state"), "sale_id": sale_id, "replayed": True, "marketplace_fulfillment_updated": False}
+    prior = _latest_pick_event(db, current_user.id, sale_id)
+    current = (prior.payload_json or {}).get("state") if prior else "AWAITING_PICK"
+    next_states = {"AWAITING_PICK": "PICKED", "PICKED": "PACKED", "PACKED": "LABEL_READY", "LABEL_READY": "SHIPPED"}
+    if next_states.get(current) != requested:
+        raise HTTPException(409, f"Invalid pick transition {current} -> {requested}.")
+    picked_ids = list((prior.payload_json or {}).get("picked_item_uuids", [])) if prior else []
+    if requested == "PICKED":
+        expected_quantity = max(1, int(sale.quantity or 1))
+        if len(scanned) != expected_quantity:
+            raise HTTPException(422, f"Scan exactly {expected_quantity} physical item label(s) to verify this order.")
+        matched = []
+        for raw in scanned:
+            token = str(raw or "").strip()
+            if not token:
+                raise HTTPException(422, "Scanned item identifier is empty.")
+            record = db.execute(select(InventoryCensusRecord).where(InventoryCensusRecord.user_id == current_user.id,
+                InventoryCensusRecord.listing_id == sale.listing_id, InventoryCensusRecord.status == "present",
+                or_(InventoryCensusRecord.item_uuid == token, InventoryCensusRecord.barcode_token == token)).with_for_update()).scalar_one_or_none()
+            if not record:
+                raise HTTPException(409, "Scanned label does not identify a present physical unit for this sold listing.")
+            if record.location_key == "UNASSIGNED":
+                raise HTTPException(409, "This item's physical location is still unassigned. Update it in Shelf Census before picking.")
+            if record.item_uuid in matched:
+                raise HTTPException(409, "The same physical item was scanned more than once.")
+            previous_assignment = db.execute(select(InventoryEvent).where(InventoryEvent.user_id == current_user.id,
+                InventoryEvent.entity_type == "census_item", InventoryEvent.entity_key == record.item_uuid,
+                InventoryEvent.event_type == "inventory_pick_item_state").order_by(InventoryEvent.id.desc()).limit(1)).scalar_one_or_none()
+            previous_payload = previous_assignment.payload_json or {} if previous_assignment else {}
+            if previous_payload.get("state") in {"PICKED", "PACKED", "LABEL_READY"} and previous_payload.get("sale_id") != sale.id:
+                raise HTTPException(409, "This physical item is already allocated to another unshipped order.")
+            matched.append(record.item_uuid)
+        picked_ids = matched
+    elif len(picked_ids) != max(1, int(sale.quantity or 1)):
+        raise HTTPException(409, "This order has no complete scanned pick assignment. Scan its item labels first.")
+    if requested == "SHIPPED" and payload.get("operator_confirmed_shipped") is not True:
+        raise HTTPException(422, "Confirm that the package was physically handed to the carrier before marking it shipped.")
+    event_payload = {"sale_id": sale.id, "listing_id": sale.listing_id, "state": requested, "picked_item_uuids": picked_ids,
+        "tracking_reference": tracking, "operator_confirmed_shipped": requested == "SHIPPED", "marketplace_fulfillment_updated": False,
+        "request_fingerprint": fingerprint}
+    db.add(InventoryEvent(user_id=current_user.id, operation_id=operation_id, event_type="inventory_pick_state", entity_type="sale", entity_key=str(sale.id), payload_json=event_payload))
+    for item_uuid in picked_ids:
+        db.add(InventoryEvent(user_id=current_user.id, operation_id=str(uuid4()), event_type="inventory_pick_item_state", entity_type="census_item", entity_key=item_uuid,
+            payload_json={"sale_id": sale.id, "state": requested, "tracking_reference": tracking}))
+        if requested == "SHIPPED":
+            item = db.execute(select(InventoryCensusRecord).where(InventoryCensusRecord.user_id == current_user.id, InventoryCensusRecord.item_uuid == item_uuid).with_for_update()).scalar_one()
+            # Marketplace sale sync may already have consumed this stock.
+            # Manual or legacy sale rows may not have; remove the physical
+            # unit once at carrier handoff in that case.
+            depletion_operation = "sale-" + hashlib.sha256(f"{sale.user_id}:{sale.id}".encode()).hexdigest()[:56]
+            depleted_by_sale_sync = db.execute(select(InventoryEvent.id).where(InventoryEvent.user_id == current_user.id,
+                InventoryEvent.operation_id == depletion_operation)).scalar_one_or_none()
+            if not depleted_by_sale_sync and item.inventory_product_id:
+                stock = db.execute(select(InventoryStock).where(InventoryStock.user_id == current_user.id,
+                    InventoryStock.product_id == item.inventory_product_id, InventoryStock.location_key == item.location_key).with_for_update()).scalar_one_or_none()
+                if not stock or stock.on_hand <= 0:
+                    raise HTTPException(409, "Physical stock at the recorded location is already depleted; reconcile this item before completing shipment.")
+                stock.on_hand -= 1; stock.sold += 1
+            item.status = "shipped"
+    db.commit()
+    return {"sale_id": sale.id, "status": requested, "picked_item_uuids": picked_ids, "tracking_reference": tracking,
+        "replayed": False, "marketplace_fulfillment_updated": False, "note": "This records PosterPro's local pick state only; it does not update the marketplace order."}

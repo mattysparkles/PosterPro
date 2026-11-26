@@ -51,7 +51,7 @@ def _preflight(status="ready", blockers=None, *, category_id="123", **extra):
             "policy_id": "test-ebay-fulfillment",
             "buyer_pays_shipping": True,
             "free_shipping": False,
-            "services": [{"service": "USPSParcel", "cost_type": "FLAT_RATE", "buyer_responsible": True, "free_shipping": False, "charge": 8.49}],
+            "services": [{"service": "USPSParcel", "cost_type": "FLAT_RATE", "buyer_responsible": True, "free_shipping": False, "charge": 8.0}],
         }},
         "category_summary": {"category_id": str(category_id), "leaf_verified": True},
         **extra,
@@ -86,9 +86,9 @@ def _stamp_current_preflight(listing):
                     price = 0
                 if price < 25:
                     validation.update({"valid": True, "policy_id": "266212013013", "buyer_pays_shipping": True, "free_shipping": False,
-                                       "services": [{"service": "USPSParcel", "cost_type": "FLAT_RATE", "buyer_responsible": True, "free_shipping": False, "charge": 8.49}]})
+                                       "services": [{"service": "USPSParcel", "cost_type": "FLAT_RATE", "buyer_responsible": True, "free_shipping": False, "charge": 8.0}]})
                 else:
-                    validation.update({"valid": True, "policy_id": "260642879013", "buyer_pays_shipping": False, "free_shipping": True,
+                    validation.update({"valid": True, "policy_id": "tier-free", "buyer_pays_shipping": False, "free_shipping": True,
                                        "services": [{"service": "USPSParcel", "cost_type": "CALCULATED", "buyer_responsible": False, "free_shipping": True, "charge": 0}]})
                 policy_summary["fulfillment_policy_validation"] = validation
                 current["policy_summary"] = policy_summary
@@ -123,14 +123,14 @@ def test_review_marker_without_target_preflight_is_not_reviewable(db_session):
 def test_verified_flat_tier_policy_overrides_stale_shipping_setup_marker(db_session):
     policies = [
         {
-            "id": "266212013013", "marketplace_id": "EBAY_US",
+            "id": "tier-under-25", "marketplace_id": "EBAY_US",
             "shipping_options": [{"cost_type": "FLAT_RATE", "shipping_services": [{
                 "service": "USPSParcel", "free_shipping": False,
-                "shipping_cost": {"value": "8.49", "currency": "USD"},
+                "shipping_cost": {"value": "8.0", "currency": "USD"},
             }]}],
         },
         {
-            "id": "260642879013", "marketplace_id": "EBAY_US",
+            "id": "tier-free", "marketplace_id": "EBAY_US",
             "shipping_options": [{"cost_type": "CALCULATED", "shipping_services": [{
                 "service": "USPSParcel", "free_shipping": True,
                 "shipping_cost": None,
@@ -140,7 +140,7 @@ def test_verified_flat_tier_policy_overrides_stale_shipping_setup_marker(db_sess
     user = User(email="readiness-valid-shipping-policy@example.com", settings_json={
         "ebay_marketplace_policy_settings": {
             "marketplace_id": "EBAY_US",
-            "fulfillment_policy_id": "260642879013",
+            "fulfillment_policy_id": "tier-free", "under_25_fulfillment_policy_id": "tier-under-25", "free_shipping_fulfillment_policy_id": "tier-free", "buyer_paid_flat_amount": 8.0, "handling_time_days": 4,
             "policy_candidates": {"fulfillment": policies},
         },
     })
@@ -163,12 +163,12 @@ def test_verified_flat_tier_policy_overrides_stale_shipping_setup_marker(db_sess
 
 def test_flat_and_free_ebay_tiers_ignore_amazon_estimated_package_measurements(db_session):
     policies = [
-        {"id": "266212013013", "marketplace_id": "EBAY_US", "shipping_options": [{"cost_type": "FLAT_RATE", "shipping_services": [{"service": "USPSParcel", "free_shipping": False, "shipping_cost": {"value": "8.49", "currency": "USD"}}]}]},
-        {"id": "260642879013", "marketplace_id": "EBAY_US", "shipping_options": [{"cost_type": "CALCULATED", "shipping_services": [{"service": "USPSParcel", "free_shipping": True, "shipping_cost": None}]}]},
+        {"id": "tier-under-25", "marketplace_id": "EBAY_US", "shipping_options": [{"cost_type": "FLAT_RATE", "shipping_services": [{"service": "USPSParcel", "free_shipping": False, "shipping_cost": {"value": "8.0", "currency": "USD"}}]}]},
+        {"id": "tier-free", "marketplace_id": "EBAY_US", "shipping_options": [{"cost_type": "CALCULATED", "shipping_services": [{"service": "USPSParcel", "free_shipping": True, "shipping_cost": None}]}]},
     ]
-    user = User(email="readiness-estimated-parcels@example.com", settings_json={"ebay_marketplace_policy_settings": {"marketplace_id": "EBAY_US", "fulfillment_policy_id": "260642879013", "policy_candidates": {"fulfillment": policies}}})
+    user = User(email="readiness-estimated-parcels@example.com", settings_json={"ebay_marketplace_policy_settings": {"marketplace_id": "EBAY_US", "fulfillment_policy_id": "tier-free", "under_25_fulfillment_policy_id": "tier-under-25", "free_shipping_fulfillment_policy_id": "tier-free", "buyer_paid_flat_amount": 8.0, "handling_time_days": 4, "policy_candidates": {"fulfillment": policies}}})
     db_session.add(user); db_session.flush()
-    for price, policy_id in ((24.99, "266212013013"), (25.00, "260642879013")):
+    for price, policy_id in ((24.99, "tier-under-25"), (25.00, "tier-free")):
         listing = Listing(
             user_id=user.id, user=user, source_type="amazon_vine", processing_state="complete",
             title="Storage organizer", description="A prepared storage organizer for travel and home use.",
@@ -674,7 +674,7 @@ def test_under_25_live_nonfree_policy_evidence_is_reviewable_without_flag_veto(d
         "free_shipping": False,
         "services": [{
             "service": "USPSParcel", "cost_type": "FLAT_RATE",
-            "buyer_responsible": False, "free_shipping": False, "charge": 8.49,
+            "buyer_responsible": False, "free_shipping": False, "charge": 8.0,
         }],
     }
     listing = Listing(

@@ -66,6 +66,25 @@ def test_amazon_asin_capture_records_exact_page_and_gallery_evidence(tmp_path: P
     assert capture["gallery_evidence"][0]["page_asin"] == "B000000001"
 
 
+def test_amazon_public_asin_capture_records_http_error_without_auth_fallback(tmp_path: Path):
+    class Response:
+        status = 503
+
+    class Page:
+        url = "https://www.amazon.com/error/500"
+        def goto(self, url, wait_until=None):
+            self.url = "https://www.amazon.com/error/500"
+            return Response()
+        def close(self): pass
+
+    class Context:
+        def new_page(self): return Page()
+
+    runner = AmazonMarketplaceBrowserRunner(BrowserRunnerConfig(screenshots_dir=tmp_path))
+    with pytest.raises(BrowserRunnerError, match="public product page returned HTTP 503"):
+        runner._capture_amazon_product_by_asin(Context(), asin="B000000001")
+
+
 class _CountLocator:
     def __init__(self, count: int):
         self._count = count

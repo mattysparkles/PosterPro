@@ -15,13 +15,13 @@ import pytest
 @pytest.mark.parametrize(
     ("price", "policy_id", "buyer_pays", "free_shipping", "charge_mode"),
     [
-        (24.99, "266212013013", True, False, "flat"),
-        (25.00, "260642879013", False, True, "included"),
-        (25.01, "260642879013", False, True, "included"),
+        (24.99, "tier-under-25", True, False, "flat"),
+        (25.00, "tier-free", False, True, "included"),
+        (25.01, "tier-free", False, True, "included"),
     ],
 )
 def test_review_state_derives_shipping_from_listing_price(price, policy_id, buyer_pays, free_shipping, charge_mode):
-    user = User(email=f"shipping-tier-{price}@example.com", settings_json={})
+    user = User(email=f"shipping-tier-{price}@example.com", settings_json={"ebay_marketplace_policy_settings": {"under_25_fulfillment_policy_id": "tier-under-25", "free_shipping_fulfillment_policy_id": "tier-free"}})
     listing = Listing(
         user_id=1,
         user=user,

@@ -1777,7 +1777,7 @@ def test_required_aspects_uses_explicit_supported_tree_without_default_tree_look
     assert "get_default_category_tree_id" not in calls[0][1]
 
 
-def _buyer_paid_policy_settings(*, cost_type="FLAT_RATE", buyer_responsible=True, free_shipping=False, charge=8.49, policy_id="266212013013", service_code="USPSParcel"):
+def _buyer_paid_policy_settings(*, cost_type="FLAT_RATE", buyer_responsible=True, free_shipping=False, charge=8.0, policy_id="test-under-25", service_code="USPSParcel"):
     service = {
         "carrier": "USPS",
         "service": service_code,
@@ -1788,6 +1788,10 @@ def _buyer_paid_policy_settings(*, cost_type="FLAT_RATE", buyer_responsible=True
     return {
         "marketplace_id": "EBAY_US",
         "fulfillment_policy_id": policy_id,
+        "under_25_fulfillment_policy_id": policy_id,
+        "free_shipping_fulfillment_policy_id": "test-free",
+        "buyer_paid_flat_amount": 8.0,
+        "handling_time_days": 4,
         "policy_candidates": {
             "fulfillment": [{
                 "id": policy_id,
@@ -1802,6 +1806,8 @@ def test_listing_specific_fulfillment_policy_override_does_not_change_account_de
     default = {
         "fulfillment_policy_id": "260642879013",
         "fulfillment_policy_name": "Existing default",
+        "under_25_fulfillment_policy_id": "266212013013",
+        "under_25_fulfillment_policy_name": "Buyer paid flat",
         "policy_candidates": {"fulfillment": [
             {"id": "260642879013", "name": "Existing default", "marketplace_id": "EBAY_US"},
             {"id": "266212013013", "name": "Buyer paid flat", "marketplace_id": "EBAY_US"},
@@ -1810,7 +1816,7 @@ def test_listing_specific_fulfillment_policy_override_does_not_change_account_de
     monkeypatch.setattr(ebay_service, "_load_listing_ebay_policy_settings", lambda db, user_id: default.copy())
     listing = SimpleNamespace(
         user_id=2,
-        marketplace_data={"marketplace_overrides": {"ebay": {"shipping": {"fulfillment_policy_id": "266212013013"}}}},
+        marketplace_data={},
         shipping_profile={},
     )
     listing.listing_price = 20
@@ -1825,16 +1831,16 @@ def test_under_25_accepts_verified_buyer_paid_flat_policy_without_measurements()
         _buyer_paid_policy_settings(), sale_price=24.99, shipping_profile={},
     )
     assert result["valid"] is True
-    assert result["policy_id"] == "266212013013"
+    assert result["policy_id"] == "test-under-25"
     assert result["buyer_pays_shipping"] is True
-    assert result["services"][0]["charge"] == 8.49
+    assert result["services"][0]["charge"] == 8.0
 
 
 def test_selected_fulfillment_policy_must_match_configured_handling_time():
     settings = _buyer_paid_policy_settings()
     selected = settings["policy_candidates"]["fulfillment"][0]
     selected["handling_time"] = {"value": 0, "unit": "DAY"}
-    settings["handling_time_days"] = 1
+    settings["handling_time_days"] = 4
     mismatch = ebay_service.validate_cached_ebay_fulfillment_policy(settings, sale_price=20, shipping_profile={})
     assert mismatch["valid"] is False
     assert mismatch["code"] == "EBAY_HANDLING_TIME_MISMATCH"
@@ -1854,7 +1860,7 @@ def test_under_25_accepts_non_free_flat_charge_even_when_account_flag_is_false()
     )
     assert result["valid"] is True
     assert result["buyer_pays_shipping"] is True
-    assert result["services"][0]["charge"] == 8.49
+    assert result["services"][0]["charge"] == 8.0
 
 
 def test_under_25_rejects_free_or_zero_charge_fulfillment_policy():
@@ -1871,7 +1877,7 @@ def test_under_25_rejects_calculated_instead_of_flat_849_policy():
     settings = _buyer_paid_policy_settings(cost_type="CALCULATED", charge=None, policy_id="other-policy")
     missing = ebay_service.validate_cached_ebay_fulfillment_policy(settings, sale_price=20, shipping_profile={})
     assert missing["valid"] is False
-    assert missing["code"] == "EBAY_FULFILLMENT_POLICY_TIER_MISMATCH"
+    assert missing["code"] == "EBAY_FULFILLMENT_POLICY_INVALID"
 
 
 def test_at_or_above_25_preserves_existing_verified_policy():
@@ -1905,7 +1911,7 @@ def test_legacy_approved_payload_rebuilds_exact_current_ebay_contract(monkeypatc
             "id": "ship-under-25",
             "shipping_options": [{"cost_type": "FLAT_RATE", "shipping_services": [{
                 "service": "USPSParcel", "free_shipping": False,
-                "shipping_cost": {"value": "8.49", "currency": "USD"},
+                "shipping_cost": {"value": "8.0", "currency": "USD"},
             }]}],
         }],
     }
@@ -1926,7 +1932,7 @@ def test_legacy_approved_payload_rebuilds_exact_current_ebay_contract(monkeypatc
             "fulfillment_policy_id": "ship-under-25", "payment_policy_id": "pay-1",
             "return_policy_id": "return-1", "merchant_location_key": "posterpro-default",
             "mode": "flat", "service": "USPSParcel", "free_shipping": False,
-            "buyer_pays_shipping": True, "shipping_cost": 8.49,
+            "buyer_pays_shipping": True, "shipping_cost": 8.0,
         },
     }
     plan = {
@@ -1946,7 +1952,7 @@ def test_legacy_approved_payload_rebuilds_exact_current_ebay_contract(monkeypatc
     assert contract["business_policies"]["fulfillmentPolicyId"] == "ship-under-25"
     assert contract["item_specifics"] == {"Type": ["Kit"], "Brand": ["Brand X"]}
     assert len(contract["image_urls"]) == 2
-    assert contract["shipping_policy"]["shipping_cost"] == 8.49
+    assert contract["shipping_policy"]["shipping_cost"] == 8.0
 
 
 def test_legacy_approved_payload_rejects_wrong_live_under_25_policy(monkeypatch):
@@ -1967,3 +1973,62 @@ def test_legacy_approved_payload_rejects_wrong_live_under_25_policy(monkeypatch)
     plan = {"category": {"category_id": "184324"}, "policy_settings": {"merchant_location_key": "loc"}, "inventory_item_payload": {"product": {}}, "offer_payload": {}, "payload_preview": {}, "shipping_summary": {}}
     with pytest.raises(ebay_service.EbayIntegrationError, match="EBAY_APPROVED_SHIPPING_POLICY_MISMATCH"):
         asyncio.run(ebay_service._apply_approved_ebay_snapshot_to_plan(listing, object(), plan, approved))
+
+
+def test_shipping_tier_sync_creates_and_reads_back_exact_domestic_policies(monkeypatch):
+    calls = []
+    rows = []
+
+    class FakeClient:
+        def __init__(self, token):
+            assert token == "token"
+
+        async def request(self, method, path, *, params=None, headers=None, payload=None):
+            calls.append((method, path, params, payload))
+            if method == "POST":
+                policy_id = f"tier-{len(rows) + 1}"
+                policy = {
+                    "fulfillmentPolicyId": policy_id,
+                    "name": payload["name"],
+                    "marketplaceId": payload["marketplaceId"],
+                    "categoryTypes": payload["categoryTypes"],
+                    "handlingTime": payload["handlingTime"],
+                    "shippingOptions": __import__("copy").deepcopy(payload["shippingOptions"]),
+                }
+                for option in policy["shippingOptions"]:
+                    for shipping_service in option.get("shippingServices") or []:
+                        if shipping_service.get("freeShipping") is False:
+                            shipping_service["buyerResponsibleForShipping"] = False
+                rows.append(policy)
+                return {}
+            return {"fulfillmentPolicies": list(rows)}
+
+    monkeypatch.setattr(ebay_service, "EbayAPIClient", FakeClient)
+    result = asyncio.run(ebay_service._sync_ebay_shipping_price_tiers(
+        "token", marketplace_id="EBAY_US", service_code="USPSParcel",
+        handling_days=4, buyer_paid_amount=8.0, create_missing=True,
+    ))
+    assert result["under_25_fulfillment_policy_id"] == "tier-1"
+    assert result["free_shipping_fulfillment_policy_id"] == "tier-2"
+    assert len([call for call in calls if call[0] == "POST"]) == 2
+    under_payload = calls[1][3]
+    service = under_payload["shippingOptions"][0]["shippingServices"][0]
+    assert under_payload["handlingTime"] == {"unit": "DAY", "value": 4}
+    assert service == {
+        "shippingCarrierCode": "USPS", "shippingServiceCode": "USPSParcel",
+        "freeShipping": False, "buyerResponsibleForShipping": True,
+        "shippingCost": {"value": "8.00", "currency": "USD"},
+    }
+    assert all(call[0] == "GET" or call[1].endswith("fulfillment_policy") for call in calls)
+
+
+def test_ebay_shipping_price_tier_boundary_uses_account_specific_ids():
+    from app.services.shipping_profitability_policy import ebay_fulfillment_policy_for_price
+    settings = {
+        "under_25_fulfillment_policy_id": "buyer-pays",
+        "free_shipping_fulfillment_policy_id": "free",
+    }
+    assert ebay_fulfillment_policy_for_price(24.99, settings) == "buyer-pays"
+    assert ebay_fulfillment_policy_for_price(25.00, settings) == "free"
+    assert ebay_fulfillment_policy_for_price(25.01, settings) == "free"
+    assert ebay_fulfillment_policy_for_price(24.99) is None

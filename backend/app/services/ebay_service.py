@@ -2552,7 +2552,7 @@ async def get_business_policy_ids(
                 "name": "PosterPro Default Fulfillment",
                 "marketplaceId": marketplace_id,
                 "categoryTypes": [{"name": "ALL_EXCLUDING_MOTORS_VEHICLES"}],
-                "handlingTime": {"unit": "DAY", "value": 1},
+                "handlingTime": {"unit": "DAY", "value": 4},
                 "shippingOptions": [
                     {
                         "optionType": "DOMESTIC",
@@ -2560,7 +2560,7 @@ async def get_business_policy_ids(
                         "shippingServices": [
                             {
                                 "shippingCarrierCode": "USPS",
-                                "shippingServiceCode": "USPSGroundAdvantage",
+                                "shippingServiceCode": "USPSParcel",
                                 "freeShipping": True,
                                 "buyerResponsibleForShipping": False,
                             }
@@ -2791,6 +2791,100 @@ def _is_operator_confirmed_merchant_origin(origin: dict[str, str]) -> bool:
     )
 
 
+def _shipping_policy_tier_matches(
+    policy: dict[str, Any], *, free_shipping: bool, amount: float, service_code: str, handling_days: int,
+) -> bool:
+    handling = policy.get("handling_time") if isinstance(policy.get("handling_time"), dict) else {}
+    if str(handling.get("unit") or "").upper() != "DAY" or int(handling.get("value", -1)) != handling_days:
+        return False
+    for option in policy.get("shipping_options") or []:
+        if not isinstance(option, dict) or str(option.get("option_type") or "").upper() != "DOMESTIC":
+            continue
+        if str(option.get("cost_type") or "").upper() != "FLAT_RATE":
+            continue
+        for service in option.get("shipping_services") or []:
+            if not isinstance(service, dict) or str(service.get("service") or "") != service_code:
+                continue
+            if service.get("free_shipping") is not free_shipping:
+                continue
+            if free_shipping:
+                return True
+            raw_cost = service.get("shipping_cost")
+            try:
+                charge = float(raw_cost.get("value")) if isinstance(raw_cost, dict) else float(raw_cost)
+            except (TypeError, ValueError):
+                continue
+            # eBay's Account API may normalize buyerResponsibleForShipping to
+            # false for domestic merchandise while freeShipping=false and a
+            # positive flat shippingCost still charge the buyer. Verify the
+            # actual buyer-facing terms by those authoritative values.
+            if abs(charge - amount) < 0.001 and amount > 0:
+                return True
+    return False
+
+
+async def _sync_ebay_shipping_price_tiers(
+    access_token: str, *, marketplace_id: str, service_code: str, handling_days: int,
+    buyer_paid_amount: float, create_missing: bool,
+) -> dict[str, Any]:
+    """Reuse/create and read back the two domestic account policies by exact terms."""
+    client = EbayAPIClient(access_token)
+    path = "/sell/account/v1/fulfillment_policy"
+    headers = {"Content-Language": "en-US"}
+    listed = await client.request("GET", path, params={"marketplace_id": marketplace_id}, headers=headers)
+    rows = [row for row in listed.get("fulfillmentPolicies") or [] if isinstance(row, dict)]
+    summaries = [_policy_summary_entry(row, id_field="fulfillmentPolicyId", marketplace_id=marketplace_id) for row in rows]
+    tiers = (
+        ("under_25", False, buyer_paid_amount, f"PosterPro - USPS Ground Advantage - ${buyer_paid_amount:.2f} Buyer Pays - {handling_days} Day"),
+        ("free_shipping", True, 0.0, f"PosterPro - USPS Ground Advantage - Free - {handling_days} Day"),
+    )
+    selected: dict[str, dict[str, Any] | None] = {}
+    for tier, free, amount, name in tiers:
+        selected[tier] = next((
+            row for row in summaries
+            if _shipping_policy_tier_matches(row, free_shipping=free, amount=amount, service_code=service_code, handling_days=handling_days)
+        ), None)
+        if selected[tier] or not create_missing:
+            continue
+        service = {
+            "shippingCarrierCode": "USPS", "shippingServiceCode": service_code,
+            "freeShipping": free, "buyerResponsibleForShipping": not free,
+        }
+        if not free:
+            service["shippingCost"] = {"value": f"{amount:.2f}", "currency": "USD"}
+        payload = {
+            "name": name, "marketplaceId": marketplace_id,
+            "categoryTypes": [{"name": "ALL_EXCLUDING_MOTORS_VEHICLES"}],
+            "handlingTime": {"unit": "DAY", "value": handling_days},
+            "shippingOptions": [{"optionType": "DOMESTIC", "costType": "FLAT_RATE", "shippingServices": [service]}],
+            "globalShipping": False,
+        }
+        post_error = ""
+        try:
+            await client.request("POST", path, headers=headers, payload=payload)
+        except EbayIntegrationError as exc:
+            # POST may have succeeded remotely but lost its response. Reconcile
+            # by exact policy terms before any caller considers retrying.
+            post_error = str(exc)
+        listed = await client.request("GET", path, params={"marketplace_id": marketplace_id}, headers=headers)
+        rows = [row for row in listed.get("fulfillmentPolicies") or [] if isinstance(row, dict)]
+        summaries = [_policy_summary_entry(row, id_field="fulfillmentPolicyId", marketplace_id=marketplace_id) for row in rows]
+        selected[tier] = next((
+            row for row in summaries
+            if _shipping_policy_tier_matches(row, free_shipping=free, amount=amount, service_code=service_code, handling_days=handling_days)
+        ), None)
+        if not selected[tier]:
+            detail = f" Provider response: {post_error}" if post_error else ""
+            raise EbayIntegrationError(f"eBay did not verify the requested {tier.replace('_', ' ')} fulfillment policy after synchronization.{detail}")
+    return {
+        "under_25_fulfillment_policy_id": str((selected.get("under_25") or {}).get("id") or ""),
+        "under_25_fulfillment_policy_name": str((selected.get("under_25") or {}).get("name") or ""),
+        "free_shipping_fulfillment_policy_id": str((selected.get("free_shipping") or {}).get("id") or ""),
+        "free_shipping_fulfillment_policy_name": str((selected.get("free_shipping") or {}).get("name") or ""),
+        "fulfillment_policies": summaries,
+    }
+
+
 async def sync_business_policies(
     user_id: int,
     db: Session,
@@ -2832,7 +2926,9 @@ async def sync_business_policies(
         },
         "last_policy_sync_at": datetime.now(UTC).replace(tzinfo=None).isoformat(),
         "policy_sync_error": "",
-        "shipping_service_code": policy_settings.get("shipping_service_code") or "USPSGroundAdvantage",
+        "shipping_service_code": policy_settings.get("shipping_service_code") or "USPSParcel",
+        "handling_time_days": int(policy_settings.get("handling_time_days") or 4),
+        "buyer_paid_flat_amount": float(policy_settings.get("buyer_paid_flat_amount") or 8.0),
     }
 
     if missing_types:
@@ -2888,12 +2984,54 @@ async def sync_business_policies(
             "return_policy_id": selected.get("return_policy_id") or policy_ids.get("returnPolicyId") or "",
             "return_policy_name": selected.get("return_policy_name") or "",
             "marketplace_id": marketplace_id,
-            "shipping_service_code": policy_settings.get("shipping_service_code") or "USPSGroundAdvantage",
+            "shipping_service_code": policy_settings.get("shipping_service_code") or "USPSParcel",
         }
     )
 
+    # These are account-scoped PosterPro price tiers. Keep both IDs with the
+    # seller settings so every new draft selects the right policy at its price.
+    if create_missing_defaults:
+        tiers = await _sync_ebay_shipping_price_tiers(
+            account.access_token,
+            marketplace_id=marketplace_id,
+            service_code=str(policy_settings.get("shipping_service_code") or "USPSParcel"),
+            handling_days=int(policy_settings.get("handling_time_days") or 4),
+            buyer_paid_amount=float(policy_settings.get("buyer_paid_flat_amount") or 8.0),
+            create_missing=True,
+        )
+    else:
+        # Read-only refresh: only attach exact policies that are already
+        # present; a refresh must never create or alter seller policies.
+        tiers = await _sync_ebay_shipping_price_tiers(
+            account.access_token,
+            marketplace_id=marketplace_id,
+            service_code=str(policy_settings.get("shipping_service_code") or "USPSParcel"),
+            handling_days=int(policy_settings.get("handling_time_days") or 4),
+            buyer_paid_amount=float(policy_settings.get("buyer_paid_flat_amount") or 8.0),
+            create_missing=False,
+        )
+    settings_updates.update(tiers)
+    candidate_set = dict(settings_updates.get("policy_candidates") or {})
+    candidate_set["fulfillment"] = tiers.get("fulfillment_policies") or candidate_set.get("fulfillment") or []
+    settings_updates["policy_candidates"] = candidate_set
+    settings_updates["shipping_service_code"] = str(policy_settings.get("shipping_service_code") or "USPSParcel")
+    settings_updates["handling_time_days"] = int(policy_settings.get("handling_time_days") or 4)
+    settings_updates["buyer_paid_flat_amount"] = float(policy_settings.get("buyer_paid_flat_amount") or 8.0)
+    if tiers.get("free_shipping_fulfillment_policy_id"):
+        settings_updates["fulfillment_policy_id"] = tiers["free_shipping_fulfillment_policy_id"]
+        settings_updates["fulfillment_policy_name"] = tiers.get("free_shipping_fulfillment_policy_name") or ""
+    else:
+        settings_updates["fulfillment_policy_id"] = ""
+        settings_updates["fulfillment_policy_name"] = ""
+    tiers_verified = all((
+        tiers.get("under_25_fulfillment_policy_id"), tiers.get("free_shipping_fulfillment_policy_id")
+    ))
+    settings_updates["policy_sync_status"] = "synced" if tiers_verified else "incomplete_shipping_tiers"
+    if not tiers_verified:
+        settings_updates["policy_sync_error"] = "Both exact USPS Ground Advantage price-tier policies are not yet verified in eBay."
+
     return {
-        "status": "updated",
+        "status": "updated" if tiers_verified else "blocked",
         "marketplace_id": marketplace_id,
         "policy_catalog": policy_catalog,
         "selected": selected,
@@ -3191,6 +3329,11 @@ def _normalize_ebay_policy_settings(raw: dict | None) -> dict[str, Any]:
     result = {
         "fulfillment_policy_id": str(source.get("fulfillment_policy_id") or "").strip(),
         "fulfillment_policy_name": str(source.get("fulfillment_policy_name") or "").strip(),
+        "under_25_fulfillment_policy_id": str(source.get("under_25_fulfillment_policy_id") or "").strip(),
+        "under_25_fulfillment_policy_name": str(source.get("under_25_fulfillment_policy_name") or "").strip(),
+        "free_shipping_fulfillment_policy_id": str(source.get("free_shipping_fulfillment_policy_id") or "").strip(),
+        "free_shipping_fulfillment_policy_name": str(source.get("free_shipping_fulfillment_policy_name") or "").strip(),
+        "buyer_paid_flat_amount": float(source.get("buyer_paid_flat_amount") or 8.0),
         "payment_policy_id": str(source.get("payment_policy_id") or "").strip(),
         "payment_policy_name": str(source.get("payment_policy_name") or "").strip(),
         "return_policy_id": str(source.get("return_policy_id") or "").strip(),
@@ -3212,8 +3355,8 @@ def _normalize_ebay_policy_settings(raw: dict | None) -> dict[str, Any]:
         "merchant_location_city": str(source.get("merchant_location_city") or "Farmingdale").strip(),
         "merchant_location_state_or_province": str(source.get("merchant_location_state_or_province") or "NY").strip(),
         "merchant_location_phone": str(source.get("merchant_location_phone") or "").strip(),
-        "shipping_service_code": str(source.get("shipping_service_code") or "USPSGroundAdvantage").strip(),
-        "handling_time_days": max(0, int(source.get("handling_time_days") if source.get("handling_time_days") is not None else 1)),
+        "shipping_service_code": str(source.get("shipping_service_code") or "USPSParcel").strip(),
+        "handling_time_days": max(0, int(source.get("handling_time_days") if source.get("handling_time_days") is not None else 4)),
         "local_pickup_allowed": bool(source.get("local_pickup_allowed")),
         "calculated_shipping": bool(source.get("calculated_shipping")),
         "package_weight_required": bool(source.get("package_weight_required", True)),
@@ -3224,6 +3367,15 @@ def _normalize_ebay_policy_settings(raw: dict | None) -> dict[str, Any]:
         "policy_sync_error": str(source.get("policy_sync_error") or "").strip(),
         "policy_candidates": policy_candidates,
     }
+    # These exact values were PosterPro's former software defaults, not
+    # seller-selected overrides. Normalize them to the current verified
+    # service/terms while retaining other explicit seller choices.
+    if result["shipping_service_code"] == 'USPSGroundAdvantage':
+        result["shipping_service_code"] = "USPSParcel"
+        if result["handling_time_days"] == 1:
+            result["handling_time_days"] = 4
+    if abs(result["buyer_paid_flat_amount"] - 8.49) < 0.001:
+        result["buyer_paid_flat_amount"] = 8.0
     location_matches = (
         result["merchant_location_city"].casefold() == "farmingdale"
         and result["merchant_location_state_or_province"].upper() == "NY"
@@ -3277,7 +3429,7 @@ def _listing_ebay_policy_settings(db: Session, listing: Listing) -> dict[str, An
         price = _ebay_effective_price(listing)
     except AttributeError:
         price = None
-    tier_policy_id = ebay_fulfillment_policy_for_price(price)
+    tier_policy_id = ebay_fulfillment_policy_for_price(price, settings)
     # The two-tier rule is authoritative for drafts. Ignore stale listing and
     # account-default fulfillment references, while retaining all other policy
     # settings and never guessing when price is absent or invalid.
@@ -3377,7 +3529,7 @@ def validate_cached_ebay_fulfillment_policy(
     if not usable:
         return {"valid": False, "code": "EBAY_FULFILLMENT_POLICY_INVALID", "message": "The selected eBay fulfillment policy has no supported domestic shipping service.", "policy_id": policy_id}
     from app.services.shipping_profitability_policy import ebay_fulfillment_policy_for_price
-    expected_policy_id = ebay_fulfillment_policy_for_price(sale_price)
+    expected_policy_id = ebay_fulfillment_policy_for_price(sale_price, settings)
     try:
         under_threshold = sale_price is not None and 0 < float(sale_price) < 25
     except (TypeError, ValueError):
@@ -3396,8 +3548,9 @@ def validate_cached_ebay_fulfillment_policy(
             return {"valid": False, "code": "EBAY_BUYER_SHIPPING_CHARGE_MISSING", "message": "The buyer-paid flat-rate eBay policy has no verified positive shipping charge.", "policy_id": policy_id}
         if service.get("cost_type") not in {"FLAT_RATE", "FIXED_RATE"}:
             return {"valid": False, "code": "EBAY_FULFILLMENT_POLICY_INVALID", "message": "The selected buyer-paid eBay shipping rate type is unsupported or unverified.", "policy_id": policy_id}
-        if abs(float(service.get("charge") or 0) - 8.49) > 0.001:
-            return {"valid": False, "code": "EBAY_BUYER_SHIPPING_CHARGE_MISMATCH", "message": "Below $25, the selected eBay policy must charge exactly $8.49.", "policy_id": policy_id}
+        expected_charge = float(settings.get("buyer_paid_flat_amount") or 8.0)
+        if abs(float(service.get("charge") or 0) - expected_charge) > 0.001:
+            return {"valid": False, "code": "EBAY_BUYER_SHIPPING_CHARGE_MISMATCH", "message": f"Below $25, the selected eBay policy must charge exactly ${expected_charge:.2f}.", "policy_id": policy_id}
     elif expected_policy_id:
         # The existing >=$25 policy offers buyer-free domestic USPS shipping.
         # A calculated carrier cost is paid by the seller and does not create a
@@ -4038,7 +4191,7 @@ async def build_ebay_publish_plan(
         "paymentPolicyId": live_policy_ids.get("paymentPolicyId") or None,
         "returnPolicyId": live_policy_ids.get("returnPolicyId") or None,
         "handlingTime": policy_settings.get("handling_time_days"),
-        "shippingServiceCode": policy_settings.get("shipping_service_code") or "USPSGroundAdvantage",
+        "shippingServiceCode": policy_settings.get("shipping_service_code") or "USPSParcel",
         "calculatedShipping": bool(policy_settings.get("calculated_shipping")),
         "localPickupAllowed": bool(policy_settings.get("local_pickup_allowed")),
         "buyerPaysShippingRequired": bool(0 < numeric_price < 25),
@@ -5138,19 +5291,20 @@ async def _apply_approved_ebay_snapshot_to_plan(
     options = fulfillment.get("shipping_options") or []
     services = [s for option in options if isinstance(option, dict) for s in (option.get("shipping_services") or []) if isinstance(s, dict)]
     cost_types = {str(option.get("cost_type") or "").upper() for option in options if isinstance(option, dict)}
+    policy_settings = dict(plan.get("policy_settings") or {})
+    expected_charge = float(policy_settings.get("buyer_paid_flat_amount") or 8.0)
     if price < 25:
         exact_flat = any(
             str(service.get("service") or "").lower() == "uspsparcel"
             and service.get("free_shipping") is False
-            and round(float((service.get("shipping_cost") or {}).get("value") or 0), 2) == 8.49
+            and round(float((service.get("shipping_cost") or {}).get("value") or 0), 2) == expected_charge
             for service in services
         )
-        if str(shipping.get("mode") or "").lower() != "flat" or shipping.get("buyer_pays_shipping") is not True or shipping.get("free_shipping") is True or round(float(shipping.get("shipping_cost") or 0), 2) != 8.49 or "FLAT_RATE" not in cost_types or not exact_flat:
-            raise EbayIntegrationError("EBAY_APPROVED_SHIPPING_POLICY_MISMATCH: saved under-$25 approval does not match the current $8.49 flat policy.")
+        if str(shipping.get("mode") or "").lower() != "flat" or shipping.get("buyer_pays_shipping") is not True or shipping.get("free_shipping") is True or round(float(shipping.get("shipping_cost") or 0), 2) != expected_charge or "FLAT_RATE" not in cost_types or not exact_flat:
+            raise EbayIntegrationError(f"EBAY_APPROVED_SHIPPING_POLICY_MISMATCH: saved under-$25 approval does not match the current ${expected_charge:.2f} flat policy.")
     elif shipping.get("free_shipping") is not True or shipping.get("buyer_pays_shipping") is True or not any(s.get("free_shipping") is True for s in services):
         raise EbayIntegrationError("EBAY_APPROVED_SHIPPING_POLICY_MISMATCH: saved $25-and-over approval does not match current free shipping.")
 
-    policy_settings = dict(plan.get("policy_settings") or {})
     policy_settings.update(policy_ids)
     policy_settings["merchant_location_key"] = str(shipping.get("merchant_location_key") or policy_settings.get("merchant_location_key") or "").strip()
     policy_settings["shipping_service_code"] = str(shipping.get("service") or policy_settings.get("shipping_service_code") or "").strip()

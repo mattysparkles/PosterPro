@@ -1,8 +1,12 @@
 from fastapi import HTTPException
+import pytest
 
 from app.api.inventory import census_confirm, census_search, census_session, save_census_location, census_item_label, reprint_census_item, undo_census_item, move_census_item, update_census_label_template, census_label_template_test, create_print_agent_pairing_code, pair_print_agent, _auth_print_agent, list_print_agents, update_census_print_settings, claim_print_agent_job, update_agent_print_job_state, revoke_print_agent
-from app.models.models import InventoryCensusRecord, InventoryEvent, InventoryPrintJob, InventoryPrintAgent, InventoryStock, Listing, User
+from app.models.enums import MarketplaceName
+from app.models.models import InventoryCensusRecord, InventoryEvent, InventoryPrintJob, InventoryPrintAgent, InventoryStock, Listing, Sale, User
+from app.api.inventory_census import inventory_picking_queue, update_inventory_pick_state
 from app.services.package_labels import code128_values, code128_layout, normalize_inventory_template, render_inventory_label, PAPER_PROFILES
+from app.api.inventory_census import download_census_item_label, get_census_print_settings
 
 
 def test_census_matches_existing_listing_and_preserves_sku_listing_data(db_session):
@@ -48,6 +52,19 @@ def test_census_duplicate_guard_retry_and_audited_undo(db_session):
     assert db_session.query(InventoryEvent).filter_by(event_type="census_item_undo").count() == 1
 
 
+def test_census_supports_unassigned_putaway_without_blocking_same_shelf_session(db_session):
+    user = User(email="census-unassigned@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(user_id=user.id, title="Unassigned item", quantity=2)
+    db_session.add(listing); db_session.commit()
+    first = census_confirm({"operation_id":"unassigned-item-1", "session_key":"unassigned-session", "location_key":"UNASSIGNED", "listing_id":listing.id}, db_session, user)
+    second = census_confirm({"operation_id":"unassigned-item-2", "session_key":"unassigned-session", "location_key":"UNASSIGNED", "listing_id":listing.id}, db_session, user)
+    assert first["item_uuid"] != second["item_uuid"]
+    assert first["label_payload"]["unit_id"] == ""
+    assert first["label_payload"]["shelf_code"] == "UNASSIGNED"
+    assert db_session.query(InventoryStock).filter_by(user_id=user.id, location_key="UNASSIGNED").one().on_hand == 2
+
+
 def test_census_label_has_stable_lookup_and_valid_code128(db_session):
     user = User(email="census-label@example.com")
     db_session.add(user); db_session.commit()
@@ -55,7 +72,7 @@ def test_census_label_has_stable_lookup_and_valid_code128(db_session):
     item = census_confirm({"operation_id":"census-label-op", "session_key":"session-c", "location_key":location["location_key"], "provisional_title":"Unmatched ceramic lamp"}, db_session, user)
     label = census_item_label(item["item_uuid"], "qr_code128", db_session, user)
     assert label["image_data_url"].startswith("data:image/png;base64,")
-    assert item["item_uuid"] in label["payload"]["lookup_url"]
+    assert label["payload"]["lookup_url"].endswith("/i/" + item["barcode_token"])
     assert label["payload"]["location_key"] == "01174/A/03"
     assert len(label["payload"]["barcode_token"]) == 13
     assert label["dpi"] == 203 and (label["pixel_width"], label["pixel_height"]) == (464, 320)
@@ -69,6 +86,110 @@ def test_census_label_has_stable_lookup_and_valid_code128(db_session):
     assert reprint["status"] == "queued"
     assert db_session.query(InventoryStock).filter_by(user_id=user.id).one().on_hand == 1
     assert db_session.query(InventoryPrintJob).filter_by(job_type="census_item_label").count() == 2
+
+
+def test_downloadable_inventory_label_is_png_at_native_geometry_and_qr_resolves(db_session):
+    import io
+    import cv2
+    import numpy as np
+    from PIL import Image
+
+    user = User(email="census-download-label@example.com")
+    db_session.add(user); db_session.commit()
+    location = save_census_location({"unit_id":"01175", "section_code":"A", "shelf_level":"01"}, db_session, user)
+    item = census_confirm({"operation_id":"download-label-op", "session_key":"download-label-session", "location_key":location["location_key"], "provisional_title":"A specific test product"}, db_session, user)
+    response = download_census_item_label(item["item_uuid"], "qr", db_session, user)
+    assert response.media_type == "image/png"
+    assert response.headers["X-PosterPro-Width-MM"] == "58"
+    assert response.headers["X-PosterPro-Height-MM"] == "40"
+    assert response.headers["X-PosterPro-DPI"] == "203"
+    image = Image.open(io.BytesIO(response.body))
+    assert image.size == (464, 320)
+    assert image.info["dpi"][0] == pytest.approx(203, abs=0.1)
+    # Decode the label's dedicated QR area. The full label also contains a
+    # separate Code 128 symbol and text, which can confuse OpenCV's QR detector.
+    label_pixels = np.array(image.convert("RGB"))
+    decoded, _, _ = cv2.QRCodeDetector().detectAndDecode(label_pixels[0:150, 300:455])
+    assert decoded == item["label_payload"]["lookup_url"]
+    assert decoded.endswith("/i/" + item["barcode_token"])
+    assert census_search(item["barcode_token"], db_session, user)["scanned_item"]["item_uuid"] == item["item_uuid"]
+    assert census_search(item["barcode_token"], db_session, user)["scanned_item"]["item_uuid"] == item["item_uuid"]
+
+
+def test_label_copy_preference_defaults_to_two_and_is_persisted(db_session):
+    user = User(email="census-copies@example.com")
+    db_session.add(user); db_session.commit()
+    assert get_census_print_settings(db_session, user)["copies"] == 2
+    saved = update_census_print_settings({"mode":"browser", "layout":"qr", "copies":1}, db_session, user)
+    assert saved["copies"] == 1
+    location = save_census_location({"unit_id":"01175", "section_code":"B", "shelf_level":"02"}, db_session, user)
+    item = census_confirm({"operation_id":"single-label-copy-op", "session_key":"single-copy-session", "location_key":location["location_key"], "provisional_title":"Copy preference test"}, db_session, user)
+    job = db_session.query(InventoryPrintJob).filter_by(id=item["print_job_id"]).one()
+    assert job.copies == 1
+    second = reprint_census_item(item["item_uuid"], {"operation_id":"copy-reprint"}, db_session, user)
+    assert second["copies"] == 1
+
+
+def test_sold_item_pick_flow_verifies_scan_and_keeps_ship_state_distinct(db_session):
+    user = User(email="census-pick@example.com")
+    db_session.add(user); db_session.flush()
+    listing = Listing(user_id=user.id, title="Blue camping lantern", quantity=1)
+    db_session.add(listing); db_session.commit()
+    shelf = save_census_location({"unit_id":"01175", "section_code":"A", "shelf_level":"01"}, db_session, user)
+    other = save_census_location({"unit_id":"01176", "section_code":"B", "shelf_level":"03"}, db_session, user)
+    item = census_confirm({"operation_id":"pick-item-confirm", "session_key":"pick-session", "location_key":shelf["location_key"], "listing_id":listing.id}, db_session, user)
+    sale = Sale(user_id=user.id, listing_id=listing.id, platform=MarketplaceName.ebay, marketplace_order_id="ORDER-PICK-1", quantity=1, status="SYNCED", details={"fulfillmentStartInstructions":[{"shippingStep":{"shipByDate":"2026-12-02T23:59:00Z"}}]})
+    db_session.add(sale); db_session.commit()
+    queue = inventory_picking_queue(100, db_session, user)
+    assert queue["count"] == 1
+    assert queue["items"][0]["locations"][0]["location"] == "01175/A01"
+    assert queue["items"][0]["deadline"] == "2026-12-02T23:59:00Z"
+    try:
+        update_inventory_pick_state(sale.id, {"operation_id":"pick-missing-scan", "state":"PICKED", "scanned_item_tokens":[]}, db_session, user)
+        assert False, "A pick requires a physical item scan"
+    except HTTPException as error:
+        assert error.status_code == 422
+    try:
+        update_inventory_pick_state(sale.id, {"operation_id":"pick-wrong-scan", "state":"PICKED", "scanned_item_tokens":["NOT-THIS-ITEM"]}, db_session, user)
+        assert False, "A scan must resolve to an item for this listing"
+    except HTTPException as error:
+        assert error.status_code == 409
+    picked = update_inventory_pick_state(sale.id, {"operation_id":"pick-correct-scan", "state":"PICKED", "scanned_item_tokens":[item["barcode_token"]]}, db_session, user)
+    assert picked["picked_item_uuids"] == [item["item_uuid"]]
+    try:
+        move_census_item(item["item_uuid"], {"operation_id":"move-picked-item", "destination_location_key":other["location_key"]}, db_session, user)
+        assert False, "An item reserved for an active order cannot silently move"
+    except HTTPException as error:
+        assert error.status_code == 409
+    assert update_inventory_pick_state(sale.id, {"operation_id":"pick-pack", "state":"PACKED"}, db_session, user)["status"] == "PACKED"
+    assert update_inventory_pick_state(sale.id, {"operation_id":"pick-label-ready", "state":"LABEL_READY"}, db_session, user)["status"] == "LABEL_READY"
+    try:
+        update_inventory_pick_state(sale.id, {"operation_id":"pick-shipped-unconfirmed", "state":"SHIPPED"}, db_session, user)
+        assert False, "Carrier handoff must be explicitly confirmed"
+    except HTTPException as error:
+        assert error.status_code == 422
+    shipped = update_inventory_pick_state(sale.id, {"operation_id":"pick-shipped-confirmed", "state":"SHIPPED", "operator_confirmed_shipped":True, "tracking_reference":"TRACK-123"}, db_session, user)
+    assert shipped["marketplace_fulfillment_updated"] is False
+    assert inventory_picking_queue(100, db_session, user)["count"] == 0
+    record = db_session.query(InventoryCensusRecord).filter_by(item_uuid=item["item_uuid"]).one()
+    assert record.status == "shipped"
+    stock = db_session.query(InventoryStock).filter_by(user_id=user.id, location_key=shelf["location_key"]).one()
+    assert stock.on_hand == 0 and stock.sold == 1
+
+
+def test_sold_item_pick_queue_is_account_scoped(db_session):
+    owner = User(email="pick-queue-owner@example.com"); other = User(email="pick-queue-other@example.com")
+    db_session.add_all([owner, other]); db_session.flush()
+    listing = Listing(user_id=owner.id, title="Owner product", quantity=1); db_session.add(listing); db_session.flush()
+    sale = Sale(user_id=owner.id, listing_id=listing.id, platform=MarketplaceName.ebay, marketplace_order_id="ORDER-OWNER", status="SYNCED")
+    db_session.add(sale); db_session.commit()
+    assert inventory_picking_queue(100, db_session, owner)["count"] == 1
+    assert inventory_picking_queue(100, db_session, other)["count"] == 0
+    try:
+        update_inventory_pick_state(sale.id, {"operation_id":"other-user-pick", "state":"PICKED", "scanned_item_tokens":[]}, db_session, other)
+        assert False, "A different account cannot act on the sale"
+    except HTTPException as error:
+        assert error.status_code == 404
 
 
 def test_label_template_saves_valid_positions_and_has_calibration_artifact(db_session):

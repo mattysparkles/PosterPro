@@ -19,7 +19,7 @@ def enqueue_recovery(db: Session, *, user_id: int, asin: str, title_hint: str | 
     insert = pg_insert if db.bind and db.bind.dialect.name == "postgresql" else sqlite_insert
     statement = insert(VineImageRecoveryJob).values(
         user_id=user_id, asin=asin, title_hint=title_hint, listing_id=listing_id,
-        status="pending_authorization", attempts=0,
+        status="pending", attempts=0,
         page_evidence_json={"reason": "fast_lookup_has_no_confirmed_usable_gallery", "rights": "unverified"},
     ).on_conflict_do_nothing(index_elements=["user_id", "asin"])
     db.execute(statement)
@@ -30,7 +30,7 @@ def enqueue_recovery(db: Session, *, user_id: int, asin: str, title_hint: str | 
     if title_hint and not job.title_hint:
         job.title_hint = title_hint
     if job.status in {"failed", "unavailable"} and job.attempts < MAX_ATTEMPTS:
-        job.status = "pending_authorization"
+        job.status = "pending"
         job.next_attempt_at = datetime.utcnow() + timedelta(minutes=10)
     return job
 

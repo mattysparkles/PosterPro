@@ -137,42 +137,53 @@ def test_bridge_never_fabricates_external_identity_for_direct_api_action(tmp_pat
         store.executor.shutdown(wait=False, cancel_futures=True)
 
 
-def test_vine_gallery_recovery_requires_existing_authorized_amazon_account(tmp_path: Path, monkeypatch):
+def test_vine_gallery_recovery_uses_public_catalog_without_amazon_account(tmp_path: Path, monkeypatch):
     store = bridge_main.JobStore(tmp_path, default_delay_seconds=0, max_workers=1)
-    calls = []
     monkeypatch.setattr(bridge_main.settings, "browser_headless", True)
-    monkeypatch.setattr(bridge_main.account_store, "list_accounts", lambda _marketplace=None: [{"account_key": "amazon-main", "browser_enabled": True, "credential_configured": True, "session_state": "ready"}])
-    monkeypatch.setattr(bridge_main.account_store, "resolve_account", lambda *args: calls.append(args) or (_ for _ in ()).throw(RuntimeError("No bridge account is ready for marketplace 'amazon'")))
+    monkeypatch.setattr(bridge_main.settings, "runner_mode", "playwright")
+    monkeypatch.setattr(bridge_main.account_store, "list_accounts", lambda *_args: (_ for _ in ()).throw(AssertionError("public catalog recovery must not inspect private accounts")))
+    monkeypatch.setattr(bridge_main.account_store, "resolve_account", lambda *_args: (_ for _ in ()).throw(AssertionError("public catalog recovery must not resolve a private account")))
+    captured = {}
+
+    class FakeRunner:
+        def run_import(self, *, job_id, bridge_account, payload):
+            captured.update(job_id=job_id, bridge_account=bridge_account, payload=payload)
+            return {"status": "import_completed", "imported_listings": []}
+
+    monkeypatch.setattr(bridge_main, "create_marketplace_browser_runner", lambda *_args: FakeRunner())
     job = {
         "job_id": "vine-recovery-auth-test", "job_type": "import", "execution_mode": "browser_assist",
         "payload": {"source_marketplace": "amazon", "operation": "vine_image_gallery_recovery", "asin": "B000000001"},
     }
     try:
-        try:
-            store._run_import_job(job)
-        except RuntimeError as exc:
-            assert "no bridge account is ready" in str(exc).lower()
-        else:
-            raise AssertionError("Vine recovery must not run without an authorized Amazon account")
-        assert len(calls) == 1
+        result = store._run_import_job(job)
+        assert result["status"] == "import_completed"
+        assert captured["bridge_account"] is None
+        assert captured["payload"]["access_mode"] == "public_catalog"
     finally:
         store.executor.shutdown(wait=False, cancel_futures=True)
 
 
-def test_vine_gallery_recovery_refuses_ambiguous_paired_amazon_accounts(tmp_path: Path, monkeypatch):
+def test_vine_gallery_recovery_is_independent_of_ambiguous_private_accounts(tmp_path: Path, monkeypatch):
     store = bridge_main.JobStore(tmp_path, default_delay_seconds=0, max_workers=1)
     monkeypatch.setattr(bridge_main.settings, "browser_headless", True)
+    monkeypatch.setattr(bridge_main.settings, "runner_mode", "playwright")
     account = {"browser_enabled": True, "credential_configured": True, "session_state": "ready"}
     monkeypatch.setattr(bridge_main.account_store, "list_accounts", lambda _marketplace=None: [{**account, "account_key": "one"}, {**account, "account_key": "two"}])
-    monkeypatch.setattr(bridge_main.account_store, "resolve_account", lambda *args: (_ for _ in ()).throw(AssertionError("ambiguous accounts must not be selected")))
+    captured = {}
+
+    class FakeRunner:
+        def run_import(self, *, job_id, bridge_account, payload):
+            captured["bridge_account"] = bridge_account
+            return {"status": "import_completed"}
+
+    monkeypatch.setattr(bridge_main, "create_marketplace_browser_runner", lambda *_args: FakeRunner())
+    monkeypatch.setattr(bridge_main.account_store, "resolve_account", lambda *_args: (_ for _ in ()).throw(AssertionError("public access must not select a private account")))
     job = {"job_id": "vine-recovery-ambiguous", "job_type": "import", "execution_mode": "browser_assist", "payload": {"source_marketplace": "amazon", "operation": "vine_image_gallery_recovery", "asin": "B000000001"}}
     try:
-        try:
-            store._run_import_job(job)
-        except RuntimeError as exc:
-            assert "exactly one ready paired amazon" in str(exc).lower()
-        else:
-            raise AssertionError("ambiguous Amazon sessions must remain pending for operator selection")
+        result = store._run_import_job(job)
+        assert result["status"] == "import_completed"
+        assert captured["bridge_account"] is None
     finally:
         store.executor.shutdown(wait=False, cancel_futures=True)
 
@@ -189,14 +200,14 @@ def test_vine_gallery_recovery_refuses_non_headless_runner(tmp_path: Path, monke
         try:
             store._run_import_job(job)
         except RuntimeError as exc:
-            assert "authorized headless" in str(exc).lower()
+            assert "configured headless browser runner" in str(exc).lower()
         else:
             raise AssertionError("Vine recovery must refuse a foreground browser")
     finally:
         store.executor.shutdown(wait=False, cancel_futures=True)
 
 
-def test_vine_recovery_uses_ready_account_state_in_new_headless_context_not_extension_pairing(tmp_path: Path, monkeypatch):
+def test_vine_recovery_uses_anonymous_headless_context_not_extension_or_account_session(tmp_path: Path, monkeypatch):
     store = bridge_main.JobStore(tmp_path, default_delay_seconds=0, max_workers=1)
     monkeypatch.setattr(bridge_main.settings, "browser_headless", True)
     monkeypatch.setattr(bridge_main.settings, "runner_mode", "playwright")
@@ -207,8 +218,8 @@ def test_vine_recovery_uses_ready_account_state_in_new_headless_context_not_exte
         "session_state": "ready",
         "session_payload": {"cookies": [{"name": "test-only", "value": "redacted"}]},
     }
-    monkeypatch.setattr(bridge_main.account_store, "list_accounts", lambda _marketplace=None: [configured])
-    monkeypatch.setattr(bridge_main.account_store, "resolve_account", lambda *_args: configured)
+    monkeypatch.setattr(bridge_main.account_store, "list_accounts", lambda *_args: (_ for _ in ()).throw(AssertionError("public recovery must not inspect account state")))
+    monkeypatch.setattr(bridge_main.account_store, "resolve_account", lambda *_args: (_ for _ in ()).throw(AssertionError("public recovery must not resolve account state")))
     captured = {}
 
     class FakeRunner:
@@ -233,8 +244,8 @@ def test_vine_recovery_uses_ready_account_state_in_new_headless_context_not_exte
         store._run_import_job(job)
         assert captured["marketplace"] == "amazon"
         assert captured["headless"] is True
-        assert captured["bridge_account"]["account_key"] == "amazon-disposable-test"
-        assert captured["bridge_account"]["session_payload"]["cookies"]
+        assert captured["bridge_account"] is None
+        assert captured["payload"]["access_mode"] == "public_catalog"
     finally:
         store.executor.shutdown(wait=False, cancel_futures=True)
 

@@ -752,7 +752,7 @@ def test_build_ebay_publish_plan_maps_preview_and_account_summary(db_session, mo
     assert plan["sku"] == f"posterprou{user.id}l{listing.id}"
     assert plan["payload_preview"]["item_specifics"]["Brand"] == ["Canon"]
     assert plan["payload_preview"]["condition"] == "USED_GOOD"
-    assert plan["policy_settings"]["shipping_service_code"] == "USPSGroundAdvantage"
+    assert plan["policy_settings"]["shipping_service_code"] == "USPSParcel"
     assert plan["account_summary"]["external_account_id"] == "ebay-user-1"
     assert plan["inventory_item_payload"]["packageWeightAndSize"] == {
         "weight": {"value": 3.0, "unit": "POUND"},

@@ -13,7 +13,9 @@ DEFAULT_SHIPPING_POLICY: dict[str, Any] = {
     "shipping_at_or_above_threshold_mode": "free_shipping",
     "currency": "USD",
     "preferred_carrier": "USPS",
-    "preferred_service": "USPSGroundAdvantage",
+    "preferred_service": "USPSParcel",
+    "buyer_paid_flat_amount": 8.00,
+    "handling_time_days": 4,
     "buyer_paid_rate_type": "flat",
     "minimum_estimated_net_proceeds": None,
     "minimum_gross_margin": None,
@@ -29,15 +31,18 @@ EBAY_UNDER_25_FULFILLMENT_POLICY_ID = "266212013013"
 EBAY_FREE_SHIPPING_FULFILLMENT_POLICY_ID = "260642879013"
 
 
-def ebay_fulfillment_policy_for_price(price: Any) -> str | None:
-    """Return the account's verified two-tier policy, or None without a valid ask."""
+def ebay_fulfillment_policy_for_price(price: Any, policy_settings: dict[str, Any] | None = None) -> str | None:
+    """Return the account-scoped price-tier policy ID, or None if unsynchronized."""
     try:
         amount = float(price)
     except (TypeError, ValueError, OverflowError):
         return None
     if amount <= 0 or amount == float("inf") or amount != amount:
         return None
-    return EBAY_UNDER_25_FULFILLMENT_POLICY_ID if amount < 25 else EBAY_FREE_SHIPPING_FULFILLMENT_POLICY_ID
+    settings = policy_settings if isinstance(policy_settings, dict) else {}
+    if amount < 25:
+        return str(settings.get("under_25_fulfillment_policy_id") or "").strip() or None
+    return str(settings.get("free_shipping_fulfillment_policy_id") or "").strip() or None
 
 
 def normalize_shipping_policy(policy: dict | None) -> dict[str, Any]:
@@ -69,7 +74,15 @@ def normalize_shipping_policy(policy: dict | None) -> dict[str, Any]:
     result["shipping_policy_enabled"] = bool(result["shipping_policy_enabled"])
     result["currency"] = str(result["currency"] or "USD").upper()[:8]
     result["preferred_carrier"] = str(result["preferred_carrier"] or "USPS").strip()
-    result["preferred_service"] = str(result["preferred_service"] or "USPSGroundAdvantage").strip()
+    result["preferred_service"] = str(result["preferred_service"] or "USPSParcel").strip()
+    try:
+        result["buyer_paid_flat_amount"] = round(max(0.0, float(result.get("buyer_paid_flat_amount", 8.0))), 2)
+    except (TypeError, ValueError):
+        result["buyer_paid_flat_amount"] = 8.0
+    try:
+        result["handling_time_days"] = max(0, min(30, int(result.get("handling_time_days", 4))))
+    except (TypeError, ValueError):
+        result["handling_time_days"] = 4
     result["buyer_paid_rate_type"] = str(result["buyer_paid_rate_type"] or "calculated").strip().lower()
     if result["buyer_paid_rate_type"] not in {"calculated", "flat"}:
         result["buyer_paid_rate_type"] = "calculated"
@@ -239,20 +252,20 @@ def repair_unpublished_under_threshold_shipping(db, *, apply: bool = False) -> d
             "shipping_setup_required": not can_select_calculated_service,
         })
         if can_select_calculated_service:
-            shipping.update({"domestic_service": "USPSGroundAdvantage", "shipping_service": "USPSGroundAdvantage"})
+            shipping.update({"domestic_service": "USPSParcel", "shipping_service": "USPSParcel"})
         else:
             # Keep any historical service value for audit, but do not imply it
             # is selectable until packed parcel measurements are verified.
-            shipping["requested_domestic_service"] = "USPSGroundAdvantage"
+            shipping["requested_domestic_service"] = "USPSParcel"
             shipping.pop("shipping_service", None)
         market["shipping"] = shipping
         listing.marketplace_data = market
         if isinstance(profile, dict):
             profile = {**profile, "mode": shipping_mode, "shipping_charge_mode": shipping_mode, "buyer_pays_shipping": price is not None, "free_shipping": False, "shipping_setup_required": not can_select_calculated_service}
             if can_select_calculated_service:
-                profile["domestic_service"] = "USPSGroundAdvantage"
+                profile["domestic_service"] = "USPSParcel"
             else:
-                profile["requested_domestic_service"] = "USPSGroundAdvantage"
+                profile["requested_domestic_service"] = "USPSParcel"
                 profile.pop("shipping_service", None)
             listing.shipping_profile = profile
         db.add(listing)

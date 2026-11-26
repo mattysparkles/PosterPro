@@ -337,15 +337,16 @@ def test_destination_shipping_override_reaches_payload_without_changing_default(
 def test_under_25_ebay_policy_does_not_rewrite_assisted_marketplace_shipping(db_session):
     user = User(email="under25-marketplace-payload@example.com")
     db_session.add(user); db_session.flush()
-    low = Listing(user_id=user.id, title="Small item", listing_price=24.99,
+    low = Listing(user_id=user.id, user=user, title="Small item", listing_price=24.99,
                   shipping_profile={"free_shipping": True, "buyer_pays_shipping": False},
                   marketplace_data={"shipping": {"free_shipping": True}})
+    user.settings_json = {"ebay_marketplace_policy_settings": {"under_25_fulfillment_policy_id": "tier-under-25", "free_shipping_fulfillment_policy_id": "tier-free", "buyer_paid_flat_amount": 8.0}}
     exact = Listing(user_id=user.id, title="At threshold", listing_price=25.00,
                     shipping_profile={"free_shipping": True})
     invalid = Listing(user_id=user.id, title="Unknown price", listing_price=0, estimated_value=19.99,
                       shipping_profile={"free_shipping": True})
     low_ebay = build_marketplace_payload(low, "ebay")["shipping_policy"]
-    assert low_ebay["fulfillment_policy_id"] == "266212013013"
+    assert low_ebay["fulfillment_policy_id"] == "tier-under-25"
     assert low_ebay["buyer_pays_shipping"] is True
     assert low_ebay["free_shipping"] is False
     low_mercari = build_marketplace_payload(low, "mercari")["shipping"]

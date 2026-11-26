@@ -33,7 +33,7 @@ def test_under_25_draft_requires_buyer_shipping_but_not_unverified_service():
     assert shipping["free_shipping"] is False
     assert shipping["shipping_setup_required"] is True
     assert shipping["mode"] == "setup_required"
-    assert shipping["requested_domestic_service"] == "USPSGroundAdvantage"
+    assert shipping["requested_domestic_service"] == "USPSParcel"
     assert "shipping_service" not in shipping
     db.commit.assert_called_once()
 
