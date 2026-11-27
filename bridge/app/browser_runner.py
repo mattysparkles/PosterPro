@@ -2594,6 +2594,7 @@ class AmazonMarketplaceBrowserRunner(MarketplaceBrowserRunner):
                             "title": title,
                             "page_asin": capture.get("page_asin"),
                             "identity_status": capture.get("identity_status"),
+                            "identity_evidence": capture.get("identity_evidence"),
                             "asin_cross_check": capture.get("asin_cross_check"),
                             "selected_variant": capture.get("selected_variant"),
                             "gallery_evidence": capture.get("gallery_evidence", []),
@@ -2687,41 +2688,80 @@ class AmazonMarketplaceBrowserRunner(MarketplaceBrowserRunner):
                 candidates = self._collect_amazon_search_candidates(search_page.content())
                 if not candidates:
                     continue
-                # A similarity score is useful for ordering search hits, but
-                # never sufficient product-identity evidence. Keep only
-                # result titles containing every non-generic source-title
-                # token, which preserves model, size, color, and pack count.
+                # Marketing copy varies across sellers. Compare identity-bearing
+                # facts and reject real variant conflicts instead of requiring
+                # every source-title word to appear verbatim.
                 matches = [candidate for candidate in candidates if self._title_identity_tokens_match(title_hint, candidate["title"])]
                 if not matches:
                     continue
-                best_candidate = max(matches, key=lambda candidate: self._score_text_match(title_hint, candidate["title"]))
-                asin = best_candidate["asin"]
-                capture = self._capture_amazon_product_by_asin(context, asin=asin)
-                if not self._title_identity_tokens_match(title_hint, capture.get("title")):
-                    continue
-                if not capture["image_urls"]:
-                    continue
-                if not capture.get("title"):
-                    capture["title"] = best_candidate["title"]
-                capture["source_url"] = f"https://www.amazon.com/dp/{asin}"
-                capture["identity_status"] = "title_tokens_verified"
-                return capture
+                matches.sort(key=lambda candidate: self._score_text_match(title_hint, candidate["title"]), reverse=True)
+                for candidate in matches:
+                    asin = candidate["asin"]
+                    capture = self._capture_amazon_product_by_asin(context, asin=asin)
+                    page_identity = " ".join(str(value or "") for value in (capture.get("title"), capture.get("selected_variant")))
+                    if not self._title_identity_tokens_match(title_hint, page_identity) or not capture["image_urls"]:
+                        continue
+                    if not capture.get("title"):
+                        capture["title"] = candidate["title"]
+                    capture["source_url"] = f"https://www.amazon.com/dp/{asin}"
+                    capture["identity_status"] = "structured_title_identity_review_required"
+                    capture["identity_evidence"] = {
+                        "source_title": title_hint,
+                        "search_result_title": candidate["title"],
+                        "product_page_title": capture.get("title"),
+                        "selected_variant": capture.get("selected_variant"),
+                        "asin_cross_check": "equal_asin" if capture.get("page_asin") == candidate["asin"] else "result_asin_used",
+                    }
+                    return capture
             finally:
                 search_page.close()
         return None
 
     def _title_identity_tokens_match(self, expected_title: str | None, observed_title: str | None) -> bool:
-        """Require title evidence for every identifying token; similarity alone is not proof."""
+        """Allow marketing wording changes while protecting product variants."""
+        expected_raw = str(expected_title or "")
+        observed_raw = str(observed_title or "")
         expected = self._normalize_text(expected_title)
         observed = self._normalize_text(observed_title)
         if not expected or not observed:
             return False
-        generic = {"a", "an", "and", "for", "from", "in", "of", "on", "the", "to", "with", "by", "new", "best"}
-        expected_tokens = {token for token in expected.split() if token not in generic}
-        observed_tokens = set(observed.split())
-        # A page title may add marketing text, but it may not omit or alter
-        # any source-title token that identifies the product or its variant.
-        return bool(expected_tokens) and expected_tokens.issubset(observed_tokens)
+        expected_tokens, observed_tokens = set(expected.split()), set(observed.split())
+        color_tokens = {"black", "white", "gray", "grey", "silver", "gold", "blue", "red", "green", "pink", "purple", "orange", "brown", "beige", "clear"}
+        expected_colors, observed_colors = expected_tokens & color_tokens, observed_tokens & color_tokens
+        if expected_colors and observed_colors and not expected_colors & observed_colors:
+            return False
+
+        model_re = re.compile(r"(?<![a-z0-9])(?=[a-z0-9-]*\d)[a-z0-9]+(?:-[a-z0-9]+)*(?![a-z0-9])", re.I)
+        expected_models = {value.lower() for value in model_re.findall(expected) if len(value) >= 4}
+        observed_models = {value.lower() for value in model_re.findall(observed) if len(value) >= 4}
+        if expected_models and observed_models and not expected_models & observed_models:
+            return False
+
+        measure_re = re.compile(r"(?<![a-z0-9])(\d+(?:\.\d+)?)\s*(mm|cm|inches|inch|\"|ft|feet|ounces|ounce|oz|lbs?|kg|g|mah|ah|v|w|gb|tb|pcs?|pieces?|pack|count)(?![a-z])", re.I)
+        groups = {"mm": "length", "cm": "length", "inch": "length", "inches": "length", "\"": "length", "ft": "length", "feet": "length", "oz": "amount", "ounce": "amount", "ounces": "amount", "lb": "amount", "lbs": "amount", "kg": "amount", "g": "amount", "mah": "capacity", "ah": "capacity", "v": "voltage", "w": "power", "gb": "storage", "tb": "storage", "pc": "count", "pcs": "count", "piece": "count", "pieces": "count", "pack": "count", "count": "count"}
+        def measures(value: str) -> set[tuple[str, str]]:
+            result = set()
+            for number, raw_unit in measure_re.findall(value):
+                unit = raw_unit.lower().replace("inches", "inch").replace("feet", "ft").replace("ounces", "oz").replace("ounce", "oz").replace("lb", "lbs")
+                if unit in {"pcs", "pc", "piece", "pieces", "pack", "count"}:
+                    unit = "count"
+                number = number.rstrip("0").rstrip(".") if "." in number else number
+                result.add((number, unit))
+            return result
+        expected_measures, observed_measures = measures(expected_raw), measures(observed_raw)
+        for group in {groups.get(unit) for _, unit in expected_measures} & {groups.get(unit) for _, unit in observed_measures}:
+            left = {(number, unit) for number, unit in expected_measures if groups.get(unit) == group}
+            right = {(number, unit) for number, unit in observed_measures if groups.get(unit) == group}
+            if left and right and not left & right:
+                return False
+
+        generic = {"a", "an", "and", "for", "from", "in", "of", "on", "the", "to", "with", "by", "new", "best", "product", "item"}
+        expected_tokens = {token for token in expected_tokens if token not in generic and not token.isdigit()}
+        observed_tokens = {token for token in observed_tokens if token not in generic and not token.isdigit()}
+        overlap = expected_tokens & observed_tokens
+        if expected_models & observed_models:
+            return True
+        return len(overlap) >= 2 and self._score_text_match(" ".join(expected_tokens), " ".join(observed_tokens)) >= 0.2
 
     def _amazon_title_search_variants(self, title_hint: str) -> list[str]:
         normalized = self._normalize_text(title_hint)
@@ -2819,9 +2859,12 @@ class AmazonMarketplaceBrowserRunner(MarketplaceBrowserRunner):
                     cleaned = cleaned.replace(/\\._AC_[A-Z0-9_,]+_\\./g, '.');
                     if (/^https?:\\/\\//i.test(cleaned) && /\\.(jpg|jpeg|png|webp)(\\?|$)/i.test(cleaned)) out.add(cleaned);
                   };
-                  document.querySelectorAll('#imgTagWrapperId img, #landingImage, #altImages img, img[data-old-hires], img[src*="images-amazon.com/images/I/"]').forEach((img) => {
+                  document.querySelectorAll('#imgTagWrapperId img, #landingImage, #altImages img, #imageBlock img, #main-image img').forEach((img) => {
                     push(img.getAttribute('data-old-hires'));
-                    push(img.getAttribute('data-a-dynamic-image') ? Object.keys(JSON.parse(img.getAttribute('data-a-dynamic-image')) || {})[0] : null);
+                    try {
+                      const dynamic = JSON.parse(img.getAttribute('data-a-dynamic-image') || '{}');
+                      Object.keys(dynamic).forEach(push);
+                    } catch (_error) { }
                     push(img.getAttribute('src'));
                   });
                   return [...out];
@@ -2833,20 +2876,22 @@ class AmazonMarketplaceBrowserRunner(MarketplaceBrowserRunner):
         except Exception:
             pass
 
-        try:
-            html = page.content()
-            for match in re.findall(r'"hiRes"\s*:\s*"([^"]+)"', html):
-                urls.append(match)
-            for match in re.findall(r'"large"\s*:\s*"([^"]+)"', html):
-                urls.append(match)
-        except Exception:
-            pass
-
+        # Do not scan page-wide hiRes/large fields: Amazon also embeds
+        # recommendation and promotional assets outside the selected SKU's
+        # gallery. The DOM gallery selectors above are the source of truth.
         deduped: list[str] = []
         for raw in urls:
             cleaned = str(raw or "").strip().replace("\\u0026", "&").replace("\\/", "/")
             cleaned = re.sub(r"\._[A-Z0-9_,]+_\.", ".", cleaned)
-            if cleaned.startswith("http") and cleaned not in deduped:
+            parsed = urlparse(cleaned)
+            path = parsed.path.lower()
+            suspicious = any(marker in path for marker in (
+                "/logo", "logo_", "_logo", "/banner", "banner_", "_banner",
+                "/advert", "/promo", "/placeholder", "/no-image", "/no_image",
+                "/tracking", "/pixel", "/spacer", "/marketing/prime/",
+                "recommendation", "brand-logo", "brand_logo", "amazon-logo",
+            ))
+            if parsed.scheme == "https" and parsed.hostname in {"m.media-amazon.com", "images-na.ssl-images-amazon.com"} and not suspicious and cleaned not in deduped:
                 deduped.append(cleaned)
         return deduped[:12]
 

@@ -141,6 +141,37 @@ def test_title_identity_match_requires_variant_tokens():
         "Siftary 100 Pack 16.9 oz Clear PET Cups",
         "Siftary 100 Pack 12 oz Clear PET Cups with Lids",
     )
+    assert runner._title_identity_tokens_match(
+        "Portable Desk Lamp with Dimmable LED",
+        "BrightGlow LED Desk Light with Adjustable Dimming",
+    )
+    assert runner._title_identity_tokens_match(
+        "Brand A123 100 Pack 16.9 oz Clear PET Cups",
+        "Brand A123 Beverage Cups, 100 count, clear PET, 16.9 ounces",
+    )
+    assert not runner._title_identity_tokens_match(
+        "Brand A123 100 Pack 16.9 oz Clear PET Cups",
+        "Brand A123 Beverage Cups, 100 count, red PET, 12 ounces",
+    )
+    assert not runner._title_identity_tokens_match(
+        "Brand A123 100 Pack 16.9 oz Clear PET Cups",
+        "Brand B456 Beverage Cups, 100 count, clear PET, 16.9 ounces",
+    )
+
+
+def test_amazon_gallery_extraction_ignores_pagewide_and_promotional_images(tmp_path: Path):
+    urls = [
+        "https://m.media-amazon.com/images/G/01/marketing/prime/Prime_Logo.png",
+        "https://m.media-amazon.com/images/I/recommendation.jpg",
+        "https://m.media-amazon.com/images/I/brand-logo.jpg",
+        "https://m.media-amazon.com/images/I/product-front.jpg",
+    ]
+
+    class Page:
+        def evaluate(self, _script): return urls
+
+    runner = AmazonMarketplaceBrowserRunner(BrowserRunnerConfig(screenshots_dir=tmp_path))
+    assert runner._extract_amazon_product_images(Page()) == [urls[-1]]
 
 
 class _CountLocator:

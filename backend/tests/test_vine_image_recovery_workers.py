@@ -146,6 +146,36 @@ def test_title_verified_recovery_accepts_public_result_asin_mismatch(db_session,
     assert media.image_metadata["rights_state"] == "unverified"
 
 
+def test_recovery_rejects_matching_asin_when_selected_variant_conflicts(db_session, monkeypatch):
+    user = User(email=f"vine-wrong-variant-{uuid4()}@example.test", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.flush()
+    title = "Brand A123 100 Pack 16.9 oz Clear PET Cups"
+    listing = Listing(user_id=user.id, source_type="amazon_vine", title=title, image_urls=[], listing_images=[])
+    db_session.add(listing)
+    db_session.flush()
+    job = VineImageRecoveryJob(user_id=user.id, listing_id=listing.id, asin="B000000043", title_hint=title, status="collecting", bridge_job_id="bridge-wrong-variant")
+    db_session.add(job)
+    db_session.commit()
+    monkeypatch.setattr(tasks, "get_bridge_job", lambda _id: {
+        "status": "completed",
+        "result": {"imported_listings": [{
+            "asin": "B000000043", "page_asin": "B000000043",
+            "identity_status": "title_tokens_verified",
+            "source_url": "https://www.amazon.com/dp/B000000043",
+            "title": "Brand A123 Beverage Cups, 100 count, red PET, 12 ounces",
+            "selected_variant": "Red, 12 oz",
+            "image_urls": ["https://m.media-amazon.com/images/I/wrong-variant.jpg"],
+        }]},
+    })
+
+    result = tasks.poll_vine_image_recovery_job.run(job.id)
+    db_session.refresh(job)
+    assert result["status"] == "pending"
+    assert "neither matching ASIN" in result["error"]
+    assert job.candidates_json in (None, [])
+
+
 def test_vine_recovery_lost_bridge_response_retries_with_same_idempotency_key(db_session, monkeypatch):
     user = User(email=f"vine-lost-bridge-{uuid4()}@example.test", role="owner", is_admin=True)
     db_session.add(user)

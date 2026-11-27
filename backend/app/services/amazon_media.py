@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models.models import Image, ProductMediaCache
 from app.services.storage import LocalStorage
-from app.services.image_quality import PRIME_LOGO_SHA256, PRIME_LOGO_URL_PART, fetch_candidate_image, filter_known_placeholders, merge_gallery_candidates, validate_image_file
+from app.services.image_quality import PRIME_LOGO_SHA256, PRIME_LOGO_URL_PART, fetch_candidate_image, filter_known_placeholders, is_suspected_non_product_asset, merge_gallery_candidates, validate_image_file
 
 
 _AMAZON_HTML_MAX_BYTES = 4 * 1024 * 1024
@@ -74,6 +74,10 @@ def _extract_json_ld_blocks(html: str) -> list[dict]:
 def _extract_json_ld_images(html: str) -> list[str]:
     urls: list[str] = []
     for block in _extract_json_ld_blocks(html):
+        raw_type = block.get("@type")
+        types = raw_type if isinstance(raw_type, list) else [raw_type]
+        if not any("product" in str(value or "").lower() for value in types):
+            continue
         image = block.get("image")
         if isinstance(image, list):
             urls.extend(str(item) for item in image if item)
@@ -90,9 +94,10 @@ def _extract_amazon_product_images(html: str) -> list[str]:
     widget and incorrectly cached an empty gallery for otherwise accessible
     products.
     """
+    # JSON-LD Product.image is meaningful catalog evidence. Page-wide OG image
+    # metadata is not: Amazon pages can advertise a Prime logo or promotional
+    # graphic there, which caused the historical one-image gallery regression.
     candidates = [*_extract_json_ld_images(html)]
-    og = re.findall(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)', html, flags=re.I)
-    candidates.extend(og)
     # Restrict image-widget attributes to the primary product image region so
     # recommendation cards are not mistaken for this ASIN's gallery.
     marker = re.search(r'(?:id=["\'](?:landingImage|imgTagWrapperId|main-image|imageBlock)["\']|data-a-dynamic-image=)', html, flags=re.I)
@@ -121,7 +126,7 @@ def _extract_amazon_product_images(html: str) -> list[str]:
         # Page-wide metadata may be a brand graphic (including Amazon's
         # Prime logo), not a product gallery image. Never accept this known
         # promotional asset as product photography.
-        if _is_amazon_media_url(url) and PRIME_LOGO_URL_PART not in url.lower() and url not in seen:
+        if _is_amazon_media_url(url) and PRIME_LOGO_URL_PART not in url.lower() and not is_suspected_non_product_asset(url) and url not in seen:
             seen.add(url)
             cleaned.append(url)
     return cleaned

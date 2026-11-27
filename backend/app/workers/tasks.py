@@ -51,7 +51,7 @@ from app.services.automation_bridge import submit_bridge_job, wait_for_bridge_jo
 from app.services.secondary_marketplace_execution import execute_secondary_marketplace_path
 from app.services.inventory_service import InventorySafetyError, InventoryService
 from app.services.storage import LocalStorage
-from app.services.image_quality import fetch_candidate_image, title_identity_tokens_match, validate_image_bytes
+from app.services.image_quality import fetch_candidate_image, product_title_identity, validate_image_bytes
 from app.services.analytics_service import AnalyticsService
 from app.services.prediction_service import PredictionService
 from app.services.pricing_intelligence_service import PricingIntelligenceService
@@ -770,17 +770,30 @@ def poll_vine_image_recovery_job(job_id: int) -> dict[str, Any]:
             records = result.get("imported_listings") if isinstance(result.get("imported_listings"), list) else []
             record = next((row for row in records if isinstance(row, dict) and str(row.get("asin") or "").upper() == job.asin), {})
             page_asin = str(record.get("page_asin") or "").upper()
+            title_identity_status = str(record.get("identity_status") or "")
+            observed_product_identity = " ".join(str(value or "") for value in (
+                record.get("title"), record.get("selected_variant"),
+            ))
+            identity_check = product_title_identity(job.title_hint, observed_product_identity)
+            variant_conflict = any(reason in {
+                "color_conflict", "model_token_conflict", "variant_measurement_conflict",
+            } for reason in identity_check.get("reasons", []))
             title_match = (
-                str(record.get("identity_status") or "") == "title_tokens_verified"
-                and title_identity_tokens_match(job.title_hint, record.get("title"))
+                title_identity_status in {
+                    "title_tokens_verified",  # backwards-compatible in-flight jobs
+                    "structured_title_identity_review_required",
+                }
+                and identity_check.get("matched") is True
             )
-            asin_match = bool(page_asin) and page_asin == job.asin
+            asin_match = bool(page_asin) and page_asin == job.asin and not variant_conflict
             if not asin_match and not title_match:
                 raise RuntimeError(str(record.get("acquisition_error") or "product page had neither matching ASIN nor complete product-title identity evidence"))
             evidence = {
                 "requested_asin": job.asin, "page_asin": page_asin,
                 "source_url": record.get("source_url"), "title": record.get("title"),
                 "selected_variant": record.get("selected_variant"),
+                "identity_evidence": record.get("identity_evidence"),
+                "identity_check": identity_check,
                 "identity_method": "asin_cross_check" if asin_match else "product_title_token_match",
                 "identity_state": "asin_verified" if asin_match else "title_verified_review_required",
                 "variant_identity": "unverified" if not record.get("selected_variant") else "operator_review_required",

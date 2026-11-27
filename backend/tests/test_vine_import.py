@@ -65,14 +65,62 @@ def test_title_identity_match_requires_variant_tokens():
     )
 
 
+def test_title_identity_uses_structured_variant_evidence_not_every_marketing_word():
+    from app.services.image_quality import product_title_identity
+
+    result = product_title_identity(
+        "FOGATTI InstaShower 8 Pro RV Tankless Water Heater, Propane, 12V DC, White",
+        "Fogatti 8 Pro InstaShower RV Propane Tankless Heater White 12 V",
+    )
+    assert result["matched"] is True
+    assert result["confidence"] == "high"
+    assert not product_title_identity(
+        "FOGATTI InstaShower 8 Pro RV Tankless Water Heater 12V White",
+        "FOGATTI InstaShower 8 Pro RV Tankless Water Heater 12V Black",
+    )["matched"]
+    assert not product_title_identity(
+        "Siftary 100 Pack 16.9 oz Clear PET Cups",
+        "Siftary 100 Pack 12 oz Clear PET Cups with Lids",
+    )["matched"]
+    assert product_title_identity(
+        "Portable Desk Lamp with Dimmable LED",
+        "BrightGlow LED Desk Light with Adjustable Dimming",
+    )["matched"] is True
+
+
+def test_structured_catalog_identifiers_override_title_wording():
+    from app.services.image_quality import product_title_identity
+
+    assert product_title_identity(
+        "Brand marketing title with different wording", "Manufacturer product page title",
+        {"brand": "Fogatti", "model": "RF030A0N"},
+        {"brand": "Fogatti", "model_number": "RF030A0N"},
+    )["matched"] is True
+    conflict = product_title_identity(
+        "Brand model RF030A0N", "Brand model RF030A1N",
+        {"model": "RF030A0N"}, {"model": "RF030A1N"},
+    )
+    assert conflict["matched"] is False
+    assert "model_conflict" in conflict["reasons"]
+    same_model_wrong_variant = product_title_identity(
+        "Brand model RF030A0N White", "Brand model RF030A0N Black",
+        {"model": "RF030A0N"}, {"model": "RF030A0N"},
+    )
+    assert same_model_wrong_variant["matched"] is False
+    assert "color_conflict" in same_model_wrong_variant["reasons"]
+
+
 def test_known_prime_asset_hash_fixture_is_stable():
     assert len(PRIME_LOGO_SHA256) == 64
 
 
 def test_amazon_product_image_extractor_excludes_prime_brand_graphic():
     from app.services.amazon_media import _extract_amazon_product_images
-    html = '<meta property="og:image" content="https://m.media-amazon.com/images/G/01/marketing/prime/2022PrimeBrand/Logos/Prime_Logo_RGB_Prime_Blue_MASTER.png">'
-    assert _extract_amazon_product_images(html) == []
+    prime = "https://m.media-amazon.com/images/G/01/marketing/prime/2022PrimeBrand/Logos/Prime_Logo_RGB_Prime_Blue_MASTER.png"
+    product = "https://m.media-amazon.com/images/I/real-product-front.jpg"
+    html = f'''<meta property="og:image" content="{prime}">
+      <div id="imgTagWrapperId"><img id="landingImage" data-old-hires="{product}" /></div>'''
+    assert _extract_amazon_product_images(html) == [product]
 
 
 PRIME_TEST_URL = "https://m.media-amazon.com/images/G/01/marketing/prime/2022PrimeBrand/Logos/Prime_Logo_RGB_Prime_Blue_MASTER.png"
@@ -215,6 +263,81 @@ def test_image_recovery_candidate_requires_operator_attach_and_remains_pending_r
     assert candidate["metadata"]["rights_state"] == "unverified"
     assert candidate["metadata"]["identity_state"] == "asin_verified_variant_unverified"
     assert listing.image_urls == ["/media/recovered/candidate.jpg"]
+
+
+def test_catalog_reference_candidate_attachment_is_idempotent_and_preserves_approved_gallery(db_session, tmp_path):
+    from io import BytesIO
+    from PIL import Image as PILImage
+    from app.services.storage import LocalStorage
+    from app.services.vine_catalog_reference import attach_catalog_reference_candidate
+
+    user = User(email=f"vine-catalog-ref-{uuid4()}@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.flush()
+    original = {"storage_path": "/media/user-approved.jpg", "role": "primary", "operator_state": "approved", "is_reference": False, "display_order": 0}
+    listing = Listing(user_id=user.id, source_type="amazon_vine", title="Brand Widget Model X1 Black", image_urls=["/media/user-approved.jpg"], listing_images=[original], source_metadata={"asin": "B000000001"})
+    db_session.add(listing)
+    db_session.flush()
+    output = BytesIO()
+    PILImage.new("RGB", (500, 500), (23, 45, 67)).save(output, format="JPEG")
+    args = {
+        "listing_id": listing.id, "data": output.getvalue(),
+        "source_url": "https://cdn.example.test/widget-x1.jpg",
+        "source_page_url": "https://brand.example.test/products/widget-x1",
+        "source_title": "Brand Widget X1 Black",
+        "source_platform": "official_manufacturer",
+        "identity_state": "exact_model_match_review_required",
+        "identity_evidence": {"brand": "Brand", "model": "X1", "color": "Black"},
+        "storage": LocalStorage(str(tmp_path / "media")),
+    }
+    first = attach_catalog_reference_candidate(db_session, **args)
+    db_session.commit()
+    second = attach_catalog_reference_candidate(db_session, **args)
+    db_session.commit()
+    db_session.refresh(listing)
+
+    assert first["storage_path"] == second["storage_path"]
+    assert second["already_attached"] is True
+    assert listing.image_urls[0] == "/media/user-approved.jpg"
+    assert len(listing.image_urls) == 2
+    assert len(listing.listing_images) == 2
+    assert listing.listing_images[0] == original
+    attached = listing.listing_images[1]
+    assert attached["role"] == "gallery_candidate"
+    assert attached["is_reference"] is True
+    assert attached["seller_photographed"] is False
+    assert attached["marketplace_approved"] is False
+    assert attached["metadata"]["rights_state"] == "unverified"
+    job = db_session.query(VineImageRecoveryJob).filter_by(user_id=user.id, asin="B000000001").one()
+    assert job.status == "review_required"
+    assert len(job.candidates_json) == 1
+
+
+def test_catalog_reference_candidate_attachment_rejects_prime_hash(db_session, tmp_path):
+    from io import BytesIO
+    from PIL import Image as PILImage
+    from app.services.storage import LocalStorage
+    from app.services.vine_catalog_reference import attach_catalog_reference_candidate
+
+    user = User(email=f"vine-catalog-prime-{uuid4()}@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.flush()
+    listing = Listing(user_id=user.id, source_type="amazon_vine", title="Brand Widget", image_urls=[], listing_images=[], source_metadata={"asin": "B000000001"})
+    db_session.add(listing)
+    db_session.flush()
+    output = BytesIO()
+    PILImage.new("RGB", (400, 400), "white").save(output, format="JPEG")
+    try:
+        attach_catalog_reference_candidate(db_session, listing_id=listing.id, data=output.getvalue(),
+            source_url="https://m.media-amazon.com/images/G/01/marketing/prime/2022primebrand/logos/prime_logo_rgb_prime_blue_master.png",
+            source_page_url="https://brand.example.test/products/widget",
+            source_title="Brand Widget", source_platform="official_manufacturer",
+            identity_state="review_required", identity_evidence={"title": "Brand Widget"},
+            storage=LocalStorage(str(tmp_path / "media")))
+    except ValueError as exc:
+        assert str(exc) == "image_rejected:confirmed_placeholder"
+    else:
+        raise AssertionError("known Prime logo must not be attached")
 
 
 def test_vine_dimension_merge_respects_operator_locked_item_height():
@@ -1137,7 +1260,7 @@ def test_amazon_media_provider_uses_owner_user_and_region(monkeypatch, db_sessio
 
     class FakeResponse:
         status_code = 200
-        text = '<meta property="og:image" content="https://m.media-amazon.com/images/I/primary.jpg" />'
+        text = '<div id="imgTagWrapperId"><img id="landingImage" data-old-hires="https://m.media-amazon.com/images/I/primary.jpg" /></div>'
 
     class FakeClient:
         def __init__(self, *args, **kwargs):
@@ -1184,6 +1307,18 @@ def test_amazon_media_provider_extracts_dynamic_product_gallery(monkeypatch, db_
     ]
     single_quoted = "<img id='landingImage' data-a-dynamic-image='{\"https://m.media-amazon.com/images/I/single.jpg\":[100,100]}' />"
     assert _extract_amazon_product_images(single_quoted) == ["https://m.media-amazon.com/images/I/single.jpg"]
+
+
+def test_image_quality_flags_generic_logo_and_tracking_asset_paths():
+    from io import BytesIO
+    from PIL import Image as PILImage
+    from app.services.image_quality import validate_image_bytes
+
+    output = BytesIO()
+    PILImage.new("RGB", (320, 320), "white").save(output, format="JPEG")
+    result = validate_image_bytes(output.getvalue(), source_url="https://m.media-amazon.com/images/I/brand-logo.jpg")
+    assert result["verdict"] == "suspected_placeholder"
+    assert "source_path_looks_like_logo_ad_or_placeholder" in result["reasons"]
 
 
 def test_listing_draft_hides_order_number_from_public_text(db_session):
