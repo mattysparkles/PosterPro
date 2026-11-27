@@ -124,4 +124,10 @@ if ! wait_for_health "$health_url" || ! wait_for_health "$frontend_url"; then
   echo "Health check failed; prior release restored." >&2
   exit 4
 fi
+retention_script="$canonical_repo/ops/release/prune_releases.py"
+if [[ -f "$retention_script" ]]; then
+  if ! python3 "$retention_script" --apply; then
+    echo "WARNING: post-deployment release retention did not complete; no activation rollback was needed." >&2
+  fi
+fi
 echo "Activated $(basename "$candidate"); public health check passed."
