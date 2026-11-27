@@ -561,11 +561,11 @@ def reconcile_retroactive_intake_boundaries_task(user_id: int | None = None) -> 
 
 @celery_app.task(name="repair_recent_vine_images", bind=True, max_retries=None)
 def repair_recent_vine_images_task(self, user_id: int | None = None, chunk_size: int = 25) -> dict[str, Any]:
-    """Keep retrying recent Vine image repair until the backlog is cleared.
+    """Reconcile recent image-less drafts into durable recovery jobs.
 
-    The task is intentionally chunked and re-runnable.  It only targets Vine
-    rows ordered on or after the backfill cutoff, so archived older inventory
-    is not reprocessed by the automatic loop.
+    Network research is performed only by the existing bounded browser-bridge
+    workers. Keeping this beat task database-only prevents one slow public
+    product page from blocking reconciliation of the rest of the cohort.
     """
     db = SessionLocal()
     try:
@@ -586,52 +586,25 @@ def repair_recent_vine_images_task(self, user_id: int | None = None, chunk_size:
             ).all()
             target_users = [int(row[0]) for row in rows if row and row[0] is not None]
 
-        totals = {
-            "updated": 0,
-            "removed_unsafe": 0,
-            "already_present": 0,
-            "missing_asin": 0,
-            "no_cache": 0,
-            "bridge_refetched": 0,
-            "bridge_failed": 0,
-            "processed": 0,
-            "target_users": target_users,
-            "chunk_size": max(1, int(chunk_size or 25)),
-            "cutoff": VINE_IMAGE_BACKFILL_CUTOFF.isoformat(),
-        }
-
-        total_backlog = 0
+        totals = {"target_users": target_users, "chunk_size": max(1, int(chunk_size or 25)),
+                  "cutoff": VINE_IMAGE_BACKFILL_CUTOFF.isoformat(), "eligible": 0,
+                  "jobs_created": 0, "already_queued": 0, "has_usable_media": 0,
+                  "missing_asin": 0, "archived": 0}
         for target_user_id in target_users:
-            targets = service.list_recent_vine_listing_ids(
+            result = service.enqueue_missing_vine_image_recovery_jobs(
                 db,
                 user_id=target_user_id,
                 since_order_date=VINE_IMAGE_BACKFILL_CUTOFF,
                 include_archived=False,
-                only_missing_images=True,
-                limit=max(1, int(chunk_size or 25)),
+                limit=max(1, int(chunk_size or 25)) * 10,
             )
-            if not targets:
-                continue
-            result = service.repair_vine_listing_images(
-                db,
-                user_id=target_user_id,
-                listing_ids=targets,
-                include_archived=False,
-                force_refresh=True,
-                use_bridge_session=True,
-                only_missing_images=True,
-                limit=None,
-            )
-            for key in ("updated", "removed_unsafe", "already_present", "missing_asin", "no_cache", "bridge_refetched", "bridge_failed", "processed"):
-                totals[key] += int(result.get(key) or 0)
-            total_backlog += service.count_recent_vine_image_backlog(
-                db,
-                user_id=target_user_id,
-                since_order_date=VINE_IMAGE_BACKFILL_CUTOFF,
-                include_archived=False,
-            )
-
-        totals["remaining_backlog"] = total_backlog
+            for key in ("eligible", "created", "already_queued", "has_usable_media", "missing_asin", "archived"):
+                totals["jobs_created" if key == "created" else key] += int(result.get(key) or 0)
+        db.commit()
+        totals["pending_jobs"] = int(db.execute(select(func.count(VineImageRecoveryJob.id)).where(
+            VineImageRecoveryJob.status.in_(["pending", "pending_authorization"]),
+            VineImageRecoveryJob.attempts < 4,
+        )).scalar_one() or 0)
         return totals
     finally:
         db.close()
@@ -799,7 +772,8 @@ def poll_vine_image_recovery_job(job_id: int) -> dict[str, Any]:
                 "variant_identity": "unverified" if not record.get("selected_variant") else "operator_review_required",
                 "collector": "public_amazon_product_page", "access_mode": "public_catalog", "rights": "unverified",
             }
-            candidates = []
+            job.page_evidence_json = evidence
+            db.flush()
             storage = LocalStorage()
             for source_url in list(record.get("image_urls") or [])[:12]:
                 try:
@@ -815,33 +789,40 @@ def poll_vine_image_recovery_job(job_id: int) -> dict[str, Any]:
                     )
                     if checked["verdict"] not in {"valid_exact_product", "identity_unverified"}:
                         continue
-                    fmt = str(quality.get("evidence", {}).get("format") or "JPEG").lower()
-                    extension = ".png" if fmt == "png" else ".webp" if fmt == "webp" else ".jpg"
-                    local_path = storage.save_bytes(data, extension=extension, prefix=f"vine-recovery/{job.user_id}/{job.asin}")
-                    image = Image(
-                        user_id=job.user_id, source_url=str(source_url), local_path=local_path,
-                        width=(quality.get("evidence", {}).get("dimensions") or [None, None])[0],
-                        height=(quality.get("evidence", {}).get("dimensions") or [None, None])[1],
-                        image_metadata={
-                            "source": "amazon_vine_browser_gallery_candidate", "asin": job.asin,
-                            "source_page_asin": page_asin,
-                            "source_page_url": record.get("source_url"), "page_asin": page_asin,
-                            "selected_variant": record.get("selected_variant"),
-                            "identity_state": "asin_verified_variant_unverified" if asin_match else "title_verified_review_required",
-                            "identity_method": "asin_cross_check" if asin_match else "product_title_token_match",
-                            "rights_state": "unverified", "operator_state": "pending_review",
+                    source_page_url = str(record.get("source_url") or "")
+                    if not source_page_url.startswith("https://"):
+                        continue
+                    from app.services.vine_catalog_reference import attach_catalog_reference_candidate
+                    listing = db.get(Listing, int(job.listing_id)) if job.listing_id else None
+                    if listing is None or listing.user_id != job.user_id:
+                        continue
+                    listing_metadata = dict(listing.source_metadata or {})
+                    listing_metadata.setdefault("asin", job.asin)
+                    listing.source_metadata = listing_metadata
+                    attachment = attach_catalog_reference_candidate(
+                        db,
+                        listing_id=int(job.listing_id),
+                        data=data,
+                        source_url=str(source_url),
+                        source_page_url=source_page_url,
+                        source_title=str(record.get("title") or job.title_hint or "Amazon product gallery"),
+                        source_platform="amazon",
+                        identity_state="asin_verified_variant_unverified" if asin_match else "title_verified_review_required",
+                        identity_evidence={
+                            **evidence,
                             "gallery_source_evidence": gallery_source_evidence,
                             "quality_evidence": quality.get("evidence"),
+                            "candidate_verdict": checked["verdict"],
                         },
+                        storage=storage,
                     )
-                    db.add(image)
-                    db.flush()
-                    rel = Path(local_path).resolve().relative_to(storage.root.resolve()).as_posix()
-                    candidates.append({"image_id": image.id, "storage_path": f"/media/{rel}", "source_url": str(source_url), "verdict": checked["verdict"], "identity_state": "asin_verified_variant_unverified" if asin_match else "title_verified_review_required", "rights_status": "unverified", "operator_state": "pending_review"})
+                    logger.info("vine_recovery_candidate_attached_pending_review", extra={
+                        "recovery_job_id": job.id, "listing_id": job.listing_id,
+                        "image_id": attachment["image_id"], "sha256": attachment["sha256"],
+                    })
                 except Exception as exc:
                     logger.info("vine_image_candidate_rejected", extra={"recovery_job_id": job.id, "reason": str(exc)[:160]})
-            job.page_evidence_json = evidence
-            job.candidates_json = candidates
+            candidates = list(job.candidates_json or [])
             job.status = "review_required" if candidates else "manual_review_required"
             job.last_error = None if candidates else "no usable product gallery candidates; manual acquisition required"
             job.completed_at = datetime.utcnow()

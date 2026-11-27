@@ -2280,6 +2280,36 @@ def test_create_listing_drafts_fetch_media_first_uses_bridge_fallback_when_image
     assert all(image.get("operator_state") == "suggested" for image in listing.listing_images)
 
 
+def test_vine_draft_without_usable_media_always_gets_durable_recovery_job(db_session, monkeypatch):
+    user = User(email=f"vine-durable-dispatch-{uuid4()}@example.com", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.flush()
+    batch = VineImportBatch(user_id=user.id, filename="no-gallery.csv", source_type="csv")
+    db_session.add(batch)
+    db_session.flush()
+    item = VineImportItem(
+        batch_id=batch.id, user_id=user.id, asin="B00JOB0001",
+        product_name="Sealed Catalog Product Model J1", eligibility_status="eligible",
+    )
+    db_session.add(item)
+    db_session.commit()
+    monkeypatch.setattr(AmazonProductDiscoveryService, "discover_for_vine_item", lambda *args, **kwargs: {
+        "status": "manual_review_needed", "asin": item.asin, "images": [], "product_facts": {},
+    })
+
+    result = VineImportService().create_listing_drafts(
+        db_session, batch=batch, item_ids=[item.id], fetch_media_first=False,
+        allow_drafts_without_media=True,
+    )
+    job = db_session.query(VineImageRecoveryJob).filter_by(user_id=user.id, asin=item.asin).one()
+    listing = db_session.get(Listing, item.listing_id)
+    assert result["created"] == 1
+    assert job.listing_id == listing.id
+    assert job.title_hint == listing.title
+    assert job.status == "pending"
+    assert listing.image_urls == []
+
+
 def test_repair_all_vine_listing_images_chunks_the_full_catalog(db_session, monkeypatch):
     user = User(email=f"vine-repair-all-{uuid4()}@example.com", role="owner", is_admin=True)
     db_session.add(user)

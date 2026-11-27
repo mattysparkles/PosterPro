@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.enums import ListingStatus, MarketplaceName
-from app.models.models import Listing, ListingProcessingEvent, ProductMediaCache, VineImportBatch, VineImportItem, User
+from app.models.models import Listing, ListingProcessingEvent, ProductMediaCache, VineImageRecoveryJob, VineImportBatch, VineImportItem, User
 from app.services.category_rules import is_source_noise_category, suggest_category_from_text
 from app.services.automation_bridge import submit_bridge_job, wait_for_bridge_job
 from app.services.amazon_media import AmazonProductMediaProvider, _normalize_dimension_facts
@@ -1195,6 +1195,17 @@ class VineImportService:
                     listing.custom_labels = list(dict.fromkeys([*(listing.custom_labels or []), "needs_photos"]))
             else:
                 listing.custom_labels = [label for label in (listing.custom_labels or []) if label != "needs_photos"] or None
+
+            # Research dispatch is durable and independent of whether the
+            # synchronous fast lookup happened to run (or returned a usable
+            # gallery). This closes the import path that previously left
+            # image-less drafts with no recovery job at all.
+            usable_gallery = self._filter_valid_gallery_urls(listing.image_urls or [])
+            if item.asin and not usable_gallery:
+                self._bridge_capture_for_asin(
+                    db, item.asin, listing.title or item.product_name,
+                    user_id=batch.user_id, listing_id=listing.id,
+                )
 
             db.add(listing)
             if not item.listing_id:
@@ -3448,15 +3459,123 @@ class VineImportService:
             limit=None,
         ))
 
+    def enqueue_missing_vine_image_recovery_jobs(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        since_order_date: date,
+        include_archived: bool = False,
+        limit: int = 250,
+    ) -> dict[str, int]:
+        """Durably enqueue image-less Vine drafts without doing network work.
+
+        This reconciliation is intentionally safe to run repeatedly. It scans
+        beyond the first fixed page by selecting records which do not already
+        have a per-user/ASIN recovery row, so scheduled runs make forward
+        progress instead of retrying the same first 25 listings forever.
+        """
+        rows = db.execute(
+            select(Listing, VineImportItem)
+            .join(VineImportItem, (VineImportItem.listing_id == Listing.id) | (VineImportItem.inventory_item_id == Listing.id))
+            .where(
+                Listing.user_id == user_id,
+                Listing.source_type == "amazon_vine",
+                VineImportItem.order_date.is_not(None),
+                VineImportItem.order_date >= since_order_date,
+            )
+            .order_by(Listing.id.asc(), VineImportItem.updated_at.desc(), VineImportItem.id.desc())
+        ).all()
+        # Join rows may repeat one listing after a Vine CSV was re-imported.
+        latest: dict[int, tuple[Listing, VineImportItem]] = {}
+        for listing, item in rows:
+            latest.setdefault(int(listing.id), (listing, item))
+
+        from app.services.image_quality import PRIME_LOGO_SHA256, is_known_prime_placeholder, validate_image_file
+        from app.services.vine_image_recovery import enqueue_recovery
+
+        result = {"eligible": 0, "created": 0, "already_queued": 0, "has_usable_media": 0,
+                  "missing_asin": 0, "archived": 0}
+        for listing, item in latest.values():
+            if not include_archived and self._is_archived_vine_listing(listing):
+                result["archived"] += 1
+                continue
+            gallery = normalize_listing_images(
+                listing_images=listing.listing_images,
+                image_urls=listing.image_urls,
+                source_platform="amazon",
+                default_is_reference=True,
+                approved=False,
+            )
+            usable = []
+            for image in gallery:
+                if image.get("operator_state") == "rejected" or _is_unsafe_vine_image(image):
+                    continue
+                metadata = image.get("metadata") if isinstance(image.get("metadata"), dict) else {}
+                candidate_paths = (image.get("storage_path"), image.get("source_url"))
+                if any(is_known_prime_placeholder(path) for path in candidate_paths):
+                    continue
+                local = next((self._local_media_file_for_url(path) for path in candidate_paths
+                              if self._local_media_file_for_url(path) is not None), None)
+                if local is not None:
+                    if not local.is_file():
+                        continue
+                    try:
+                        checked = validate_image_file(str(local), source_url=str(image.get("source_url") or ""))
+                    except OSError:
+                        continue
+                    if checked.get("verdict") in {"decode_failed", "unreachable", "confirmed_placeholder"}:
+                        continue
+                    if checked.get("evidence", {}).get("sha256") == PRIME_LOGO_SHA256:
+                        continue
+                elif not any(str(path or "").startswith("https://") for path in candidate_paths):
+                    continue
+                usable.append(image)
+            if usable:
+                result["has_usable_media"] += 1
+                continue
+
+            asin = str(item.asin or (listing.source_metadata or {}).get("asin") or "").strip().upper()
+            if not re.fullmatch(r"[A-Z0-9]{10}", asin):
+                result["missing_asin"] += 1
+                continue
+            result["eligible"] += 1
+            before = db.execute(
+                select(VineImageRecoveryJob.id).where(
+                    VineImageRecoveryJob.user_id == user_id,
+                    VineImageRecoveryJob.asin == asin,
+                )
+            ).scalar_one_or_none()
+            job = enqueue_recovery(
+                db, user_id=user_id, asin=asin,
+                title_hint=listing.title or item.product_name,
+                listing_id=listing.id,
+            )
+            if before is None:
+                result["created"] += 1
+            else:
+                result["already_queued"] += 1
+                # An existing row can have been created before its listing was
+                # linked. Keep the durable job associated with this draft.
+                if not job.listing_id:
+                    job.listing_id = listing.id
+            if limit and result["created"] >= max(1, int(limit)):
+                break
+        db.flush()
+        return result
+
     def _bridge_capture_for_asin(self, db: Session, asin: str, title_hint: str | None, *, user_id: int, listing_id: int | None = None) -> ProductMediaCache | None:
         # Recovery candidates are durable and review-only; never attach a
         # browser gallery directly during the draft build/repair transaction.
+        normalized_asin = str(asin or "").strip().upper()
+        if not re.fullmatch(r"[A-Z0-9]{10}", normalized_asin):
+            return None
         from app.services.vine_image_recovery import enqueue_recovery
-        enqueue_recovery(db, user_id=user_id, asin=asin, title_hint=title_hint, listing_id=listing_id)
+        enqueue_recovery(db, user_id=user_id, asin=normalized_asin, title_hint=title_hint, listing_id=listing_id)
         db.flush()
         return db.execute(
             select(ProductMediaCache).where(
-                ProductMediaCache.asin == asin,
+                ProductMediaCache.asin == normalized_asin,
                 ProductMediaCache.marketplace_region == settings.amazon_marketplace_region.upper(),
             )
         ).scalar_one_or_none()

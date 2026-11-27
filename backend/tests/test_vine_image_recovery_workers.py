@@ -16,7 +16,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.core.config import settings
 from app.core.database import Base
-from app.models.models import Image, Listing, MarketplaceListing, User, VineImageRecoveryJob
+from app.models.models import Image, Listing, MarketplaceListing, User, VineImageRecoveryJob, VineImportBatch, VineImportItem
 from app.workers import tasks
 
 
@@ -83,6 +83,13 @@ def test_vine_recovery_worker_submission_poll_review_and_duplicate_delivery(db_s
     assert refreshed.page_evidence_json["page_asin"] == "B000000042"
     assert refreshed.candidates_json[0]["operator_state"] == "pending_review"
     assert db_session.query(Image).filter(Image.image_metadata["asin"].as_string() == "B000000042").count() == 1
+    recovered_listing = db_session.get(Listing, listing.id)
+    assert len(recovered_listing.listing_images) == 2
+    recovered_gallery_image = next(row for row in recovered_listing.listing_images if row["storage_path"] == refreshed.candidates_json[0]["storage_path"])
+    assert recovered_gallery_image["is_reference"] is True
+    assert recovered_gallery_image["seller_photographed"] is False
+    assert recovered_gallery_image["marketplace_approved"] is False
+    assert recovered_gallery_image["metadata"]["rights_state"] == "unverified"
 
     from app.api.vine_imports import attach_vine_image_recovery_candidate
     from app.api.routes import approve_listing_photos, set_listing_photo_primary
@@ -254,6 +261,48 @@ def test_vine_dispatch_recovers_worker_crash_and_stops_at_attempt_cap(db_session
     assert db_session.get(VineImageRecoveryJob, crashed.id).attempts == 1
     assert db_session.get(VineImageRecoveryJob, crashed.id).status == "submitting"
     assert db_session.get(VineImageRecoveryJob, exhausted.id).status == "pending_authorization"
+
+
+def test_recent_vine_reconciliation_enqueues_all_unlinked_rows_idempotently(db_session, monkeypatch):
+    user = User(email=f"vine-reconcile-{uuid4()}@example.test", role="owner", is_admin=True)
+    db_session.add(user)
+    db_session.flush()
+    batch = VineImportBatch(user_id=user.id, filename="recent-vine.csv", source_type="csv", status="imported")
+    db_session.add(batch)
+    db_session.flush()
+    for index in range(66):
+        asin = f"B{index:09d}"
+        listing = Listing(
+            user_id=user.id, source_type="amazon_vine", title=f"Vine product {index}",
+            image_urls=[], listing_images=[], source_metadata={"asin": asin},
+        )
+        db_session.add(listing)
+        db_session.flush()
+        item = VineImportItem(
+            batch_id=batch.id, user_id=user.id, asin=asin, product_name=listing.title,
+            order_date=datetime(2026, 11, 1).date(), eligibility_status="eligible",
+            listing_id=listing.id, inventory_item_id=listing.id,
+        )
+        db_session.add(item)
+        if index < 10:
+            db_session.add(VineImageRecoveryJob(
+                user_id=user.id, listing_id=listing.id, asin=asin,
+                title_hint=listing.title, status="manual_review_required", attempts=1,
+            ))
+    db_session.commit()
+
+    monkeypatch.setattr(db_session, "close", lambda: None)
+    monkeypatch.setattr(tasks, "SessionLocal", lambda: db_session)
+    first = tasks.repair_recent_vine_images_task.run(user.id, chunk_size=25)
+    assert first["eligible"] == 66
+    assert first["jobs_created"] == 56
+    assert first["already_queued"] == 10
+    assert db_session.query(VineImageRecoveryJob).filter_by(user_id=user.id).count() == 66
+
+    second = tasks.repair_recent_vine_images_task.run(user.id, chunk_size=25)
+    assert second["jobs_created"] == 0
+    assert second["already_queued"] == 66
+    assert db_session.query(VineImageRecoveryJob).filter_by(user_id=user.id).count() == 66
 
 
 @pytest.fixture
